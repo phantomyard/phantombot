@@ -97,15 +97,23 @@ export function ChooseScreen(props: {
               onPress={() => props.onAnswer(option.value)}
             >
               <Box>
-                <Text bold={selected} color={selected ? theme.accent : undefined}>
+                <Text
+                  bold={selected}
+                  color={selected ? "whiteBright" : "white"}
+                >
                   {option.label}
                 </Text>
                 {option.value === initial && initial !== "" ? (
-                  <Text color={theme.dim}> (current)</Text>
+                  <Text color={selected ? theme.accent : theme.dim}>
+                    {" "}
+                    (current)
+                  </Text>
                 ) : null}
                 {option.hint ? (
                   <Box marginLeft={1}>
-                    <Text color={theme.dim}>({option.hint})</Text>
+                    <Text color={selected ? "white" : theme.dim}>
+                      ({option.hint})
+                    </Text>
                   </Box>
                 ) : null}
               </Box>

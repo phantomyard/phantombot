@@ -92,11 +92,12 @@ export function MultiChooseScreen(props: {
       ) : null}
       <Box flexDirection="column" marginTop={1}>
         {options.map((option, i) => {
+          const selected = i === index;
           const on = checked.has(option.value);
           return (
             <Selectable
               key={option.value}
-              selected={i === index}
+              selected={selected}
               onPress={() => {
                 setIndex(i);
                 setChecked((prev) => {
@@ -109,16 +110,24 @@ export function MultiChooseScreen(props: {
             >
               <Box>
                 <Box marginRight={1}>
-                  <Text color={on ? theme.accent : theme.dim}>
-                    {on ? "◉" : "○"}
+                  <Text
+                    bold={on}
+                    color={on ? theme.accent : "gray"}
+                  >
+                    {on ? "[✓]" : "[ ]"}
                   </Text>
                 </Box>
-                <Text bold={i === index} color={i === index ? theme.accent : undefined}>
+                <Text
+                  bold={selected || on}
+                  color={selected ? "whiteBright" : on ? "white" : "gray"}
+                >
                   {option.label}
                 </Text>
                 {option.hint ? (
                   <Box marginLeft={1}>
-                    <Text color={theme.dim}>{option.hint}</Text>
+                    <Text color={selected ? theme.accent : theme.dim}>
+                      ({option.hint})
+                    </Text>
                   </Box>
                 ) : null}
               </Box>

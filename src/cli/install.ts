@@ -140,6 +140,16 @@ export interface RunInstallInput {
    * install fails with a clear message rather than hanging.
    */
   runLoggedOff?: boolean;
+  /** Run in dry-run mode without modifying units or tasks. */
+  dryRun?: boolean;
+  /**
+   * Boot-start (run logged off) flag. Alias/parallel to runLoggedOff.
+   */
+  boot?: boolean;
+  /**
+   * Login-start (run only when logged on) flag. Alias/parallel to interactive.
+   */
+  login?: boolean;
   windowsPassword?: string;
   /** Directory for transient Task Scheduler XML import files (Windows tests). */
   xmlDir?: string;
@@ -187,6 +197,11 @@ export interface RunInstallInput {
 export async function runInstall(input: RunInstallInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
+
+  if (input.dryRun || (typeof process !== "undefined" && process.env?.PHANTOMBOT_SANDBOX && process.env.PHANTOMBOT_SANDBOX !== "0")) {
+    out.write("phantombot: [dryrun] skipping background service installation\n");
+    return 0;
+  }
 
   const binPath = input.binPath ?? process.execPath;
   // The compiled binary is `phantombot` on POSIX and `phantombot.exe` on
@@ -647,27 +662,43 @@ export default defineCommand({
     "run-logged-off": {
       type: "boolean",
       description:
-        "Windows: run whether or not anyone is logged on (stores the Windows password with the scheduled task; pair with --windows-password or PHANTOMBOT_WINDOWS_PASSWORD). Skips the prompt.",
+        "Windows / Linux: run whether or not anyone is logged on (stores the Windows password / enables linger). Skips the prompt.",
+    },
+    "boot": {
+      type: "boolean",
+      description: "Alias for --run-logged-off (start at boot, before login).",
     },
     "interactive": {
       type: "boolean",
       description:
-        "Windows: run only while the user is logged on (skips the prompt; the default).",
+        "Run only while the user is logged on (skips the prompt; the default).",
+    },
+    "login": {
+      type: "boolean",
+      description: "Alias for --interactive (start at login).",
     },
     "windows-password": {
       type: "string",
       description:
         "Windows: account password for --run-logged-off. Prefer the PHANTOMBOT_WINDOWS_PASSWORD env var to keep it out of shell history.",
     },
+    "dryrun": {
+      type: "boolean",
+      alias: "dry-run",
+      description: "Skip side effects (service installation).",
+    },
   },
   async run({ args }) {
+    const wantsLoggedOff = args["run-logged-off"] || args.boot;
+    const wantsInteractive = args.interactive || args.login;
     const code = await runInstall({
-      runLoggedOff: args["run-logged-off"]
+      runLoggedOff: wantsLoggedOff
         ? true
-        : args["interactive"]
+        : wantsInteractive
           ? false
           : undefined,
       windowsPassword: args["windows-password"],
+      dryRun: args.dryrun,
     });
     // A successful install wires up shell tab-completion so it works right
     // away, with no extra step. Best-effort: a completion failure never turns

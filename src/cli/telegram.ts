@@ -84,9 +84,96 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
   const validate = input.validateToken ?? telegramGetMe;
   const svc = input.serviceControl ?? defaultServiceControl();
 
-  // Target persona: an explicit `--persona` wins; otherwise pick from the
-  // detected personas (default pre-selected, "None" to skip) — same pattern as
-  // `phantombot persona`.
+  if (process.stdin.isTTY) {
+    const { runStandaloneFlow } = await import("../tui/standalone.tsx");
+    const { configureTelegram } = await import(
+      "../tui/channelsFlow.ts"
+    );
+    type ChannelsQuestions = import("../tui/channelsFlow.ts").ChannelsQuestions;
+    const { listExistingPersonas } = await import("./persona.ts");
+    const { loadState } = await import("../state.ts");
+
+    let persona = input.persona;
+    return await runStandaloneFlow(async (q) => {
+      if (!persona) {
+        const personas = listExistingPersonas(config);
+        if (personas.length === 0) {
+          return "No personas found. Create one with `phantombot create-persona` first.";
+        }
+        const def = (await loadState()).default_persona ?? config.defaultPersona;
+        const initial = personas.includes(def) ? def : personas[0];
+        const picked = await q.choose({
+          title: "Telegram setup",
+          description: "Select which persona to configure Telegram for:",
+          options: personas.map((p) => ({
+            value: p,
+            label: p,
+            hint: p === def ? "default" : undefined,
+          })),
+          initial,
+        });
+        if (!picked) return "telegram unchanged";
+        persona = picked;
+      }
+
+      const personaConfig = await loadConfig(persona);
+      const target = await resolvePersonaWriteTarget({
+        configPath: config.configPath,
+        personasDir: config.personasDir,
+        persona,
+      });
+
+      const existing =
+        personaConfig.channels.telegram ??
+        (persona ? config.channels.telegramPersonas?.[persona] : undefined);
+
+      const questions: ChannelsQuestions = {
+        choose: (opts) => q.choose(opts),
+        value: (opts) => q.value(opts),
+        confirm: (opts) => q.confirm(opts),
+      };
+
+      const result = await configureTelegram(persona, questions, {
+        existing,
+        validateToken: validate,
+        save: async (inputs) => {
+          await applyTelegramConfig(
+            target.path,
+            {
+              token: inputs.token,
+              pollTimeoutS: 30,
+              allowedUserIds: inputs.allowedUserIds,
+            },
+            persona,
+            target.scope,
+          );
+        },
+        targetPath: target.path,
+      });
+
+      await maybePromptRestart(
+        svc,
+        async (msg) =>
+          await q.confirm({
+            title: msg,
+            consequence: {
+              summary: "restarts daemon",
+              detail: "",
+              longRunning: false,
+              restarts: true,
+            },
+          }),
+        {
+          note: (body: string, title?: string) =>
+            q.note(title ?? "", body),
+        } as never,
+      );
+
+      return result;
+    }, ["phantombot", persona ?? "telegram", "channel"]);
+  }
+
+  // Fallback for non-TTY / test runners
   let persona = input.persona;
   if (!persona) {
     const picked = await pickChannelPersona(config, "Telegram");

@@ -85,18 +85,33 @@ export function NewPersonaScreen(props: {
       </Box>
       <Box flexDirection="column">
         <Selectable selected={cursor === 0} onPress={props.onCreate}>
-          <Text>Create a new persona</Text>
+          <Text
+            bold={cursor === 0}
+            color={cursor === 0 ? "whiteBright" : "white"}
+          >
+            Create a new persona
+          </Text>
         </Selectable>
         <Selectable selected={cursor === 1} onPress={props.onImport}>
-          <Text>
+          <Text
+            bold={cursor === 1}
+            color={cursor === 1 ? "whiteBright" : "white"}
+          >
             Import from a directory{" "}
-            <Text color={theme.dim}>(OpenClaw or phantombot-shaped)</Text>
+            <Text color={cursor === 1 ? theme.accent : theme.dim}>
+              (OpenClaw or phantombot-shaped)
+            </Text>
           </Text>
         </Selectable>
         <Selectable selected={cursor === 2} onPress={props.onRestore}>
-          <Text>
+          <Text
+            bold={cursor === 2}
+            color={cursor === 2 ? "whiteBright" : "white"}
+          >
             Restore an archived persona{" "}
-            <Text color={theme.dim}>{`(${count} available)`}</Text>
+            <Text color={cursor === 2 ? theme.accent : theme.dim}>
+              {`(${count} available)`}
+            </Text>
           </Text>
         </Selectable>
       </Box>

@@ -8,6 +8,7 @@ import {
   detectAvailability,
   piInstallCommand,
   runHarness,
+  runHarnessCheck,
   SUPPORTED_HARNESSES,
   whichBinary,
 } from "../src/cli/harness.ts";
@@ -24,12 +25,12 @@ describe("Pi-default wizard wiring", () => {
     expect(piInstallCommand("linux")).toEqual([
       "sh",
       "-c",
-      "curl -fsSL https://pi.dev/install.sh | sh",
+      "curl -f -s -S -L https://pi.dev/install.sh -o /tmp/pi-install.sh && sh /tmp/pi-install.sh && rm -f /tmp/pi-install.sh",
     ]);
     expect(piInstallCommand("darwin")).toEqual([
       "sh",
       "-c",
-      "curl -fsSL https://pi.dev/install.sh | sh",
+      "curl -f -s -S -L https://pi.dev/install.sh -o /tmp/pi-install.sh && sh /tmp/pi-install.sh && rm -f /tmp/pi-install.sh",
     ]);
   });
 
@@ -254,5 +255,177 @@ describe("runHarness dual-Pi duplicate host config rule", () => {
         ),
       ),
     ).toBe(true);
+  });
+});
+
+describe("runHarnessCheck", () => {
+  test("shows detected harnesses note and returns 0 when harnesses are found", async () => {
+    const notes: Array<{ body: string; title?: string }> = [];
+    const q: HarnessPrompts = {
+      select: async () => undefined as any,
+      text: async () => undefined as any,
+      password: async () => undefined as any,
+      confirm: async () => true,
+      note: (body, title) => {
+        notes.push({ body, title });
+      },
+      intro: () => {},
+      outro: () => {},
+      cancel: () => {},
+      canRunInteractiveInstaller: false,
+    };
+
+    const config = {
+      configPath: join(workdir, "config.toml"),
+      personasDir: join(workdir, "personas"),
+      defaultPersona: "phantom",
+      harnesses: {
+        chain: ["pi"],
+        pi: { bin: "/bin/sh" },
+        codex: { bin: undefined },
+        claude: { bin: undefined },
+      },
+    } as unknown as Config;
+
+    const code = await runHarnessCheck({ config, prompts: q });
+    expect(code).toBe(0);
+    expect(notes.some((n) => n.title === "Detected harnesses")).toBe(true);
+    expect(notes.some((n) => n.title === "Warning: No Harness Found")).toBe(false);
+  });
+
+  test("proposes Pi install and runs runner when all harnesses are missing", async () => {
+    const notes: Array<{ body: string; title?: string }> = [];
+    let confirmed = false;
+    let installRunnerCalled = false;
+
+    const q: HarnessPrompts = {
+      select: async () => undefined as any,
+      text: async () => undefined as any,
+      password: async () => undefined as any,
+      confirm: async () => {
+        confirmed = true;
+        return true;
+      },
+      note: (body, title) => {
+        notes.push({ body, title });
+      },
+      intro: () => {},
+      outro: () => {},
+      cancel: () => {},
+      canRunInteractiveInstaller: false,
+    };
+
+    const config = {
+      configPath: join(workdir, "config.toml"),
+      personasDir: join(workdir, "personas"),
+      defaultPersona: "phantom",
+      harnesses: {
+        chain: ["pi"],
+        pi: { bin: "/nonexistent/pi" },
+        codex: { bin: "/nonexistent/codex" },
+        claude: { bin: "/nonexistent/claude" },
+      },
+    } as unknown as Config;
+
+    const code = await runHarnessCheck({
+      config,
+      availability: {
+        pi: undefined,
+        codex: undefined,
+        claude: undefined,
+      },
+      prompts: q,
+      installRunner: async () => {
+        installRunnerCalled = true;
+        return { exitCode: 0, stderr: "" };
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(notes.some((n) => n.title === "Warning: No Harness Found")).toBe(true);
+    expect(confirmed).toBe(true);
+    expect(installRunnerCalled).toBe(true);
+  });
+
+  test("dryrun mode does not prompt for Pi install when harnesses are missing", async () => {
+    const notes: Array<{ body: string; title?: string }> = [];
+    const confirmMessages: string[] = [];
+
+    const q: HarnessPrompts = {
+      select: async () => undefined as any,
+      text: async () => undefined as any,
+      password: async () => undefined as any,
+      confirm: async ({ message }) => {
+        confirmMessages.push(message);
+        return true;
+      },
+      note: (body, title) => {
+        notes.push({ body, title });
+      },
+      intro: () => {},
+      outro: () => {},
+      cancel: () => {},
+      canRunInteractiveInstaller: false,
+    };
+
+    const config = {
+      configPath: join(workdir, "config.toml"),
+      personasDir: join(workdir, "personas"),
+      defaultPersona: "phantom",
+      harnesses: {
+        chain: ["pi"],
+        pi: { bin: "/nonexistent/pi" },
+        codex: { bin: "/nonexistent/codex" },
+        claude: { bin: "/nonexistent/claude" },
+      },
+    } as unknown as Config;
+
+    const code = await runHarnessCheck({
+      config,
+      availability: {
+        pi: undefined,
+        codex: undefined,
+        claude: undefined,
+      },
+      prompts: q,
+      dryRun: true,
+    });
+
+    expect(code).toBe(0);
+    expect(notes.some((n) => n.title === "Warning: No Harness Found")).toBe(true);
+    expect(confirmMessages.some((m) => m.includes("Install Pi"))).toBe(false);
+    expect(confirmMessages.some((m) => m.includes("Continue to phantombot TUI"))).toBe(true);
+  });
+
+  test("returns 1 when user declines or cancels continue prompt", async () => {
+    const notes: Array<{ body: string; title?: string }> = [];
+    const q: HarnessPrompts = {
+      select: async () => undefined as any,
+      text: async () => undefined as any,
+      password: async () => undefined as any,
+      confirm: async () => false,
+      note: (body, title) => {
+        notes.push({ body, title });
+      },
+      intro: () => {},
+      outro: () => {},
+      cancel: () => {},
+      canRunInteractiveInstaller: false,
+    };
+
+    const config = {
+      configPath: join(workdir, "config.toml"),
+      personasDir: join(workdir, "personas"),
+      defaultPersona: "phantom",
+      harnesses: {
+        chain: ["pi"],
+        pi: { bin: "/bin/sh" },
+        codex: { bin: undefined },
+        claude: { bin: undefined },
+      },
+    } as unknown as Config;
+
+    const code = await runHarnessCheck({ config, prompts: q });
+    expect(code).toBe(1);
   });
 });

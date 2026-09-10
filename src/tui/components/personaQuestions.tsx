@@ -15,47 +15,59 @@ import { theme } from "../theme.ts";
 
 /** A rounded quote-box — the app's standard example/preview block. */
 export function ExampleBox(props: {
-  /** Small dim italic caption on the box's first line, e.g. "e.g." */
+  /** Caption on the box's first line, e.g. "✦ Examples" */
   label?: string;
   children: React.ReactNode;
 }): React.ReactElement {
   return (
     <Box
       borderStyle="round"
-      borderColor={theme.dim}
-      paddingX={1}
+      borderColor={theme.accent}
+      paddingX={2}
+      paddingY={0}
       flexDirection="column"
       marginTop={1}
       marginBottom={1}
+      alignSelf="flex-start"
     >
       {props.label ? (
-        <Text dimColor italic>
-          {props.label}
-        </Text>
+        <Box marginBottom={0}>
+          <Text color={theme.accent} bold>
+            {props.label}
+          </Text>
+        </Box>
       ) : null}
       {props.children}
     </Box>
   );
 }
 
-const NAME_EXAMPLES = "lena · study-buddy · ops-bot";
-
 const IDENTITY_EXAMPLES = [
-  "a senior engineer who cares about correctness",
-  "a warm tutor who explains things simply",
-  "a blunt editor who cuts every wasted word",
+  "a senior software engineer who cares about correctness and testing",
+  "a patient tutor who explains complex technical concepts simply",
+  "a concise editor who eliminates ambiguity and wasted words",
 ];
 
 export function nameDescription(): React.ReactElement {
   return (
     <>
       <Text>
-        This is the name your phantom will be called — in chat, in the
-        phantoms list, and on disk. Pick something you'd be happy talking to.
+        This is the name your phantom will be called — in chat conversations,
+        in the phantoms list, and on disk. Choose something memorable and easy to type.
       </Text>
-      <ExampleBox label="e.g.">
-        <Text bold color={theme.accent}>
-          {NAME_EXAMPLES}
+      <ExampleBox label="✦ Examples">
+        <Text>
+          <Text bold color={theme.accent}>
+            lena
+          </Text>
+          <Text color={theme.dim}> · </Text>
+          <Text bold color={theme.accent}>
+            study-buddy
+          </Text>
+          <Text color={theme.dim}> · </Text>
+          <Text bold color={theme.accent}>
+            ops-bot
+          </Text>
         </Text>
       </ExampleBox>
       {/* The format line lives in the AskScreen hint slot — which renders just
@@ -69,21 +81,24 @@ export function identityDescription(name: string): React.ReactElement {
   return (
     <>
       <Text>
-        The one sentence that defines who this phantom is: it opens every
+        The defining core sentence that shapes who this phantom is. It opens every
         conversation as{" "}
         <Text bold color={theme.accent}>
           "You are {name || "…"}, ___"
         </Text>{" "}
-        and colours everything it says and does.
+        and guides how it thinks, writes, and solves problems.
       </Text>
-      <ExampleBox label="e.g.">
+      <ExampleBox label="✦ Examples">
         {IDENTITY_EXAMPLES.map((example) => (
-          <Text key={example} italic>
-            {example}
-          </Text>
+          <Box key={example}>
+            <Text color={theme.accent}>▸ </Text>
+            <Text italic>{example}</Text>
+          </Box>
         ))}
       </ExampleBox>
-      <Text dimColor>Leave the default, or edit it to fit. Tweakable any time in Configure.</Text>
+      <Text color={theme.dim}>
+        Leave the default, or edit it to fit. You can change this anytime in Configure.
+      </Text>
     </>
   );
 }
@@ -92,10 +107,10 @@ export function toneDescription(name: string, identity: string): React.ReactElem
   return (
     <>
       <Text>
-        You are <Text bold color={theme.accent}>{name}</Text>,{" "}
-        <Text italic>{identity}</Text>. How should {name} write and speak?
+        You are configuring <Text bold color={theme.accent}>{name}</Text> (
+        <Text italic>{identity}</Text>). How should <Text bold color={theme.accent}>{name}</Text> write and speak?
       </Text>
-      <Text dimColor>Changeable later in Configure.</Text>
+      <Text color={theme.dim}>You can change the communication tone anytime in Configure.</Text>
     </>
   );
 }
@@ -105,12 +120,12 @@ export function skillsDescription(name: string): React.ReactElement {
     <>
       <Text>
         What should <Text bold color={theme.accent}>{name}</Text> be good at?
-        These seed the identity file's expertise section — the grounding the
-        phantom draws on when it answers. Pick what fits the role you have in
-        mind; skip everything and the one-line identity carries the
-        personality on its own.
+        These seed the expertise section in IDENTITY.md — the grounding your
+        phantom draws upon when answering.
       </Text>
-      <Text dimColor>Optional — space to toggle, ↵ to confirm. Editable later in IDENTITY.md.</Text>
+      <Text color={theme.dim}>
+        Optional — press space to toggle, ↵ to confirm. Editable anytime in IDENTITY.md.
+      </Text>
     </>
   );
 }
@@ -120,14 +135,22 @@ export function ownerDescription(name: string): React.ReactElement {
     <>
       <Text>
         What should <Text bold color={theme.accent}>{name}</Text> call you?
-        This is who the phantom serves — it greets you by name, and knows who
+        This defines who the phantom serves — it greets you by name, and knows who
         it takes direction from.
       </Text>
-      <ExampleBox label="e.g.">
-        <Text italic>Andrew</Text>
-        <Text italic>Kate</Text>
+      <ExampleBox label="✦ Examples">
+        <Box>
+          <Text color={theme.accent}>▸ </Text>
+          <Text italic>Andrew</Text>
+        </Box>
+        <Box>
+          <Text color={theme.accent}>▸ </Text>
+          <Text italic>Kate</Text>
+        </Box>
       </ExampleBox>
-      <Text dimColor>Optional — leave blank to skip. Editable later in IDENTITY.md.</Text>
+      <Text color={theme.dim}>
+        Optional — leave blank to skip. Editable anytime in IDENTITY.md.
+      </Text>
     </>
   );
 }

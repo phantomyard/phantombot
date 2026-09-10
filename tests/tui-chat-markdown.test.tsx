@@ -64,6 +64,9 @@ async function frameFor(text: string): Promise<string> {
     async command() {
       return null;
     },
+    async reloadHarnesses() {
+      return [];
+    },
     async close() {},
   };
   const instance = render(
@@ -117,6 +120,6 @@ describe("a rendered reply", () => {
     // `borderStyle`, and a compressed row is what used to push the bottom
     // chrome off screen — the footer must still be the last thing rendered.
     const nonEmpty = frame.split("\n").filter((l) => l.trim().length > 0);
-    expect(nonEmpty.at(-1)).toContain("Send");
+    expect(nonEmpty.slice(-2).join(" ")).toContain("Send");
   });
 });

@@ -61,6 +61,9 @@ const idleSession: ChatSession = {
   async command() {
     return null;
   },
+  async reloadHarnesses() {
+    return [];
+  },
   async close() {},
 };
 
@@ -97,8 +100,8 @@ describe("footer badges", () => {
         [badge.send, "Alt+↵"],
         [badge.run, "/"],
         [badge.scroll, "↑↓"],
-        [badge.settings, "^s"],
-        [badge.quit, "^q"],
+        [badge.settings, "ctrl+s"],
+        [badge.quit, "ctrl+q"],
       ];
       for (const [icon, key] of expected) {
         expect(frame).toContain(`${icon} ${key}`);

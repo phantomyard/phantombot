@@ -30,13 +30,19 @@
 
 import type { PiModel } from "../lib/piModels.ts";
 import {
+  mergeModels,
+  modelsForProvider,
   primaryIsMultimodal,
   providerChoices,
   providerEnvVar,
 } from "../lib/piModels.ts";
 import { resolvePiApiKeyWrite, type RoutingChoices } from "../lib/piRouting.ts";
 import { probeProviderKey, type KeyProbeResult } from "../lib/providerKeyProbe.ts";
+import { fetchProviderModels } from "../lib/providerModelCatalog.ts";
 import type { PiAuthWriteResult } from "../lib/piAuthStore.ts";
+import type { BrainTestRequest, BrainTestResult } from "./screens/BrainTest.tsx";
+
+export type { BrainTestRequest, BrainTestResult };
 
 export interface BrainQuestions {
   choose(input: {
@@ -60,6 +66,8 @@ export interface BrainQuestions {
     masked?: boolean;
     allowEmpty?: boolean;
   }): Promise<string | undefined>;
+  /** Live model test screen with checklist status and apply/retry confirmation. */
+  testBrain?(input: BrainTestRequest): Promise<BrainTestResult>;
   /** A progress fact, shown in the notice bar. Never a question. */
   note(title: string, body: string): void;
 }
@@ -100,6 +108,13 @@ export interface BrainDeps {
    * Injectable for tests; defaults to the real HTTP probe.
    */
   probeProviderKey?(providerId: string, key: string): Promise<KeyProbeResult>;
+  /**
+   * The provider's OWN model list, asked over HTTP. The fallback for when
+   * `pi --list-models` knows nothing about the chosen provider — without it the
+   * model pickers collapse to free text and the operator has to type a model id
+   * from memory. Injectable for tests; defaults to the real fetch.
+   */
+  fetchProviderModels?(providerId: string, key: string): Promise<PiModel[]>;
   setSecret(
     value: string,
     instanceId?: string,
@@ -118,19 +133,6 @@ const HARNESS_LABELS: Record<string, string> = {
   codex: "Codex",
   claude: "Claude",
 };
-
-function mergeModels(existing: readonly PiModel[], fresh: readonly PiModel[]): PiModel[] {
-  const seen = new Set<string>();
-  const res: PiModel[] = [];
-  for (const m of [...fresh, ...existing]) {
-    const key = `${m.provider}/${m.model}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      res.push(m);
-    }
-  }
-  return res;
-}
 
 /**
  * Per-harness hints. Codex/Claude state the inheritance up front — an operator
@@ -456,7 +458,26 @@ export async function configurePi(
     );
   }
 
-  const scoped = provider ? models.filter((m) => m.provider === provider) : models;
+  // LAST RESORT before the pickers: if Pi still lists nothing for this
+  // provider, ask the provider itself. `pi --list-models` only enumerates
+  // providers Pi has already keyed, and a key written seconds ago may not be
+  // visible to it yet — which is exactly how the picker used to end up with a
+  // lone "(none)" row and a demand that the user type a model id from memory.
+  let scoped = modelsForProvider(provider || undefined, models);
+  if (scoped.length === 0 && provider) {
+    const fetchModels = deps.fetchProviderModels ?? fetchProviderModels;
+    const effectiveKey =
+      keyWrite.action === "set" ? keyWrite.value : (current.storedKey ?? "");
+    const live = await fetchModels(provider, effectiveKey);
+    if (live.length > 0) {
+      models = mergeModels(models, live);
+      scoped = modelsForProvider(provider, models);
+      q.note(
+        "Model catalogue",
+        `Pi listed no models for ${provider}; fetched ${live.length} from the provider's own API.`,
+      );
+    }
+  }
 
   // Slot 1 — PRIMARY. "(none)" leaves Pi on its own default model.
   const primaryModel = await pickModelSlot(q, {
@@ -474,7 +495,7 @@ export async function configurePi(
   // When it can't, the list narrows to vision-capable models. Capability comes
   // from Pi's `images` column; a model with no capability data counts as
   // not-capable, so vision is still asked rather than guessed.
-  const multimodal = primaryIsMultimodal(models, primaryModel);
+  const multimodal = primaryIsMultimodal(scoped, primaryModel);
   let imageModel: string | undefined;
   if (multimodal) {
     imageModel = primaryModel;

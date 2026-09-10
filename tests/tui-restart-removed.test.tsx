@@ -195,6 +195,7 @@ async function open() {
         async command() {
           return null;
         },
+        reloadHarnesses: async () => [],
         close: async () => {},
       })}
     />,

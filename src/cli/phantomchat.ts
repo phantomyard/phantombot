@@ -178,6 +178,97 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
   const savePersonaConfig =
     input.savePersonaConfig ?? savePhantomchatPersonaConfig;
 
+  if (process.stdin.isTTY) {
+    const { runStandaloneFlow } = await import("../tui/standalone.tsx");
+    const { configurePhantomchat } = await import(
+      "../tui/channelsFlow.ts"
+    );
+    type ChannelsQuestions = import("../tui/channelsFlow.ts").ChannelsQuestions;
+    const { listExistingPersonas } = await import("./persona.ts");
+    const { loadState } = await import("../state.ts");
+
+    let persona = input.persona;
+    return await runStandaloneFlow(async (q) => {
+      if (!persona) {
+        const personas = listExistingPersonas(config);
+        if (personas.length === 0) {
+          return "No personas found. Create one with `phantombot create-persona` first.";
+        }
+        const def = (await loadState()).default_persona ?? config.defaultPersona;
+        const initial = personas.includes(def) ? def : personas[0];
+        const picked = await q.choose({
+          title: "PhantomChat setup",
+          description: "Select which persona to configure PhantomChat for:",
+          options: personas.map((p) => ({
+            value: p,
+            label: p,
+            hint: p === def ? "default" : undefined,
+          })),
+          initial,
+        });
+        if (!picked) return "phantomchat unchanged";
+        persona = picked;
+      }
+
+      const agentDir = personaDir(config, persona);
+      const questions: ChannelsQuestions = {
+        choose: (opts) => q.choose(opts),
+        value: (opts) => q.value(opts),
+        confirm: (opts) => q.confirm(opts),
+      };
+
+      const result = await configurePhantomchat(persona, questions, {
+        identity: async () => {
+          const id = await ensurePhantomchatIdentity(
+            agentDir,
+            generate,
+            loadPersonaConfig,
+          );
+          return {
+            npub: id.npub,
+            allowedNpubs:
+              loadPersonaConfig(agentDir)?.allowedNpubs ?? [],
+          };
+        },
+        save: async ({ allowedNpubs }) => {
+          const id = await ensurePhantomchatIdentity(
+            agentDir,
+            generate,
+            loadPersonaConfig,
+          );
+          const saved = await savePhantomchatAllowlist({
+            agentDir,
+            nsec: id.nsec,
+            allowedNpubs,
+            save: savePersonaConfig,
+            load: loadPersonaConfig,
+          });
+          return saved.path;
+        },
+      });
+
+      await maybePromptRestart(
+        svc,
+        async (msg) =>
+          await q.confirm({
+            title: msg,
+            consequence: {
+              summary: "restarts daemon",
+              detail: "",
+              longRunning: false,
+              restarts: true,
+            },
+          }),
+        {
+          note: (body: string, title?: string) =>
+            q.note(title ?? "", body),
+        } as never,
+      );
+
+      return result;
+    }, ["phantombot", persona ?? "phantomchat", "channel"]);
+  }
+
   // Target persona: an explicit `--persona` wins; otherwise pick from the
   // detected personas (default pre-selected, "None" to skip) — same pattern as
   // `phantombot persona`.

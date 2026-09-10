@@ -253,25 +253,25 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
 describe("first run", () => {
   test("invalid names stay on the field with an inline error", async () => {
     const app = mount({ startPersona: undefined });
-    await app.waitFor((f) => f.includes("Persona name"));
+    await app.waitFor((f) => f.includes("Persona Name") || f.includes("Persona name"));
     await app.press("Bad Name\r");
-    await app.waitFor((f) => f.includes("invalid name"));
-    expect(app.lastFrame()).toContain("Persona name");
+    await app.waitFor((f) => f.toLowerCase().includes("invalid name"));
+    expect(app.lastFrame()).toMatch(/Persona [Nn]ame/);
     expect(app.created).toEqual([]);
   });
 
   test("three questions plus the optional pair, then the creation callback runs with no technical steps", async () => {
     const app = mount({ startPersona: undefined });
-    await app.waitFor((f) => f.includes("Persona name"));
+    await app.waitFor((f) => f.includes("Persona Name") || f.includes("Persona name"));
     // name → identity (accept the editable default) → tone → skills (skip)
     // → your name (skip).
     await app.press("alice\r");
-    await app.waitFor((f) => f.includes("One-line identity"));
+    await app.waitFor((f) => f.includes("One-Line Identity") || f.includes("One-line identity"));
     expect(app.lastFrame()).toContain("a helpful, no-nonsense assistant");
-    await app.enterUntil("Default tone");
-    await app.enterUntil("Skills & disciplines");
-    await app.enterUntil("Your name");
-    await app.enterUntil("alice");
+    await app.enterUntil("Default Tone");
+    await app.enterUntil("Skills & Disciplines");
+    await app.enterUntil("Your Name");
+    await app.enterUntil("created");
     expect(app.created).toEqual(["alice"]);
   });
 
@@ -281,7 +281,7 @@ describe("first run", () => {
       startPersona: undefined,
       onCreatePersona: recordingCreate(created),
     });
-    await app.waitFor((f) => f.includes("Persona name"));
+    await app.waitFor((f) => f.includes("Persona Name") || f.includes("Persona name"));
 
     // name → identity → tone, accepting each step's default. Bounded rather
     // than exact so the test asserts "the wizard completes", not "the wizard
@@ -349,7 +349,7 @@ describe("first run", () => {
     await tick();
     // The wizard's identity question, resumed — with the editable default
     // pre-filled, not the old brain interrogation.
-    expect(app.frame()).toContain("One-line identity");
+    expect(app.frame()).toMatch(/One-[Ll]ine [Ii]dentity/);
     expect(app.frame()).toContain("a helpful, no-nonsense assistant");
   });
 
@@ -370,10 +370,10 @@ describe("first run", () => {
     await tick();
     // A resume has no name question behind it — the persona already exists.
     await app.press("\u001b");
-    expect(app.frame()).toContain("One-line identity");
+    expect(app.frame()).toMatch(/One-[Ll]ine [Ii]dentity/);
     // Enter accepts the pre-filled default identity → the tone picker.
     await app.press("\r");
-    expect(app.frame()).toContain("Default tone");
+    expect(app.frame()).toMatch(/Default [Tt]one/);
   });
 
   test("a resumed persona reports an update, not newly created identity files", async () => {
@@ -382,11 +382,11 @@ describe("first run", () => {
       wizardStartAt: "identity",
       onCreatePersona: async () => ({ created: false }),
     });
-    await app.waitFor((f) => f.includes("One-line identity"));
+    await app.waitFor((f) => f.includes("One-Line Identity") || f.includes("One-line identity"));
     // Accept the default identity, then the first tone, then skip the
     // optional skills and owner questions. The final Enter-until fires on the
     // owner screen itself — the notice is the marker it waits for.
-    await app.enterUntil("Skills & disciplines");
+    await app.enterUntil("Skills & Disciplines");
     await app.enterUntil("updated alice · config.toml");
     expect(app.lastFrame()).not.toContain("created /tmp/does-not-exist/alice");
   });

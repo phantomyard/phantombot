@@ -49,6 +49,11 @@ import {
   SearchListScreen,
   type SearchListRequest,
 } from "./screens/SearchList.tsx";
+import {
+  BrainTestScreen,
+  type BrainTestRequest,
+  type BrainTestResult,
+} from "./screens/BrainTest.tsx";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
 import { openChat, type ChatSession } from "./chatSession.ts";
 import { ChatScreen } from "./screens/Chat.tsx";
@@ -67,6 +72,7 @@ import { SystemScreen } from "./screens/System.tsx";
 import { systemSnapshot } from "./systemSnapshot.ts";
 import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
 import { theme } from "./theme.ts";
+import { log } from "../lib/logger.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { TerminalSizeContext, renderRows, terminalSize } from "./terminal.ts";
 import { loadConfig, loadConfigForPersona, type Config } from "../config.ts";
@@ -107,6 +113,9 @@ export interface AppProps {
    * and writes through the same config helpers the CLI uses. The result
    * decides where the wizard lands: "chat" only when the brain was verified
    * by a real turn; anything else lands in Configure.
+   *
+   * Seams BOTH brain entry points — the wizard's steps and the Configure
+   * screen's Brain row run the same flow, so they share the same seam.
    */
   onWizardBrain?: (
     persona: string,
@@ -174,6 +183,14 @@ export function App(props: AppProps): React.ReactElement {
   );
   const [session, setSession] = useState<ChatSession | undefined>();
   /**
+   * The live session, readable from callbacks without making every one of them
+   * depend on it. `changeBrain` in particular must reach the OPEN session to
+   * refresh its harness chain, and re-creating that callback on every session
+   * change would churn the whole settings tree for no benefit.
+   */
+  const sessionRef = useRef<ChatSession | undefined>(undefined);
+  sessionRef.current = session;
+  /**
    * Latched the first time chat is reached — including from the wizard's
    * `onFinish`, which is the path that had no way to set it before.
    */
@@ -225,6 +242,9 @@ export function App(props: AppProps): React.ReactElement {
   >();
   const [searchAsk, setSearchAsk] = useState<
     (SearchListRequest & { resolve: (value: string | undefined) => void }) | undefined
+  >();
+  const [brainTest, setBrainTest] = useState<
+    (BrainTestRequest & { resolve: (res: BrainTestResult) => void }) | undefined
   >();
   const [reembed, setReembed] = useState<
     { space: string; state: ReembedState } | undefined
@@ -313,6 +333,15 @@ export function App(props: AppProps): React.ReactElement {
     });
     setSearchAsk(undefined);
     return value;
+  }, []);
+
+  /** Run the live model test checklist screen. */
+  const askBrainTest = useCallback(async (input: BrainTestRequest) => {
+    const res = await new Promise<BrainTestResult>((resolve) => {
+      setBrainTest({ ...input, resolve });
+    });
+    setBrainTest(undefined);
+    return res;
   }, []);
 
   // One chat session per persona, opened lazily and kept across screen
@@ -524,150 +553,23 @@ export function App(props: AppProps): React.ReactElement {
     ): Promise<{ landing: "chat" | "configure"; notice: string }> => {
       setPrompting(true);
       try {
-        // On-demand imports, same reason as `changeBrain`: the harness graph
-        // must not delay the app's first render.
-        const { runBrainOnboarding } = await import("./brainOnboarding.ts");
-        const { loadConfig } = await import("../config.ts");
-        const { ENV_PI_API_KEY } = await import("../lib/piRouting.ts");
-        const {
-          applyHarnessChain,
-          applyRouting,
-          clearPiRouting,
-          defaultInstallRunner,
-          detectAvailability,
-          installPi,
-          piInstallCommand,
-        } = await import("../cli/harness.ts");
-        const { resolveHarnessWriteTarget } = await import(
-          "../lib/harnessWriteTarget.ts"
+        const { createBrainOnboardingDeps, runBrainOnboarding } = await import(
+          "./brainOnboarding.ts"
         );
-        const { harnessChainIds, piInstanceSecretName } = await import("../harnesses/buildChain.ts");
-        const { listPiModels } = await import("../lib/piModels.ts");
-        const {
-          getPersonaSecret,
-          setPersonaSecret,
-          unsetPersonaSecret,
-        } = await import("../lib/vaultSecrets.ts");
-        const { writePiApiKey } = await import("../lib/piAuthStore.ts");
-        const { probeProviderKey } = await import("../lib/providerKeyProbe.ts");
-
-        const config = await loadConfig(persona);
-        const availability = await detectAvailability(config);
-        const writeTarget = await resolveHarnessWriteTarget(config, persona);
-        const routing = config.harnesses.pi.routing ?? {};
+        const deps = await createBrainOnboardingDeps(persona, {
+          setNotice,
+          askConfirmValue,
+        });
 
         return await runBrainOnboarding(
           {
             choose: askChoice,
             search: askSearch,
             value: askValue,
+            testBrain: askBrainTest,
             note: (title, body) => setNotice(`${title}: ${body.split("\n")[0]}`),
           },
-          {
-            persona,
-            availability: () => detectAvailability(config),
-            installCommand: piInstallCommand().join(" "),
-            installPi: async () => {
-              // stdout/stdin inherit: the operator goes through Pi's own
-              // onboarding live. The q shim only needs `note` (failure).
-              const ok = await installPi(
-                defaultInstallRunner,
-                {
-                  note: (body: string, title?: string) =>
-                    setNotice(
-                      title ? `${title}: ${body.split("\n")[0]}` : body,
-                    ),
-                } as never,
-              );
-              return ok && Boolean((await detectAvailability(config)).pi);
-            },
-            chain: harnessChainIds(config, persona),
-            routing: {
-              provider: routing.provider,
-              primaryModel: routing.primaryModel,
-              imageModel: routing.imageModel,
-              codingModel: routing.codingModel,
-            },
-            storedKey: await getPersonaSecret(config, ENV_PI_API_KEY, persona),
-            piInstances: {
-              primary: {
-                routing: config.harnesses.instances?.["pi-primary"]?.routing ?? {},
-                storedKey: await getPersonaSecret(
-                  config,
-                  piInstanceSecretName("pi-primary"),
-                  persona,
-                ),
-              },
-              fallback: {
-                routing: config.harnesses.instances?.["pi-fallback"]?.routing ?? {},
-                storedKey: await getPersonaSecret(
-                  config,
-                  piInstanceSecretName("pi-fallback"),
-                  persona,
-                ),
-              },
-            },
-            targetPath: writeTarget.path,
-            personaScope: writeTarget.scope === "persona",
-            piBin: availability.pi,
-            listModels: (extraEnv) =>
-              listPiModels(availability.pi!, undefined, extraEnv),
-            setSecret: (value, instanceId) =>
-              setPersonaSecret(
-                config,
-                instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
-                value,
-                persona,
-              ),
-            unsetSecret: (instanceId) =>
-              unsetPersonaSecret(
-                config,
-                instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
-                persona,
-              ),
-            writeAuth: (provider, value) => writePiApiKey(provider, value),
-            applyChain: (chain) =>
-              applyHarnessChain(
-                writeTarget.path,
-                chain as never,
-                persona,
-                writeTarget.scope,
-              ),
-            applyRouting: (choices, instanceId) =>
-              applyRouting(writeTarget.path, choices, instanceId),
-            clearRouting: async (opts, instanceId) => {
-              await clearPiRouting(writeTarget.path, opts, instanceId);
-            },
-            probe: async (id) => {
-              const { probeHarness } = await import("../lib/harnessProbe.ts");
-              return probeHarness({ config: await loadConfig(persona), id });
-            },
-            probeProviderKey: (providerId, key) =>
-              probeProviderKey(providerId, key),
-            maybePromptRestart: async () => {
-              const { maybePromptRestart } = await import("../cli/harness.ts");
-              const { defaultServiceControl } = await import("../lib/platform.ts");
-              await maybePromptRestart(
-                defaultServiceControl(),
-                async (message) =>
-                  await askConfirmValue({
-                    title: message,
-                    consequence: {
-                      summary: "",
-                      detail: "",
-                      longRunning: false,
-                      restarts: true,
-                    },
-                  }),
-                {
-                  note: (body: string, title?: string) =>
-                    setNotice(
-                      title ? `${title}: ${body.split("\n")[0]}` : body,
-                    ),
-                } as never,
-              );
-            },
-          },
+          deps,
         );
       } catch (e) {
         return {
@@ -679,8 +581,37 @@ export function App(props: AppProps): React.ReactElement {
         await refresh();
       }
     },
-    [refresh, askChoice, askSearch, askValue],
+    [refresh, askChoice, askSearch, askValue, askBrainTest, askConfirmValue],
   );
+
+  /**
+   * Point the OPEN chat session at the brain that was just configured.
+   *
+   * The session resolves its harness chain once, when it opens, and then
+   * deliberately outlives every screen switch so a trip to settings does not
+   * lose the thread. Nothing re-read config.toml after that, so configuring a
+   * brain left chat still talking to the chain from before the write — on a
+   * fresh install the default `claude`, which is not installed. The user was
+   * told "brain verified", landed in chat, and every reply came back empty.
+   *
+   * Rebuilt in place rather than by reopening the session: reopening resets
+   * the transcript. Called by BOTH brain entry points (the wizard's steps and
+   * the Configure screen's Brain row).
+   */
+  const refreshChatBrain = useCallback(async () => {
+    const open = sessionRef.current;
+    if (!open) return;
+    try {
+      const { config } = await loadConfigForPersona(open.persona);
+      await open.reloadHarnesses(config);
+    } catch (e) {
+      // Never mask the flow's own outcome with a reload failure — the config
+      // IS saved, and the next app start picks it up regardless.
+      log.warn("tui: could not refresh the chat harness chain", {
+        error: (e as Error).message,
+      });
+    }
+  }, []);
 
   const wizardBrain = props.onWizardBrain ?? onboardBrain;
 
@@ -693,13 +624,18 @@ export function App(props: AppProps): React.ReactElement {
    */
   const changeBrain = useCallback(
     async (target: PersonaSnapshot) => {
-      const result = await onboardBrain(target.name);
+      // `wizardBrain`, not `onboardBrain`: this IS the wizard's brain flow (see
+      // the doc comment above), and going through the same seam means a test
+      // can drive the Configure entry point without a live harness — which is
+      // how the "chat kept the pre-configuration chain" bug is pinned.
+      const result = await wizardBrain(target.name);
+      await refreshChatBrain();
       setNotice(result.notice);
 
       // A verified brain earns chat, same as the wizard's landing.
       if (result.landing === "chat") setScreen("chat");
     },
-    [onboardBrain],
+    [onboardBrain, refreshChatBrain],
   );
 
   /**
@@ -1702,6 +1638,7 @@ export function App(props: AppProps): React.ReactElement {
                 result?.created !== false
                   ? await wizardBrain(answers.name)
                   : undefined;
+              await refreshChatBrain();
               // The brain steps' notice (what happened to the config)
               // supersedes the creation line — but only when the flow has
               // something to say.
@@ -1798,7 +1735,7 @@ export function App(props: AppProps): React.ReactElement {
           <Frame
             title={["phantombot", personaName]}
             status="starting"
-            footer={[{ key: "^q", label: "Quit" }]}
+            footer={[{ key: "ctrl+q", label: "Quit" }]}
           >
             <Text color={theme.dim}>opening {personaName}…</Text>
           </Frame>
@@ -2149,6 +2086,19 @@ export function App(props: AppProps): React.ReactElement {
           <SearchListScreen
             request={searchAsk}
             onAnswer={(v) => searchAsk.resolve(v)}
+          />
+        </Box>
+      </TerminalSizeContext.Provider>
+    );
+  }
+
+  if (brainTest) {
+    return (
+      <TerminalSizeContext.Provider value={size}>
+        <Box flexDirection="column" height={renderRows(size)}>
+          <BrainTestScreen
+            request={brainTest}
+            onAnswer={(res) => brainTest.resolve(res)}
           />
         </Box>
       </TerminalSizeContext.Provider>

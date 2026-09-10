@@ -14,12 +14,20 @@ import { glyph, theme } from "../theme.ts";
 export function Selectable(props: {
   selected?: boolean;
   onPress?: () => void;
+  fullWidth?: boolean;
   children: React.ReactNode;
 }): React.ReactElement {
+  const selected = Boolean(props.selected);
   return (
-    <Box>
+    <Box
+      backgroundColor={selected ? "blackBright" : undefined}
+      alignSelf={props.fullWidth ? undefined : "flex-start"}
+      paddingRight={props.fullWidth ? undefined : 1}
+    >
       <Box marginRight={1}>
-        <Text color={theme.accent}>{props.selected ? glyph.selected : " "}</Text>
+        <Text color={selected ? theme.accent : "gray"} bold={selected}>
+          {selected ? glyph.selected : " "}
+        </Text>
       </Box>
       <Box flexGrow={1}>{props.children}</Box>
     </Box>

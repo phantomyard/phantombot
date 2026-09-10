@@ -55,7 +55,7 @@ export interface MenuItemProps {
 export function MenuItem(props: MenuItemProps): React.ReactElement {
   const selected = Boolean(props.selected);
   return (
-    <Selectable selected={selected} onPress={props.onPress}>
+    <Selectable selected={selected} onPress={props.onPress} fullWidth>
       {/* `width="100%"` so the row actually spans its container: without it the
           row shrinks to its content and a right-aligned badge lands wherever
           the description happened to end. */}

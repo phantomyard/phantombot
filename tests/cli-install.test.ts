@@ -236,6 +236,24 @@ describe("runInstall (linux/systemd)", () => {
     // No auto-set message when env was already set.
     expect(out.text).not.toContain("auto-detected");
   });
+
+  test("dryRun returns 0 and skips writing units or calling systemctl", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const sys = new FakeSystemctl();
+    const code = await runInstall({
+      binPath: "/usr/local/bin/phantombot",
+      unitPath,
+      systemctl: sys,
+      out,
+      err,
+      dryRun: true,
+      platform: "linux",
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("[dryrun] skipping background service installation");
+    expect(sys.calls).toEqual([]);
+  });
 });
 
 describe("runInstall (darwin/launchd)", () => {

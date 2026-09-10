@@ -6,6 +6,8 @@ import {
   applyRouting,
   clearPiRouting,
   resolveHarnessWriteTarget,
+  restorePiRouting,
+  snapshotPiRouting,
 } from "../src/cli/harness.ts";
 import {
   computeRoutingClears,
@@ -364,5 +366,80 @@ describe("persona clears are tombstoned, not deleted (phantombot#441)", () => {
     const routing = (await readConfigToml(target.path) as any).harnesses.pi.routing;
     expect(routing.use_local_config).toBeUndefined();
     expect(routing.primary_model).toBe("lena-primary-2");
+  });
+});
+
+describe("snapshotPiRouting / restorePiRouting (brain-wizard rollback)", () => {
+  test("puts a previous routing table back after the wizard overwrote it", async () => {
+    await applyRouting(configPath, {
+      provider: "openrouter",
+      primaryModel: "gpt-4.1",
+      imageModel: "gpt-4.1",
+      codingModel: "qwen-coder",
+    });
+    const snap = await snapshotPiRouting(configPath);
+
+    await applyRouting(configPath, {
+      provider: "groq",
+      primaryModel: "llama-4",
+      codingModel: undefined,
+    });
+    expect(
+      (await readConfigToml(configPath)).harnesses,
+    ).toMatchObject({ pi: { routing: { provider: "groq" } } });
+
+    await restorePiRouting(configPath, snap);
+    const toml = await readConfigToml(configPath);
+    expect((toml.harnesses as any).pi.routing).toEqual({
+      provider: "openrouter",
+      primary_model: "gpt-4.1",
+      image_model: "gpt-4.1",
+      coding_model: "qwen-coder",
+    });
+  });
+
+  test("round-trips the 'use Pi's own config' tombstone", async () => {
+    await clearPiRouting(configPath, { tombstone: true });
+    const snap = await snapshotPiRouting(configPath);
+
+    await applyRouting(configPath, {
+      provider: "openrouter",
+      primaryModel: "gpt-4.1",
+    });
+    await restorePiRouting(configPath, snap);
+
+    const routing = (await readConfigToml(configPath)).harnesses as any;
+    // applyRouting REVOKES the tombstone; a key-by-key restore would have
+    // left the persona silently inheriting the host routing instead.
+    expect(routing.pi.routing.use_local_config).toBe(true);
+    expect(routing.pi.routing.provider).toBeUndefined();
+  });
+
+  test("deletes the table again when there was none at snapshot time", async () => {
+    const snap = await snapshotPiRouting(configPath, "pi-primary");
+    expect(snap).toBeUndefined();
+
+    await applyRouting(
+      configPath,
+      { provider: "openrouter", primaryModel: "gpt-4.1" },
+      "pi-primary",
+    );
+    await restorePiRouting(configPath, snap, "pi-primary");
+
+    const toml = (await readConfigToml(configPath)).harnesses as any;
+    expect(toml.instances?.["pi-primary"]?.routing).toBeUndefined();
+  });
+
+  test("snapshots each instance slot independently", async () => {
+    await applyRouting(configPath, { provider: "groq", primaryModel: "a" }, "pi-primary");
+    await applyRouting(configPath, { provider: "openrouter", primaryModel: "b" }, "pi-fallback");
+    const primary = await snapshotPiRouting(configPath, "pi-primary");
+
+    await applyRouting(configPath, { provider: "mistral", primaryModel: "c" }, "pi-primary");
+    await restorePiRouting(configPath, primary, "pi-primary");
+
+    const toml = (await readConfigToml(configPath)).harnesses as any;
+    expect(toml.instances["pi-primary"].routing.provider).toBe("groq");
+    expect(toml.instances["pi-fallback"].routing.provider).toBe("openrouter");
   });
 });

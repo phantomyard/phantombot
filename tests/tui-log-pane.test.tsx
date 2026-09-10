@@ -100,9 +100,17 @@ function mount(sources: LogSource[]) {
     },
   );
   mounted.push(() => instance.unmount());
+  const waitFor = async (predicate: (frame: string) => boolean, ms = 2000) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (predicate(stripAnsi(frames.at(-1) ?? ""))) return;
+      await sleep(10);
+    }
+  };
   return {
     stdin,
     latest: () => stripAnsi(frames.at(-1) ?? ""),
+    waitFor,
   };
 }
 
@@ -110,7 +118,7 @@ describe("system log pane", () => {
   test("shows the selected source's path and full-stream command", async () => {
     const ui = mount([AUDIT, SERVICE]);
     ui.stdin.write("l"); // overview -> logs
-    await sleep(60);
+    await ui.waitFor((f) => f.includes("bash: ran the doctor"));
     const frame = ui.latest();
     expect(frame).toContain("/audit/2026-09-01.log");
     expect(frame).toContain("tail -f /home/kai/audit/*.log");
@@ -120,9 +128,9 @@ describe("system log pane", () => {
   test("'s' cycles to the next source and shows ITS location", async () => {
     const ui = mount([AUDIT, SERVICE]);
     ui.stdin.write("l");
-    await sleep(60);
+    await ui.waitFor((f) => f.includes("bash: ran the doctor"));
     ui.stdin.write("s");
-    await sleep(60);
+    await ui.waitFor((f) => f.includes("journald"));
     const frame = ui.latest();
     expect(frame).toContain("journald");
     expect(frame).toContain("journalctl --user -u phantombot -f");
@@ -133,7 +141,7 @@ describe("system log pane", () => {
   test("the time window defaults to 'all' so durable sources are not hidden", async () => {
     const ui = mount([AUDIT, SERVICE]);
     ui.stdin.write("l");
-    await sleep(60);
+    await ui.waitFor((f) => f.includes("bash: ran the doctor"));
     const frame = ui.latest();
     // A 1h default silently filtered out yesterday's audit file and read as
     // "no logs" — the exact symptom #478 was filed for.
@@ -156,18 +164,20 @@ describe("system log pane", () => {
     };
     const ui = mount([slow, SERVICE]);
     ui.stdin.write("l");
-    await sleep(60);
+    const deadline = Date.now() + 2000;
+    while (!seen && Date.now() < deadline) await sleep(10);
     expect(seen).toBeDefined();
     expect(seen!.aborted).toBe(false);
     ui.stdin.write("s"); // move off it
-    await sleep(60);
+    const abortDeadline = Date.now() + 2000;
+    while (!seen?.aborted && Date.now() < abortDeadline) await sleep(10);
     expect(seen!.aborted).toBe(true);
   });
 
   test("an empty source still shows where it would have come from", async () => {
     const ui = mount([SERVICE]);
     ui.stdin.write("l");
-    await sleep(60);
+    await ui.waitFor((f) => f.includes("journald"));
     const frame = ui.latest();
     expect(frame).toContain("journald");
     expect(frame).toContain("No lines from service");
