@@ -13,7 +13,8 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { existsSync } from "node:fs";
-import { basename } from "node:path";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 
 import {
@@ -49,6 +50,11 @@ import {
   SearchListScreen,
   type SearchListRequest,
 } from "./screens/SearchList.tsx";
+import {
+  BrainTestScreen,
+  type BrainTestRequest,
+  type BrainTestResult,
+} from "./screens/BrainTest.tsx";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
 import { openChat, type ChatSession } from "./chatSession.ts";
 import { ChatScreen } from "./screens/Chat.tsx";
@@ -67,6 +73,7 @@ import { SystemScreen } from "./screens/System.tsx";
 import { systemSnapshot } from "./systemSnapshot.ts";
 import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
 import { theme } from "./theme.ts";
+import { log } from "../lib/logger.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { TerminalSizeContext, renderRows, terminalSize } from "./terminal.ts";
 import { loadConfig, loadConfigForPersona, type Config } from "../config.ts";
@@ -107,6 +114,9 @@ export interface AppProps {
    * and writes through the same config helpers the CLI uses. The result
    * decides where the wizard lands: "chat" only when the brain was verified
    * by a real turn; anything else lands in Configure.
+   *
+   * Seams BOTH brain entry points — the wizard's steps and the Configure
+   * screen's Brain row run the same flow, so they share the same seam.
    */
   onWizardBrain?: (
     persona: string,
@@ -174,6 +184,14 @@ export function App(props: AppProps): React.ReactElement {
   );
   const [session, setSession] = useState<ChatSession | undefined>();
   /**
+   * The live session, readable from callbacks without making every one of them
+   * depend on it. `changeBrain` in particular must reach the OPEN session to
+   * refresh its harness chain, and re-creating that callback on every session
+   * change would churn the whole settings tree for no benefit.
+   */
+  const sessionRef = useRef<ChatSession | undefined>(undefined);
+  sessionRef.current = session;
+  /**
    * Latched the first time chat is reached — including from the wizard's
    * `onFinish`, which is the path that had no way to set it before.
    */
@@ -217,14 +235,29 @@ export function App(props: AppProps): React.ReactElement {
    * the same reason: a question drawn as a SCREEN resolves on a keystroke in a
    * later turn of the event loop, so the resolver cannot live on the stack.
    */
+  /**
+   * One id per ask/choose/search request, used as the overlay's React `key`.
+   * `setX(undefined)` and the NEXT question's `setX(request)` land in the same
+   * batch when two questions are asked back to back, so without a key the
+   * overlay never unmounts and the new screen inherits the old one's state:
+   * the OpenClaw import's name box opened holding the path just typed, and
+   * Enter submitted the path as the persona name.
+   */
+  const requestSeq = useRef(0);
   const [ask, setAsk] = useState<
-    (AskRequest & { resolve: (value: string | undefined) => void }) | undefined
+    | (AskRequest & { resolve: (value: string | undefined) => void; seq?: number })
+    | undefined
   >();
   const [choose, setChoose] = useState<
-    (ChooseRequest & { resolve: (value: string | undefined) => void }) | undefined
+    | (ChooseRequest & { resolve: (value: string | undefined) => void; seq?: number })
+    | undefined
   >();
   const [searchAsk, setSearchAsk] = useState<
-    (SearchListRequest & { resolve: (value: string | undefined) => void }) | undefined
+    | (SearchListRequest & { resolve: (value: string | undefined) => void; seq?: number })
+    | undefined
+  >();
+  const [brainTest, setBrainTest] = useState<
+    (BrainTestRequest & { resolve: (res: BrainTestResult) => void }) | undefined
   >();
   const [reembed, setReembed] = useState<
     { space: string; state: ReembedState } | undefined
@@ -291,7 +324,7 @@ export function App(props: AppProps): React.ReactElement {
   /** Ask for a typed value on a screen. `undefined` means cancelled. */
   const askValue = useCallback(async (input: AskRequest) => {
     const value = await new Promise<string | undefined>((resolve) => {
-      setAsk({ ...input, resolve });
+      setAsk({ ...input, resolve, seq: ++requestSeq.current });
     });
     setAsk(undefined);
     return value;
@@ -300,7 +333,7 @@ export function App(props: AppProps): React.ReactElement {
   /** Ask for one of a list on a screen. `undefined` means cancelled. */
   const askChoice = useCallback(async (input: ChooseRequest) => {
     const value = await new Promise<string | undefined>((resolve) => {
-      setChoose({ ...input, resolve });
+      setChoose({ ...input, resolve, seq: ++requestSeq.current });
     });
     setChoose(undefined);
     return value;
@@ -309,10 +342,19 @@ export function App(props: AppProps): React.ReactElement {
   /** Ask with the searchable list screen (long catalogues). Same contract. */
   const askSearch = useCallback(async (input: SearchListRequest) => {
     const value = await new Promise<string | undefined>((resolve) => {
-      setSearchAsk({ ...input, resolve });
+      setSearchAsk({ ...input, resolve, seq: ++requestSeq.current });
     });
     setSearchAsk(undefined);
     return value;
+  }, []);
+
+  /** Run the live model test checklist screen. */
+  const askBrainTest = useCallback(async (input: BrainTestRequest) => {
+    const res = await new Promise<BrainTestResult>((resolve) => {
+      setBrainTest({ ...input, resolve });
+    });
+    setBrainTest(undefined);
+    return res;
   }, []);
 
   // One chat session per persona, opened lazily and kept across screen
@@ -524,150 +566,23 @@ export function App(props: AppProps): React.ReactElement {
     ): Promise<{ landing: "chat" | "configure"; notice: string }> => {
       setPrompting(true);
       try {
-        // On-demand imports, same reason as `changeBrain`: the harness graph
-        // must not delay the app's first render.
-        const { runBrainOnboarding } = await import("./brainOnboarding.ts");
-        const { loadConfig } = await import("../config.ts");
-        const { ENV_PI_API_KEY } = await import("../lib/piRouting.ts");
-        const {
-          applyHarnessChain,
-          applyRouting,
-          clearPiRouting,
-          defaultInstallRunner,
-          detectAvailability,
-          installPi,
-          piInstallCommand,
-        } = await import("../cli/harness.ts");
-        const { resolveHarnessWriteTarget } = await import(
-          "../lib/harnessWriteTarget.ts"
+        const { createBrainOnboardingDeps, runBrainOnboarding } = await import(
+          "./brainOnboarding.ts"
         );
-        const { harnessChainIds, piInstanceSecretName } = await import("../harnesses/buildChain.ts");
-        const { listPiModels } = await import("../lib/piModels.ts");
-        const {
-          getPersonaSecret,
-          setPersonaSecret,
-          unsetPersonaSecret,
-        } = await import("../lib/vaultSecrets.ts");
-        const { writePiApiKey } = await import("../lib/piAuthStore.ts");
-        const { probeProviderKey } = await import("../lib/providerKeyProbe.ts");
-
-        const config = await loadConfig(persona);
-        const availability = await detectAvailability(config);
-        const writeTarget = await resolveHarnessWriteTarget(config, persona);
-        const routing = config.harnesses.pi.routing ?? {};
+        const deps = await createBrainOnboardingDeps(persona, {
+          setNotice,
+          askConfirmValue,
+        });
 
         return await runBrainOnboarding(
           {
             choose: askChoice,
             search: askSearch,
             value: askValue,
+            testBrain: askBrainTest,
             note: (title, body) => setNotice(`${title}: ${body.split("\n")[0]}`),
           },
-          {
-            persona,
-            availability: () => detectAvailability(config),
-            installCommand: piInstallCommand().join(" "),
-            installPi: async () => {
-              // stdout/stdin inherit: the operator goes through Pi's own
-              // onboarding live. The q shim only needs `note` (failure).
-              const ok = await installPi(
-                defaultInstallRunner,
-                {
-                  note: (body: string, title?: string) =>
-                    setNotice(
-                      title ? `${title}: ${body.split("\n")[0]}` : body,
-                    ),
-                } as never,
-              );
-              return ok && Boolean((await detectAvailability(config)).pi);
-            },
-            chain: harnessChainIds(config, persona),
-            routing: {
-              provider: routing.provider,
-              primaryModel: routing.primaryModel,
-              imageModel: routing.imageModel,
-              codingModel: routing.codingModel,
-            },
-            storedKey: await getPersonaSecret(config, ENV_PI_API_KEY, persona),
-            piInstances: {
-              primary: {
-                routing: config.harnesses.instances?.["pi-primary"]?.routing ?? {},
-                storedKey: await getPersonaSecret(
-                  config,
-                  piInstanceSecretName("pi-primary"),
-                  persona,
-                ),
-              },
-              fallback: {
-                routing: config.harnesses.instances?.["pi-fallback"]?.routing ?? {},
-                storedKey: await getPersonaSecret(
-                  config,
-                  piInstanceSecretName("pi-fallback"),
-                  persona,
-                ),
-              },
-            },
-            targetPath: writeTarget.path,
-            personaScope: writeTarget.scope === "persona",
-            piBin: availability.pi,
-            listModels: (extraEnv) =>
-              listPiModels(availability.pi!, undefined, extraEnv),
-            setSecret: (value, instanceId) =>
-              setPersonaSecret(
-                config,
-                instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
-                value,
-                persona,
-              ),
-            unsetSecret: (instanceId) =>
-              unsetPersonaSecret(
-                config,
-                instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
-                persona,
-              ),
-            writeAuth: (provider, value) => writePiApiKey(provider, value),
-            applyChain: (chain) =>
-              applyHarnessChain(
-                writeTarget.path,
-                chain as never,
-                persona,
-                writeTarget.scope,
-              ),
-            applyRouting: (choices, instanceId) =>
-              applyRouting(writeTarget.path, choices, instanceId),
-            clearRouting: async (opts, instanceId) => {
-              await clearPiRouting(writeTarget.path, opts, instanceId);
-            },
-            probe: async (id) => {
-              const { probeHarness } = await import("../lib/harnessProbe.ts");
-              return probeHarness({ config: await loadConfig(persona), id });
-            },
-            probeProviderKey: (providerId, key) =>
-              probeProviderKey(providerId, key),
-            maybePromptRestart: async () => {
-              const { maybePromptRestart } = await import("../cli/harness.ts");
-              const { defaultServiceControl } = await import("../lib/platform.ts");
-              await maybePromptRestart(
-                defaultServiceControl(),
-                async (message) =>
-                  await askConfirmValue({
-                    title: message,
-                    consequence: {
-                      summary: "",
-                      detail: "",
-                      longRunning: false,
-                      restarts: true,
-                    },
-                  }),
-                {
-                  note: (body: string, title?: string) =>
-                    setNotice(
-                      title ? `${title}: ${body.split("\n")[0]}` : body,
-                    ),
-                } as never,
-              );
-            },
-          },
+          deps,
         );
       } catch (e) {
         return {
@@ -679,8 +594,37 @@ export function App(props: AppProps): React.ReactElement {
         await refresh();
       }
     },
-    [refresh, askChoice, askSearch, askValue],
+    [refresh, askChoice, askSearch, askValue, askBrainTest, askConfirmValue],
   );
+
+  /**
+   * Point the OPEN chat session at the brain that was just configured.
+   *
+   * The session resolves its harness chain once, when it opens, and then
+   * deliberately outlives every screen switch so a trip to settings does not
+   * lose the thread. Nothing re-read config.toml after that, so configuring a
+   * brain left chat still talking to the chain from before the write — on a
+   * fresh install the default `claude`, which is not installed. The user was
+   * told "brain verified", landed in chat, and every reply came back empty.
+   *
+   * Rebuilt in place rather than by reopening the session: reopening resets
+   * the transcript. Called by BOTH brain entry points (the wizard's steps and
+   * the Configure screen's Brain row).
+   */
+  const refreshChatBrain = useCallback(async () => {
+    const open = sessionRef.current;
+    if (!open) return;
+    try {
+      const { config } = await loadConfigForPersona(open.persona);
+      await open.reloadHarnesses(config);
+    } catch (e) {
+      // Never mask the flow's own outcome with a reload failure — the config
+      // IS saved, and the next app start picks it up regardless.
+      log.warn("tui: could not refresh the chat harness chain", {
+        error: (e as Error).message,
+      });
+    }
+  }, []);
 
   const wizardBrain = props.onWizardBrain ?? onboardBrain;
 
@@ -693,13 +637,18 @@ export function App(props: AppProps): React.ReactElement {
    */
   const changeBrain = useCallback(
     async (target: PersonaSnapshot) => {
-      const result = await onboardBrain(target.name);
+      // `wizardBrain`, not `onboardBrain`: this IS the wizard's brain flow (see
+      // the doc comment above), and going through the same seam means a test
+      // can drive the Configure entry point without a live harness — which is
+      // how the "chat kept the pre-configuration chain" bug is pinned.
+      const result = await wizardBrain(target.name);
+      await refreshChatBrain();
       setNotice(result.notice);
 
       // A verified brain earns chat, same as the wizard's landing.
       if (result.landing === "chat") setScreen("chat");
     },
-    [onboardBrain],
+    [onboardBrain, refreshChatBrain],
   );
 
   /**
@@ -1479,37 +1428,60 @@ export function App(props: AppProps): React.ReactElement {
   }, [askConfirmValue]);
 
   /**
-   * Import an OpenClaw- or phantombot-shaped directory, all on screens.
+   * Import an OpenClaw agent directory, all on screens. Reached from BOTH the
+   * first-run wizard's opening pick and Configure → New persona.
+   *
+   * OpenClaw only: a phantombot persona's identity.json, vault and
+   * memory.sqlite rows are not markdown, so a copy of its dir would silently
+   * land as a new identity with an unreadable vault. That migration is its own
+   * job, not this menu's.
    *
    * The WRITE path is `runImportPersona` with an explicit source — the same
    * machinery `phantombot persona --import` uses, including the OpenClaw
    * telegram/voice sniff, default adoption and scaffold — so the TUI and the
    * CLI cannot import differently shaped personas. Only the ASKING is ours:
    * path, name, overwrite confirm, all on Ask/Confirm screens instead of clack.
+   *
+   * `fromWizard` decides the landing, matching each entry point's Create:
+   * the wizard's Create continues into the Brain steps, so its Import does
+   * too; Configure's Create lands in Configure, so its Import does too.
    */
-  const importPersonaFromDirectory = useCallback(async () => {
+  const importOpenClawAgent = useCallback(async (fromWizard: boolean) => {
+    // OpenClaw's own default workspace — pre-filled only when it is really
+    // there, so the common case is one Enter and a wrong guess is never shown.
+    const openclawDefault = join(homedir(), ".openclaw", "workspace");
     const source = await askValue({
-      title: "Import a persona from a directory",
-      hint: "path to an OpenClaw- or phantombot-shaped persona directory",
+      title: "Import from OpenClaw",
+      hint: "path to the OpenClaw agent directory (the one holding SOUL.md / IDENTITY.md)",
+      initial: existsSync(openclawDefault) ? openclawDefault : undefined,
     });
     if (!source) return setNotice("import cancelled");
     if (!existsSync(source))
       return setNotice(`import failed: no such directory: ${source}`);
 
     const { validPersonaName } = await import("../cli/persona-new.ts");
-    const suggested = basename(source);
+    // OpenClaw's default dir is literally `workspace` — a basename that names
+    // the folder, not the agent. Never offer it as the phantom's name.
+    const base = basename(source);
+    const suggested =
+      base !== "workspace" && validPersonaName(base) ? base : undefined;
     const name = await askValue({
       title: "Persona name",
-      hint: validPersonaName(suggested)
+      hint: suggested
         ? `blank keeps '${suggested}'`
         : "lowercase letters, digits, '-' or '_', starting with a letter or digit",
-      initial: validPersonaName(suggested) ? suggested : undefined,
+      initial: suggested,
       allowEmpty: true,
     });
     if (name === undefined) return setNotice("import cancelled");
-    const target = name || (validPersonaName(suggested) ? suggested : "");
-    if (!target)
-      return setNotice("import failed: a valid persona name is required");
+    const target = name || suggested || "";
+    // A typed name is validated like every other name box — the importer's
+    // own check is looser (it allows capitals), and a persona the rest of the
+    // app will refuse to address is not an import that worked.
+    if (!validPersonaName(target))
+      return setNotice(
+        "import failed: use lowercase letters, digits, '-' or '_', starting with a letter or digit",
+      );
 
     if (host.personas.some((p) => p.name === target)) {
       const yes = await askConfirmValue({
@@ -1526,6 +1498,7 @@ export function App(props: AppProps): React.ReactElement {
     }
 
     setPrompting(true);
+    let imported = false;
     try {
       const { runImportPersona } = await import("../cli/import-persona.ts");
       const config = await loadConfig();
@@ -1542,19 +1515,44 @@ export function App(props: AppProps): React.ReactElement {
         return setNotice(
           output.trim().split("\n")[0] || `import of ${target} failed`,
         );
-
-      await refresh();
-      setPersonaName(target);
-      navRef.current = [];
-      setScreen("persona");
-      setNotice(`imported ${target} — finish its settings below`);
-      await offerRestart();
+      imported = true;
     } catch (e) {
-      setNotice(`import failed: ${(e as Error).message}`);
+      return setNotice(`import failed: ${(e as Error).message}`);
     } finally {
       setPrompting(false);
     }
-  }, [host, askValue, askConfirmValue, refresh, offerRestart]);
+    if (!imported) return;
+
+    await refresh();
+    setPersonaName(target);
+    // An imported persona is not a place to go back to, from either door.
+    navRef.current = [];
+    setNotice(`imported ${target} from OpenClaw`);
+    if (fromWizard) {
+      // The same Brain steps the wizard's Create continues into. OpenClaw's
+      // brain config does not come across, so an imported phantom is exactly
+      // as brainless as a created one — chat is earned by a verified brain;
+      // every other exit lands in Configure with the red `required` row.
+      const brainResult = await wizardBrain(target);
+      await refreshChatBrain();
+      if (brainResult?.notice) setNotice(brainResult.notice);
+      setScreen(brainResult?.landing === "chat" ? "chat" : "persona");
+    } else {
+      setScreen("persona");
+      setNotice(`imported ${target} from OpenClaw — finish its settings below`);
+    }
+    // The import can write host telegram/voice config, read only on the next
+    // service spawn.
+    await offerRestart();
+  }, [
+    host,
+    askValue,
+    askConfirmValue,
+    refresh,
+    offerRestart,
+    wizardBrain,
+    refreshChatBrain,
+  ]);
 
   /**
    * Restore an archived persona from `personas-archive/`, all on screens.
@@ -1678,6 +1676,7 @@ export function App(props: AppProps): React.ReactElement {
           // which does not exist yet — there ^q quits the app instead.
           onBack={navRef.current.length > 0 ? back : undefined}
           onQuit={navRef.current.length > 0 ? undefined : exit}
+          onImport={() => void importOpenClawAgent(true)}
           onFinish={async (answers) => {
             try {
               const result = await props.onCreatePersona(answers);
@@ -1702,6 +1701,7 @@ export function App(props: AppProps): React.ReactElement {
                 result?.created !== false
                   ? await wizardBrain(answers.name)
                   : undefined;
+              await refreshChatBrain();
               // The brain steps' notice (what happened to the config)
               // supersedes the creation line — but only when the flow has
               // something to say.
@@ -1720,7 +1720,7 @@ export function App(props: AppProps): React.ReactElement {
         <NewPersonaScreen
           personasDir={host.personasDir}
           onCreate={() => go("createPersona")}
-          onImport={() => void importPersonaFromDirectory()}
+          onImport={() => void importOpenClawAgent(false)}
           onRestore={() => void restoreArchivedPersona()}
           onBack={back}
         />
@@ -1798,7 +1798,7 @@ export function App(props: AppProps): React.ReactElement {
           <Frame
             title={["phantombot", personaName]}
             status="starting"
-            footer={[{ key: "^q", label: "Quit" }]}
+            footer={[{ key: "ctrl+q", label: "Quit" }]}
           >
             <Text color={theme.dim}>opening {personaName}…</Text>
           </Frame>
@@ -2126,7 +2126,11 @@ export function App(props: AppProps): React.ReactElement {
     return (
       <TerminalSizeContext.Provider value={size}>
         <Box flexDirection="column" height={renderRows(size)}>
-          <AskScreen request={ask} onAnswer={(v) => ask.resolve(v)} />
+          <AskScreen
+            key={ask.seq}
+            request={ask}
+            onAnswer={(v) => ask.resolve(v)}
+          />
         </Box>
       </TerminalSizeContext.Provider>
     );
@@ -2136,7 +2140,11 @@ export function App(props: AppProps): React.ReactElement {
     return (
       <TerminalSizeContext.Provider value={size}>
         <Box flexDirection="column" height={renderRows(size)}>
-          <ChooseScreen request={choose} onAnswer={(v) => choose.resolve(v)} />
+          <ChooseScreen
+            key={choose.seq}
+            request={choose}
+            onAnswer={(v) => choose.resolve(v)}
+          />
         </Box>
       </TerminalSizeContext.Provider>
     );
@@ -2147,8 +2155,22 @@ export function App(props: AppProps): React.ReactElement {
       <TerminalSizeContext.Provider value={size}>
         <Box flexDirection="column" height={renderRows(size)}>
           <SearchListScreen
+            key={searchAsk.seq}
             request={searchAsk}
             onAnswer={(v) => searchAsk.resolve(v)}
+          />
+        </Box>
+      </TerminalSizeContext.Provider>
+    );
+  }
+
+  if (brainTest) {
+    return (
+      <TerminalSizeContext.Provider value={size}>
+        <Box flexDirection="column" height={renderRows(size)}>
+          <BrainTestScreen
+            request={brainTest}
+            onAnswer={(res) => brainTest.resolve(res)}
           />
         </Box>
       </TerminalSizeContext.Provider>

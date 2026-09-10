@@ -156,18 +156,12 @@ export function ConfirmScreen(props: {
             selected={i === index}
             onPress={() => props.onAnswer(choice.value)}
           >
-            <Box>
-              <Box marginRight={1}>
-                <Text
-                  backgroundColor={i === index ? theme.accent : undefined}
-                >
-                  {" "}
-                </Text>
-              </Box>
-              <Text bold={i === index} color={i === index ? theme.accent : undefined}>
-                {choice.label}
-              </Text>
-            </Box>
+            <Text
+              bold={i === index}
+              color={i === index ? "whiteBright" : "white"}
+            >
+              {choice.label}
+            </Text>
           </Selectable>
         ))}
       </Box>

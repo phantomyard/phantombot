@@ -1351,6 +1351,30 @@ export async function installPhantombotTasks(
       ? `registered ${taskNames(opts.persona).main} + heartbeat + tick + login-fallback\n`
       : `registered ${taskNames(opts.persona).main} + heartbeat + tick\n`,
   );
+
+  // Registering a task is not starting it. Every trigger on the always-on task
+  // fires LATER (logon, or the 1-minute keep-alive TimeTrigger), so without an
+  // explicit /Run the installer finishes with no daemon running and the user
+  // watches an apparently-installed agent do nothing until a trigger catches
+  // up. Linux and macOS both start the service during install; Windows must
+  // too, or "installed" means three different things on three platforms.
+  //
+  // This is safe to issue unconditionally: the task carries
+  // MultipleInstancesPolicy=IgnoreNew, so a /Run against an already-running
+  // daemon is ignored rather than spawning a second supervisor.
+  const started = await opts.schtasks.run(["/Run", "/TN", taskNames(opts.persona).main]);
+  if (started.exitCode === 0) {
+    opts.out.write(`started ${taskNames(opts.persona).main}\n`);
+  } else {
+    // Not fatal: the task IS registered, and its keep-alive trigger will start
+    // the daemon within a minute. Say so rather than failing the install.
+    opts.err.write(
+      `warning: could not start ${taskNames(opts.persona).main} now ` +
+        `(${started.stderr.trim() || `schtasks /Run exited ${started.exitCode}`}); ` +
+        `it is registered and will start on its next trigger\n`,
+    );
+  }
+
   return { installed: true };
 }
 

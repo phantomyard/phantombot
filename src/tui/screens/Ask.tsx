@@ -54,14 +54,14 @@ export function AskScreen(props: {
   /**
    * Drop the `esc Back` footer entry — for flows whose first step has no
    * screen behind it (genuine first run, wizard resume). With `onQuit` the
-   * app-wide `^q Quit` is advertised in its place: on genuine first run the
+   * app-wide `ctrl+q Quit` is advertised in its place: on genuine first run the
    * wizard IS the app, so there must be a way out — a footer with only
    * `Save` hides a working key, and a key that silently does nothing is
    * worse than either.
    */
   noBack?: boolean;
-  /** When `noBack`, ^q exits the app (the app-wide quit), esc does nothing.
-   *  Must be exactly app exit and nothing else: App.tsx already handles ^q
+  /** When `noBack`, ctrl+q exits the app (the app-wide quit), esc does nothing.
+   *  Must be exactly app exit and nothing else: App.tsx already handles ctrl+q
    *  globally, so both handlers fire — this one is only safe because it does
    *  the same thing. Anything else ("leave the wizard, keep the app") would
    *  run alongside the global quit, which wins. */
@@ -111,7 +111,7 @@ export function AskScreen(props: {
         { icon: badge.save, key: "↵", label: "Save" },
         ...(props.noBack
           ? props.onQuit
-            ? [{ icon: badge.quit, key: "^q", label: "Quit" }]
+            ? [{ icon: badge.quit, key: "ctrl+q", label: "Quit" }]
             : []
           : [{ icon: badge.back, key: "esc", label: "Back" }]),
       ]}

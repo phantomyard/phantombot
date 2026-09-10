@@ -194,10 +194,17 @@ The installer:
 - Downloads the matching binary and `SHA256SUMS`.
 - Verifies the checksum before installing.
 - Installs to `~/.local/bin/phantombot` by default.
+- Verifies the install by RUNNING the binary (`phantombot --version`) and stops
+  with a red `✗` if it does not run — a checksum only proves the bytes arrived,
+  not that they execute on this host.
 - Warns if `~/.local/bin` is not on `PATH`.
 - Installs service units with a deterministic PATH that includes stable
   per-user shim locations such as `~/.local/bin` and
   `~/.local/share/pi-node/{bin,current/bin}`.
+- Registers the platform service and starts it — a systemd `--user` unit on
+  Linux, a launchd LaunchAgent on macOS, the `\Phantombot\` scheduled tasks on
+  Windows. If that step fails it is reported, and the installer says the binary
+  is installed but the background service is not.
 - Starts the persona setup TUI when stdin/stdout are interactive.
 
 Installer environment overrides:
@@ -284,19 +291,19 @@ Settings live one keypress away:
 
 | Key | What it does |
 |---|---|
-| `^s` | Settings for **the phantom you are talking to**: identity files, brain, channels, memory, voice, boot, MCP, vault, doctor |
+| `ctrl+s` | Settings for **the phantom you are talking to**: identity files, brain, channels, memory, voice, boot, MCP, vault, doctor |
 | `esc` | Back to the conversation, mid-thread, nothing lost |
-| `^p` | Every phantom on this host, plus the host itself — and switch which one you are talking to |
-| `^t` | Expand the collapsed tool calls behind a reply (`3 steps · 12s` → each step with its own duration) |
-| `^l` | Open System observability (service/heartbeat/tick overview, and every log source on the host with its path) |
-| `^c` | Interrupt the turn (it does **not** quit) |
-| `^q` | Quit |
+| `ctrl+p` | Every phantom on this host, plus the host itself — and switch which one you are talking to |
+| `ctrl+t` | Expand the collapsed tool calls behind a reply (`3 steps · 12s` → each step with its own duration) |
+| `ctrl+l` | Open System observability (service/heartbeat/tick overview, and every log source on the host with its path) |
+| `ctrl+c` | Interrupt the turn (it does **not** quit) |
+| `ctrl+q` | Quit |
 | `/` | Open the command list; `Tab` completes what you have typed |
 
 It takes the whole window — the app runs on the alternate screen buffer, like
 `less` or `htop`, and leaves your shell and its scrollback exactly as it found
 them on exit. While it runs, log output is **captured rather than printed**:
-`^l` opens **System**, where Overview distinguishes daemon, heartbeat, and tick
+`ctrl+l` opens **System**, where Overview distinguishes daemon, heartbeat, and tick
 health using platform-neutral service state, fire markers, and task history.
 Unicode history bars summarize recent success/failure; missing data
 is shown as unavailable and never prevents the TUI opening. Otherwise captured
@@ -626,7 +633,7 @@ logged, naming the op: `start`, `stop` and `restart` log
 `PHANTOMBOT_LOG_LEVEL=warn` keeps the three that report a false success and
 drops the one that does not. Those lines go to the **stderr of the process
 that has the variable set** — your terminal for a `bun run src/index.ts`
-checkout, and the `^l` log pane inside the TUI
+checkout, and the `ctrl+l` log pane inside the TUI
 (which swaps the sink for its own ring buffer). It reaches `phantombot logs`
 only if the *daemon itself* was started with the variable set — which is the
 case you never want: **never set it on a host running the real service**, or
@@ -3020,7 +3027,22 @@ subdirectories are skipped with reasons in the summary. Conversation history is
 not imported.
 
 By default, import also sniffs `~/.openclaw/openclaw.json` for a Telegram bot
-block. Pass `--no-telegram` to skip that.
+block. Pass `--no-telegram` to skip that. A voice block is imported too, and
+its API key is saved to the **imported** persona's vault (never overwriting a
+key already there).
+
+The TUI offers the same import in two places, both driving the command above:
+
+- **First run.** The installer wizard opens on one pick — *Create a new
+  persona* (highlighted, so a new install just presses Enter) or *Import from
+  OpenClaw*. An import continues into the same Brain steps as Create.
+- **Configure → New persona → Import from OpenClaw**, which lands in the
+  imported persona's Configure screen.
+
+The path box is pre-filled with `~/.openclaw/workspace` when it exists. Import
+is OpenClaw-only: a phantombot persona's `identity.json`, vault and database
+rows do not survive a markdown copy, so moving one between hosts is a separate
+job.
 
 ## Versioning
 

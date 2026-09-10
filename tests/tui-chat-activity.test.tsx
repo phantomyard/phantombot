@@ -69,6 +69,9 @@ function pendingSession(events: ChatEvent[]): ChatSession {
     async command() {
       return null;
     },
+    async reloadHarnesses() {
+      return [];
+    },
     async close() {},
   };
 }
@@ -106,6 +109,9 @@ function recordingSession(sent: string[]): ChatSession {
     },
     async command() {
       return null;
+    },
+    async reloadHarnesses() {
+      return [];
     },
     async close() {},
   };
@@ -204,7 +210,7 @@ describe("chat activity indicator", () => {
       await sleep(150);
       // The activity line tracks the live step rather than freezing on a word.
       expect(lastFrame(stdout.frames)).toContain("gh release view");
-      expect(lastFrame(stdout.frames)).toContain("^c interrupts");
+      expect(lastFrame(stdout.frames)).toContain("ctrl+c interrupts");
     } finally {
       instance.unmount();
     }
@@ -221,6 +227,9 @@ describe("chat activity indicator", () => {
       },
       async command() {
         return null;
+      },
+      async reloadHarnesses() {
+        return [];
       },
       async close() {},
     };
@@ -249,6 +258,9 @@ describe("message timestamps", () => {
       async *send() {},
       async command() {
         return null;
+      },
+      async reloadHarnesses() {
+        return [];
       },
       async close() {},
     };

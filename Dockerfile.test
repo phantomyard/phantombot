@@ -1,0 +1,33 @@
+# Interactive test environment for simulating `./install.sh` and onboarding flows
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Core packages required for binary download, tar/gzip unpack, and execution
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    tar \
+    gzip \
+    git \
+    sudo \
+    procps \
+    locales \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configure UTF-8 locale
+RUN locale-gen en_US.UTF-8
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
+
+# Configure default user with passwordless sudo
+RUN echo "ubuntu ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+USER ubuntu
+WORKDIR /home/ubuntu
+
+ENV TERM=xterm-256color
+ENV COLORTERM=truecolor
+
+CMD ["/bin/bash"]

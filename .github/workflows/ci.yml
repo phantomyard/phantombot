@@ -110,3 +110,24 @@ jobs:
           tests/lib-workspaceLock.test.ts
           tests/lib-promptSafeText.test.ts
           tests/lib-processLiveness.test.ts
+      # The Windows installer is a shipped artefact no Linux job can parse.
+      # Windows PowerShell 5.1 is the floor (it is what a fresh Windows box
+      # has), and it is stricter than pwsh 7 about both duplicate parameter
+      # names and file encoding — PR #539 shipped a script that failed to
+      # parse there while every Linux check stayed green. Parse it, then run
+      # it end-to-end in dry-run so a syntax or interpolation error is a red
+      # check rather than a broken first-run.
+      - name: Smoke-test install.ps1 (Windows PowerShell 5.1)
+        shell: powershell
+        env:
+          PHANTOMBOT_SKIP_TUI: "1"
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path install.ps1), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            throw "install.ps1 failed to parse under Windows PowerShell $($PSVersionTable.PSVersion)"
+          }
+          & .\install.ps1 -DryRun
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 -DryRun exited $LASTEXITCODE" }

@@ -20,6 +20,8 @@
  * the table, while the in-process extension uses the structured registry.
  */
 
+import { withCommandDirOnPath } from "./processGroup.ts";
+
 /** One row from `pi --list-models`, reduced to what the wizard needs. */
 export interface PiModel {
   /** Provider column, e.g. "openai", "openrouter", "deepseek". */
@@ -112,12 +114,13 @@ export type PiModelsRunner = (
 }>;
 
 const defaultRunner: PiModelsRunner = async (bin, extraEnv) => {
+  const env = withCommandDirOnPath(bin, { ...process.env, ...extraEnv });
   const proc = Bun.spawn([bin, "--list-models"], {
     stdout: "pipe",
     stderr: "ignore",
     // Undefined ⇒ inherit as before; merge (not replace) so PATH/HOME survive
     // and Pi can still read its own auth store.
-    env: extraEnv ? { ...process.env, ...extraEnv } : undefined,
+    env: env as Record<string, string>,
   });
   const stdout = await new Response(proc.stdout).text();
   const exitCode = await proc.exited;
@@ -250,6 +253,39 @@ export const PI_PROVIDER_CATALOG: readonly Omit<PiProvider, "hasModels">[] = [
     envVar: "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
   },
 ];
+
+/**
+ * Merge two lists of models, deduplicating by `provider/model`.
+ * Models in `fresh` appear first.
+ */
+export function mergeModels(
+  existing: readonly PiModel[],
+  fresh: readonly PiModel[],
+): PiModel[] {
+  const seen = new Set<string>();
+  const res: PiModel[] = [];
+  for (const m of [...fresh, ...existing]) {
+    const key = `${m.provider}/${m.model}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      res.push(m);
+    }
+  }
+  return res;
+}
+
+/**
+ * Narrow a catalogue to one provider.
+ *
+ * `undefined` provider ⇒ everything (the "(none) — Pi's own default" path,
+ * where any model in the catalogue is a legal pick).
+ */
+export function modelsForProvider(
+  provider: string | undefined,
+  models: readonly PiModel[] = [],
+): PiModel[] {
+  return provider ? models.filter((m) => m.provider === provider) : [...models];
+}
 
 /** The provider's native API-key env var, or undefined if we don't know one. */
 export function providerEnvVar(providerId: string): string | undefined {

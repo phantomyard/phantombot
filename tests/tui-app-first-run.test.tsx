@@ -232,6 +232,30 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
      * seems to happen; the test mirrors that. Bounded so a genuine deadlock
      * fails loudly instead of looping forever.
      */
+    /**
+     * Past the first-run Create/Import pick into the name box. Create is the
+     * cursor's start, so this is one Enter — the whole cost of the pick to a
+     * new install, and exactly what this helper spends.
+     */
+    startCreate: async () => {
+      const deadline = Date.now() + 3000;
+      while (
+        Date.now() < deadline &&
+        !(stdout.frames[stdout.frames.length - 1] ?? "").includes(
+          "Import from OpenClaw",
+        )
+      )
+        await tick();
+      for (let i = 0; i < 10; i++) {
+        stdin.write("\r");
+        await tick();
+        if ((stdout.frames[stdout.frames.length - 1] ?? "").includes("Persona Name"))
+          return;
+      }
+      throw new Error(
+        `startCreate never reached the name box; last frame:\n${stdout.frames[stdout.frames.length - 1] ?? "(nothing rendered)"}`,
+      );
+    },
     enterUntil: async (marker: string, ms = 500) => {
       for (let i = 0; i < 10; i++) {
         stdin.write("\r");
@@ -253,25 +277,25 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
 describe("first run", () => {
   test("invalid names stay on the field with an inline error", async () => {
     const app = mount({ startPersona: undefined });
-    await app.waitFor((f) => f.includes("Persona name"));
+    await app.startCreate();
     await app.press("Bad Name\r");
-    await app.waitFor((f) => f.includes("invalid name"));
-    expect(app.lastFrame()).toContain("Persona name");
+    await app.waitFor((f) => f.toLowerCase().includes("invalid name"));
+    expect(app.lastFrame()).toMatch(/Persona [Nn]ame/);
     expect(app.created).toEqual([]);
   });
 
   test("three questions plus the optional pair, then the creation callback runs with no technical steps", async () => {
     const app = mount({ startPersona: undefined });
-    await app.waitFor((f) => f.includes("Persona name"));
+    await app.startCreate();
     // name → identity (accept the editable default) → tone → skills (skip)
     // → your name (skip).
     await app.press("alice\r");
-    await app.waitFor((f) => f.includes("One-line identity"));
+    await app.waitFor((f) => f.includes("One-Line Identity") || f.includes("One-line identity"));
     expect(app.lastFrame()).toContain("a helpful, no-nonsense assistant");
-    await app.enterUntil("Default tone");
-    await app.enterUntil("Skills & disciplines");
-    await app.enterUntil("Your name");
-    await app.enterUntil("alice");
+    await app.enterUntil("Default Tone");
+    await app.enterUntil("Skills & Disciplines");
+    await app.enterUntil("Your Name");
+    await app.enterUntil("created");
     expect(app.created).toEqual(["alice"]);
   });
 
@@ -281,7 +305,7 @@ describe("first run", () => {
       startPersona: undefined,
       onCreatePersona: recordingCreate(created),
     });
-    await app.waitFor((f) => f.includes("Persona name"));
+    await app.startCreate();
 
     // name → identity → tone, accepting each step's default. Bounded rather
     // than exact so the test asserts "the wizard completes", not "the wizard
@@ -325,7 +349,7 @@ describe("first run", () => {
         return fakeSession(persona);
       },
     });
-    await tick();
+    await app.startCreate();
 
     await app.press("alice");
     for (let i = 0; i < 12 && created.length === 0; i++) {
@@ -344,12 +368,61 @@ describe("first run", () => {
     expect(frame).toContain("Brain");
   });
 
+  test("the opening pick's Import runs the real OpenClaw import, then the Brain steps", async () => {
+    // REGRESSION for the first-run gap: a new install went straight to the
+    // name box, so someone moving across from OpenClaw had to invent a phantom
+    // first. The pick's Import must reach the SAME Brain steps the wizard's
+    // Create does — an imported phantom is exactly as brainless.
+    const { existsSync } = await import("node:fs");
+    const savedHome = process.env.HOME;
+    // No real ~/.openclaw can pre-fill the path box or feed the sniff.
+    process.env.HOME = tmpRoot;
+    cleanup.push(() => {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+    });
+    const src = join(tmpRoot, "clawd");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, "SOUL.md"), "# soul", "utf8");
+
+    const brainCalls: string[] = [];
+    const app = mount({
+      startPersona: undefined,
+      onWizardBrain: async (name: string) => {
+        brainCalls.push(name);
+        return { landing: "configure", notice: "" };
+      },
+    });
+    await app.waitFor((f) => f.includes("Import from OpenClaw"));
+    // Create is the default: the cursor must start on it.
+    expect(app.lastFrame()).toMatch(/▸?\s*Create a new persona/);
+    for (let i = 0; i < 10 && !app.lastFrame().includes("SOUL.md / IDENTITY.md"); i++) {
+      await app.press("\x1b[B"); // ↓ onto Import
+      await app.press("\r");
+    }
+    await app.waitFor((f) => f.includes("SOUL.md / IDENTITY.md"));
+    await app.press(`${src}\r`);
+    // The name box must open on the folder's name — not on the path just
+    // typed (the back-to-back-ask bug) — so Enter alone accepts it.
+    await app.waitFor((f) => f.includes("Persona name"));
+    expect(app.lastFrame()).toContain("blank keeps 'clawd'");
+    expect(app.lastFrame()).not.toContain(src);
+    await app.press("\r");
+
+    const deadline = Date.now() + 5000;
+    while (brainCalls.length === 0 && Date.now() < deadline) await tick();
+    expect(brainCalls).toEqual(["clawd"]);
+    expect(existsSync(join(tmpRoot, "personas", "clawd", "SOUL.md"))).toBe(true);
+    // Nothing was created through the Create path.
+    expect(app.created).toEqual([]);
+  }, 20_000);
+
   test("an incomplete persona opens the wizard, not chat", async () => {
     const app = mount({ startPersona: "alice", wizardStartAt: "identity" });
     await tick();
     // The wizard's identity question, resumed — with the editable default
     // pre-filled, not the old brain interrogation.
-    expect(app.frame()).toContain("One-line identity");
+    expect(app.frame()).toMatch(/One-[Ll]ine [Ii]dentity/);
     expect(app.frame()).toContain("a helpful, no-nonsense assistant");
   });
 
@@ -370,10 +443,10 @@ describe("first run", () => {
     await tick();
     // A resume has no name question behind it — the persona already exists.
     await app.press("\u001b");
-    expect(app.frame()).toContain("One-line identity");
+    expect(app.frame()).toMatch(/One-[Ll]ine [Ii]dentity/);
     // Enter accepts the pre-filled default identity → the tone picker.
     await app.press("\r");
-    expect(app.frame()).toContain("Default tone");
+    expect(app.frame()).toMatch(/Default [Tt]one/);
   });
 
   test("a resumed persona reports an update, not newly created identity files", async () => {
@@ -382,11 +455,11 @@ describe("first run", () => {
       wizardStartAt: "identity",
       onCreatePersona: async () => ({ created: false }),
     });
-    await app.waitFor((f) => f.includes("One-line identity"));
+    await app.waitFor((f) => f.includes("One-Line Identity") || f.includes("One-line identity"));
     // Accept the default identity, then the first tone, then skip the
     // optional skills and owner questions. The final Enter-until fires on the
     // owner screen itself — the notice is the marker it waits for.
-    await app.enterUntil("Skills & disciplines");
+    await app.enterUntil("Skills & Disciplines");
     await app.enterUntil("updated alice · config.toml");
     expect(app.lastFrame()).not.toContain("created /tmp/does-not-exist/alice");
   });

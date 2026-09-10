@@ -91,6 +91,9 @@ function spySession(options: {
       if (!text.startsWith("/") || text.includes(" is ")) return null;
       return { reply: options.reply ?? "pong", afterSend: options.afterSend };
     },
+    async reloadHarnesses() {
+      return [];
+    },
     async close() {},
   };
   return { session, sent, commanded };

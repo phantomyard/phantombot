@@ -147,6 +147,7 @@ export async function runImportPersona(
 
   await maybeImportOpenclawVoice({
     config,
+    persona: result.name,
     openclawConfigPath: input.openclawConfigPath,
     out,
   });
@@ -190,7 +191,7 @@ async function runImportPersonaTui(
     options: [
       {
         value: "path",
-        label: "Import from a directory (OpenClaw or phantombot-shaped)",
+        label: "Import from OpenClaw (an existing OpenClaw agent directory)",
       },
       {
         value: "archive",
@@ -215,7 +216,7 @@ async function runImportFromPath(
   input: RunImportPersonaTuiInput,
 ): Promise<number> {
   const sourcePath = await p.text({
-    message: "Path to OpenClaw / phantombot persona directory",
+    message: "Path to the OpenClaw agent directory",
     placeholder: "/home/me/clawd",
     validate: (v) => {
       if (!v || v.length === 0) return "path is required";
@@ -387,6 +388,14 @@ async function maybeImportOpenclawTelegram(args: {
 
 async function maybeImportOpenclawVoice(args: {
   config: Config;
+  /**
+   * The persona the key belongs to — the one just imported. NOT
+   * `config.defaultPersona`: `config` was loaded before the import adopted a
+   * default, so on a fresh host that names a persona that does not exist, and
+   * opening its vault conjures a stray dir + identity.json + vault for it
+   * while the imported phantom never gets its key.
+   */
+  persona: string;
   openclawConfigPath?: string;
   out: WriteSink;
 }): Promise<void> {
@@ -410,7 +419,7 @@ async function maybeImportOpenclawVoice(args: {
     // Conservatively SET if missing; never overwrite a key the user's already
     // configured. "Already configured" now means the persona VAULT (#452), not
     // a plaintext .env.
-    const persona = args.config.defaultPersona;
+    const persona = args.persona;
     let existing: string | undefined;
     try {
       const vault = await openPersonaVault(

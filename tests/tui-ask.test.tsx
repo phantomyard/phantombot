@@ -116,16 +116,16 @@ describe("the value question is an app screen", () => {
     expect(answers).toEqual([]);
   });
 
-  test("noBack with onQuit shows ^q Quit and ^q quits instead of answering", async () => {
+  test("noBack with onQuit shows ctrl+q Quit and ctrl+q quits instead of answering", async () => {
     // Genuine first run: no screen behind the question, so esc cannot mean
-    // Back. The app-wide ^q quit is advertised instead and QUITS — it must
+    // Back. The app-wide ctrl+q quit is advertised instead and QUITS — it must
     // not also resolve an answer on the way out. Bare esc is not repurposed:
     // it resolves undefined, like esc does on every other value question.
     const answers: Array<string | undefined> = [];
     let quit = false;
     const app = mount(
       <AskScreen
-        request={{ title: "Persona name" }}
+        request={{ title: "Persona Name" }}
         noBack
         onQuit={() => void (quit = true)}
         onAnswer={(v) => answers.push(v)}
@@ -133,7 +133,7 @@ describe("the value question is an app screen", () => {
     );
     const frame = app.frame();
     expect(frame).toContain("Save");
-    expect(frame).toContain("^q Quit");
+    expect(frame).toContain("ctrl+q Quit");
     expect(frame).not.toContain("Back");
     expect(frame).not.toContain("esc");
     await app.press("\x11"); // ^q

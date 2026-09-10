@@ -8,8 +8,10 @@
  *     name, one-line identity, tone — nothing else. Brain, channels, memory
  *     and voice live in the Configure screen the flow lands on, and the new
  *     persona inherits the host chain until Configure says otherwise.
- *   - **Import** copies an OpenClaw- or phantombot-shaped directory into
- *     `personas/` (the `phantombot persona --import` machinery).
+ *   - **Import** copies an OpenClaw agent directory into `personas/` (the
+ *     `phantombot persona --import` machinery). OpenClaw only — a phantombot
+ *     persona's identity, vault and DB rows do not survive a markdown copy.
+ *     The first-run wizard offers the same import on its opening pick.
  *   - **Restore** brings an archived persona back from `personas-archive/`.
  *
  * The archive count is read when the screen opens, not at App mount: the
@@ -85,18 +87,33 @@ export function NewPersonaScreen(props: {
       </Box>
       <Box flexDirection="column">
         <Selectable selected={cursor === 0} onPress={props.onCreate}>
-          <Text>Create a new persona</Text>
+          <Text
+            bold={cursor === 0}
+            color={cursor === 0 ? "whiteBright" : "white"}
+          >
+            Create a new persona
+          </Text>
         </Selectable>
         <Selectable selected={cursor === 1} onPress={props.onImport}>
-          <Text>
-            Import from a directory{" "}
-            <Text color={theme.dim}>(OpenClaw or phantombot-shaped)</Text>
+          <Text
+            bold={cursor === 1}
+            color={cursor === 1 ? "whiteBright" : "white"}
+          >
+            Import from OpenClaw{" "}
+            <Text color={cursor === 1 ? theme.accent : theme.dim}>
+              (an existing OpenClaw agent directory)
+            </Text>
           </Text>
         </Selectable>
         <Selectable selected={cursor === 2} onPress={props.onRestore}>
-          <Text>
+          <Text
+            bold={cursor === 2}
+            color={cursor === 2 ? "whiteBright" : "white"}
+          >
             Restore an archived persona{" "}
-            <Text color={theme.dim}>{`(${count} available)`}</Text>
+            <Text color={cursor === 2 ? theme.accent : theme.dim}>
+              {`(${count} available)`}
+            </Text>
           </Text>
         </Selectable>
       </Box>
