@@ -610,7 +610,7 @@ is in, just answer.`;
  * Channel-agnostic conduct overlay: plan-then-confirm before a long or
  * state-changing job, and keep direct answers short.
  *
- * This is the block PR #443 removed from `TELEGRAM_REPLY_INSTRUCTION`,
+ * This is the block PR #443 removed from `CHAT_REPLY_INSTRUCTION`,
  * restored deliberately and in a different shape. #443's three
  * complaints were real, and each is answered here:
  *

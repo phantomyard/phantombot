@@ -97,7 +97,7 @@ import type { GroupChatState } from "./routing.ts";
 import {
   captureNudgeForTurn,
   languageReplyInstruction,
-  TELEGRAM_REPLY_INSTRUCTION,
+  CHAT_REPLY_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
 } from "./prompts.ts";
@@ -1389,7 +1389,7 @@ async function processChatMessage(
         input.agentDir,
       ),
       // Channel-layer prompt suffix:
-      //   - Always: TELEGRAM_REPLY_INSTRUCTION — short conversational
+      //   - Always: CHAT_REPLY_INSTRUCTION — short conversational
       //     replies + plan-then-confirm before long jobs (git/build/
       //     deploy or anything that would spawn more than one tool call).
       //   - Voice-out: stack VOICE_REPLY_INSTRUCTION on top — stricter
@@ -1407,8 +1407,8 @@ async function processChatMessage(
       // exactly the salience boost weak harnesses need.
       systemPromptSuffix: [
         willReplyWithVoice
-          ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
-          : TELEGRAM_REPLY_INSTRUCTION,
+          ? `${CHAT_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
+          : CHAT_REPLY_INSTRUCTION,
         replyLanguage ? languageReplyInstruction(replyLanguage.name) : undefined,
         captureNudge,
       ]

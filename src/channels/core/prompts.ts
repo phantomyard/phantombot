@@ -4,7 +4,7 @@
  * These standing instructions live at the channel layer (not in persona
  * files) so they apply to chat turns without leaking into unattended CLI /
  * nightly turns. The names are kept IDENTICAL to their original form
- * (including TELEGRAM_REPLY_INSTRUCTION) and re-exported from
+ * (including CHAT_REPLY_INSTRUCTION) and re-exported from
  * channels/telegram.ts so the public API is unchanged (#162).
  */
 
@@ -13,15 +13,22 @@ import { log } from "../../lib/logger.ts";
 import type { MemoryStore } from "../../memory/store.ts";
 
 /**
- * System-prompt suffix applied to EVERY Telegram turn.
+ * System-prompt suffix applied to EVERY chat turn (Telegram and
+ * phantomchat today; any future chat transport tomorrow).
  *
  * Two purposes:
  *
  * 1. Reply style. The user is on a phone with a narrow column. Long
- *    walls of text and meta-narration ("Let me check…", "Right,
- *    here's what I found…") read poorly there. Default to short,
- *    conversational answers; structured-and-clear is fine when the
- *    user explicitly asks for a detailed report.
+ *    walls of text read poorly there. Default to short, conversational
+ *    answers; structured-and-clear is fine when the user explicitly
+ *    asks for a detailed report.
+ *
+ *    It does NOT tell the model to skip narration. Every interactive
+ *    turn carries the orchestrator's PRE_TOOL_NARRATION_INSTRUCTION
+ *    ("before each tool call, say ONE short sentence"), and a
+ *    channel-local "skip narration" line directly contradicted it —
+ *    a contradiction only a strong model reconciles. The orchestrator
+ *    overlay is the single owner of that rule.
  *
  * 2. Voice/text reply-mode routing.
  *
@@ -38,13 +45,12 @@ import type { MemoryStore } from "../../memory/store.ts";
  * Lives at the channel layer (not in persona files) so CLI / nightly
  * turns aren't affected — verbose CLI output is fine there.
  */
-export const TELEGRAM_REPLY_INSTRUCTION =
-  `# Reply style (Telegram chat)
+export const CHAT_REPLY_INSTRUCTION =
+  `# Reply style (chat)
 
-You're chatting via Telegram. Default to short, conversational
-replies — typically 1-4 sentences. The user is usually on a phone,
-and the narrow column makes long walls of text hard to read. Skip
-narration ("Let me…", "Right, here's what I found…"); answer directly.
+You're in a chat app. Default to short, conversational replies —
+typically 1-4 sentences. The user is usually on a phone, and the
+narrow column makes long walls of text hard to read.
 
 Longer replies are fine when the user explicitly asks for a detailed
 report or analysis. Use clear structure (headings, lists) when the
@@ -133,7 +139,7 @@ export async function captureNudgeForTurn(
 }
 
 /**
- * Voice-only overlay, stacked on top of TELEGRAM_REPLY_INSTRUCTION
+ * Voice-only overlay, stacked on top of CHAT_REPLY_INSTRUCTION
  * when the reply will be synthesized via TTS.
  *
  * Why this exists separately: the chat-style instruction allows
