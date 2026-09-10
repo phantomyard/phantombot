@@ -43,6 +43,16 @@ export interface ChooseRequest {
 export function ChooseScreen(props: {
   request: ChooseRequest;
   onAnswer: (value: string | undefined) => void;
+  /**
+   * Drop the `esc Back` footer entry — same contract as AskScreen's: for a
+   * first step with no screen behind it (the first-run wizard's opening
+   * Create/Import pick). esc still answers `undefined`; the caller decides
+   * that it means nothing.
+   */
+  noBack?: boolean;
+  /** When `noBack`, ctrl+q exits the app — exactly the app-wide quit (see
+   *  AskScreen.onQuit for why it must be nothing else). */
+  onQuit?: () => void;
 }): React.ReactElement {
   const { title, options, initial, description } = props.request;
   // Starting the cursor on the current value is what makes ↵ mean "leave it as
@@ -53,7 +63,10 @@ export function ChooseScreen(props: {
     return at >= 0 ? at : 0;
   });
 
-  useStableInput((_char, key) => {
+  useStableInput((char, key) => {
+    if (props.noBack && props.onQuit && key.ctrl && char === "q") {
+      return props.onQuit();
+    }
     if (key.escape) return props.onAnswer(undefined);
     if (key.upArrow) return setIndex((i) => Math.max(0, i - 1));
     if (key.downArrow)
@@ -72,7 +85,11 @@ export function ChooseScreen(props: {
       footer={[
         { icon: badge.select, key: "↑↓", label: "Select" },
         { icon: badge.continue, key: "↵", label: "Continue" },
-        { icon: badge.back, key: "esc", label: "Back" },
+        ...(props.noBack
+          ? props.onQuit
+            ? [{ icon: badge.quit, key: "ctrl+q", label: "Quit" }]
+            : []
+          : [{ icon: badge.back, key: "esc", label: "Back" }]),
       ]}
     >
       <Box>
