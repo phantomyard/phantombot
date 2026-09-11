@@ -394,12 +394,17 @@ describe("reaching settings and the phantom list", () => {
     expect(app.frame()).toContain("PHANTOMS");
   });
 
-  test("Vault and MCP are gone from both the table and the settings screen", async () => {
-    // They were rows on a settings screen whose job is the setup `phantombot
-    // init` performs — harness, channels, voice, autostart. A secret store and
-    // an external-server registry are neither, and each one on the screen was a
-    // row a first-time user had to decide about. Removed, not moved: the CLI
-    // (`phantombot vault`, `phantombot mcp`) still owns both.
+  test("Vault is gone from the table and the settings screen", async () => {
+    // It was a row on a settings screen whose job is the setup `phantombot
+    // init` performs — harness, channels, voice, autostart. A secret store is
+    // not that, and the row was one more thing a first-time user had to decide
+    // about. Removed, not moved: `phantombot vault` still owns it.
+    //
+    // MCP was removed in the same pass and has since come BACK as a persona
+    // settings row (see the test below) — Andrew's call, 2026-09-12. It is
+    // still absent from the HOST table, which is the part of that decision
+    // that stands: an external-server registry belongs to a phantom, not to
+    // the box.
     const app = await mountApp();
     await app.press("\x13"); // ^s -> the table
     expect(app.frame()).toContain("PHANTOMS");
@@ -413,10 +418,7 @@ describe("reaching settings and the phantom list", () => {
 
     // And not on the phantom's own settings screen either.
     await app.press("c");
-    const frame = app.frame();
-    expect(frame).toContain("▸ alice");
-    expect(frame).not.toContain("MCP");
-    expect(frame).not.toContain("Vault");
+    expect(app.frame()).not.toContain("Vault");
   });
 
   test("the table's 'd' runs the doctor FOR THE ROW under the cursor", async () => {
@@ -465,5 +467,177 @@ describe("reaching settings and the phantom list", () => {
     // And the walk unwinds one level per esc, all the way to the floor.
     await app.press("\x1b");
     expect(app.frame()).toContain("Send");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Configure → MCP Servers (Andrew, 2026-09-12).
+//
+// The screen existed but was UNREACHABLE: no menu row pointed at it, and the
+// router rendered it with `servers={[]}` and an `onTest` that set the notice
+// "mcp test not wired yet". So these tests assert the three things that were
+// each independently missing — the row is there, opening it lists what is on
+// disk, and `d` actually removes it from the registry FILE. Asserting a
+// handler fired would have passed against the dead build.
+// ---------------------------------------------------------------------------
+
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+
+/** A persona dir on disk with a two-server registry. */
+function personaWithServers(): string {
+  const dir = mkdtempSync(join(tmpdir(), "phantombot-tui-mcp-"));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        github: {
+          transport: "http",
+          url: "https://api.githubcopilot.com/mcp/",
+          auth: {
+            type: "header",
+            header: "Authorization",
+            valueRef: "MCP_GITHUB_TOKEN",
+            prefix: "Bearer ",
+          },
+        },
+        atlassian: {
+          transport: "stdio",
+          command: "npx",
+          args: ["-y", "mcp-remote", "https://mcp.atlassian.com/v1/sse"],
+        },
+      },
+    }),
+  );
+  return dir;
+}
+
+/** Walk the settings cursor down to the MCP row and open it. */
+async function openMcpScreen(app: { press: (b: string) => Promise<void> }) {
+  await app.press("\x13"); // ^s -> the table
+  await app.press("c"); // -> alice's settings
+  for (let i = 0; i < 8; i++) await app.press("\x1b[B"); // MCP is the last row
+  await app.press("\r");
+  // The registry read happens behind a dynamic import of the whole MCP stack;
+  // one keypress tick is not always enough for the first frame to carry rows.
+  await sleep(250);
+}
+
+describe("Configure → MCP Servers", () => {
+  test("the settings screen has an MCP row carrying the registered count", async () => {
+    const app = await mountApp({
+      ...HOST,
+      personas: [{ ...ALICE, mcpServers: 2 }],
+    });
+    await app.press("\x13");
+    await app.press("c");
+    const frame = app.frame();
+    expect(frame).toContain("MCP Servers");
+    // The COUNT, not a green tick on its own: "configured" tells the user
+    // nothing they could not guess, and the number is the whole answer.
+    expect(frame).toContain("2");
+  });
+
+  test("zero registered servers reads as optional, never as a fault", async () => {
+    // A phantom with no external tools is a normal phantom. The row this
+    // replaced (before MCP was removed from the screen entirely) was one more
+    // red decision on a first-run screen, which is why it was taken out.
+    const app = await mountApp({
+      ...HOST,
+      personas: [{ ...ALICE, mcpServers: 0 }],
+    });
+    await app.press("\x13");
+    await app.press("c");
+    expect(app.frame()).toContain("MCP Servers");
+    expect(app.frame()).toContain("optional");
+  });
+
+  test("opening it lists the servers in the persona's registry file", async () => {
+    const dir = personaWithServers();
+    const app = await mountApp({
+      ...HOST,
+      personas: [{ ...ALICE, dir, mcpServers: 2 }],
+    });
+    await openMcpScreen(app);
+    const frame = app.frame();
+    expect(frame).toContain("github");
+    expect(frame).toContain("atlassian");
+    expect(frame).toContain("http");
+    expect(frame).toContain("stdio");
+    // Nothing has been probed, and the screen must say exactly that rather
+    // than showing a green or a red it has not earned.
+    expect(frame).toContain("not probed");
+    // The SELECTED row's target, so a delete is decided with the command line
+    // (or endpoint) in view and not from a bare name.
+    expect(frame).toContain("npx -y mcp-remote");
+    expect(frame).not.toContain("api.githubcopilot.com");
+  });
+
+  test("'d' deletes the selected server from the registry file", async () => {
+    const dir = personaWithServers();
+    const app = await mountApp({
+      ...HOST,
+      personas: [{ ...ALICE, dir, mcpServers: 2 }],
+    });
+    await openMcpScreen(app);
+    // Rows are sorted, so the cursor starts on `atlassian`; move to the one
+    // with a vault reference so BOTH questions are exercised.
+    await app.press("\x1b[B");
+    await app.press("d");
+    // A destructive settings change goes through the same confirm screen as
+    // every other one — it is not a bare keypress.
+    expect(app.frame().toLowerCase()).toContain("confirm");
+    expect(app.frame()).toContain("github");
+
+    await app.press("\x1b[A"); // danger starts on No; move to Yes
+    await app.press("\r");
+    // Second, SEPARATE question, because this entry references a vault key:
+    // the registry entry is re-addable, the secret is not.
+    expect(app.frame()).toContain("vault secret");
+    await app.press("n"); // keep the secret
+    await sleep(150);
+
+    const registry = JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8")) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(Object.keys(registry.mcpServers)).toEqual(["atlassian"]);
+  });
+
+  test("a server with no vault reference is never asked about secrets", async () => {
+    // The purge question is asked only when there is something to purge —
+    // a second yes/no on every delete is how users learn to reflex through it.
+    const dir = personaWithServers();
+    const app = await mountApp({
+      ...HOST,
+      personas: [{ ...ALICE, dir, mcpServers: 2 }],
+    });
+    await openMcpScreen(app);
+    await app.press("d"); // `atlassian`: stdio, no auth
+    await app.press("\x1b[A");
+    await app.press("\r");
+    await sleep(150);
+    expect(app.frame()).not.toContain("vault secret");
+    const registry = JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8")) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(Object.keys(registry.mcpServers)).toEqual(["github"]);
+  });
+
+  test("declining the confirm leaves the registry untouched", async () => {
+    const dir = personaWithServers();
+    const app = await mountApp({
+      ...HOST,
+      personas: [{ ...ALICE, dir, mcpServers: 2 }],
+    });
+    await openMcpScreen(app);
+    await app.press("d");
+    await app.press("\r"); // danger cursor sits on No
+    const registry = JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8")) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(Object.keys(registry.mcpServers).sort()).toEqual([
+      "atlassian",
+      "github",
+    ]);
   });
 });
