@@ -1155,13 +1155,41 @@ describe("phantomchat streaming bubbles", () => {
  * through to a normal turn.
  */
 
-const slashSleep = (ms: number): Promise<void> =>
-  new Promise((r) => setTimeout(r, ms));
+/**
+ * Poll `cond` until it holds, then return — instead of guessing a wall-clock
+ * delay.
+ *
+ * These slash-command tests used to sequence "the turn is in flight", "the
+ * command landed" and "stop the server" with fixed sleeps. On a loaded runner
+ * a sleep that is too short tears the server down before the effect under
+ * test has happened, and the test fails on bun's per-test cap with nothing to
+ * say about why. (The Telegram siblings flaked exactly this way, on a merge
+ * run, and skipped a release.) Waiting for the observable effect makes the
+ * ordering a fact rather than a race, and a blown wait names what it was
+ * waiting for.
+ */
+async function waitUntil(
+  cond: () => boolean | Promise<boolean>,
+  what: string,
+  timeoutMs = 4000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await cond()) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 
 /** A harness that emits one text chunk then blocks until its signal aborts —
  *  lets a test hold a turn "in flight" so /stop has something to abort. */
 class BlockingHarness implements Harness {
   invocations = 0;
+  /** Set once the turn is parked on its abort signal, so a test can
+   *  sequence off it instead of off a sleep. */
+  inFlight = false;
   constructor(public readonly id: string) {}
   async available(): Promise<boolean> {
     return true;
@@ -1169,6 +1197,7 @@ class BlockingHarness implements Harness {
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
     this.invocations++;
     yield { type: "text", text: "working" };
+    this.inFlight = true;
     await new Promise<void>((resolve) => {
       if (req.signal?.aborted) return resolve();
       req.signal?.addEventListener("abort", () => resolve(), { once: true });
@@ -1341,15 +1370,24 @@ describe("phantomchat slash commands", () => {
       harness,
     });
     srv.feed(senderSk, "do a long thing");
-    await slashSleep(120); // let the turn register + block
+    // /stop is sent only once the harness is genuinely parked, so the
+    // interrupt cannot race ahead of the turn it is meant to interrupt.
+    await waitUntil(() => harness.inFlight, "the turn to be in flight");
     srv.feed(senderSk, "/stop");
-    await slashSleep(120);
+    // Stop the server only after the /stop reply has actually gone out.
+    await waitUntil(
+      async () =>
+        (await dmBubbles(srv.pool, senderSk)).some((r) =>
+          r.startsWith("stopped (was running"),
+        ),
+      "the /stop reply to be sent",
+    );
     await srv.stop();
 
     expect(harness.invocations).toBe(1);
     const replies = await dmBubbles(srv.pool, senderSk);
     expect(replies.some((r) => r.startsWith("stopped (was running"))).toBe(true);
-  });
+  }, 20_000);
 
   test("/reset clears the conversation history", async () => {
     const senderSk = generateSecretKey();
@@ -1364,12 +1402,19 @@ describe("phantomchat slash commands", () => {
       harness,
     });
     srv.feed(senderSk, "hello"); // a normal turn persists history for this peer
-    await slashSleep(150);
-    expect(
-      (await memory.recentTurns("phantom", conversation, 50)).length,
-    ).toBeGreaterThan(0);
+    await waitUntil(
+      async () =>
+        (await memory.recentTurns("phantom", conversation, 50)).length > 0,
+      "the first turn to persist history",
+    );
     srv.feed(senderSk, "/reset");
-    await slashSleep(120);
+    await waitUntil(
+      async () =>
+        (await dmBubbles(srv.pool, senderSk)).some((r) =>
+          /^reset: cleared \d+ turns? from this chat/.test(r),
+        ),
+      "the /reset reply to be sent",
+    );
     await srv.stop();
 
     const replies = await dmBubbles(srv.pool, senderSk);
@@ -1380,7 +1425,7 @@ describe("phantomchat slash commands", () => {
     expect((await memory.recentTurns("phantom", conversation, 50)).length).toBe(
       0,
     );
-  });
+  }, 20_000);
 
   test("/restart replies then fires serviceControl.restart via afterSend", async () => {
     const senderSk = generateSecretKey();
@@ -1403,13 +1448,20 @@ describe("phantomchat slash commands", () => {
       serviceControl,
     });
     srv.feed(senderSk, "/restart");
-    await slashSleep(120);
+    // The restart fires from afterSend, so waiting on the reply alone could
+    // still race the callback; wait for both.
+    await waitUntil(
+      async () =>
+        restarted &&
+        (await dmBubbles(srv.pool, senderSk)).includes("restarting…"),
+      "the /restart reply to be sent and serviceControl.restart to fire",
+    );
     await srv.stop();
 
     expect(harness.invocations).toBe(0);
     expect(restarted).toBe(true);
     expect(await dmBubbles(srv.pool, senderSk)).toContain("restarting…");
-  });
+  }, 20_000);
 });
 
 /**
