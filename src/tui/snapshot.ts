@@ -221,6 +221,13 @@ export interface PersonaSnapshot {
   nightly?: NightlySnapshot;
   /** Secret NAMES only. Values are never read into the TUI. */
   secretNames?: string[];
+  /**
+   * Registered MCP servers, counted from the persona's own registry file.
+   * Undefined when the registry exists but does not load — which the MCP row
+   * shows as `…` rather than as zero, since "unreadable" and "none" are
+   * different problems.
+   */
+  mcpServers?: number;
   memory: MemorySnapshot;
   completeness: PersonaCompleteness;
   /** Where the effective value came from; absence means inherit. */
@@ -477,6 +484,14 @@ export async function personaSnapshot(
     }
   });
 
+  // Registered MCP servers — a count, off the persona's own registry file.
+  // No hub, no connection: this is on the app's startup path and a cold `npx`
+  // server start would be paid before the first frame.
+  const mcpServers = await safeAsync(async () => {
+    const { loadRegistry } = await import("../mcp/registry.ts");
+    return Object.keys((await loadRegistry(dir)).mcpServers).length;
+  });
+
   // The nightly is the one piece of persona health that is invisible until it
   // has been broken for days — a backlog does not announce itself.
   // Imported on demand: the nightly module pulls the whole memory stack in
@@ -542,6 +557,7 @@ export async function personaSnapshot(
     channelDetails: channelDetailsFor(config, dir),
     ...(nightly ? { nightly } : {}),
     secretNames,
+    mcpServers,
     memory: readMemory(config, name),
     completeness: await personaCompleteness(config, name),
     configSources: configSourcesOf(personaToml, globalToml),

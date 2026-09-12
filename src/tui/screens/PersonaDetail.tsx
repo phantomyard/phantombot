@@ -89,7 +89,7 @@ function descriptionLines(desc: string, columns: number): number {
 }
 
 /** Screens this one leads to. */
-export type Target = "memory" | "voice";
+export type Target = "memory" | "voice" | "mcp";
 
 /**
  * Everything the cursor can land on, in screen order.
@@ -104,6 +104,7 @@ export type Row =
   | "channels"
   | "memory"
   | "voice"
+  | "mcp"
   | "autostart"
   | "default"
   | "release";
@@ -119,6 +120,7 @@ const ROWS: Row[] = [
   "channels",
   "memory",
   "voice",
+  "mcp",
 ];
 
 export function PersonaDetailScreen(props: {
@@ -136,6 +138,12 @@ export function PersonaDetailScreen(props: {
   onChangeChannels: () => void;
   onChangeAutostart: () => void;
   onMakeDefault: () => void;
+  /**
+   * How many MCP servers the persona has registered, or undefined when the
+   * registry could not be read. Zero is not a fault: a phantom with no
+   * external tools is a normal phantom, so the row reads `optional`.
+   */
+  mcpServers?: number;
   /** The host's current release ring — shown on the Release Channel row. */
   releaseChannel: string;
   onToggleRelease: () => void;
@@ -353,6 +361,38 @@ export function PersonaDetailScreen(props: {
           {...probeBadge(line("voice"), "configured")}
           selected={row === "voice"}
           onPress={() => press("voice")}
+          {...tableProps}
+        />
+      ),
+    },
+    {
+      id: "mcp",
+      height: h("external tool servers this phantom can call"),
+      node: (
+        <MenuItem
+          icon="⬡"
+          label="MCP Servers"
+          description="external tool servers this phantom can call"
+          // Counted from the persona's own registry file, not probed: a badge
+          // that waits on a network round trip leaves the settings table
+          // half-painted, and "how many are registered" is what this row
+          // answers. Reachability is the MCP screen's job, one row at a time.
+          badge={
+            props.mcpServers === undefined
+              ? "…"
+              : props.mcpServers === 0
+                ? "optional"
+                : `${glyph.ok} ${props.mcpServers}`
+          }
+          badgeColor={
+            props.mcpServers === undefined
+              ? theme.dim
+              : props.mcpServers === 0
+                ? theme.warn
+                : theme.ok
+          }
+          selected={row === "mcp"}
+          onPress={() => press("mcp")}
           {...tableProps}
         />
       ),

@@ -68,7 +68,7 @@ import { PersonaDetailScreen } from "./screens/PersonaDetail.tsx";
 import { KeysScreen } from "./screens/Keys.tsx";
 import { DoctorScreen } from "./screens/Doctor.tsx";
 import { gatherStatus, type StatusRows } from "./status.ts";
-import { McpScreen } from "./screens/Mcp.tsx";
+import { McpScreen, type McpServerRow } from "./screens/Mcp.tsx";
 import { SystemScreen } from "./screens/System.tsx";
 import { systemSnapshot } from "./systemSnapshot.ts";
 import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
@@ -201,6 +201,12 @@ export function App(props: AppProps): React.ReactElement {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | undefined>();
   const [doctorStatus, setDoctorStatus] = useState<StatusRows | undefined>();
   const [doctorRunning, setDoctorRunning] = useState(false);
+  /**
+   * The MCP screen's rows. Undefined until the registry has been read; the
+   * screen renders an empty list, which reads identically to "none
+   * registered" for the fraction of a second a file read takes.
+   */
+  const [mcpServers, setMcpServers] = useState<McpServerRow[] | undefined>();
   // The settings screen's live /status reading for the persona it is open on.
   // Undefined = still gathering; the descriptions read `…` until this lands.
   const [detailStatus, setDetailStatus] = useState<StatusRows | undefined>();
@@ -549,6 +555,117 @@ export function App(props: AppProps): React.ReactElement {
       setDoctorRunning(false);
     }
   }, [personaName, host]);
+
+  /**
+   * The MCP screen's data path: list from disk, probe per row, delete on
+   * confirm. Listing and probing are separate on purpose — see `mcpFlow.ts`.
+   */
+  const loadMcpServers = useCallback(async (personaDirPath: string) => {
+    try {
+      const { listMcpServers } = await import("./mcpFlow.ts");
+      setMcpServers(await listMcpServers(personaDirPath));
+    } catch (e) {
+      // An unreadable registry is NOT an empty one. Empty rows plus a notice
+      // says so; silently painting "none registered" would invite the user to
+      // re-add servers that are already there.
+      setMcpServers([]);
+      setNotice(`mcp registry unreadable: ${(e as Error).message}`);
+    }
+  }, []);
+
+  /**
+   * Probe ONE server. The row flips to `probing` first so the user can see
+   * which one is being waited on, then to its verdict. Rows are matched by
+   * name rather than index: a probe that lands after a delete must not write
+   * its result onto whatever row slid into that slot.
+   */
+  const probeOneMcpServer = useCallback(
+    async (personaDirPath: string, name: string) => {
+      const patch = (row: Partial<McpServerRow>) =>
+        setMcpServers((rows) =>
+          rows?.map((r) => (r.name === name ? { ...r, ...row } : r)),
+        );
+      patch({ status: "probing", detail: undefined });
+      try {
+        const { probeMcpServer } = await import("./mcpFlow.ts");
+        const result = await probeMcpServer(personaDirPath, name);
+        patch({
+          status: result.ok ? "ok" : "bad",
+          detail: result.detail,
+          ...(result.tools === undefined ? {} : { tools: result.tools }),
+        });
+      } catch (e) {
+        patch({ status: "bad", detail: (e as Error).message });
+      }
+    },
+    [],
+  );
+
+  /**
+   * Delete one server, behind the same confirm every destructive setting uses.
+   * The vault keys it references are PURGED only on a second, separate yes —
+   * the registry entry can be re-added from notes, while the vault is the only
+   * copy of the credential.
+   */
+  const removeOneMcpServer = useCallback(
+    async (target: PersonaSnapshot, name: string) => {
+      const row = mcpServers?.find((r) => r.name === name);
+      const secrets = row?.secrets ?? [];
+      const yes = await askConfirmValue({
+        title: `Remove MCP server '${name}' from ${target.name}?`,
+        danger: true,
+        consequence: {
+          summary: `${target.name} loses every tool this server provides`,
+          detail:
+            `The registry entry is deleted from ${target.name}'s mcp.json. ` +
+            "Nothing else changes: the server itself keeps running wherever " +
+            "it runs, and it can be registered again with `phantombot mcp add`.",
+          longRunning: false,
+          restarts: false,
+        },
+      });
+      if (!yes) return;
+      const purgeSecrets =
+        secrets.length > 0 &&
+        (await askConfirmValue({
+          title: `Also delete ${name}'s ${secrets.length} vault secret(s)?`,
+          danger: true,
+          consequence: {
+            summary: `${secrets.join(", ")} are erased from the vault`,
+            detail:
+              "The vault is the only copy of these values, so this cannot be " +
+              "undone. Say no to keep them — an unreferenced secret is inert, " +
+              "and it is what you need to register this server again.",
+            longRunning: false,
+            restarts: false,
+          },
+        }));
+      try {
+        const { deleteMcpServer } = await import("./mcpFlow.ts");
+        const result = await deleteMcpServer({
+          personaDir: target.dir,
+          name,
+          purgeSecrets,
+        });
+        if (!result.ok) {
+          setNotice(result.error ?? `could not remove ${name}`);
+          return;
+        }
+        setMcpServers((rows) => rows?.filter((r) => r.name !== name));
+        setNotice(
+          result.purged.length > 0
+            ? `removed ${name} · purged ${result.purged.join(", ")}`
+            : `removed ${name}`,
+        );
+        // The Configure row's count comes from the snapshot, so it has to be
+        // re-taken or the badge keeps the pre-delete number.
+        await refresh();
+      } catch (e) {
+        setNotice(`could not remove ${name}: ${(e as Error).message}`);
+      }
+    },
+    [mcpServers, askConfirmValue, refresh],
+  );
 
   // The settings screen no longer runs the doctor — its telemetry block shows
   // the persona's /status reading only. The full Doctor screen (from the
@@ -1940,6 +2057,7 @@ export function App(props: AppProps): React.ReactElement {
         <PersonaDetailScreen
           persona={persona}
           status={detailStatus}
+          mcpServers={persona.mcpServers}
           onBack={back}
           onEditIdentity={() => void editIdentity(persona)}
           onChangeBrain={() => void changeBrain(persona)}
@@ -2006,9 +2124,16 @@ export function App(props: AppProps): React.ReactElement {
           }}
           onOpen={(target) => {
             // Memory and Voice are FLOWS now, not screens — the same clack
-            // walkthroughs the Brain and Channels rows run.
+            // walkthroughs the Brain and Channels rows run. MCP is a real
+            // screen: it lists rows, probes them and deletes them.
             if (target === "memory") void changeMemory(persona);
-            else void changeVoice(persona);
+            else if (target === "mcp") {
+              // Clear first: a previous persona's servers flashing as this
+              // one's is the same staleness bug the Doctor row guards against.
+              setMcpServers(undefined);
+              go("mcp");
+              void loadMcpServers(persona.dir);
+            } else void changeVoice(persona);
           }}
         />
       );
@@ -2100,8 +2225,13 @@ export function App(props: AppProps): React.ReactElement {
     return (
       <McpScreen
         personaName={persona.name}
-        servers={[]}
-        onTest={() => setNotice("mcp test not wired yet")}
+        servers={mcpServers ?? []}
+        onTest={(name) => void probeOneMcpServer(persona.dir, name)}
+        onTestAll={() => {
+          for (const server of mcpServers ?? [])
+            void probeOneMcpServer(persona.dir, server.name);
+        }}
+        onDelete={(name) => void removeOneMcpServer(persona, name)}
         onBack={back}
       />
     );
