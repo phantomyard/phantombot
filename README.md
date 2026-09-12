@@ -1030,6 +1030,16 @@ before the key existed: every configured identity starts. Once the key is
 present — even as an empty list — it is the whole truth, and a persona outside
 it is skipped with a warning naming the fix.
 
+`phantombot doctor` treats that skip as a FAILURE, not a note: a persona that
+holds a `phantomchat.json` (or a stated Telegram account) but sits outside the
+roster is configured to talk and silently mute, which is a misconfiguration far
+more often than it is a choice. If muting it IS the choice, unstate the channel
+rather than leaving the two halves disagreeing — delete
+`<persona-dir>/phantomchat.json` (or clear the persona's Telegram account) and
+doctor stops reporting it, because a persona with no channel file is not using
+the channel at all. Keeping the file as a parked config is what earns the red
+row; there is no separate "configured but intentionally off" state.
+
 A persona name is CASE-SENSITIVE everywhere it is used as a key — persona
 directory, memory rows, vault, tasks — even though macOS and Windows
 filesystems are not. `default_persona = "robbie"` against a directory named

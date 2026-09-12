@@ -1556,6 +1556,62 @@ describe("runDoctor — phantomchat channel health", () => {
     expect(out.text).toContain("identity.json is missing");
   });
 
+  test("an invalid nsec is named as such, not as a parse failure", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const dir = join(workdir, "personas", "phantom");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "identity.json"),
+      JSON.stringify({ nsec: "nsec1notactuallyakey" }),
+      "utf8",
+    );
+    await writeFile(
+      join(dir, "phantomchat.json"),
+      JSON.stringify({ relays: ["wss://a"], allowed_npubs: [] }),
+      "utf8",
+    );
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    expect(code).toBe(1);
+    // The two causes need different fixes, so the report must not offer the
+    // operator a guess between them.
+    expect(out.text).toContain("identity.json holds an invalid nsec");
+    expect(out.text).not.toContain("phantomchat.json is unparseable");
+  });
+
+  test("an unparseable phantomchat.json clears a healthy identity", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const dir = join(workdir, "personas", "phantom");
+    await mkdir(dir, { recursive: true });
+    const identity = generateIdentity();
+    await writeFile(
+      join(dir, "identity.json"),
+      JSON.stringify({ nsec: identity.nsec }),
+      "utf8",
+    );
+    await writeFile(join(dir, "phantomchat.json"), "{ not json", "utf8");
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    expect(code).toBe(1);
+    expect(out.text).toContain("phantomchat.json is unparseable");
+    expect(out.text).toContain("identity.json itself is fine");
+  });
+
+  test("the autostart skip names the escape hatch", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    await writePhantomchatPersona("phantom", { allowed_npubs: ["npub1a"] });
+    await writePhantomchatPersona("kai", { allowed_npubs: ["npub1b"] });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config: { ...config, autostartPersonas: [] },
+      out,
+      ...skips,
+    });
+    expect(code).toBe(1);
+    // A red row an operator cannot clear is one they learn to ignore.
+    expect(out.text).toContain("delete phantomchat.json");
+  });
+
   test("configured but outside autostart_personas fails doctor", async () => {
     await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
     await writePhantomchatPersona("phantom", { allowed_npubs: ["npub1a"] });

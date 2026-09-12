@@ -631,6 +631,28 @@ function telegramHealthReport(
 }
 
 /**
+ * Why `loadPhantomchatPersonaConfig` returned undefined.
+ *
+ * It folds three distinct causes into one falsy value, and they need different
+ * fixes: a missing key, a key that is present but not a valid nsec, and a
+ * `phantomchat.json` that will not parse. Re-resolve the identity the same way
+ * the loader does so the report names the actual cause instead of offering the
+ * operator a guess between two.
+ */
+function phantomchatLoadFailure(agentDir: string): string {
+  const nsec = readPersonaIdentityNsec(agentDir);
+  if (nsec === undefined) {
+    return "phantomchat.json present but identity.json is missing — no usable key";
+  }
+  try {
+    identityFromNsec(nsec);
+  } catch (e) {
+    return `identity.json holds an invalid nsec: ${(e as Error).message}`;
+  }
+  return "phantomchat.json is unparseable — identity.json itself is fine";
+}
+
+/**
  * PhantomChat health, the sibling of `telegramHealthReport`.
  *
  * Scans the persona directories for `phantomchat.json` rather than reading the
@@ -679,9 +701,7 @@ function phantomchatHealthReport(host: Config): DoctorReport["phantomchat"] {
         tofu: false,
         listener: false,
         healthy: false,
-        detail: existsSync(join(agentDir, "identity.json"))
-          ? "phantomchat.json is unparseable, or identity.json holds an invalid nsec"
-          : "phantomchat.json present but identity.json is missing — no usable key",
+        detail: phantomchatLoadFailure(agentDir),
       });
       continue;
     }
@@ -701,7 +721,8 @@ function phantomchatHealthReport(host: Config): DoctorReport["phantomchat"] {
       listener,
       healthy: listener,
       detail: !listener
-        ? "configured but not in autostart_personas — no listener is started"
+        ? "configured but not in autostart_personas — no listener is started; " +
+          "delete phantomchat.json if muting it is deliberate"
         : unpaired
           ? `runnable on ${pc.relays.length} relay(s), but no allowed npubs and TOFU off — nothing can reach it yet`
           : `runnable on ${pc.relays.length} relay(s), ${allowed} allowed sender(s)`,
