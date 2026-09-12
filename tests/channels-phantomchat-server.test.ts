@@ -152,7 +152,9 @@ async function runOnce(opts: {
   senderSk: Uint8Array;
   botSk: Uint8Array;
   allowedHex: string[];
-  harness: Harness;
+  // `invocations` is the observable every test harness in this file exposes;
+  // `untilInvocations` below sequences the abort off it.
+  harness: Harness & { invocations: number };
   text: string;
   tofu?: boolean;
   persistTrust?: (senderHex: string) => Promise<void>;
@@ -169,7 +171,17 @@ async function runOnce(opts: {
     reason: string;
     heldMessage?: string;
   }>;
-  // How long to let listen() enqueue + the handler drain before aborting.
+  // Wait until the harness has been invoked this many times, then abort. The
+  // server drains its own inFlight set after the listen loop ends (see the tail
+  // of runPhantomchatServer), so once the turn has STARTED the drain guarantees
+  // it — and everything it publishes — finished before runOnce returns. Every
+  // test that expects a turn to run should use this instead of a sleep: the
+  // only thing a fixed window was ever buying was "has the gift-wrap been
+  // unwrapped and enqueued yet", which is exactly what this observes.
+  untilInvocations?: number;
+  // Fixed settle window. Only for the tests that assert NOTHING runs (auth
+  // denials, a held screen verdict): there is no state to wait for, so the wall
+  // clock is all that is left.
   waitMs?: number;
   // Stub kind-0 resolver (lowercased hex → {name, bot}). Lets a DM test exercise
   // the GLOBAL "never reply to a bot" rule via the sender's profile bot flag.
@@ -233,9 +245,17 @@ async function runOnce(opts: {
 
   // Deliver the wrap, then end the stream so the oneShot loop completes.
   pool.feed(wraps[0] as NTNostrEvent);
-  // Give the microtask queue a tick so the channel enqueues the message before
-  // we abort the listen loop.
-  await new Promise((r) => setTimeout(r, opts.waitMs ?? 80));
+  if (opts.untilInvocations !== undefined) {
+    const want = opts.untilInvocations;
+    await waitUntil(
+      () => opts.harness.invocations >= want,
+      `the harness to be invoked ${want}x`,
+    );
+  } else {
+    // Give the microtask queue a tick so the channel enqueues the message
+    // before we abort the listen loop.
+    await new Promise((r) => setTimeout(r, opts.waitMs ?? 80));
+  }
   ac.abort();
   await serverPromise;
 
@@ -260,6 +280,7 @@ describe("phantomchat auth gate", () => {
       ],
       harness,
       text: "ping",
+      untilInvocations: 1,
     });
 
     expect(senderNpub.startsWith("npub1")).toBe(true);
@@ -326,6 +347,7 @@ describe("phantomchat auth gate", () => {
       allowedHex: [],
       harness,
       text: "anyone home",
+      untilInvocations: 1,
     });
 
     expect(harness.invocations).toBe(1);
@@ -353,6 +375,7 @@ describe("phantomchat TOFU (trust-on-first-use)", () => {
       },
       harness,
       text: "first contact",
+      untilInvocations: 1,
     });
 
     // First sender is trusted: turn runs, reply published, and the sender hex
@@ -831,6 +854,7 @@ describe("phantomchat group routing (HQ bug)", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "hi in DM",
+      untilInvocations: 1,
     });
 
     // kind-1059 = delivery receipt + v2 reply = 2 events. The
@@ -901,7 +925,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "go",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     expect(await dmBubbles(pool, senderSk)).toEqual([
@@ -934,7 +958,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "am I free at 3?",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     // Narration bubble first, answer second — and the narration is consumed,
@@ -962,7 +986,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "go",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     expect(await dmBubbles(pool, senderSk)).toEqual(["First.", "Second."]);
@@ -988,7 +1012,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "did it land?",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     expect(await dmBubbles(pool, senderSk)).toEqual(["All merged."]);
@@ -1010,7 +1034,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "ship it",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     expect(await dmBubbles(pool, senderSk)).toEqual(["👍"]);
@@ -1041,7 +1065,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "restart it",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     const bubbles = await dmBubbles(pool, senderSk);
@@ -1155,13 +1179,41 @@ describe("phantomchat streaming bubbles", () => {
  * through to a normal turn.
  */
 
-const slashSleep = (ms: number): Promise<void> =>
-  new Promise((r) => setTimeout(r, ms));
+/**
+ * Poll `cond` until it holds, then return — instead of guessing a wall-clock
+ * delay.
+ *
+ * These slash-command tests used to sequence "the turn is in flight", "the
+ * command landed" and "stop the server" with fixed sleeps. On a loaded runner
+ * a sleep that is too short tears the server down before the effect under
+ * test has happened, and the test fails on bun's per-test cap with nothing to
+ * say about why. (The Telegram siblings flaked exactly this way, on a merge
+ * run, and skipped a release.) Waiting for the observable effect makes the
+ * ordering a fact rather than a race, and a blown wait names what it was
+ * waiting for.
+ */
+async function waitUntil(
+  cond: () => boolean | Promise<boolean>,
+  what: string,
+  timeoutMs = 4000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await cond()) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 
 /** A harness that emits one text chunk then blocks until its signal aborts —
  *  lets a test hold a turn "in flight" so /stop has something to abort. */
 class BlockingHarness implements Harness {
   invocations = 0;
+  /** Set once the turn is parked on its abort signal, so a test can
+   *  sequence off it instead of off a sleep. */
+  inFlight = false;
   constructor(public readonly id: string) {}
   async available(): Promise<boolean> {
     return true;
@@ -1169,6 +1221,7 @@ class BlockingHarness implements Harness {
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
     this.invocations++;
     yield { type: "text", text: "working" };
+    this.inFlight = true;
     await new Promise<void>((resolve) => {
       if (req.signal?.aborted) return resolve();
       req.signal?.addEventListener("abort", () => resolve(), { once: true });
@@ -1307,6 +1360,7 @@ describe("phantomchat slash commands", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "/remember buy milk",
+      untilInvocations: 1,
     });
     // Not a command we own → runTurn handled it.
     expect(harness.invocations).toBe(1);
@@ -1341,15 +1395,24 @@ describe("phantomchat slash commands", () => {
       harness,
     });
     srv.feed(senderSk, "do a long thing");
-    await slashSleep(120); // let the turn register + block
+    // /stop is sent only once the harness is genuinely parked, so the
+    // interrupt cannot race ahead of the turn it is meant to interrupt.
+    await waitUntil(() => harness.inFlight, "the turn to be in flight");
     srv.feed(senderSk, "/stop");
-    await slashSleep(120);
+    // Stop the server only after the /stop reply has actually gone out.
+    await waitUntil(
+      async () =>
+        (await dmBubbles(srv.pool, senderSk)).some((r) =>
+          r.startsWith("stopped (was running"),
+        ),
+      "the /stop reply to be sent",
+    );
     await srv.stop();
 
     expect(harness.invocations).toBe(1);
     const replies = await dmBubbles(srv.pool, senderSk);
     expect(replies.some((r) => r.startsWith("stopped (was running"))).toBe(true);
-  });
+  }, 20_000);
 
   test("/reset clears the conversation history", async () => {
     const senderSk = generateSecretKey();
@@ -1364,12 +1427,19 @@ describe("phantomchat slash commands", () => {
       harness,
     });
     srv.feed(senderSk, "hello"); // a normal turn persists history for this peer
-    await slashSleep(150);
-    expect(
-      (await memory.recentTurns("phantom", conversation, 50)).length,
-    ).toBeGreaterThan(0);
+    await waitUntil(
+      async () =>
+        (await memory.recentTurns("phantom", conversation, 50)).length > 0,
+      "the first turn to persist history",
+    );
     srv.feed(senderSk, "/reset");
-    await slashSleep(120);
+    await waitUntil(
+      async () =>
+        (await dmBubbles(srv.pool, senderSk)).some((r) =>
+          /^reset: cleared \d+ turns? from this chat/.test(r),
+        ),
+      "the /reset reply to be sent",
+    );
     await srv.stop();
 
     const replies = await dmBubbles(srv.pool, senderSk);
@@ -1380,7 +1450,7 @@ describe("phantomchat slash commands", () => {
     expect((await memory.recentTurns("phantom", conversation, 50)).length).toBe(
       0,
     );
-  });
+  }, 20_000);
 
   test("/restart replies then fires serviceControl.restart via afterSend", async () => {
     const senderSk = generateSecretKey();
@@ -1403,13 +1473,20 @@ describe("phantomchat slash commands", () => {
       serviceControl,
     });
     srv.feed(senderSk, "/restart");
-    await slashSleep(120);
+    // The restart fires from afterSend, so waiting on the reply alone could
+    // still race the callback; wait for both.
+    await waitUntil(
+      async () =>
+        restarted &&
+        (await dmBubbles(srv.pool, senderSk)).includes("restarting…"),
+      "the /restart reply to be sent and serviceControl.restart to fire",
+    );
     await srv.stop();
 
     expect(harness.invocations).toBe(0);
     expect(restarted).toBe(true);
     expect(await dmBubbles(srv.pool, senderSk)).toContain("restarting…");
-  });
+  }, 20_000);
 });
 
 /**
@@ -1795,6 +1872,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       harness,
       text: "hey lena",
       profiles: { [c.andrewHex.toLowerCase()]: { name: "andrew" } }, // no bot flag
+      untilInvocations: 1,
     });
 
     expect(harness.invocations).toBe(1);
@@ -2014,7 +2092,7 @@ describe("phantomchat relay tier", () => {
       screen: screen.fn,
       harness,
       text: "hello from the bridge",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     // Answered.
@@ -2051,7 +2129,7 @@ describe("phantomchat relay tier", () => {
       screen: passingScreen().fn,
       harness,
       text: "Robbie, por favor revisa el correo y dime si han contestado.",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     expect(harness.lastRequest!.systemPrompt).toContain("Reply in Spanish");
@@ -2074,7 +2152,7 @@ describe("phantomchat relay tier", () => {
       screen: screen.fn,
       harness,
       text: "ping",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     expect(harness.invocations).toBe(1);
@@ -2100,7 +2178,7 @@ describe("phantomchat relay tier", () => {
       screen: screen.fn,
       harness,
       text: "which tier am i",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     expect(screen.calls.length).toBe(1);
@@ -2153,7 +2231,7 @@ describe("phantomchat relay tier", () => {
       screen: screen.fn,
       harness,
       text: "/status",
-      waitMs: 250,
+      untilInvocations: 1,
     });
 
     // The turn ran (screened) instead of the slash handler replying.
@@ -2185,7 +2263,7 @@ describe("phantomchat relay tier", () => {
       screen: screen.fn,
       harness,
       text: "first contact",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     // Answered as a relay, but it did NOT claim the TOFU slot.
@@ -2214,7 +2292,7 @@ describe("phantomchat relay tier", () => {
       text:
         "[phantombridge-relay:v1]\norigin: matrix\nroom: #ops:example.org\n" +
         "speaker: alice\n---\ncan you check the deploy?",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     const sent = harness.lastRequest!.userMessage;
@@ -2403,7 +2481,7 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "summarise PLAT-1106 in my voice",
-      waitMs: 400,
+      untilInvocations: 2,
     });
 
     expect(harness.invocations).toBe(2);
@@ -2438,7 +2516,7 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "do the thing",
-      waitMs: 400,
+      untilInvocations: 2,
     });
 
     const texts = await replyTexts(pool, senderSk);
@@ -2462,7 +2540,7 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "do the thing",
-      waitMs: 400,
+      untilInvocations: 2,
     });
 
     const texts = await replyTexts(pool, senderSk);
@@ -2502,7 +2580,7 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "¿Puedes resumir el informe de ventas, por favor?",
-      waitMs: 400,
+      untilInvocations: 2,
     });
 
     expect(harness.invocations).toBe(2);
@@ -2544,7 +2622,7 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "do the thing",
-      waitMs: 600,
+      untilInvocations: 2,
     });
 
     const typing = pool.published
