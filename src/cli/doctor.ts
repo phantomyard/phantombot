@@ -17,7 +17,7 @@
  */
 
 import { defineCommand } from "citty";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
@@ -71,6 +71,13 @@ import {
   listPersonaDirs,
 } from "../lib/personaDefault.ts";
 import { loadRegistry } from "../mcp/registry.ts";
+import {
+  loadPhantomchatPersonaConfig,
+  phantomchatConfigPath,
+} from "../channels/phantomchat/personaStore.ts";
+import { identityFromNsec } from "../lib/nostrIdentity.ts";
+import { readPersonaIdentityNsec } from "../lib/personaIdentity.ts";
+import { openVaultWithSecret, vaultPath } from "../lib/vault.ts";
 import { saveHarnessBins } from "../state.ts";
 import {
   BunSystemctlRunner,
@@ -119,6 +126,79 @@ export interface DoctorReport {
       persona: string;
       stated: boolean;
       listeners: number;
+      healthy: boolean;
+      detail: string;
+    }>;
+  };
+  /**
+   * PhantomChat (Nostr NIP-17) reachability, the sibling of the Telegram
+   * check above. Telegram was for a long time the ONLY channel doctor could
+   * see, which made it look like a leftover when it was simply alone.
+   *
+   * PhantomChat is configured PER-PERSONA in `<persona-dir>/phantomchat.json`
+   * with the key in `identity.json` — there is deliberately no
+   * `[channels.phantomchat]` block in config.toml — so nothing in the host
+   * config tells you whether a persona can talk. The failures this catches are
+   * all silent by construction: an unparseable file and a missing/invalid nsec
+   * both make `loadPhantomchatPersonaConfig` return undefined, which the boot
+   * path reads as "not configured" and skips without an error; and a persona
+   * that IS configured but absent from `autostart_personas` is gated out with
+   * a warning on stderr that nobody sees after the service has started.
+   *
+   * Only personas that HAVE a phantomchat.json appear here. A persona that
+   * does not use the channel is not a finding, and listing every one of them
+   * as green would bury the one line that matters.
+   */
+  phantomchat: {
+    healthy: boolean;
+    /** Personas that would actually get a listener on this host. */
+    listeners: number;
+    personas: Array<{
+      persona: string;
+      /** A phantomchat.json exists for this persona. */
+      stated: boolean;
+      /** The persona's public npub — safe to print; the nsec never is. */
+      npub?: string;
+      /** Relays this persona would connect to (defaults applied). */
+      relays: number;
+      /** Senders allowed to address it (allowed + relay tiers). */
+      allowed: number;
+      /** Trust-on-first-use is on, so an empty allowlist still pairs. */
+      tofu: boolean;
+      /** This host would start a listener for it. */
+      listener: boolean;
+      healthy: boolean;
+      detail: string;
+    }>;
+  };
+  /**
+   * Per-persona encrypted secrets vault reachability (#516/#522).
+   *
+   * The vault key is DERIVED from the persona's nsec in `identity.json`, so
+   * `identity.json` missing while `vault.sqlite` is present means every secret
+   * in it is unreadable — and the way that surfaces today is not an error but
+   * a capability quietly going away: a credential that will not decrypt is
+   * simply absent from the environment, and the feature it powered degrades.
+   * That is exactly how a revoked embeddings key dropped memory search to
+   * keyword-only with doctor reporting "semantic search off" and no reason.
+   *
+   * So this check answers "can this persona read its own secrets", per
+   * persona, by deriving the key and decrypting every row. Values are never
+   * read into the report — only names, counts and whether each row decrypts.
+   * A persona with no vault yet is NOT a fault (a fresh box has none).
+   */
+  vault: {
+    healthy: boolean;
+    personas: Array<{
+      persona: string;
+      /** vault.sqlite exists for this persona. */
+      present: boolean;
+      /** identity.json exists — without it the key cannot be derived. */
+      identity: boolean;
+      /** Rows that decrypted cleanly. */
+      secrets: number;
+      /** NAMES (never values) of rows that would not decrypt. */
+      undecryptable: string[];
       healthy: boolean;
       detail: string;
     }>;
@@ -422,6 +502,18 @@ export interface RunDoctorInput {
   checkEditorConnectors?:
     | false
     | ((repair: boolean) => DoctorReport["editorConnectors"]);
+  /**
+   * Test seam for the PhantomChat channel check. Pass `false` to skip, a
+   * function to substitute a fake. In production this is undefined and doctor
+   * scans the real persona directories for `phantomchat.json`.
+   */
+  checkPhantomchat?: false | (() => DoctorReport["phantomchat"]);
+  /**
+   * Test seam for the per-persona vault check. Pass `false` to skip, a
+   * function to substitute a fake. In production this is undefined and doctor
+   * opens each served persona's real vault (read-only, never creating one).
+   */
+  checkVault?: false | (() => Promise<DoctorReport["vault"]>);
 }
 
 interface MutableTelegramPersonaHealth {
@@ -538,6 +630,179 @@ function telegramHealthReport(
   };
 }
 
+/**
+ * PhantomChat health, the sibling of `telegramHealthReport`.
+ *
+ * Scans the persona directories for `phantomchat.json` rather than reading the
+ * host config, because that file IS the configuration — there is no
+ * `[channels.phantomchat]` block to consult. A persona with no such file is
+ * not reported at all: it simply does not use the channel.
+ *
+ * The autostart gate is MIRRORED here rather than imported from `run.ts`, for
+ * the same reason `telegramHealthReport` mirrors listener planning: `run.ts`
+ * already imports this module, so reaching the other way would close a cycle.
+ * Keep the two in step — the rule is "`autostart_personas` absent means every
+ * configured identity starts; present (even empty) makes it the whole truth".
+ */
+function phantomchatHealthReport(host: Config): DoctorReport["phantomchat"] {
+  const personas: DoctorReport["phantomchat"]["personas"] = [];
+  let names: string[] = [];
+  if (existsSync(host.personasDir)) {
+    try {
+      names = readdirSync(host.personasDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+        .sort();
+    } catch (e) {
+      log.warn("doctor: phantomchat persona scan failed", {
+        error: (e as Error).message,
+      });
+    }
+  }
+  const roster =
+    host.autostartPersonas === undefined
+      ? undefined
+      : new Set([host.defaultPersona, ...host.autostartPersonas]);
+
+  for (const persona of names) {
+    const agentDir = personaDir(host, persona);
+    if (!existsSync(phantomchatConfigPath(agentDir))) continue;
+    const pc = loadPhantomchatPersonaConfig(agentDir);
+    if (!pc) {
+      // The boot path reads this exact state as "not configured" and skips the
+      // persona silently, so it is the one worth being loudest about.
+      personas.push({
+        persona,
+        stated: true,
+        relays: 0,
+        allowed: 0,
+        tofu: false,
+        listener: false,
+        healthy: false,
+        detail: existsSync(join(agentDir, "identity.json"))
+          ? "phantomchat.json is unparseable, or identity.json holds an invalid nsec"
+          : "phantomchat.json present but identity.json is missing — no usable key",
+      });
+      continue;
+    }
+    const listener = roster === undefined || roster.has(persona);
+    const allowed = pc.allowedHex.length + pc.relayHex.length;
+    // Reachability is reported but never fatal: a persona created moments ago
+    // and not yet paired is legitimately in this state, and a check that is
+    // permanently lit on a healthy box is one nobody reads.
+    const unpaired = allowed === 0 && !pc.tofu;
+    personas.push({
+      persona,
+      stated: true,
+      npub: pc.identity.npub,
+      relays: pc.relays.length,
+      allowed,
+      tofu: pc.tofu,
+      listener,
+      healthy: listener,
+      detail: !listener
+        ? "configured but not in autostart_personas — no listener is started"
+        : unpaired
+          ? `runnable on ${pc.relays.length} relay(s), but no allowed npubs and TOFU off — nothing can reach it yet`
+          : `runnable on ${pc.relays.length} relay(s), ${allowed} allowed sender(s)`,
+    });
+  }
+
+  return {
+    healthy: personas.every((p) => p.healthy),
+    listeners: personas.filter((p) => p.listener && p.healthy).length,
+    personas,
+  };
+}
+
+/**
+ * Per-persona vault reachability.
+ *
+ * READ-ONLY BY CONSTRUCTION: it resolves the nsec with
+ * `readPersonaIdentityNsec` and opens the vault with `openVaultWithSecret`,
+ * never `openPersonaVault` — that one calls `getOrCreatePersonaIdentity` and
+ * would GENERATE an identity (and a vault) for a persona that has neither,
+ * turning a health check into provisioning. Same reasoning as the guard in
+ * `readAllVaultValues`.
+ *
+ * Decryption is per-row: one poisoned row is collected by name, not allowed to
+ * abort the persona's check, so the report can say WHICH secret is unreadable.
+ */
+async function defaultCheckVault(host: Config): Promise<DoctorReport["vault"]> {
+  const personas: DoctorReport["vault"]["personas"] = [];
+  for (const persona of servedPersonasOf(host)) {
+    const agentDir = personaDir(host, persona);
+    if (!existsSync(agentDir)) continue;
+    const present = existsSync(vaultPath(agentDir));
+    const nsec = readPersonaIdentityNsec(agentDir);
+    if (!present) {
+      // A box installed this afternoon has no vault. Not a fault, and saying
+      // so in red would teach an operator to ignore this line.
+      personas.push({
+        persona,
+        present: false,
+        identity: nsec !== undefined,
+        secrets: 0,
+        undecryptable: [],
+        healthy: true,
+        detail: "no vault yet",
+      });
+      continue;
+    }
+    if (!nsec) {
+      personas.push({
+        persona,
+        present: true,
+        identity: false,
+        secrets: 0,
+        undecryptable: [],
+        healthy: false,
+        detail:
+          "vault.sqlite present but identity.json is missing — its key derives from that nsec, so nothing in it can be decrypted",
+      });
+      continue;
+    }
+    let secrets = 0;
+    const undecryptable: string[] = [];
+    let openError: string | undefined;
+    try {
+      const identity = identityFromNsec(nsec);
+      const vault = openVaultWithSecret(agentDir, identity.secretKey);
+      try {
+        for (const name of vault.list()) {
+          try {
+            if (vault.get(name) !== undefined) secrets++;
+            else undecryptable.push(name);
+          } catch {
+            undecryptable.push(name);
+          }
+        }
+      } finally {
+        vault.close();
+      }
+    } catch (e) {
+      openError = (e as Error).message;
+    }
+    personas.push({
+      persona,
+      present: true,
+      identity: true,
+      secrets,
+      undecryptable,
+      healthy: openError === undefined && undecryptable.length === 0,
+      detail: openError
+        ? `vault could not be opened: ${openError}`
+        : undecryptable.length > 0
+          ? `${secrets} secret(s) readable, ${undecryptable.length} will NOT decrypt: ${undecryptable.join(", ")}`
+          : `${secrets} secret(s) readable`,
+    });
+  }
+  return {
+    healthy: personas.every((p) => p.healthy),
+    personas,
+  };
+}
+
 export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
@@ -626,6 +891,18 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   }
   const dryDay = userTurns >= DRY_DAY_TURN_THRESHOLD && captures === 0;
   const telegramReport = telegramHealthReport(host, personaConfigs);
+  const phantomchatReport =
+    input.checkPhantomchat === false
+      ? undefined
+      : input.checkPhantomchat
+        ? input.checkPhantomchat()
+        : phantomchatHealthReport(host);
+  const vaultReport =
+    input.checkVault === false
+      ? undefined
+      : input.checkVault
+        ? await input.checkVault()
+        : await defaultCheckVault(host);
 
   // Embeddings status — informational only. Vector search is live only when
   // the selected provider has enough configuration to make a request.
@@ -824,9 +1101,17 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     existsSync(join(dir, rel)),
   );
 
+  const emptyPhantomchat: DoctorReport["phantomchat"] = {
+    healthy: true,
+    listeners: 0,
+    personas: [],
+  };
+  const emptyVault: DoctorReport["vault"] = { healthy: true, personas: [] };
   const report: DoctorReport = {
     persona,
     telegram: telegramReport,
+    phantomchat: phantomchatReport ?? emptyPhantomchat,
+    vault: vaultReport ?? emptyVault,
     nightly: {
       last_run: state.last_run,
       last_status: state.last_status,
@@ -938,6 +1223,14 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
 
   const memoryDbBroken = dbPresent && !dbHealth.ok;
   const telegramBroken = !telegramReport.healthy;
+  // A configured channel that cannot receive is a failure, exactly as for
+  // Telegram. An UNCONFIGURED one never reaches here: personas without a
+  // phantomchat.json are not in the report at all.
+  const phantomchatBroken = !!phantomchatReport && !phantomchatReport.healthy;
+  // Secrets that will not decrypt are in the same class as an unreadable
+  // memory database: not a process to restart, but data the box cannot get
+  // back. Every credential-shaped feature degrades silently behind it.
+  const vaultBroken = !!vaultReport && !vaultReport.healthy;
   const exitCode =
     memoryDbBroken
       ? 1
@@ -957,7 +1250,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
                 ? 1
                 : telegramBroken
                   ? 1
-                  : 0;
+                  : vaultBroken
+                    ? 1
+                    : phantomchatBroken
+                      ? 1
+                      : 0;
 
   if (input.json) {
     out.write(JSON.stringify(report, null, 2) + "\n");
@@ -991,6 +1288,33 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       `    persona '${entry.persona}': ${entry.listeners} listener(s), ` +
         `${entry.detail}\n`,
     );
+  }
+  if (phantomchatReport) {
+    out.write(
+      `  phantomchat: ${tick(phantomchatReport.healthy)} — ` +
+        (phantomchatReport.personas.length === 0
+          ? "not configured on any persona\n"
+          : `${phantomchatReport.listeners} listener(s) across ` +
+            `${phantomchatReport.personas.length} persona(s)\n`),
+    );
+    for (const entry of phantomchatReport.personas) {
+      out.write(
+        `    persona '${entry.persona}': ${entry.detail}` +
+          (entry.npub ? ` (${entry.npub})` : "") +
+          "\n",
+      );
+    }
+  }
+  if (vaultReport) {
+    out.write(`  vault: ${tick(vaultReport.healthy)} — `);
+    out.write(
+      vaultReport.personas.length === 0
+        ? "no personas to check\n"
+        : `${vaultReport.personas.length} persona(s) checked\n`,
+    );
+    for (const entry of vaultReport.personas) {
+      out.write(`    persona '${entry.persona}': ${entry.detail}\n`);
+    }
   }
   // Health comes off the ledger, not the clock: a box that slept through
   // 02:00 but has nothing pending is healthy.
