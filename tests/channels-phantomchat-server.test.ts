@@ -152,7 +152,9 @@ async function runOnce(opts: {
   senderSk: Uint8Array;
   botSk: Uint8Array;
   allowedHex: string[];
-  harness: Harness;
+  // `invocations` is the observable every test harness in this file exposes;
+  // `untilInvocations` below sequences the abort off it.
+  harness: Harness & { invocations: number };
   text: string;
   tofu?: boolean;
   persistTrust?: (senderHex: string) => Promise<void>;
@@ -169,7 +171,17 @@ async function runOnce(opts: {
     reason: string;
     heldMessage?: string;
   }>;
-  // How long to let listen() enqueue + the handler drain before aborting.
+  // Wait until the harness has been invoked this many times, then abort. The
+  // server drains its own inFlight set after the listen loop ends (see the tail
+  // of runPhantomchatServer), so once the turn has STARTED the drain guarantees
+  // it — and everything it publishes — finished before runOnce returns. Every
+  // test that expects a turn to run should use this instead of a sleep: the
+  // only thing a fixed window was ever buying was "has the gift-wrap been
+  // unwrapped and enqueued yet", which is exactly what this observes.
+  untilInvocations?: number;
+  // Fixed settle window. Only for the tests that assert NOTHING runs (auth
+  // denials, a held screen verdict): there is no state to wait for, so the wall
+  // clock is all that is left.
   waitMs?: number;
   // Stub kind-0 resolver (lowercased hex → {name, bot}). Lets a DM test exercise
   // the GLOBAL "never reply to a bot" rule via the sender's profile bot flag.
@@ -233,9 +245,17 @@ async function runOnce(opts: {
 
   // Deliver the wrap, then end the stream so the oneShot loop completes.
   pool.feed(wraps[0] as NTNostrEvent);
-  // Give the microtask queue a tick so the channel enqueues the message before
-  // we abort the listen loop.
-  await new Promise((r) => setTimeout(r, opts.waitMs ?? 80));
+  if (opts.untilInvocations !== undefined) {
+    const want = opts.untilInvocations;
+    await waitUntil(
+      () => opts.harness.invocations >= want,
+      `the harness to be invoked ${want}x`,
+    );
+  } else {
+    // Give the microtask queue a tick so the channel enqueues the message
+    // before we abort the listen loop.
+    await new Promise((r) => setTimeout(r, opts.waitMs ?? 80));
+  }
   ac.abort();
   await serverPromise;
 
@@ -260,6 +280,7 @@ describe("phantomchat auth gate", () => {
       ],
       harness,
       text: "ping",
+      untilInvocations: 1,
     });
 
     expect(senderNpub.startsWith("npub1")).toBe(true);
@@ -326,6 +347,7 @@ describe("phantomchat auth gate", () => {
       allowedHex: [],
       harness,
       text: "anyone home",
+      untilInvocations: 1,
     });
 
     expect(harness.invocations).toBe(1);
@@ -353,6 +375,7 @@ describe("phantomchat TOFU (trust-on-first-use)", () => {
       },
       harness,
       text: "first contact",
+      untilInvocations: 1,
     });
 
     // First sender is trusted: turn runs, reply published, and the sender hex
@@ -831,6 +854,7 @@ describe("phantomchat group routing (HQ bug)", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "hi in DM",
+      untilInvocations: 1,
     });
 
     // kind-1059 = delivery receipt + v2 reply = 2 events. The
@@ -901,7 +925,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "go",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     expect(await dmBubbles(pool, senderSk)).toEqual([
@@ -934,7 +958,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "am I free at 3?",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     // Narration bubble first, answer second — and the narration is consumed,
@@ -962,7 +986,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "go",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     expect(await dmBubbles(pool, senderSk)).toEqual(["First.", "Second."]);
@@ -988,7 +1012,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "did it land?",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     expect(await dmBubbles(pool, senderSk)).toEqual(["All merged."]);
@@ -1010,7 +1034,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "ship it",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     expect(await dmBubbles(pool, senderSk)).toEqual(["👍"]);
@@ -1041,7 +1065,7 @@ describe("phantomchat streaming bubbles", () => {
       harness,
       text: "restart it",
       streaming: STREAM_ONE_PER_SENTENCE,
-      waitMs: 150,
+      untilInvocations: 1,
     });
 
     const bubbles = await dmBubbles(pool, senderSk);
@@ -1336,6 +1360,7 @@ describe("phantomchat slash commands", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "/remember buy milk",
+      untilInvocations: 1,
     });
     // Not a command we own → runTurn handled it.
     expect(harness.invocations).toBe(1);
@@ -1847,6 +1872,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       harness,
       text: "hey lena",
       profiles: { [c.andrewHex.toLowerCase()]: { name: "andrew" } }, // no bot flag
+      untilInvocations: 1,
     });
 
     expect(harness.invocations).toBe(1);
@@ -2066,7 +2092,7 @@ describe("phantomchat relay tier", () => {
       screen: screen.fn,
       harness,
       text: "hello from the bridge",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     // Answered.
@@ -2103,7 +2129,7 @@ describe("phantomchat relay tier", () => {
       screen: passingScreen().fn,
       harness,
       text: "Robbie, por favor revisa el correo y dime si han contestado.",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     expect(harness.lastRequest!.systemPrompt).toContain("Reply in Spanish");
@@ -2126,7 +2152,7 @@ describe("phantomchat relay tier", () => {
       screen: screen.fn,
       harness,
       text: "ping",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     expect(harness.invocations).toBe(1);
@@ -2152,7 +2178,7 @@ describe("phantomchat relay tier", () => {
       screen: screen.fn,
       harness,
       text: "which tier am i",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     expect(screen.calls.length).toBe(1);
@@ -2205,7 +2231,7 @@ describe("phantomchat relay tier", () => {
       screen: screen.fn,
       harness,
       text: "/status",
-      waitMs: 250,
+      untilInvocations: 1,
     });
 
     // The turn ran (screened) instead of the slash handler replying.
@@ -2237,7 +2263,7 @@ describe("phantomchat relay tier", () => {
       screen: screen.fn,
       harness,
       text: "first contact",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     // Answered as a relay, but it did NOT claim the TOFU slot.
@@ -2266,7 +2292,7 @@ describe("phantomchat relay tier", () => {
       text:
         "[phantombridge-relay:v1]\norigin: matrix\nroom: #ops:example.org\n" +
         "speaker: alice\n---\ncan you check the deploy?",
-      waitMs: 200,
+      untilInvocations: 1,
     });
 
     const sent = harness.lastRequest!.userMessage;
@@ -2455,7 +2481,7 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "summarise PLAT-1106 in my voice",
-      waitMs: 400,
+      untilInvocations: 2,
     });
 
     expect(harness.invocations).toBe(2);
@@ -2490,7 +2516,7 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "do the thing",
-      waitMs: 400,
+      untilInvocations: 2,
     });
 
     const texts = await replyTexts(pool, senderSk);
@@ -2514,7 +2540,7 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "do the thing",
-      waitMs: 400,
+      untilInvocations: 2,
     });
 
     const texts = await replyTexts(pool, senderSk);
@@ -2554,7 +2580,7 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "¿Puedes resumir el informe de ventas, por favor?",
-      waitMs: 400,
+      untilInvocations: 2,
     });
 
     expect(harness.invocations).toBe(2);
@@ -2596,7 +2622,7 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
       allowedHex: [getPublicKey(senderSk)],
       harness,
       text: "do the thing",
-      waitMs: 600,
+      untilInvocations: 2,
     });
 
     const typing = pool.published
