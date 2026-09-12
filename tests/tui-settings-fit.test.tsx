@@ -125,6 +125,8 @@ const HOST: HostSnapshot = {
 const FAKE_REPORT: DoctorReport = {
   persona: "alice",
   telegram: { healthy: true, listeners: 2, personas: [] },
+  phantomchat: { healthy: true, listeners: 0, personas: [] },
+  vault: { healthy: true, personas: [] },
   memory_db: {
     path: "/x/db",
     healthy: true,
