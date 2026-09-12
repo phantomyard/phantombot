@@ -179,16 +179,19 @@ describe("doctorChecklist", () => {
     expect(telegram.hint).toContain("no listener is planned");
   });
 
-  test("no telegram account is yellow and says nothing is wrong", () => {
+  test("an unconfigured channel is green, not yellow — and stays quiet", () => {
     // The distinction that makes yellow worth having: a phantom that does not
-    // use Telegram is not a broken phantom, and if warn reads as bad the
-    // operator stops reading red too.
+    // use Telegram is not a degraded phantom. If "not configured" were yellow
+    // every Telegram-less host would carry a permanent warning, and an
+    // operator who learns yellow means nothing stops reading red too. Yellow
+    // in CHANNELS is for a channel that IS configured and is failing.
     const r = healthyReport();
     r.telegram = { healthy: true, listeners: 0, personas: [] };
     const telegram = item(r, "telegram")!;
-    expect(telegram.state).toBe("warn");
-    expect(telegram.detail).toBe("no account configured");
-    expect(telegram.hint).toContain("nothing is wrong");
+    expect(telegram.state).toBe("ok");
+    expect(telegram.detail).toBe("not configured");
+    // Rule 3: health is quiet. A green row carries no "what to do" line.
+    expect(telegram.hint).toBeUndefined();
   });
 
   test("a repaired fault says what was healed, not just green", () => {

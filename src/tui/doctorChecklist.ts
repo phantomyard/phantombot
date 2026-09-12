@@ -23,9 +23,11 @@
  *   3. `hint` — the "here is what to do" line — appears ONLY on a check that
  *      is not green. Failures are loud; health is quiet.
  *
- * `warn` must never read as `bad`. "No Telegram account" is a perfectly good
- * state for a phantom that does not use Telegram, and an operator who learns
- * that yellow means nothing stops reading red too.
+ * `warn` must never read as `bad`, and a state that is simply NOT CONFIGURED
+ * is neither — it is green. "No Telegram account" is a perfectly good state
+ * for a phantom that does not use Telegram, so yellow is reserved for a check
+ * that is configured and degraded. An operator who learns that yellow means
+ * nothing stops reading red too.
  *
  * Doctor REPAIRS as well as reports, so where a check healed something the
  * line says so ("re-stamped", "re-armed") rather than just showing green —
@@ -246,17 +248,18 @@ function channelItems(r: DoctorReport): ChecklistItem[] {
   const stated = r.telegram.personas.filter((p) => p.stated);
   items.push({
     label: "telegram",
-    state: !r.telegram.healthy ? "bad" : stated.length === 0 ? "warn" : "ok",
+    // A host that does not answer on Telegram is not degraded, so this is
+    // green, not yellow. CHANNELS yellow is reserved for a channel that is
+    // configured and failing to do its job; if "not configured" were yellow,
+    // every Telegram-less phantom would show a permanent warning and the
+    // colour would stop meaning anything (Lena, #544).
+    state: !r.telegram.healthy ? "bad" : "ok",
     detail:
       stated.length === 0
-        ? "no account configured"
+        ? "not configured"
         : `${plural(r.telegram.listeners, "listener")} across ${plural(stated.length, "persona")}`,
     ...(r.telegram.healthy
-      ? stated.length === 0
-        ? {
-            hint: "nothing is wrong — this host simply does not answer on Telegram",
-          }
-        : {}
+      ? {}
       : {
           hint: r.telegram.personas
             .filter((p) => !p.healthy)
