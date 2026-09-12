@@ -38,6 +38,48 @@ function healthyReport(): DoctorReport {
         { persona: "bob", stated: true, listeners: 1, healthy: true, detail: "runnable" },
       ],
     },
+    phantomchat: {
+      healthy: true,
+      listeners: 2,
+      personas: [
+        {
+          persona: "alice",
+          stated: true,
+          npub: "npub1alice",
+          relays: 3,
+          allowed: 1,
+          tofu: false,
+          listener: true,
+          healthy: true,
+          detail: "runnable on 3 relay(s), 1 allowed sender(s)",
+        },
+        {
+          persona: "bob",
+          stated: true,
+          npub: "npub1bob",
+          relays: 3,
+          allowed: 2,
+          tofu: false,
+          listener: true,
+          healthy: true,
+          detail: "runnable on 3 relay(s), 2 allowed sender(s)",
+        },
+      ],
+    },
+    vault: {
+      healthy: true,
+      personas: [
+        {
+          persona: "alice",
+          present: true,
+          identity: true,
+          secrets: 7,
+          undecryptable: [],
+          healthy: true,
+          detail: "7 secret(s) readable",
+        },
+      ],
+    },
     nightly: { age_hours: 2, health: "ok", detail: "no backlog", backlog: 0 },
     memory_db: {
       path: "/x/memory.sqlite",
@@ -153,6 +195,8 @@ describe("doctorChecklist", () => {
       "default persona",
       "release ring",
       "telegram",
+      "phantomchat",
+      "secrets vault",
       "embeddings",
       "harness binaries",
       "mcp servers",
@@ -192,6 +236,81 @@ describe("doctorChecklist", () => {
     expect(telegram.detail).toBe("not configured");
     // Rule 3: health is quiet. A green row carries no "what to do" line.
     expect(telegram.hint).toBeUndefined();
+  });
+
+  test("phantomchat gets the same treatment telegram does", () => {
+    // Telegram read as legacy because it was ALONE, so the fix is only real
+    // if its sibling is rendered to the same standard.
+    const r = healthyReport();
+    r.phantomchat.healthy = false;
+    r.phantomchat.listeners = 1;
+    r.phantomchat.personas[1] = {
+      persona: "bob",
+      stated: true,
+      relays: 0,
+      allowed: 0,
+      tofu: false,
+      listener: false,
+      healthy: false,
+      detail: "configured but not in autostart_personas — no listener is started",
+    };
+    const pc = item(r, "phantomchat")!;
+    expect(pc.state).toBe("bad");
+    expect(pc.hint).toContain("bob");
+    expect(pc.hint).toContain("autostart_personas");
+  });
+
+  test("a persona that does not use phantomchat is green and quiet", () => {
+    const r = healthyReport();
+    r.phantomchat = { healthy: true, listeners: 0, personas: [] };
+    const pc = item(r, "phantomchat")!;
+    expect(pc.state).toBe("ok");
+    expect(pc.detail).toBe("not configured");
+    expect(pc.hint).toBeUndefined();
+  });
+
+  test("a vault that will not decrypt is red and names the persona", () => {
+    const r = healthyReport();
+    r.vault = {
+      healthy: false,
+      personas: [
+        {
+          persona: "alice",
+          present: true,
+          identity: false,
+          secrets: 0,
+          undecryptable: [],
+          healthy: false,
+          detail: "vault.sqlite present but identity.json is missing",
+        },
+      ],
+    };
+    const vault = item(r, "secrets vault")!;
+    expect(vault.state).toBe("bad");
+    expect(vault.hint).toContain("alice");
+    expect(vault.hint).toContain("identity.json");
+  });
+
+  test("a box with no vault yet is green, not a warning", () => {
+    const r = healthyReport();
+    r.vault = {
+      healthy: true,
+      personas: [
+        {
+          persona: "alice",
+          present: false,
+          identity: true,
+          secrets: 0,
+          undecryptable: [],
+          healthy: true,
+          detail: "no vault yet",
+        },
+      ],
+    };
+    const vault = item(r, "secrets vault")!;
+    expect(vault.state).toBe("ok");
+    expect(vault.detail).toBe("no vault yet");
+    expect(vault.hint).toBeUndefined();
   });
 
   test("a repaired fault says what was healed, not just green", () => {

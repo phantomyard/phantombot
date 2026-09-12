@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDoctor } from "../src/cli/doctor.ts";
 import type { Config } from "../src/config.ts";
+import { generateIdentity } from "../src/lib/nostrIdentity.ts";
+import { openVaultWithSecret } from "../src/lib/vault.ts";
 
 class CaptureStream {
   chunks: string[] = [];
@@ -1482,5 +1485,227 @@ describe("runDoctor — the host default persona (#505)", () => {
     expect(report.default_persona.served).toBe(true);
     expect(report.default_persona.defect).toBeNull();
     expect(report.default_persona.provenance).toBe("builtin");
+  });
+});
+
+describe("runDoctor — phantomchat channel health", () => {
+  /** Write a persona dir with an identity and a phantomchat.json. */
+  async function writePhantomchatPersona(
+    persona: string,
+    file: Record<string, unknown> = {},
+  ): Promise<string> {
+    const dir = join(workdir, "personas", persona);
+    await mkdir(join(dir, "memory"), { recursive: true });
+    const identity = generateIdentity();
+    await writeFile(
+      join(dir, "identity.json"),
+      JSON.stringify({ nsec: identity.nsec }),
+      "utf8",
+    );
+    await writeFile(
+      join(dir, "phantomchat.json"),
+      JSON.stringify({ relays: ["wss://a"], allowed_npubs: [], ...file }),
+      "utf8",
+    );
+    return identity.npub;
+  }
+
+  const skips = {
+    checkSystemd: false,
+    checkTimers: false,
+    checkMaintenance: false,
+    checkVault: false,
+  } as const;
+
+  test("a persona with no phantomchat.json is not a finding", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    expect(code).toBe(0);
+    expect(out.text).toContain("phantomchat: ok — not configured on any persona");
+  });
+
+  test("a runnable persona is reported with its npub", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const npub = await writePhantomchatPersona("phantom", {
+      allowed_npubs: ["npub1qqqqq"],
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    expect(code).toBe(0);
+    expect(out.text).toContain("phantomchat: ok — 1 listener(s)");
+    expect(out.text).toContain(npub);
+    // The npub is public; the nsec must never reach the report.
+    expect(out.text).not.toContain("nsec1");
+  });
+
+  test("phantomchat.json without identity.json fails doctor", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const dir = join(workdir, "personas", "phantom");
+    await writeFile(
+      join(dir, "phantomchat.json"),
+      JSON.stringify({ relays: ["wss://a"] }),
+      "utf8",
+    );
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    // The boot path reads this as "not configured" and starts nothing, which
+    // is precisely why doctor has to say it out loud.
+    expect(code).toBe(1);
+    expect(out.text).toContain("phantomchat: WARN");
+    expect(out.text).toContain("identity.json is missing");
+  });
+
+  test("configured but outside autostart_personas fails doctor", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    await writePhantomchatPersona("phantom", { allowed_npubs: ["npub1a"] });
+    await writePhantomchatPersona("kai", { allowed_npubs: ["npub1b"] });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config: { ...config, autostartPersonas: [] },
+      out,
+      ...skips,
+    });
+    expect(code).toBe(1);
+    expect(out.text).toContain("kai");
+    expect(out.text).toContain("not in autostart_personas");
+    // The default persona is in the roster by definition, so it stays green.
+    expect(out.text).toContain("persona 'phantom': runnable");
+  });
+
+  test("an absent autostart roster starts every configured identity", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    await writePhantomchatPersona("phantom", { allowed_npubs: ["npub1a"] });
+    await writePhantomchatPersona("kai", { allowed_npubs: ["npub1b"] });
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    expect(code).toBe(0);
+    expect(out.text).toContain("phantomchat: ok — 2 listener(s)");
+  });
+
+  test("no allowed npubs and no TOFU is surfaced but not fatal", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    await writePhantomchatPersona("phantom", { allowed_npubs: [] });
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    // A persona created moments ago and not yet paired is legitimately here;
+    // a permanently-lit failure is one nobody reads.
+    expect(code).toBe(0);
+    expect(out.text).toContain("nothing can reach it yet");
+  });
+
+  test("json mode carries the phantomchat block", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    await writePhantomchatPersona("phantom", { allowed_npubs: ["npub1a"] });
+    const out = new CaptureStream();
+    await runDoctor({ config, out, json: true, ...skips });
+    const report = JSON.parse(out.text);
+    expect(report.phantomchat.healthy).toBe(true);
+    expect(report.phantomchat.listeners).toBe(1);
+    expect(report.phantomchat.personas[0].relays).toBe(1);
+    expect(JSON.stringify(report)).not.toContain("nsec1");
+  });
+});
+
+describe("runDoctor — per-persona secrets vault", () => {
+  const skips = {
+    checkSystemd: false,
+    checkTimers: false,
+    checkMaintenance: false,
+    checkPhantomchat: false,
+  } as const;
+
+  /** Give a persona an identity.json and return its secret key. */
+  async function writeIdentity(persona: string): Promise<Uint8Array> {
+    const dir = join(workdir, "personas", persona);
+    await mkdir(dir, { recursive: true });
+    const identity = generateIdentity();
+    await writeFile(
+      join(dir, "identity.json"),
+      JSON.stringify({ nsec: identity.nsec }),
+      "utf8",
+    );
+    return identity.secretKey;
+  }
+
+  test("a persona with no vault yet is healthy", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    expect(code).toBe(0);
+    expect(out.text).toContain("vault: ok");
+    expect(out.text).toContain("no vault yet");
+  });
+
+  test("readable secrets are counted, never printed", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const secretKey = await writeIdentity("phantom");
+    const vault = openVaultWithSecret(join(workdir, "personas", "phantom"), secretKey);
+    vault.set("OPENAI_API_KEY", "sk-super-secret-value");
+    vault.set("GITHUB_TOKEN", "ghp_another_secret");
+    vault.close();
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    expect(code).toBe(0);
+    expect(out.text).toContain("2 secret(s) readable");
+    expect(out.text).not.toContain("sk-super-secret-value");
+    expect(out.text).not.toContain("ghp_another_secret");
+  });
+
+  test("a vault whose identity.json is gone fails doctor", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const secretKey = await writeIdentity("phantom");
+    const dir = join(workdir, "personas", "phantom");
+    const vault = openVaultWithSecret(dir, secretKey);
+    vault.set("OPENAI_API_KEY", "sk-value");
+    vault.close();
+    await rm(join(dir, "identity.json"));
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    expect(code).toBe(1);
+    expect(out.text).toContain("vault: WARN");
+    expect(out.text).toContain("identity.json is missing");
+  });
+
+  test("a row written under a different key is named, not silently dropped", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const dir = join(workdir, "personas", "phantom");
+    const first = await writeIdentity("phantom");
+    const vault = openVaultWithSecret(dir, first);
+    vault.set("STALE_KEY", "written-under-the-old-identity");
+    vault.close();
+    // Re-mint the identity: the vault file survives, its rows do not decrypt.
+    await rm(join(dir, "identity.json"));
+    await writeIdentity("phantom");
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...skips });
+    expect(code).toBe(1);
+    expect(out.text).toContain("will NOT decrypt: STALE_KEY");
+    expect(out.text).not.toContain("written-under-the-old-identity");
+  });
+
+  test("doctor never provisions a persona it only inspected", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const dir = join(workdir, "personas", "phantom");
+    const code = await runDoctor({ config, out: new CaptureStream(), ...skips });
+    expect(code).toBe(0);
+    // openPersonaVault would have minted both of these as a side effect.
+    expect(existsSync(join(dir, "identity.json"))).toBe(false);
+    expect(existsSync(join(dir, "vault.sqlite"))).toBe(false);
+  });
+
+  test("json mode carries the vault block without values", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const secretKey = await writeIdentity("phantom");
+    const vault = openVaultWithSecret(join(workdir, "personas", "phantom"), secretKey);
+    vault.set("OPENAI_API_KEY", "sk-secret");
+    vault.close();
+    const out = new CaptureStream();
+    await runDoctor({ config, out, json: true, ...skips });
+    const report = JSON.parse(out.text);
+    expect(report.vault.healthy).toBe(true);
+    expect(report.vault.personas[0].secrets).toBe(1);
+    expect(report.vault.personas[0].undecryptable).toEqual([]);
+    expect(out.text).not.toContain("sk-secret");
   });
 });

@@ -13,6 +13,10 @@
  * precisely BECAUSE it was alone. The fix is to add its siblings, not to
  * remove it (Andrew, 2026-09-12).
  *
+ * Its siblings now exist for real: `runDoctor` grew a PhantomChat probe and a
+ * per-persona vault probe, so CHANNELS answers "can this phantom be reached"
+ * on both channels, and CORE answers "can it read its own secrets".
+ *
  * Three rules, which is the whole design:
  *
  *   1. GROUPED — Core, Channels, Integrations. A flat wall of green ticks is
@@ -88,6 +92,29 @@ function coreItems(r: DoctorReport): ChecklistItem[] {
       detail: plural(r.memory_db.unretired_drawers.length, "file") + " still on disk",
       hint: `retirement held back ${r.memory_db.unretired_drawers.join(", ")} — nothing reads them`,
     });
+
+  // The vault is data, not a process: its key derives from the persona's nsec,
+  // so a lost identity.json does not throw anywhere — every secret simply
+  // stops arriving and the features behind them degrade quietly. That is why
+  // it sits in CORE next to the memory database rather than under a channel.
+  {
+    const broken = r.vault.personas.filter((p) => !p.healthy);
+    const withVault = r.vault.personas.filter((p) => p.present);
+    const secrets = r.vault.personas.reduce((n, p) => n + p.secrets, 0);
+    items.push({
+      label: "secrets vault",
+      state: broken.length > 0 ? "bad" : "ok",
+      detail:
+        withVault.length === 0
+          ? "no vault yet"
+          : `${plural(secrets, "secret")} across ${plural(withVault.length, "persona")}`,
+      ...(broken.length === 0
+        ? {}
+        : {
+            hint: broken.map((p) => `${p.persona}: ${p.detail}`).join("; "),
+          }),
+    });
+  }
 
   items.push({
     label: "nightly sweep",
@@ -262,6 +289,28 @@ function channelItems(r: DoctorReport): ChecklistItem[] {
       ? {}
       : {
           hint: r.telegram.personas
+            .filter((p) => !p.healthy)
+            .map((p) => `${p.persona}: ${p.detail}`)
+            .join("; "),
+        }),
+  });
+
+  // PhantomChat is the other half of "can this phantom be reached", and the
+  // half no host config mentions: it is configured per-persona on disk, so
+  // without this line an unparseable phantomchat.json or a persona left out of
+  // `autostart_personas` is invisible — the boot path treats both as "not
+  // configured" and starts nothing.
+  items.push({
+    label: "phantomchat",
+    state: !r.phantomchat.healthy ? "bad" : "ok",
+    detail:
+      r.phantomchat.personas.length === 0
+        ? "not configured"
+        : `${plural(r.phantomchat.listeners, "listener")} across ${plural(r.phantomchat.personas.length, "persona")}`,
+    ...(r.phantomchat.healthy
+      ? {}
+      : {
+          hint: r.phantomchat.personas
             .filter((p) => !p.healthy)
             .map((p) => `${p.persona}: ${p.detail}`)
             .join("; "),
