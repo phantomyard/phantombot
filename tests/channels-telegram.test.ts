@@ -151,6 +151,33 @@ class FakeTransport implements TelegramTransport {
   }
 }
 
+/**
+ * Poll `cond` until it holds, then return — instead of guessing a wall-clock
+ * delay.
+ *
+ * The in-flight-turn tests below used fixed `setTimeout`s to sequence
+ * "message arrives", "interrupt arrives" and "stop the polling loop". On a
+ * loaded CI runner the loop was sometimes torn down before the interrupt had
+ * been polled, leaving the harness parked on its 5s fallback and tripping
+ * bun's 5000ms per-test cap — a flake that skipped a release when it landed
+ * on a merge run. Waiting for the observable effect makes the ordering a fact
+ * rather than a race, and a blown wait fails with what it was waiting for
+ * instead of a bare "timed out".
+ */
+async function waitUntil(
+  cond: () => boolean,
+  what: string,
+  timeoutMs = 4000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) {
+      throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 class ScriptedHarness implements Harness {
   invocations = 0;
   lastRequest?: HarnessRequest;
@@ -3424,6 +3451,9 @@ describe("runTelegramServer slash commands", () => {
     expect(transport.sent[0]!.text).toContain("cleared 1 turn");
   });
 
+  // Generous per-test cap: the waits above are the real deadlines and fail
+  // with what they were waiting for, so the cap only has to be bigger than
+  // them plus the harness's 5s fallback — never the thing that fires first.
   test("/stop aborts an in-flight turn and suppresses the would-be reply", async () => {
     // A harness that yields one text chunk then waits 5s (long enough that
     // the test-level abort is the only way it ever finishes within the
@@ -3431,11 +3461,14 @@ describe("runTelegramServer slash commands", () => {
     class AbortableHarness implements Harness {
       readonly id = "abortable";
       lastSignalAborted: boolean | undefined;
+      /** Set once the turn is parked, so the test can sequence off it. */
+      inFlight = false;
       async available(): Promise<boolean> {
         return true;
       }
       async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
         yield { type: "text", text: "thinking…" };
+        this.inFlight = true;
         await new Promise<void>((resolve) => {
           if (req.signal?.aborted) return resolve();
           const onAbort = () => {
@@ -3460,22 +3493,9 @@ describe("runTelegramServer slash commands", () => {
       senderId: "42",
       text: "kick off something slow",
     });
-    // /stop arrives ~30ms later, after the harness is already in-flight.
-    setTimeout(() => {
-      transport.pendingUpdates.push({
-        updateId: 2,
-        conversationId: "1001",
-        senderId: "42",
-        text: "/stop",
-      });
-    }, 30);
-
     const harness = new AbortableHarness();
     const ac = new AbortController();
-    // Stop the polling loop after a moment; the turn worker drain in the
-    // server's `finally` will wait for the aborted turn to resolve.
-    setTimeout(() => ac.abort(), 200);
-    await runTelegramServer({
+    const run = runTelegramServer({
       config: baseConfig(),
       memory,
       harnesses: [harness],
@@ -3484,6 +3504,28 @@ describe("runTelegramServer slash commands", () => {
       transport,
       signal: ac.signal,
     });
+
+    // /stop is enqueued only once the harness is genuinely in-flight, so the
+    // interrupt cannot race ahead of the turn it is meant to interrupt.
+    await waitUntil(() => harness.inFlight, "the first turn to be in-flight");
+    transport.pendingUpdates.push({
+      updateId: 2,
+      conversationId: "1001",
+      senderId: "42",
+      text: "/stop",
+    });
+
+    // Tear the polling loop down only after the abort has actually happened
+    // and the /stop reply has gone out; the turn worker drain in the server's
+    // `finally` then waits for the aborted turn to resolve.
+    await waitUntil(
+      () =>
+        harness.lastSignalAborted === true &&
+        transport.sent.some((s) => s.text.startsWith("stopped")),
+      "the in-flight turn to be aborted and the /stop reply to be sent",
+    );
+    ac.abort();
+    await run;
 
     // The /stop reply lands. The aborted turn does NOT send a follow-up
     // (no "(error: stopped)" leak).
@@ -3517,16 +3559,18 @@ describe("runTelegramServer slash commands", () => {
         (t) => t.role === "user" && t.text.includes("The user issued /stop"),
       ),
     ).toBe(true);
-  });
+  }, 20_000);
 
   test("a second non-slash message interrupts an in-flight turn (no reply for the aborted one)", async () => {
-    // First message kicks off a slow harness; ~30ms later a second
-    // message arrives. The first turn should be aborted — no reply
-    // sent — and the second message's reply should land.
+    // First message kicks off a slow harness; a second message is enqueued
+    // once that turn is provably in-flight. The first turn should be
+    // aborted — no reply sent — and the second message's reply should land.
     class InterruptableHarness implements Harness {
       readonly id = "interruptable";
       invocations = 0;
       abortedSignals: boolean[] = [];
+      /** Set once the first turn is parked, so the test can sequence off it. */
+      inFlight = false;
       async available(): Promise<boolean> {
         return true;
       }
@@ -3535,6 +3579,7 @@ describe("runTelegramServer slash commands", () => {
         if (turn === 1) {
           // Slow turn — only ends when aborted.
           yield { type: "text", text: "thinking…" };
+          this.inFlight = true;
           await new Promise<void>((resolve) => {
             if (req.signal?.aborted) return resolve();
             req.signal?.addEventListener(
@@ -3563,19 +3608,9 @@ describe("runTelegramServer slash commands", () => {
       senderId: "42",
       text: "kick off something slow",
     });
-    setTimeout(() => {
-      transport.pendingUpdates.push({
-        updateId: 2,
-        conversationId: "1001",
-        senderId: "42",
-        text: "actually do this instead",
-      });
-    }, 30);
-
     const harness = new InterruptableHarness();
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 300);
-    await runTelegramServer({
+    const run = runTelegramServer({
       config: baseConfig(),
       memory,
       harnesses: [harness],
@@ -3584,6 +3619,26 @@ describe("runTelegramServer slash commands", () => {
       transport,
       signal: ac.signal,
     });
+
+    // The second message is enqueued only once the slow turn is parked, so
+    // it is always an interrupt and never an ordinary queued message.
+    await waitUntil(() => harness.inFlight, "the first turn to be in-flight");
+    transport.pendingUpdates.push({
+      updateId: 2,
+      conversationId: "1001",
+      senderId: "42",
+      text: "actually do this instead",
+    });
+
+    // Tear the loop down only once the second turn has actually replied.
+    await waitUntil(
+      () =>
+        harness.invocations === 2 &&
+        transport.sent.some((s) => s.text === "second reply"),
+      "the interrupting turn to run and reply",
+    );
+    ac.abort();
+    await run;
 
     // First turn was aborted (signal fired).
     expect(harness.abortedSignals).toEqual([true]);
@@ -3610,7 +3665,7 @@ describe("runTelegramServer slash commands", () => {
       "actually do this instead",
       "second reply",
     ]);
-  });
+  }, 20_000);
 
   test("/status reports the current primary harness", async () => {
     const transport = new FakeTransport();
