@@ -46,12 +46,11 @@ import {
 import type { LifecycleAccount } from "../../lib/lifecycleBroadcast.ts";
 import { ConversationBacklog } from "../core/backlog.ts";
 import {
-  languageReplyInstruction,
+  REPLY_LANGUAGE_INSTRUCTION,
   CHAT_REPLY_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
 } from "../core/prompts.ts";
-import { resolveReplyLanguage } from "../../lib/replyLanguage.ts";
 import { getPublicKey } from "nostr-tools/pure";
 import { npubEncode } from "../../lib/nostrIdentity.ts";
 import type { Channel, ChannelMessage } from "../core/types.ts";
@@ -835,16 +834,6 @@ export async function runPhantomchatServer(
       return wantsVoice && ttsAvailable;
     };
     let willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
-    // Reply-language routing — same channel-layer contract as Telegram:
-    // detect on the user's own words, then STATE the language to the
-    // harness instead of leaving it to be inferred from whatever else the
-    // turn happens to contain. Short messages carry the conversation's
-    // last confident language forward rather than flipping it.
-    const replyLanguage = await resolveReplyLanguage({
-      persona: input.persona,
-      conversation: conversationKey,
-      text: msg.text,
-    });
     // Typing indicator. The PWA shows three-dots on each
     // ephemeral kind-20001 event and auto-expires it after ~6s, so we refresh
     // every 2s for the whole turn. A plain interval (rather than per-chunk)
@@ -1049,9 +1038,7 @@ export async function runPhantomchatServer(
           willReplyWithVoice
             ? `${CHAT_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
             : CHAT_REPLY_INSTRUCTION,
-          replyLanguage
-            ? languageReplyInstruction(replyLanguage.name)
-            : undefined,
+          REPLY_LANGUAGE_INSTRUCTION,
         ]
           .filter(Boolean)
           .join("\n\n"),
@@ -1172,11 +1159,6 @@ export async function runPhantomchatServer(
           harnesses,
           userMessage: msg.text,
           personaName: input.persona,
-          // Recovery runs after the chain fell over, so it is often served by
-          // a weaker fallback harness that infers language poorly. We already
-          // resolved it in code for this turn — hand it over rather than
-          // hoping.
-          replyLanguageName: replyLanguage?.name,
           signal: controller.signal,
         });
       } finally {

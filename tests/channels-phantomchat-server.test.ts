@@ -97,7 +97,6 @@ class FakePool implements RelayPool {
 let workdir: string;
 let agentDir: string;
 let memory: MemoryStore;
-const SAVED_REPLY_LANGUAGE_STATE = process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-pc-"));
@@ -105,19 +104,10 @@ beforeEach(async () => {
   await mkdir(agentDir, { recursive: true });
   await writeFile(join(agentDir, "BOOT.md"), "# Phantom", "utf8");
   memory = await openMemoryStore(":memory:");
-  process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE = join(
-    workdir,
-    "reply-language.json",
-  );
 });
 
 afterEach(async () => {
   await memory.close();
-  if (SAVED_REPLY_LANGUAGE_STATE === undefined) {
-    delete process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE;
-  } else {
-    process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE = SAVED_REPLY_LANGUAGE_STATE;
-  }
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -2110,11 +2100,10 @@ describe("phantomchat relay tier", () => {
     );
   });
 
-  // #534: the language overlay is resolved in the channel layer and STATED
-  // to the harness. PhantomChat is a second call site of the same contract,
-  // so it needs its own wiring assertion — a Telegram-only test would pass
-  // with this call site broken.
-  test("the inbound language is named in the system prompt", async () => {
+  // #534/#548: the reply-language rule is a channel-layer contract, and
+  // PhantomChat is a second call site of it — a Telegram-only test would
+  // pass with this call site broken.
+  test("the reply-language rule is stacked into the system prompt", async () => {
     const senderSk = generateSecretKey();
     const botSk = generateSecretKey();
     const harness = new ScriptedHarness("fake", [
@@ -2132,8 +2121,10 @@ describe("phantomchat relay tier", () => {
       untilInvocations: 1,
     });
 
-    expect(harness.lastRequest!.systemPrompt).toContain("Reply in Spanish");
-    expect(harness.lastRequest!.systemPrompt).not.toContain("Reply in English");
+    expect(harness.lastRequest!.systemPrompt).toContain("# Reply language");
+    expect(harness.lastRequest!.systemPrompt).toContain(
+      "USER'S LATEST MESSAGE",
+    );
   });
 
   test("an allow-listed principal is unaffected: trusted, never screened", async () => {
@@ -2584,10 +2575,11 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
     });
 
     expect(harness.invocations).toBe(2);
-    // The recovery prompt NAMES the language instead of falling back to the
-    // generic "same language as the user's message" instruction.
-    expect(prompts[1]).toContain("Reply in Spanish.");
-    expect(prompts[1]).not.toContain("SAME LANGUAGE");
+    // Recovery points at the user's message, the same source the healthy
+    // turn's rule names — it has no other content to be confused by.
+    expect(prompts[1]).toContain(
+      "Reply in the SAME LANGUAGE as the user's message below.",
+    );
   });
 
   test("typing dots are re-armed while the recovery reply is generated", async () => {

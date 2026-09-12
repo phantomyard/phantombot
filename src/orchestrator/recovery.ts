@@ -48,34 +48,20 @@ export interface RecoveryReplyInput {
   userMessage: string;
   /** Persona display name, for light tone framing. Optional. */
   personaName?: string;
-  /**
-   * Display name of the language the reply must be written in, as already
-   * resolved in code for the failed turn (see lib/replyLanguage.ts).
-   *
-   * Without it recovery relies on the model INFERRING the language from
-   * `userMessage` — which the primary harness does well and a weak fallback
-   * harness often does not, and recovery runs precisely when we have fallen
-   * down the chain. Naming the language explicitly removes the inference.
-   */
-  replyLanguageName?: string;
   /** Subprocess working dir. Defaults to the running user's home. */
   workingDir?: string;
   /** Abort signal — a new inbound message should cancel recovery too. */
   signal?: AbortSignal;
 }
 
-function recoverySystemPrompt(
-  personaName?: string,
-  replyLanguageName?: string,
-): string {
+function recoverySystemPrompt(personaName?: string): string {
   const who = personaName
     ? `You are ${personaName}, the user's personal assistant.`
     : `You are the user's personal assistant.`;
-  // When the channel already resolved the language in code, state it outright
-  // instead of leaving it to be inferred from the user's message.
-  const language = replyLanguageName
-    ? `Reply in ${replyLanguageName}.`
-    : `Reply in the SAME LANGUAGE as the user's message below.`;
+  // The user's message is the only thing that decides the reply language —
+  // the same rule the channel layer states on a healthy turn. Recovery has
+  // no other content to be confused by, so pointing at it is enough.
+  const language = `Reply in the SAME LANGUAGE as the user's message below.`;
   return [
     who,
     "",
@@ -110,10 +96,7 @@ export async function generateRecoveryReply(
     for await (const chunk of runWithFallback(
       input.harnesses,
       {
-        systemPrompt: recoverySystemPrompt(
-          input.personaName,
-          input.replyLanguageName,
-        ),
+        systemPrompt: recoverySystemPrompt(input.personaName),
         userMessage: input.userMessage,
         history: [],
         workingDir: input.workingDir ?? homedir(),

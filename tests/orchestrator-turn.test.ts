@@ -295,10 +295,12 @@ describe("runTurn — successful path", () => {
 
     const prompt = captured?.systemPrompt ?? "";
     expect(prompt).toContain("Narration before tool calls");
-    // Multilingual nudge: the rule must explicitly say "use the user's
-    // language" so non-English speakers don't get English filler leaking
-    // into their conversations.
-    expect(prompt).toMatch(/user'?s language/i);
+    // Multilingual nudge: the rule must point narration at the user's
+    // LATEST message, so non-English speakers don't get English filler —
+    // and so it cannot be read as "infer it from the conversation", which
+    // is what flipped narration mid-turn (#548).
+    expect(prompt).toMatch(/language of the user'?s LATEST message/i);
+    expect(prompt).not.toMatch(/whatever language the conversation/i);
   });
 
   test("toolNarration coexists with systemPromptSuffix — both land in the prompt", async () => {

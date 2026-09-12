@@ -698,7 +698,6 @@ let workdir: string;
 let memory: MemoryStore;
 let agentDir: string;
 const SAVED_REPLY_MODE_STATE = process.env.PHANTOMBOT_REPLY_MODE_STATE;
-const SAVED_REPLY_LANGUAGE_STATE = process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-tg-"));
@@ -707,21 +706,12 @@ beforeEach(async () => {
   await writeFile(join(agentDir, "BOOT.md"), "# Phantom", "utf8");
   memory = await openMemoryStore(":memory:");
   process.env.PHANTOMBOT_REPLY_MODE_STATE = join(workdir, "reply-mode.json");
-  process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE = join(
-    workdir,
-    "reply-language.json",
-  );
 });
 
 afterEach(async () => {
   await memory.close();
   if (SAVED_REPLY_MODE_STATE === undefined) delete process.env.PHANTOMBOT_REPLY_MODE_STATE;
   else process.env.PHANTOMBOT_REPLY_MODE_STATE = SAVED_REPLY_MODE_STATE;
-  if (SAVED_REPLY_LANGUAGE_STATE === undefined) {
-    delete process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE;
-  } else {
-    process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE = SAVED_REPLY_LANGUAGE_STATE;
-  }
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -4109,13 +4099,18 @@ describe("runTelegramServer reaction dispatch (wake-but-silent)", () => {
 // ---------------------------------------------------------------------------
 
 describe("reply-language overlay", () => {
-  const runWith = async (text: string, harness: ScriptedHarness) => {
+  const runWith = async (
+    text: string,
+    harness: ScriptedHarness,
+    replyTo?: { messageId: number; fromBot: boolean; text: string },
+  ) => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: Math.floor(Math.random() * 1e6),
       conversationId: "1001",
       senderId: "42",
       text,
+      ...(replyTo ? { replyTo } : {}),
     });
     await runTelegramServer({
       config: baseConfig(),
@@ -4129,103 +4124,75 @@ describe("reply-language overlay", () => {
     return harness.lastRequest?.systemPrompt ?? "";
   };
 
-  test("names the inbound language in the system prompt", async () => {
-    const harness = new ScriptedHarness("fake", [
-      { type: "done", finalText: "ok" },
-    ]);
+  const done = () =>
+    new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+
+  test("every turn carries the rule, and it names the message as the source", async () => {
     const prompt = await runWith(
       "Robbie, can you check whether the invoice was paid yesterday?",
-      harness,
+      done(),
     );
-    expect(prompt).toContain("Reply in English");
-    expect(prompt).not.toContain("Reply in Spanish");
+    expect(prompt).toContain("# Reply language");
+    expect(prompt).toContain("USER'S LATEST MESSAGE");
   });
 
-  test("a Spanish message gets a Spanish instruction", async () => {
-    const harness = new ScriptedHarness("fake", [
-      { type: "done", finalText: "ok" },
-    ]);
+  // The regression this replaced a classifier for: a Latin-script
+  // function-word lexicon scored these at zero, resolved "unknown" and
+  // injected NOTHING — so the languages with the worst drift were the ones
+  // with no rule at all. An unconditional rule cannot have that hole.
+  test.each([
+    ["Chinese", "罗比，请帮我看看昨天那张发票付款了没有，谢谢。"],
+    ["Russian", "Робби, проверь пожалуйста, оплатили ли вчерашний счёт."],
+    ["Greek", "Ρόμπι, έλεγξε σε παρακαλώ αν πληρώθηκε το χθεσινό τιμολόγιο."],
+    ["Arabic", "روبي، من فضلك تحقق مما إذا كانت فاتورة الأمس قد دُفعت."],
+  ])("a %s message still gets the rule", async (_name, text) => {
+    expect(await runWith(text, done())).toContain("# Reply language");
+  });
+
+  test("a message too short to classify still gets the rule", async () => {
+    // "ok" is the same word in half of Europe. The old classifier had to
+    // carry a remembered language forward here or stay silent; pointing at
+    // the message needs neither.
+    expect(await runWith("ok", done())).toContain("# Reply language");
+  });
+
+  test("the rule never names a concrete language", async () => {
+    // Naming one is what required the classifier — and what went silent
+    // when the classifier could not decide.
     const prompt = await runWith(
       "Robbie, por favor revisa el correo y dime si han contestado.",
-      harness,
+      done(),
     );
-    expect(prompt).toContain("Reply in Spanish");
-  });
-
-  test("the previous turn's language does not carry into a new one", async () => {
-    // The drift this feature exists to stop: a turn spent in Spanish, then
-    // an English message. The English message must win.
-    const first = new ScriptedHarness("fake", [
-      { type: "done", finalText: "vale" },
-    ]);
-    expect(
-      await runWith(
-        "Robbie, por favor revisa el correo y dime si han contestado.",
-        first,
-      ),
-    ).toContain("Reply in Spanish");
-
-    const second = new ScriptedHarness("fake", [
-      { type: "done", finalText: "ok" },
-    ]);
-    const prompt = await runWith(
-      "Actually, give me the figures in a plain list rather than a table.",
-      second,
-    );
-    expect(prompt).toContain("Reply in English");
     expect(prompt).not.toContain("Reply in Spanish");
+    expect(prompt).not.toContain("Reply in English");
   });
 
-  test("a bare 'ok' does not flip the conversation language", async () => {
-    const first = new ScriptedHarness("fake", [
-      { type: "done", finalText: "vale" },
-    ]);
-    await runWith(
-      "Robbie, por favor revisa el correo y dime si han contestado.",
-      first,
-    );
-
-    const second = new ScriptedHarness("fake", [
-      { type: "done", finalText: "vale" },
-    ]);
-    expect(await runWith("ok", second)).toContain("Reply in Spanish");
-  });
-
-  test("an unclassifiable message with no history injects no language rule", async () => {
-    const harness = new ScriptedHarness("fake", [
-      { type: "done", finalText: "ok" },
-    ]);
-    // Honest failure mode: we would rather say nothing than state a
-    // coin-flip to the harness as fact.
-    expect(await runWith("ok", harness)).not.toContain("Reply in ");
-  });
-
-  test("detection ignores a quoted reply, which is context and not the message", async () => {
-    const transport = new FakeTransport();
-    transport.pendingUpdates.push({
-      updateId: 4242,
-      conversationId: "1001",
-      senderId: "42",
-      text: "Can you confirm that is still the plan for tomorrow morning?",
-      replyTo: {
+  test("a quoted reply is named as data, not as the deciding message", async () => {
+    const prompt = await runWith(
+      "Can you confirm that is still the plan for tomorrow morning?",
+      done(),
+      {
         messageId: 77,
         fromBot: true,
-        text: "Claro, mañana por la mañana reviso el correo y te confirmo si han contestado sobre la pension.",
+        text: "Claro, mañana por la mañana reviso el correo y te confirmo si han contestado.",
       },
-    });
-    const harness = new ScriptedHarness("fake", [
-      { type: "done", finalText: "ok" },
-    ]);
-    await runTelegramServer({
-      config: baseConfig(),
-      memory,
-      harnesses: [harness],
-      agentDir,
-      persona: "phantom",
-      transport,
-      oneShot: true,
-    });
-    expect(harness.lastRequest?.systemPrompt).toContain("Reply in English");
-    expect(harness.lastRequest?.systemPrompt).not.toContain("Reply in Spanish");
+    );
+    expect(prompt).toContain("quoted/replied-to message");
+  });
+
+  // The mid-turn drift bug (#548): the narration overlay is pushed LAST, so
+  // whatever it says about language is the freshest instruction the model
+  // reads. While it re-delegated to "match whatever language the
+  // conversation is in", it re-opened a question the reply-language rule had
+  // just closed — by inference over turn content, which is the pollution
+  // source. The two blocks must agree.
+  test("the narration overlay does not re-delegate language to inference", async () => {
+    const prompt = await runWith(
+      "Robbie, can you check whether the invoice was paid yesterday?",
+      done(),
+    );
+    expect(prompt).toContain("Narration before tool calls");
+    expect(prompt).not.toContain("whatever language the conversation");
+    expect(prompt).toContain("Narrate in the language of the user's LATEST");
   });
 });
