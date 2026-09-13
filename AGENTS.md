@@ -6,6 +6,19 @@ This file is for **any agent (human or LLM) working on the phantombot codebase i
 
 ## The contributing discipline (READ FIRST)
 
+### Tool watchdog invariant (issue #552)
+
+Tool execution is a parser-owned lifecycle, not an idle activity hint.
+`runHarnessProcess` receives stable tool start/end IDs from every adapter and
+`KillCoordinator` suspends model-idle watching while any ID remains in flight.
+Each tool has its own `harness_tool_timeout_s` cap (default 1200s, clamped to
+the hard turn cap); the final matching end restarts idle from zero, and every
+terminal path clears the set. Tool-cap kills never fall through to another
+harness. Claude pairs `tool_use.id` with `tool_result.tool_use_id`, Pi pairs
+`tool_execution_start`/`tool_execution_end` by `toolCallId`, and Codex pairs
+tool `item.started`/`item.completed` by `item.id`; anonymous names and progress
+text are not identifiers because parallel calls make them ambiguous.
+
 **Every PR that changes user-facing behavior, architecture, or developer workflow must update both `README.md` and this file in the same PR.** No exceptions. Reviewers should reject PRs where the docs don't match the code.
 
 What "user-facing behavior" means:

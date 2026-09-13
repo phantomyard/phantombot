@@ -83,6 +83,8 @@ export interface HarnessRequest {
    * fed but never converge on a final reply.
    */
   hardTimeoutMs?: number;
+  /** Per-tool wall-clock ceiling while the idle watchdog is suspended. */
+  toolTimeoutMs?: number;
   /**
    * Startup timeout: kill the subprocess if it produces NO stdout at all
    * within this window. Distinct from idleTimeoutMs, which only bounds silence
@@ -234,7 +236,9 @@ export type HarnessChunk =
        * silently disabling the recovery. Omitted when the failure was not a
        * coordinator kill (spawn failure, non-zero exit, provider 4XX).
        */
-      killCause?: "timeout" | "idle" | "startup" | "aborted" | "policy";
+      killCause?: "timeout" | "idle" | "tool" | "startup" | "aborted" | "policy";
+      /** True when an idle callback raced with an already-started tool. */
+      toolInFlightAtKill?: true;
       /**
        * Last ~20 lines of harness stderr, captured by a ring buffer in
        * `runHarnessProcess` (src/lib/harnessRunner.ts). Present on non-zero-exit

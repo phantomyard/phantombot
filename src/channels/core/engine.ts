@@ -510,6 +510,7 @@ export async function runTelegramServer(
           memory: input.memory,
           idleTimeoutMs: input.config.harnessIdleTimeoutMs,
           hardTimeoutMs: input.config.harnessHardTimeoutMs,
+          toolTimeoutMs: input.config.harnessToolTimeoutMs,
           startupTimeoutMs: input.config.harnessStartupTimeoutMs,
           promptCache: input.config.promptCache,
           // Reaction from an allow-listed principal → trusted, so the memory
@@ -1306,6 +1307,7 @@ async function processChatMessage(
       memory: input.memory,
       idleTimeoutMs: input.config.harnessIdleTimeoutMs,
       hardTimeoutMs: input.config.harnessHardTimeoutMs,
+      toolTimeoutMs: input.config.harnessToolTimeoutMs,
       startupTimeoutMs: input.config.harnessStartupTimeoutMs,
       promptCache: input.config.promptCache,
       signal: controller.signal,

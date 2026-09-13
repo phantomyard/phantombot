@@ -110,6 +110,8 @@ export interface TurnInput {
   idleTimeoutMs: number;
   /** Hard wall-clock ceiling regardless of activity. */
   hardTimeoutMs?: number;
+  /** Per-tool wall-clock ceiling while idle watching is suspended. */
+  toolTimeoutMs?: number;
   /** Kill subprocess if it emits no output at all within this long (startup/init wedge guard). Omit to disable. */
   startupTimeoutMs?: number;
   /** Number of prior turns to load. Default 30. */
@@ -750,6 +752,7 @@ async function* runTurnBody(
         tmpBaseDir: join(input.agentDir, "tmp"),
         idleTimeoutMs: input.idleTimeoutMs,
         hardTimeoutMs: input.hardTimeoutMs,
+        toolTimeoutMs: input.toolTimeoutMs,
         startupTimeoutMs: input.startupTimeoutMs,
         mcpMode: input.mcpMode,
         toolsMode: input.toolsMode,

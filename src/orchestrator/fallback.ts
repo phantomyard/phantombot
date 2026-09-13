@@ -95,6 +95,8 @@ export async function* runWithFallback(
   // harness answers we can tell the owner which one is broken and who is
   // covering for it. Only the first matters: that's the primary.
   let firstFailure: { harnessId: string; error: string } | undefined;
+  const priorKillHarness = new Map<string, string>();
+  const repeatedKillCausesLogged = new Set<string>();
   const estimatedBytes = estimatePayloadBytes(req);
 
   // Snapshot cooldown state at turn start. We don't re-poll within the
@@ -232,6 +234,19 @@ export async function* runWithFallback(
       try {
       for await (const chunk of harness.invoke(attemptReq)) {
         if (chunk.type === "error") {
+          if (chunk.killCause) {
+            const priorHarness = priorKillHarness.get(chunk.killCause);
+            if (priorHarness && priorHarness !== harness.id && !repeatedKillCausesLogged.has(chunk.killCause)) {
+              repeatedKillCausesLogged.add(chunk.killCause);
+              log.warn("orchestrator: repeated kill cause across harnesses", {
+                cause: chunk.killCause,
+                firstHarnessId: priorHarness,
+                secondHarnessId: harness.id,
+              });
+            } else if (!priorHarness) {
+              priorKillHarness.set(chunk.killCause, harness.id);
+            }
+          }
           // Killed mid-flight with work already done: respawn this same
           // harness once, carrying what it had said and started. Checked BEFORE
           // the fall-through branch so a chain that HAS a next harness still

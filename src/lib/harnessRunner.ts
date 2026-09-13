@@ -50,11 +50,13 @@ type HarnessSubprocess = Subprocess<
 export type KillCause =
   | "timeout"
   | "idle"
+  | "tool"
   | "startup"
   | "aborted"
   | "policy"
   | undefined;
 export type HarnessActivity = "model" | "tool" | "productive";
+export type ToolBoundary = { phase: "start" | "end"; id: string };
 
 export interface KillCoordinatorOpts {
   proc: HarnessSubprocess;
@@ -110,6 +112,10 @@ export interface KillCoordinator {
    * when startupTimeoutMs was not set or the coordinator already fired/disposed.
    */
   firstOutput(): void;
+  toolStart(id: string): void;
+  toolEnd(id: string): void;
+  hasInFlightTools(): boolean;
+  toolWasInFlightAtKill(): boolean;
   /** Stop all timers and detach signal listener. Idempotent. */
   dispose(): Promise<void>;
   /**
@@ -129,14 +135,15 @@ export function createKillCoordinator(
   const graceMs = opts.graceMs ?? 5000;
   let cause: KillCause;
   let disposed = false;
-  let toolRunning = false;
-  // Wall-clock start of the current contiguous tool-run (undefined when no tool
-  // is running). Used with opts.toolTimeoutMs to cap how long tool activity
-  // alone may keep deferring the idle kill. See touch().
-  let toolRunStart: number | undefined;
+  const inFlightTools = new Map<
+    string,
+    ReturnType<typeof setTimeout> | undefined
+  >();
+  let toolInFlightAtKill = false;
 
   const triggerKill = (newCause: Exclude<KillCause, undefined>): void => {
     if (cause || disposed) return;
+    toolInFlightAtKill = inFlightTools.size > 0;
     cause = newCause;
     log.warn(`${opts.harnessId}.invoke killed: ${newCause}`, {
       idleTimeoutMs: opts.idleTimeoutMs,
@@ -147,10 +154,12 @@ export function createKillCoordinator(
     void killProcessGroup(opts.proc, graceMs);
   };
 
-  let idleTimer: ReturnType<typeof setTimeout> = setTimeout(
-    () => triggerKill("idle"),
-    opts.idleTimeoutMs,
-  );
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const armIdle = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => triggerKill("idle"), opts.idleTimeoutMs);
+  };
+  armIdle();
   const hardTimer: ReturnType<typeof setTimeout> | undefined =
     opts.hardTimeoutMs === undefined
       ? undefined
@@ -173,41 +182,10 @@ export function createKillCoordinator(
   }
 
   return {
-    touch(activity: HarnessActivity = "productive"): void {
+    touch(_activity: HarnessActivity = "productive"): void {
       if (cause || disposed) return;
-      if (activity === "tool") {
-        if (!toolRunning) {
-          toolRunning = true;
-          toolRunStart = Date.now();
-        } else if (
-          opts.toolTimeoutMs !== undefined &&
-          toolRunStart !== undefined &&
-          Date.now() - toolRunStart >= opts.toolTimeoutMs
-        ) {
-          // This contiguous tool-run has kept the idle timer alive via tool
-          // activity for longer than the tool cap WITHOUT any productive
-          // (text) output. Past the cap a tool update no longer counts as
-          // liveness: fall through WITHOUT re-arming the idle timer, so the
-          // last-armed idle window runs out and triggerKill("idle") finally
-          // fires — a wedged-but-chattery tool (e.g. a stalled router that
-          // keeps trickling tool_execution_update) fails over in minutes
-          // instead of surviving to the hard cap (issue #351). Any productive
-          // output resets the budget (the "productive" branch clears
-          // toolRunStart), so a healthy turn interleaving tools with text is
-          // never affected.
-          return;
-        }
-      } else if (activity === "productive") {
-        toolRunning = false;
-        toolRunStart = undefined;
-      } else if (toolRunning) {
-        return;
-      }
-      clearTimeout(idleTimer);
-      idleTimer = setTimeout(
-        () => triggerKill("idle"),
-        opts.idleTimeoutMs,
-      );
+      if (inFlightTools.size > 0) return;
+      armIdle();
     },
     firstOutput(): void {
       if (cause || disposed) return;
@@ -216,13 +194,41 @@ export function createKillCoordinator(
         startupTimer = undefined;
       }
     },
+    toolStart(id: string): void {
+      if (cause || disposed || inFlightTools.has(id)) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = undefined;
+      const timeoutMs = opts.toolTimeoutMs ?? opts.hardTimeoutMs;
+      const timer = timeoutMs !== undefined && Number.isFinite(timeoutMs)
+        ? setTimeout(() => triggerKill("tool"), Math.max(0, timeoutMs))
+        : undefined;
+      inFlightTools.set(id, timer);
+    },
+    toolEnd(id: string): void {
+      if (disposed) return;
+      const timer = inFlightTools.get(id);
+      if (!inFlightTools.has(id)) return;
+      if (timer) clearTimeout(timer);
+      inFlightTools.delete(id);
+      if (!cause && inFlightTools.size === 0) armIdle();
+    },
+    hasInFlightTools(): boolean {
+      return inFlightTools.size > 0;
+    },
+    toolWasInFlightAtKill(): boolean {
+      return toolInFlightAtKill;
+    },
     terminate(): void {
       triggerKill("policy");
     },
     async dispose(): Promise<void> {
       if (disposed) return;
       disposed = true;
-      clearTimeout(idleTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      for (const timer of inFlightTools.values()) {
+        if (timer) clearTimeout(timer);
+      }
+      inFlightTools.clear();
       if (hardTimer) clearTimeout(hardTimer);
       if (startupTimer) clearTimeout(startupTimer);
       if (opts.signal && !opts.signal.aborted) {
@@ -271,12 +277,14 @@ export function killCauseToErrorChunk(
   hardTimeoutMs: number | undefined,
   idleTimeoutMs: number,
   startupTimeoutMs?: number,
+  toolInFlightAtKill = false,
 ):
   | {
       type: "error";
       error: string;
       recoverable: boolean;
-      killCause?: "timeout" | "idle" | "startup" | "aborted" | "policy";
+      killCause?: "timeout" | "idle" | "tool" | "startup" | "aborted" | "policy";
+      toolInFlightAtKill?: true;
     }
   | undefined {
   if (cause === "timeout") {
@@ -291,7 +299,16 @@ export function killCauseToErrorChunk(
     return {
       type: "error",
       error: `${harnessId} timed out after ${idleTimeoutMs}ms with no output (likely wedged on a tool call)`,
-      recoverable: true,
+      recoverable: !toolInFlightAtKill,
+      killCause: cause,
+      toolInFlightAtKill: toolInFlightAtKill ? true : undefined,
+    };
+  }
+  if (cause === "tool") {
+    return {
+      type: "error",
+      error: `${harnessId}:tool_timeout`,
+      recoverable: false,
       killCause: cause,
     };
   }
@@ -422,6 +439,11 @@ export interface HarnessProcessSpec {
    * downstream exactly as if the parser had returned it directly.
    */
   parseEvent: (parsed: unknown) => ParseEventResult;
+  /** Identify parser-native tool lifecycle events without changing chunks. */
+  toolBoundary?: (parsed: unknown) =>
+    | ToolBoundary
+    | ToolBoundary[]
+    | undefined;
   /**
    * Narration-decay replay config (issue #551). When present, the engine
    * buffers model reasoning the parser captures and, after a quiet window
@@ -466,11 +488,9 @@ export interface HarnessProcessSpec {
    */
   requireCompletion?: boolean;
   /**
-   * Wall-clock cap (ms) on how long a SINGLE contiguous tool-run may keep the
-   * idle watchdog alive via `"tool"` activity alone, with no productive output.
-   * Forwarded to the kill coordinator. Guards against a wedged-but-chattery
-   * tool (e.g. a stalled router or a hung retry that keeps trickling output)
-   * resetting the idle timer up to the hard cap with no fallback (issue #351).
+   * Wall-clock cap (ms) on one parser-identified in-flight tool. The idle
+   * watchdog is suspended while tools run; this separate timer bounds both
+   * silent and chattery tools without replaying them through fallback.
    *
    * When omitted, defaults across all harnesses (pi, claude, codex) to
    * `Math.min(req.hardTimeoutMs ?? Infinity, Math.max(req.idleTimeoutMs * 4, 1_200_000))`,
@@ -488,7 +508,7 @@ export interface HarnessProcessSpec {
 }
 
 /**
- * Compute the default contiguous tool timeout bound across harnesses:
+ * Compute the compatibility default tool timeout bound across harnesses:
  * floored at 20 minutes (1,200,000ms), scaled with `idleTimeoutMs * 4`, and
  * capped at `hardTimeoutMs` when defined.
  */
@@ -517,9 +537,13 @@ export async function* runHarnessProcess(
   // on pipe backpressure. By arming the killer first, we ensure the hard
   // timeout still fires and kills the process group, causing the blocked
   // write to fail with EPIPE (which our catch block handles).
-  const toolTimeoutMs =
-    spec.toolTimeoutMs ??
+  const configuredToolTimeoutMs =
+    req.toolTimeoutMs ?? spec.toolTimeoutMs ??
     harnessDefaults.defaultToolTimeoutMs(req.idleTimeoutMs, req.hardTimeoutMs);
+  const toolTimeoutMs = Math.min(
+    req.hardTimeoutMs ?? Number.POSITIVE_INFINITY,
+    configuredToolTimeoutMs,
+  );
 
   const killer = createKillCoordinator({
     proc,
@@ -610,6 +634,14 @@ export async function* runHarnessProcess(
   // chunk for everything except `done` (whose meta is captured, not surfaced —
   // the single terminal `done` is synthesized after the loop).
   function* consume(parsed: unknown): Generator<HarnessChunk> {
+    const rawBoundaries = spec.toolBoundary?.(parsed);
+    const boundaries = rawBoundaries
+      ? Array.isArray(rawBoundaries) ? rawBoundaries : [rawBoundaries]
+      : [];
+    for (const boundary of boundaries) {
+      if (boundary.phase === "start") killer.toolStart(boundary.id);
+      else killer.toolEnd(boundary.id);
+    }
     const res = spec.parseEvent(parsed);
     if (!res) return;
     let c: HarnessChunk;
@@ -771,6 +803,7 @@ export async function* runHarnessProcess(
     req.hardTimeoutMs,
     req.idleTimeoutMs,
     req.startupTimeoutMs,
+    killer.toolWasInFlightAtKill(),
   );
   if (errChunk) {
     await awaitStderrDrained();

@@ -256,6 +256,7 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
         memory,
         idleTimeoutMs: config.harnessIdleTimeoutMs,
         hardTimeoutMs: config.harnessHardTimeoutMs,
+        toolTimeoutMs: config.harnessToolTimeoutMs,
         // A terminal conversation is a conversation: history, retrieval,
         // durable facts and turn indexing all behave as they do on Telegram.
         noHistory: false,

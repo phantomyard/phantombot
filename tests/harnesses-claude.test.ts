@@ -19,6 +19,7 @@ import {
   PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
   filterAuthEnv,
   apiErrorStatus,
+  claudeToolBoundaries,
   isSubagentActivity,
   parseStreamJson,
   renderStdinPayload,
@@ -27,6 +28,16 @@ import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
 
 const FAKE_CLAUDE = resolve(__dirname, "fixtures/fake-claude.sh");
+
+test("claude tool boundaries preserve parallel ids and ignore unmatched shapes", () => {
+  expect(claudeToolBoundaries({ type: "assistant", message: { content: [
+    { type: "tool_use", id: "a" }, { type: "tool_use", id: "b" },
+  ] } })).toEqual([{ phase: "start", id: "a" }, { phase: "start", id: "b" }]);
+  expect(claudeToolBoundaries({ type: "user", message: { content: [
+    { type: "tool_result", tool_use_id: "b" }, { type: "tool_result", tool_use_id: "a" },
+  ] } })).toEqual([{ phase: "end", id: "b" }, { phase: "end", id: "a" }]);
+  expect(claudeToolBoundaries({ type: "assistant", message: { content: [{ type: "tool_use" }] } })).toBeUndefined();
+});
 
 function newRequest(overrides: Partial<HarnessRequest> = {}): HarnessRequest {
   return {

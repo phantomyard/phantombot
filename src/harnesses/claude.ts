@@ -243,6 +243,7 @@ export class ClaudeHarness implements Harness {
       harnessId: this.id,
       stdinPayload: renderStdinPayload(req),
       parseEvent: parseStreamJson,
+      toolBoundary: claudeToolBoundaries,
       activity: claudeActivity,
       reasoningReplay: this.config.reasoningReplay ?? DEFAULT_REASONING_REPLAY,
       buildDoneMeta: () => ({
@@ -729,6 +730,28 @@ export function parseStreamJson(parsed: unknown): ParseEventResult {
   if (sawRedactedThinking) return { redacted: true, chunk: { type: "heartbeat" } };
   if (sawOtherNonText) return { type: "heartbeat" };
   return undefined;
+}
+
+export function claudeToolBoundaries(parsed: unknown) {
+  // Claude's stream_event deltas do not provide a stable tool lifecycle pair.
+  // The complete assistant message (including tool_use.id) is emitted before
+  // execution begins; the matching complete user message carries tool_result.
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const message = (parsed as Record<string, unknown>).message;
+  if (typeof message !== "object" || message === null) return undefined;
+  const content = (message as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return undefined;
+  const boundaries: Array<{ phase: "start" | "end"; id: string }> = [];
+  for (const part of content) {
+    if (typeof part !== "object" || part === null) continue;
+    const p = part as Record<string, unknown>;
+    if (p.type === "tool_use" && typeof p.id === "string") {
+      boundaries.push({ phase: "start", id: p.id });
+    } else if (p.type === "tool_result" && typeof p.tool_use_id === "string") {
+      boundaries.push({ phase: "end", id: p.tool_use_id });
+    }
+  }
+  return boundaries.length > 0 ? boundaries : undefined;
 }
 
 function claudeActivity(
