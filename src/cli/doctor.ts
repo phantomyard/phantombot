@@ -47,6 +47,7 @@ import { piInstanceSecretName } from "../harnesses/buildChain.ts";
 import { ENV_PI_API_KEY } from "../lib/piRouting.ts";
 import {
   copyNativeKeys,
+  openExistingPersonaVault,
   nativeSlotsFor,
   type NativeKeyCopyResult,
 } from "../lib/nativeKeyCopy.ts";
@@ -1853,7 +1854,7 @@ async function defaultCheckDefaultPersona(
  * doctor adds is a live probe for a host `pi`, which is what lets it repair a
  * routing-less legacy pi on a host that has no pi to run it.
  */
-async function computeHarnessConfigReport(
+export async function computeHarnessConfigReport(
   host: Config,
   config: Config,
   persona: string,
@@ -1904,6 +1905,9 @@ async function computeHarnessConfigReport(
         persona: auditPersona,
         personaDir: personaDir(cfg, auditPersona ?? cfg.defaultPersona),
         dryRun,
+        // An inspection must never mint an identity/vault: open only what
+        // already exists. Repair may provision — writing the key is the point.
+        ...(dryRun ? { openVault: () => openExistingPersonaVault(personaDir(cfg, auditPersona ?? cfg.defaultPersona)) } : {}),
       }),
     );
   };

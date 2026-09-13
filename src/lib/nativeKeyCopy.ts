@@ -39,8 +39,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { personaDir, type Config } from "../config.ts";
 import { nativeApiKeyNameFor } from "../harnesses/buildChain.ts";
+import { identityFromNsec } from "./nostrIdentity.ts";
+import { readPersonaIdentityNsec } from "./personaIdentity.ts";
 import { piAuthJsonPath } from "./piAuthStore.ts";
-import { openPersonaVault } from "./vault.ts";
+import { openPersonaVault, openVaultWithSecret, vaultPath } from "./vault.ts";
 
 export interface NativeSlotKey {
   /** Chain id (native, pi-primary, pi-fallback, ...). */
@@ -112,6 +114,25 @@ export interface CopyNativeKeysInput {
    * still reported as the source that WOULD be used, but no vault row is set.
    */
   dryRun?: boolean;
+}
+
+/**
+ * Open a persona's vault ONLY if it already exists — never provision.
+ *
+ * `openPersonaVault` calls `getOrCreatePersonaIdentity`, which GENERATES an
+ * identity.json (and the open creates vault.sqlite) for a persona that has
+ * neither. An inspection must not do that (doctor's "never provisions a
+ * persona it only inspected" invariant), so read-only callers use this: no
+ * identity or no vault file → undefined, and the audit reports from the
+ * legacy auth store only.
+ */
+export async function openExistingPersonaVault(
+  dir: string,
+): Promise<NativeKeyVault | undefined> {
+  if (!existsSync(vaultPath(dir))) return undefined;
+  const nsec = readPersonaIdentityNsec(dir);
+  if (!nsec) return undefined;
+  return openVaultWithSecret(dir, identityFromNsec(nsec).secretKey);
 }
 
 /**
@@ -200,41 +221,46 @@ export async function copyNativeKeys(
 
   const copied: NativeKeyCopyResult["copied"] = [];
   const statuses: NativeKeyStatus[] = [];
+  // The key each resolved slot holds — written OR, under dryRun, would-be.
+  // Sibling lookup reads this, never the vault: a dry run writes nothing, so
+  // re-reading the vault would report a slot --fix WOULD fill as missing.
+  const values = new Map<string, string>();
+  const resolve = (status: NativeKeyStatus, from: NativeKeySource, key: string): void => {
+    if (!input.dryRun) vault!.set(status.secretName, key);
+    values.set(status.secretName, key);
+    status.source = from;
+    copied.push({ id: status.id, secretName: status.secretName, from });
+  };
   try {
     // First sweep: what already resolves (stored rows, incl. sibling keys).
     for (const slot of slots) {
       const stored = vault?.get(slot.secretName)?.trim();
+      if (stored) values.set(slot.secretName, stored);
       statuses.push({
         ...slot,
         source: stored ? "stored" : "missing",
       });
     }
-    const bySecret = new Map(statuses.map((s) => [s.secretName, s]));
 
-    // Second sweep: fill the gaps from the sanctioned sources.
+    // Second sweep: fill the gaps from the sanctioned sources. A dry run with
+    // no openable vault still reports what the auth store would supply.
     for (const status of statuses) {
       if (status.source !== "missing") continue;
       const provider = status.provider;
-      if (!provider || !vault) continue;
+      if (!provider || (!vault && !input.dryRun)) continue;
 
       // (b) legacy host auth store — the key's only pre-native home.
       const authKey = readAuthStoreKey(authPath, provider);
       if (authKey) {
-        if (!input.dryRun) vault.set(status.secretName, authKey);
-        status.source = "auth-store";
-        copied.push({ id: status.id, secretName: status.secretName, from: "auth-store" });
-        bySecret.set(status.secretName, status);
+        resolve(status, "auth-store", authKey);
         continue;
       }
 
       // (c) an OPENROUTER_API_KEY vault row for an openrouter slot.
       if (provider === "openrouter") {
-        const row = vault.get("OPENROUTER_API_KEY")?.trim();
+        const row = vault?.get("OPENROUTER_API_KEY")?.trim();
         if (row) {
-          if (!input.dryRun) vault.set(status.secretName, row);
-          status.source = "openrouter-row";
-          copied.push({ id: status.id, secretName: status.secretName, from: "openrouter-row" });
-          bySecret.set(status.secretName, status);
+          resolve(status, "openrouter-row", row);
           continue;
         }
       }
@@ -244,15 +270,9 @@ export async function copyNativeKeys(
         (s) =>
           s.secretName !== status.secretName &&
           s.provider === provider &&
-          bySecret.get(s.secretName)?.source !== "missing",
+          values.has(s.secretName),
       );
-      const siblingKey = sibling ? vault.get(sibling.secretName)?.trim() : undefined;
-      if (sibling && siblingKey) {
-        if (!input.dryRun) vault.set(status.secretName, siblingKey);
-        status.source = "sibling";
-        copied.push({ id: status.id, secretName: status.secretName, from: "sibling" });
-        bySecret.set(status.secretName, status);
-      }
+      if (sibling) resolve(status, "sibling", values.get(sibling.secretName)!);
     }
   } finally {
     if (openedByUs && !input.vaultInjected) openedByUs.close?.();

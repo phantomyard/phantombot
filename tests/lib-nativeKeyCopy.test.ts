@@ -218,4 +218,21 @@ describe("copyNativeKeys", () => {
     expect(r.copied.map((c) => c.from)).toEqual(["auth-store", "auth-store"]);
     expect(vault.writes).toEqual([]);
   });
+
+  test("dryRun with no openable vault still reports what --fix would copy", async () => {
+    // Doctor's inspection opener returns undefined for a persona with no
+    // identity (it must not mint one). The audit must still say the auth
+    // store resolves the slot, not report it missing.
+    const config = await configFor(TWO_NATIVE);
+    const r = await copyNativeKeys({
+      config,
+      persona: "alice",
+      personaDir: join(work, "personas", "alice"),
+      openVault: async () => undefined,
+      dryRun: true,
+      authPath: authStore({ openrouter: { type: "api_key", key: "sk-auth" } }),
+    });
+    expect(r.slots.map((s) => s.source)).toEqual(["auth-store", "auth-store"]);
+    expect(r.stillMissing).toEqual([]);
+  });
 });
