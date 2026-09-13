@@ -95,7 +95,7 @@ describe("mergePiApiKey", () => {
 
 describe("writePiApiKey", () => {
   test("creates ~/.pi/agent/auth.json (and parents) at mode 600", async () => {
-    const r = await writePiApiKey("openrouter", "sk-or-1", home);
+    const r = await writePiApiKey("openrouter", "sk-or-1", { home });
     expect(r.ok).toBe(true);
     const path = piAuthJsonPath(home);
     expect(existsSync(path)).toBe(true);
@@ -107,8 +107,8 @@ describe("writePiApiKey", () => {
 
   test("merges into an existing store without touching other entries", async () => {
     const path = piAuthJsonPath(home);
-    await writePiApiKey("google", "gk", home);
-    await writePiApiKey("openrouter", "sk-or-1", home);
+    await writePiApiKey("google", "gk", { home });
+    await writePiApiKey("openrouter", "sk-or-1", { home });
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
       google: { type: "api_key", key: "gk" },
       openrouter: { type: "api_key", key: "sk-or-1" },
@@ -123,7 +123,7 @@ describe("writePiApiKey", () => {
     };
     await writeFile(path, JSON.stringify(oauth), { mode: 0o600 });
     const before = await readFile(path, "utf8");
-    const r = await writePiApiKey("google-gemini-cli", "gk", home);
+    const r = await writePiApiKey("google-gemini-cli", "gk", { home });
     expect(r).toMatchObject({ ok: true, skipped: "oauth-present" });
     expect(await readFile(path, "utf8")).toBe(before);
   });
@@ -133,7 +133,7 @@ describe("writePiApiKey", () => {
     // read→merge→rename let overlapping writers drop each other's entry.
     const providers = Array.from({ length: 8 }, (_, i) => `provider-${i}`);
     const results = await Promise.all(
-      providers.map((p) => writePiApiKey(p, `key-${p}`, home)),
+      providers.map((p) => writePiApiKey(p, `key-${p}`, { home })),
     );
     for (const r of results) expect(r.ok).toBe(true);
     const path = piAuthJsonPath(home);
@@ -145,8 +145,8 @@ describe("writePiApiKey", () => {
 
   test("concurrent writers leave no stray tempfiles behind", async () => {
     await Promise.all([
-      writePiApiKey("a", "ka", home),
-      writePiApiKey("b", "kb", home),
+      writePiApiKey("a", "ka", { home }),
+      writePiApiKey("b", "kb", { home }),
     ]);
     const dir = join(home, ".pi", "agent");
     const leftovers = (await readdir(dir)).filter((f) => f.includes(".tmp"));
@@ -157,7 +157,7 @@ describe("writePiApiKey", () => {
     const path = piAuthJsonPath(home);
     await mkdir(join(home, ".pi", "agent"), { recursive: true });
     await writeFile(path, "{not json", { mode: 0o600 });
-    const r = await writePiApiKey("openrouter", "sk-or-1", home);
+    const r = await writePiApiKey("openrouter", "sk-or-1", { home });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain("refusing to clobber");
     expect(await readFile(path, "utf8")).toBe("{not json");
@@ -179,7 +179,7 @@ describe("snapshotPiAuth / restorePiAuth (brain-wizard rollback)", () => {
     await writeFile(path, before, "utf8");
 
     const snap = await snapshotPiAuth(home);
-    await writePiApiKey("openrouter", "sk-new", home);
+    await writePiApiKey("openrouter", "sk-new", { home });
     expect(JSON.parse(await readFile(path, "utf8")).openrouter.key).toBe("sk-new");
 
     const result = await restorePiAuth(snap, home);
@@ -194,7 +194,7 @@ describe("snapshotPiAuth / restorePiAuth (brain-wizard rollback)", () => {
     const snap = await snapshotPiAuth(home);
     expect(snap).toBeUndefined();
 
-    await writePiApiKey("openrouter", "sk-new", home);
+    await writePiApiKey("openrouter", "sk-new", { home });
     expect(existsSync(path)).toBe(true);
 
     expect((await restorePiAuth(snap, home)).ok).toBe(true);
@@ -204,15 +204,15 @@ describe("snapshotPiAuth / restorePiAuth (brain-wizard rollback)", () => {
   test("restores at mode 0600 — a rollback must not widen the key's perms", async () => {
     if (process.platform === "win32") return;
     const path = piAuthJsonPath(home);
-    await writePiApiKey("openrouter", "sk-one", home);
+    await writePiApiKey("openrouter", "sk-one", { home });
     const snap = await snapshotPiAuth(home);
-    await writePiApiKey("openrouter", "sk-two", home);
+    await writePiApiKey("openrouter", "sk-two", { home });
     await restorePiAuth(snap, home);
     expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 
   test("leaves no tempfile behind", async () => {
-    await writePiApiKey("openrouter", "sk-one", home);
+    await writePiApiKey("openrouter", "sk-one", { home });
     const snap = await snapshotPiAuth(home);
     await restorePiAuth(snap, home);
     const entries = await readdir(join(home, ".pi", "agent"));

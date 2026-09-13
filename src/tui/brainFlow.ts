@@ -359,6 +359,38 @@ export async function configureNative(
     break;
   }
 
+  // GATE (2026-09-13 Atlas): a native slot with NO resolvable key cannot run —
+  // the embedded engine never reads the host ~/.pi and its own store is empty.
+  // So "no key" is refused here instead of being saved as a broken brain: the
+  // loop re-asks until a key resolves (typed now, or already stored) or the
+  // operator aborts. resolvePiApiKeyWrite's "clear" only survives when NO
+  // provider is configured (nothing to authenticate against).
+  for (;;) {
+    const gateWrite = resolvePiApiKeyWrite(
+      key,
+      provider || undefined,
+      current.routing.provider,
+    );
+    const gateCandidate =
+      gateWrite.action === "set"
+        ? gateWrite.value
+        : gateWrite.action === "keep"
+          ? current.storedKey
+          : undefined;
+    if (!provider || gateCandidate) break;
+    q.note(
+      "API key required",
+      `the ${role} brain cannot run without a key: native never reads the host's own pi configuration. Paste the ${keyLabel} (esc aborts without changing anything).`,
+    );
+    key = await q.value({
+      title: keyLabel,
+      hint: "paste the key to continue (esc aborts the whole flow)",
+      masked: true,
+      allowEmpty: false,
+    });
+    if (key === undefined) return true;
+  }
+
   const keyWrite = resolvePiApiKeyWrite(
     key,
     provider || undefined,
@@ -367,16 +399,19 @@ export async function configureNative(
   if (keyWrite.action === "set") {
     const stored = await deps.setSecret(keyWrite.value, instanceId);
     if (!stored.ok) {
+      // A failed save means NO key exists after this flow — refuse rather than
+      // save a brain that cannot authenticate. Abort with the reason; the
+      // stored key (if any) is untouched.
       q.note(
-        "Pi API key",
-        `could not save ${keyLabel} to the ${stored.persona ?? "persona"} vault: ${stored.error}\nPi will fall back to its own local store until this is fixed.`,
+        "API key required",
+        `could not save ${keyLabel} to the ${stored.persona ?? "persona"} vault: ${stored.error}\nNothing was changed — re-run Configure → Brain to retry.`,
       );
-    } else {
-      q.note("Pi API key", `saved to the ${stored.persona ?? "persona"} vault`);
+      return true;
     }
-    // Key Pi's OWN auth store too, so `pi --list-models` sees the provider —
-    // the same #312 merge-write the CLI does. Failure degrades to an
-    // env-injected refresh, never a dead end.
+    q.note("Pi API key", `saved to the ${stored.persona ?? "persona"} vault`);
+    // Key the NATIVE engine's own auth store too (the isolated agent dir the
+    // deps wire up — never the host's ~/.pi), so `--list-models` sees the
+    // provider. Failure degrades to an env-injected refresh, never a dead end.
     let refreshed: PiModel[] = [];
     if (provider) {
       const authWrite = await deps.writeAuth(provider, keyWrite.value);

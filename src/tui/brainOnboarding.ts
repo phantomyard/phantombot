@@ -81,6 +81,9 @@ export async function createBrainOnboardingDeps(
   const { restorePiAuth, snapshotPiAuth, writePiApiKey } = await import(
     "../lib/piAuthStore.ts"
   );
+  const { nativeAgentDir, nativeAgentEnv } = await import(
+    "../lib/nativeAgentDir.ts"
+  );
   const { probeProviderKey } = await import("../lib/providerKeyProbe.ts");
 
   const config = await loadConfig(persona);
@@ -119,7 +122,12 @@ export async function createBrainOnboardingDeps(
     targetPath: writeTarget.path,
     personaScope: writeTarget.scope === "persona",
     listModels: (extraEnv) =>
-      listPiModels(embeddedPiCommand(), undefined, extraEnv),
+      // The embedded engine's catalog lives in its ISOLATED agent dir — merge
+      // the isolation env so a plain listing reads NATIVE auth, never ~/.pi.
+      listPiModels(embeddedPiCommand(), undefined, {
+        ...nativeAgentEnv(),
+        ...extraEnv,
+      }),
     setSecret: (value, instanceId) =>
       setPersonaSecret(
         config,
@@ -133,7 +141,9 @@ export async function createBrainOnboardingDeps(
         instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
         persona,
       ),
-    writeAuth: (provider, value) => writePiApiKey(provider, value),
+    // Write into the NATIVE engine's isolated agent dir, never ~/.pi.
+    writeAuth: (provider, value) =>
+      writePiApiKey(provider, value, { agentDir: nativeAgentDir() }),
     applyChain: (chain) =>
       applyHarnessChain(
         writeTarget.path,
@@ -160,7 +170,7 @@ export async function createBrainOnboardingDeps(
         // (PR #539 review, Kai/Lena).
         readVaultSecret: (name) =>
           getPersonaSecretStrict(config, name, persona),
-          snapshotAuth: () => snapshotPiAuth(),
+          snapshotAuth: () => snapshotPiAuth({ agentDir: nativeAgentDir() }),
         },
       ),
     restoreWrites: (snapshot) =>
@@ -170,7 +180,7 @@ export async function createBrainOnboardingDeps(
         setVaultSecret: (name, value) =>
           setPersonaSecret(config, name, value, persona),
         unsetVaultSecret: (name) => unsetPersonaSecret(config, name, persona),
-        restoreAuth: (auth) => restorePiAuth(auth),
+        restoreAuth: (auth) => restorePiAuth(auth, { agentDir: nativeAgentDir() }),
       }),
     probe: async (id) => {
       const { probeHarness } = await import("../lib/harnessProbe.ts");

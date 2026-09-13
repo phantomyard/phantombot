@@ -39,6 +39,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { ENV_PI_AGENT_DIR, nativeAgentDir } from "./nativeAgentDir.ts";
 import piPackageJson from "../../node_modules/@earendil-works/pi-coding-agent/package.json" with { type: "json" };
 import piDarkTheme from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json" with { type: "json" };
 import piLightTheme from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json" with { type: "json" };
@@ -224,6 +225,14 @@ export async function runEmbeddedPi(args: string[]): Promise<void> {
   }
   if (!process.env[ENV_PHANTOMBOT_PI_COMMAND]) {
     process.env[ENV_PHANTOMBOT_PI_COMMAND] = JSON.stringify(embeddedPiCommand());
+  }
+  // ISOLATION for hand-runs too: `phantombot __pi` IS the embedded engine, so
+  // it gets the same phantombot-owned agent dir the harness gives it (the
+  // harness sets this per-spawn; a hand-run would otherwise fall back to the
+  // user's ~/.pi). An explicit override wins.
+  if (!process.env[ENV_PI_AGENT_DIR]) {
+    process.env[ENV_PI_AGENT_DIR] = nativeAgentDir();
+    mkdirSync(nativeAgentDir(), { recursive: true });
   }
   // Pi reads process.argv in places besides the args it is handed; make it
   // look exactly like `pi <args>`.

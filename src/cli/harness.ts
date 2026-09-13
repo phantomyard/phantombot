@@ -44,7 +44,12 @@ import {
   resolveRoutingProvider,
   type RoutingChoices,
 } from "../lib/piRouting.ts";
-import { setPersonaSecret, unsetPersonaSecret } from "../lib/vaultSecrets.ts";
+import {
+  getPersonaSecret,
+  setPersonaSecret,
+  unsetPersonaSecret,
+} from "../lib/vaultSecrets.ts";
+import { nativeAgentDir, nativeAgentEnv } from "../lib/nativeAgentDir.ts";
 import { writePiApiKey } from "../lib/piAuthStore.ts";
 import { saveHarnessBins } from "../state.ts";
 import { EMBEDDED_PI_VERSION, embeddedPiCommand } from "../lib/embeddedPi.ts";
@@ -556,7 +561,7 @@ async function configureNative(
   // scopes the key prompt label and the model pickers. Query the model catalog
   // once here: it yields the models the routing wizard will filter (and marks
   // which providers are already keyed), so we don't shell out twice.
-  let models = await listPiModels(piCommand);
+  let models = await listPiModels(piCommand, undefined, nativeAgentEnv());
   // Read the EFFECTIVE routing for the persona being configured, not the raw
   // global file: with a persona layer the file on disk is only half the answer
   // (its own config.toml wins per key), and pre-selecting the host's models for
@@ -569,36 +574,59 @@ async function configureNative(
 
   // Collect the API key, LABELLED by the chosen provider so it's unambiguous
   // what to paste ("openrouter API key:" vs a bare "Pi API key:"). Blank =
-  // leave whatever's already in ~/.env (or nothing) — we never force a key,
-  // because the local-store fallback covers the absent case.
+  // keep what is stored — but a native slot with NO key anywhere cannot run
+  // (native never reads the host ~/.pi; 2026-09-13 Atlas), so the loop below
+  // refuses to finish until a key resolves. The "use Pi's own" escape hatch
+  // exists only for pi-host, which this native flow is not.
   const keyLabel = provider ? `${provider} API key` : "Pi API key";
-  const apiKey = await q.password({
-    message: `${keyLabel} (passed per-turn; blank to keep current / use Pi's own)`,
-  });
-  if (apiKey === undefined) return true;
-  // Blank means "keep current" ONLY when the provider is unchanged. The api-key
-  // is provider-scoped (threaded onto `--api-key` alongside `--provider`), so a
-  // blank key after a provider switch/clear must DROP the stale key — otherwise
-  // the old provider's key is fired at the new `--provider` and auth fails. The
-  // decision is a pure, tested function; here we just enact it.
-  const keyWrite = resolvePiApiKeyWrite(apiKey, provider, currentRouting.provider);
   const apiKeyName = instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY;
-  if (keyWrite.action === "set") {
-    const stored = await setPersonaSecret(
+  const storedBefore = await getPersonaSecret(config, apiKeyName, target.persona);
+  let apiKey: string | undefined;
+  let keyWrite: ReturnType<typeof resolvePiApiKeyWrite>;
+  for (;;) {
+    apiKey = await q.password({
+      message: `${keyLabel} (passed per-turn; blank to keep the stored key)`,
+    });
+    if (apiKey === undefined) return true;
+    // Blank means "keep current" ONLY when the provider is unchanged. The
+    // api-key is provider-scoped (threaded onto `--api-key` alongside
+    // `--provider`), so a blank key after a provider switch/clear must DROP
+    // the stale key — otherwise the old provider's key is fired at the new
+    // `--provider` and auth fails. The decision is a pure, tested function;
+    // here we just enact it.
+    keyWrite = resolvePiApiKeyWrite(apiKey, provider, currentRouting.provider);
+    const candidate =
+      keyWrite.action === "set"
+        ? keyWrite.value
+        : keyWrite.action === "keep"
+          ? storedBefore
+          : undefined;
+    if (provider && !candidate) {
+      q.note(
+        `the ${role} brain cannot run without a key: native never reads the host's own pi configuration. Paste the ${keyLabel} (esc aborts without changing anything).`,
+        "API key required",
+      );
+      continue;
+    }
+    if (keyWrite.action === "set") {
+      const stored = await setPersonaSecret(
       config,
       apiKeyName,
       keyWrite.value,
       target.persona,
     );
     if (!stored.ok) {
+      // A native slot with no key anywhere cannot run (isolated agent dir, no
+      // host ~/.pi fallback) — so a failed save is not warn-and-continue; ask
+      // for the key again.
       q.note(
         `could not save ${apiKeyName} to the ${stored.persona} vault: ${stored.error}\n` +
-          "Pi will fall back to its own local store until this is fixed.",
-        "Pi API key",
+          "Paste the key again (esc aborts without changing anything).",
+        "API key required",
       );
-    } else {
-      q.note(`saved ${apiKeyName} to the ${stored.persona} vault`, "Pi API key");
+      continue;
     }
+    q.note(`saved ${apiKeyName} to the ${stored.persona} vault`, "Pi API key");
     // Refresh the catalog with the key we just took. On a fresh install the
     // first listing was EMPTY (Pi had no key, so `--list-models` printed "No
     // models available"), which is what forced the model pickers into free-text.
@@ -619,15 +647,20 @@ async function configureNative(
     // rather than dead-ending.
     let refreshed: PiModel[] = [];
     if (provider) {
-      const authWrite = await writePiApiKey(provider, keyWrite.value);
+      // Key the NATIVE engine's own auth store (the isolated agent dir) so the
+      // embedded `--list-models` sees the provider. NEVER the user's ~/.pi —
+      // native must not read or write the host pi's files (2026-09-13 Atlas).
+      const authWrite = await writePiApiKey(provider, keyWrite.value, {
+        agentDir: nativeAgentDir(),
+      });
       if (authWrite.ok && !authWrite.skipped) {
         q.note(
-          `also keyed Pi's own store (${authWrite.path}) so \`pi --list-models\` works`,
+          `also keyed the native engine's store (${authWrite.path}) so model listings work`,
           "Pi API key",
         );
       } else if (!authWrite.ok) {
         q.note(
-          `couldn't write Pi's auth store: ${authWrite.reason}\n` +
+          `couldn't write the native engine's auth store: ${authWrite.reason}\n` +
             `falling back to an env-injected model refresh`,
           "Pi API key",
         );
@@ -636,18 +669,20 @@ async function configureNative(
       // just wrote the key, or an oauth login already did (skipped ⇒ the
       // provider is keyed, so a plain listing is populated).
       if (authWrite.ok) {
-        refreshed = await listPiModels(piCommand);
+        refreshed = await listPiModels(piCommand, undefined, nativeAgentEnv());
       }
     }
     if (refreshed.length === 0) {
       const envVar = provider ? providerEnvVar(provider) : undefined;
       if (envVar) {
         refreshed = await listPiModels(piCommand, undefined, {
+          ...nativeAgentEnv(),
           [envVar]: keyWrite.value,
         });
       }
     }
     if (refreshed.length > 0) models = refreshed;
+    break;
   } else if (keyWrite.action === "clear") {
     await unsetPersonaSecret(
       config,
@@ -659,6 +694,8 @@ async function configureNative(
         `so Pi falls back to its own local store`,
       "Pi API key",
     );
+    break;
+  }
   }
 
   // Straight into custom routing — Pi is already the chosen harness, so we don't

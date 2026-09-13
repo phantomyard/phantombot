@@ -90,7 +90,12 @@ import { openMemoryStore } from "../memory/store.ts";
 import { VERSION } from "../version.ts";
 import { runDoctor } from "./doctor.ts";
 import { spawnNightlySweep } from "../lib/nightlyTrigger.ts";
-import { ensureRoutingExtension } from "../lib/piExtensionProvision.ts";
+import {
+  effectiveNativeRouting,
+  ensureRoutingExtension,
+} from "../lib/piExtensionProvision.ts";
+import { copyNativeKeysForServedPersonas } from "../lib/nativeKeyCopy.ts";
+import { loadState, saveState } from "../state.ts";
 import { reconcileEditorConnectors } from "../connectors/acp/autoInstall.ts";
 
 /**
@@ -861,8 +866,64 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // Gated to the real `phantombot` binary (same gate doctor uses for its
   // filesystem-touching checks) so `bun test`/dev never stamp the dev box's
   // real ~/.pi.
+  // NATIVE KEY COPY PASS (the 2026-09-13 Atlas fix): before anything depends
+  // on native, copy each native slot's provider key from its legacy homes
+  // (the host ~/.pi auth store, an OPENROUTER row, a sibling slot) into the
+  // persona vault. Idempotent and best-effort; a slot that resolves nowhere
+  // is left for doctor's FAIL + --fix prompt, and a native turn fails with
+  // an error that names the exact fix.
   if (isPhantombotBinary()) {
-    ensureRoutingExtension(config.harnesses?.pi?.routing).then(
+    try {
+      const audited = await copyNativeKeysForServedPersonas({
+        config,
+        personas: servedPersonasOf(config),
+      });
+      for (const { persona, result } of audited) {
+        for (const copy of result.copied) {
+          log.info("run: copied native harness key into the vault", {
+            persona,
+            harness: copy.id,
+            secret: copy.secretName,
+            source: copy.from,
+          });
+        }
+      }
+    } catch (e) {
+      log.warn("run: native key copy pass failed", { error: (e as Error).message });
+    }
+
+    // Prune harness_bins entries for pi ids that no chain uses any more
+    // (legacy `pi`, pi-primary/pi-fallback pointing at an UNINSTALLED host pi
+    // after a native migration). state.json is a cache; stale rows there made
+    // instance bin resolution fall back to a deleted binary.
+    try {
+      const state = await loadState();
+      const bins = state.harness_bins ?? {};
+      const chainIds = new Set<string>([
+        ...config.harnesses.chain,
+        ...Object.values(config.harnesses.personas ?? {}).flatMap((e) => e.chain),
+      ]);
+      const stale = Object.keys(bins).filter(
+        (k) => /^pi(-|$)/.test(k) && !chainIds.has(k),
+      );
+      if (stale.length > 0) {
+        const next = { ...bins };
+        for (const k of stale) delete next[k];
+        await saveState({ ...state, harness_bins: next });
+        log.info("run: pruned stale pi harness_bins", { removed: stale });
+      }
+    } catch (e) {
+      log.warn("run: harness_bins prune failed", { error: (e as Error).message });
+    }
+  }
+
+  if (isPhantombotBinary()) {
+    // The managed extension is stamped for the EFFECTIVE native routing: the
+    // top-level [harnesses.pi.routing] table OR a native instance's own
+    // routing (pi-primary/pi-fallback). Consulted at startup for the default
+    // persona — the stamped sibling is that persona's fallback; per-turn reads
+    // are persona-scoped via PHANTOMBOT_ROUTING_JSON.
+    ensureRoutingExtension(effectiveNativeRouting(config)).then(
       (r) => {
         if (r.action !== "unchanged") {
           log.info("run: provisioned pi capability-routing extension", {

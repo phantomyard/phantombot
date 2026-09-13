@@ -43,6 +43,13 @@ import {
   type HarnessConfigFileResult,
 } from "../lib/harnessConfigRepair.ts";
 import { piEngineFor, routingIsConfigured } from "../lib/harnessReconcile.ts";
+import { piInstanceSecretName } from "../harnesses/buildChain.ts";
+import { ENV_PI_API_KEY } from "../lib/piRouting.ts";
+import {
+  copyNativeKeys,
+  nativeSlotsFor,
+  type NativeKeyCopyResult,
+} from "../lib/nativeKeyCopy.ts";
 import {
   embeddedPiAssetsStatus,
   embeddedPiPackageDir,
@@ -91,7 +98,7 @@ import {
 } from "../channels/phantomchat/personaStore.ts";
 import { identityFromNsec } from "../lib/nostrIdentity.ts";
 import { readPersonaIdentityNsec } from "../lib/personaIdentity.ts";
-import { openVaultWithSecret, vaultPath } from "../lib/vault.ts";
+import { openPersonaVault, openVaultWithSecret, vaultPath } from "../lib/vault.ts";
 import { saveHarnessBins } from "../state.ts";
 import {
   BunSystemctlRunner,
@@ -416,6 +423,20 @@ export interface DoctorReport {
     files: HarnessConfigFileResult[];
     warnings: string[];
     nativeAssets?: { dir: string; drifted: string[]; repaired: boolean };
+    /**
+     * Per native slot: can the embedded engine actually authenticate? A slot
+     * with no resolvable provider key is a FAIL (it used to report "ok" while
+     * every native turn died with pi's "No API key found" — the 2026-09-13
+     * Atlas defect). `repairedWith` names where this run's key came from.
+     */
+    nativeKeys?: {
+      persona?: string;
+      id: string;
+      secretName: string;
+      provider?: string;
+      resolved: boolean;
+      repairedWith?: string;
+    }[];
   };
   /**
    * Managed Pi capability-routing extension. `shouldExist` = a routable
@@ -1278,6 +1299,12 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // (and provisioning is fire-and-forget, warn-only), so the daemon never dies
   // on it. The "phantombot must never exit 1 so a revert can ship" invariant
   // lives in the service path and stays intact.
+  // A native brain with NO resolvable provider key is a failure (it used to
+  // report "ok" while every native turn died with "No API key found" — the
+  // 2026-09-13 Atlas defect). `repairedWith` marks a key this run supplied.
+  const nativeKeysBroken = !!harnessConfigReport?.nativeKeys?.some(
+    (k) => !k.resolved && !k.repairedWith,
+  );
   const piExtensionBroken =
     !!piExtensionReport &&
     piExtensionReport.drifted &&
@@ -1326,9 +1353,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
           ? 1
           : harnessesBroken
             ? 1
-            : piExtensionBroken
+            : nativeKeysBroken
               ? 1
-              : editorConnectorsBroken
+              : piExtensionBroken
+                ? 1
+                : editorConnectorsBroken
                 ? 1
                 : telegramBroken
                   ? 1
@@ -1610,6 +1639,18 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
         );
       }
     }
+    for (const k of r.nativeKeys ?? []) {
+      const where = k.persona ? `persona '${k.persona}'` : "default chain";
+      if (k.resolved) {
+        const how = k.repairedWith ? ` (${k.repairedWith})` : "";
+        out.write(`  native key (${where}, ${k.id}): OK — ${k.secretName}${how}\n`);
+      } else {
+        out.write(
+          `  native key (${where}, ${k.id}): FAIL — no API key found for provider '${k.provider ?? "?"}' and native never reads the host's own pi configuration\n` +
+            `    → run \`phantombot doctor --fix\` (or Configure → Brain) and paste the ${k.provider ?? ""} API key once; it is saved for every native brain (${k.secretName})\n`,
+        );
+      }
+    }
     if (r.nativeAssets) {
       const a = r.nativeAssets;
       out.write(
@@ -1839,11 +1880,58 @@ async function computeHarnessConfigReport(
     }
   }
 
+  // Native key audit BEFORE the reconcile, in both modes:
+  //   repair   — the copy pass WRITES the key into each persona's vault first,
+  //              so the reconcile decision sees post-copy resolvability (the
+  //              #549 upgrade hole: it switched legacy pi to native without
+  //              ever copying the key).
+  //   --no-repair — a dry run resolves sources without writing, so the report
+  //              can still say what WOULD resolve and what is missing.
+  // The host chain is audited against the default persona's vault (it is the
+  // persona that serves it).
+  const keyResults = new Map<string | undefined, NativeKeyCopyResult>();
+  const auditKeys = async (
+    key: string | undefined,
+    auditPersona: string | undefined,
+    cfg: Config,
+    dryRun: boolean,
+  ): Promise<void> => {
+    if (nativeSlotsFor(cfg, auditPersona).length === 0) return;
+    keyResults.set(
+      key,
+      await copyNativeKeys({
+        config: cfg,
+        persona: auditPersona,
+        personaDir: personaDir(cfg, auditPersona ?? cfg.defaultPersona),
+        dryRun,
+      }),
+    );
+  };
+  await auditKeys(undefined, undefined, config, !repair);
+  for (const name of names) {
+    try {
+      await auditKeys(name, name, await loadConfig(name), !repair);
+    } catch {
+      // Unreadable persona config: reconcile handles the reporting.
+    }
+  }
+  const keyResolvable = (
+    p: string | undefined,
+    instanceId: string | undefined,
+  ): boolean | undefined => {
+    const result = keyResults.get(p);
+    if (!result) return undefined;
+    const secretName = instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY;
+    const slot = result.slots.find((s) => s.secretName === secretName);
+    return slot ? slot.source !== "missing" : undefined;
+  };
+
   const results = await reconcileHarnessConfigFiles({
     files,
     routingConfigured: (p) =>
       p === undefined ? hostRouting : (routingByPersona.get(p) ?? hostRouting),
     hostPiInstalled,
+    nativeKeyResolvable: keyResolvable,
     repair,
   });
 
@@ -1874,6 +1962,58 @@ async function computeHarnessConfigReport(
     }
   }
 
+  // Keys doctor could not resolve from ANY source (vault rows, the legacy auth
+  // store, sibling slots, OPENROUTER_API_KEY). On an interactive repair run,
+  // ask ONCE per persona and save the answer into EVERY missing native slot of
+  // that persona — the operator should never chase one secret per harness.
+  // Non-interactive runs skip the prompt; the report tells the operator the
+  // exact command instead.
+  const repairedWith = new Map<string | undefined, string>();
+  if (repair) {
+    for (const [p, r] of [...keyResults]) {
+      if (r.stillMissing.length === 0) continue;
+      const promptCfg = p === undefined ? config : await loadConfig(p);
+      const where = p === undefined ? `the default persona's chain` : `persona '${p}'`;
+      const entered = await promptForNativeKey(
+        where,
+        r.stillMissing.map((m) => m.provider ?? "this brain's"),
+      );
+      if (!entered) continue;
+      const target = personaDir(promptCfg, p ?? promptCfg.defaultPersona);
+      const vault = await openPersonaVault(target);
+      try {
+        for (const m of r.stillMissing) vault.set(m.secretName, entered);
+      } finally {
+        vault.close();
+      }
+      repairedWith.set(p, "key entered at the prompt");
+      keyResults.set(
+        p,
+        await copyNativeKeys({
+          config: promptCfg,
+          persona: p ?? undefined,
+          personaDir: target,
+        }),
+      );
+    }
+  }
+
+  const nativeKeys: NonNullable<DoctorReport["harnessConfig"]>["nativeKeys"] = [];
+  for (const [p, r] of keyResults) {
+    for (const slot of r.slots) {
+      nativeKeys.push({
+        persona: p,
+        id: slot.id,
+        secretName: slot.secretName,
+        provider: slot.provider,
+        resolved: slot.source !== "missing",
+        ...(repairedWith.has(p) && slot.source !== "missing"
+          ? { repairedWith: repairedWith.get(p) }
+          : {}),
+      });
+    }
+  }
+
   let nativeAssets: NonNullable<DoctorReport["harnessConfig"]>["nativeAssets"];
   if (usesNative && isCompiledBinary()) {
     const dir = embeddedPiPackageDir(xdgDataHome());
@@ -1888,10 +2028,40 @@ async function computeHarnessConfigReport(
     }
   }
 
-  if (results.length === 0 && warnings.length === 0 && !nativeAssets) {
+  if (
+    results.length === 0 &&
+    warnings.length === 0 &&
+    !nativeAssets &&
+    (nativeKeys.length === 0 || nativeKeys.every((k) => k.resolved))
+  ) {
     return undefined;
   }
-  return { files: results, warnings, ...(nativeAssets ? { nativeAssets } : {}) };
+  return {
+    files: results,
+    warnings,
+    ...(nativeKeys.length > 0 ? { nativeKeys } : {}),
+    ...(nativeAssets ? { nativeAssets } : {}),
+  };
+}
+
+/**
+ * One interactive key prompt for native slots doctor could not resolve from
+ * any source. Hidden input, no echo; esc/blank declines and the report names
+ * the exact command instead. Non-interactive callers (no TTY) always decline.
+ */
+async function promptForNativeKey(
+  where: string,
+  providers: readonly string[],
+): Promise<string | undefined> {
+  if (!process.stdin.isTTY) return undefined;
+  const p = await import("@clack/prompts");
+  const unique = [...new Set(providers.filter(Boolean))].join(", ") || "the brain's";
+  const key = await p.password({
+    message: `No API key found for ${where} (provider: ${unique}). Paste the API key — it is saved once for every native brain and never displayed:`,
+  });
+  if (p.isCancel(key)) return undefined;
+  const trimmed = (key as string | undefined)?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 async function computeHarnessReport(
