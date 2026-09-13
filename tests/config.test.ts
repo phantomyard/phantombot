@@ -83,6 +83,7 @@ const ENV_KEYS = [
   "PHANTOMBOT_DURABLE_FACTS_MAX_EXTRACT_PER_TURN",
   "PHANTOMBOT_DURABLE_FACTS_LEASE_MS",
   "PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS",
+  "PHANTOMBOT_HARNESS_TOOL_TIMEOUT_MS",
   "PHANTOMBOT_STATE",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
@@ -141,6 +142,7 @@ describe("loadConfig — defaults (no file)", () => {
     expect(c.defaultPersona).toBe("phantom");
     expect(c.harnessIdleTimeoutMs).toBe(300_000);
     expect(c.harnessHardTimeoutMs).toBe(3_600_000);
+    expect(c.harnessToolTimeoutMs).toBe(1_200_000);
     expect(c.harnesses.chain).toEqual(["claude"]);
     expect(c.harnesses.claude).toEqual({
       bin: "claude",
@@ -199,6 +201,20 @@ describe("loadConfig — defaults (no file)", () => {
     expect(c.personasDir).toBe(join(workdir, "data", "phantombot", "personas"));
     expect(c.memoryDbPath).toBe(join(workdir, "data", "phantombot", "memory.sqlite"));
     expect(c.configPath).toBe(join(workdir, "config", "phantombot", "config.toml"));
+  });
+});
+
+describe("loadConfig — tool timeout", () => {
+  test("reads TOML seconds and clamps to the hard timeout", async () => {
+    const path = join(workdir, "config", "phantombot", "config.toml");
+    await mkdir(join(workdir, "config", "phantombot"), { recursive: true });
+    await writeFile(path, "harness_tool_timeout_s = 900\nharness_hard_timeout_s = 600\n");
+    expect((await loadConfig()).harnessToolTimeoutMs).toBe(600_000);
+  });
+
+  test("environment milliseconds override TOML", async () => {
+    process.env.PHANTOMBOT_HARNESS_TOOL_TIMEOUT_MS = "450000";
+    expect((await loadConfig()).harnessToolTimeoutMs).toBe(450_000);
   });
 });
 

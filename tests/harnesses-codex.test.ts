@@ -3,6 +3,7 @@ import { chmod } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   CodexHarness,
+  codexToolBoundary,
   isCodexSubagentActivity,
   parseCodexEvent,
   PHANTOMBOT_INJECTED_CODEX_FLAGS,
@@ -13,6 +14,14 @@ import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
 
 const FAKE_CODEX = resolve(__dirname, "fixtures/fake-codex.sh");
+
+test("codex tool boundaries pair parallel item ids and ignore unmatched events", () => {
+  expect(codexToolBoundary({ type: "item.started", item: { id: "a", type: "tool_call" } })).toEqual({ phase: "start", id: "a" });
+  expect(codexToolBoundary({ type: "item.started", item: { id: "b", type: "tool_call" } })).toEqual({ phase: "start", id: "b" });
+  expect(codexToolBoundary({ type: "item.completed", item: { id: "b", type: "tool_call" } })).toEqual({ phase: "end", id: "b" });
+  expect(codexToolBoundary({ type: "item.completed", item: { type: "tool_call" } })).toBeUndefined();
+  expect(codexToolBoundary({ type: "item.started", item: { id: "exec", type: "command_execution" } })).toEqual({ phase: "start", id: "exec" });
+});
 
 function newRequest(overrides: Partial<HarnessRequest> = {}): HarnessRequest {
   return {
@@ -208,11 +217,7 @@ describe("CodexHarness.invoke", () => {
     expect(done.finalText).toContain("late finish");
   });
 
-  // Regression for #123: after a tool has started, generic heartbeat noise
-  // must NOT keep a stuck turn alive forever. The fixture emits heartbeats
-  // spaced under the idle window after the tool-start signal; the harness must
-  // idle-kill before the late agent_message lands.
-  test("tool-phase heartbeats do not reset idle -> idle-killed before finish", async () => {
+  test("silent in-flight tool suspends idle until completion", async () => {
     process.env.FAKE_CODEX_MODE = "tool-heartbeats";
     const chunks = await collect(
       mkHarness().invoke(
@@ -221,14 +226,11 @@ describe("CodexHarness.invoke", () => {
     );
     expect(chunks.some((c) => c.type === "heartbeat")).toBe(true);
     expect(chunks.some((c) => c.type === "progress")).toBe(true);
-    expect(chunks.some((c) => c.type === "done")).toBe(false);
+    expect(chunks.some((c) => c.type === "done")).toBe(true);
     expect(
       chunks.some((c) => c.type === "text" && c.text.includes("late finish")),
-    ).toBe(false);
-    const err = chunks.find((c) => c.type === "error");
-    if (err?.type !== "error") throw new Error("expected idle error chunk");
-    expect(err.error).toContain("no output");
-    expect(err.recoverable).toBe(true);
+    ).toBe(true);
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
   });
 
   // Counterpart to the heartbeat test: productive text spaced under the idle
