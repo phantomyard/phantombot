@@ -72,3 +72,22 @@ describe("p2p frame contract", () => {
     expect(parseEventFrame(frame)).toBeNull();
   });
 });
+
+
+import { buildOkFrame as _buildOk, parseOkFrame as _parseOk } from "../src/p2p/frame.ts";
+
+describe("P2P OK receipt frames", () => {
+  test("round-trips as the NIP-01 relay OK shape", () => {
+    expect(JSON.parse(_buildOk("abc"))).toEqual(["OK", "abc", true, "p2p"]);
+    expect(_parseOk(_buildOk("abc"))).toEqual({ eventId: "abc", accepted: true });
+  });
+
+  test("rejects anything that is not a well-formed OK", () => {
+    expect(_parseOk('["EVENT",{}]')).toBeNull();
+    expect(_parseOk('["OK"')).toBeNull();
+    expect(_parseOk('["OK",5,true]')).toBeNull();
+    expect(_parseOk('["OK","",true]')).toBeNull();
+    expect(_parseOk('["OK","id","yes"]')).toBeNull();
+    expect(_parseOk(JSON.stringify(["OK", "x".repeat(129), true]))).toBeNull();
+  });
+});

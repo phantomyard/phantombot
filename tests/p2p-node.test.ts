@@ -315,3 +315,128 @@ describe("P2PNode routing", () => {
     expect(stats.peers).toEqual([{ peerHex, state: "connected" }]);
   });
 });
+
+describe("P2PNode delivery receipts (#542)", () => {
+  const us = "a".repeat(64);
+  const peerHex = "f".repeat(64);
+
+  function receiptNode(ackTimeoutMs = 60) {
+    const signaling = new FakeSignaling();
+    const bridge = new FakeBridge();
+    const peers: FakePeer[] = [];
+    let outbound!: (frame: ParsedEventFrame, raw: string) => Promise<boolean>;
+    const node = new P2PNode({
+      ourPubHex: us,
+      iceServers: [],
+      signaling,
+      ackTimeoutMs,
+      createBridge: (onOutbound) => {
+        outbound = onOutbound;
+        bridge.outbound = onOutbound;
+        return bridge;
+      },
+      createPeer: (opts) => {
+        const p = new FakePeer(opts);
+        peers.push(p);
+        return p;
+      },
+    });
+    node.start();
+    const send = (id: string, to = peerHex) =>
+      outbound(
+        { wrap: { id, tags: [["p", to]] } as unknown as NTNostrEvent, recipientHex: to },
+        `["EVENT",{"id":"${id}"}]`,
+      );
+    return { node, bridge, peers, send, peerFor: (hex: string) => peers.find((p) => p.peerHex === hex) };
+  }
+
+  function wrapTo(to: string, id = "e".repeat(64)): string {
+    return JSON.stringify([
+      "EVENT",
+      { id, pubkey: "b".repeat(64), sig: "c".repeat(128), content: "x", kind: 1059, created_at: 1, tags: [["p", to]] },
+    ]);
+  }
+
+  test("an OK from the recipient peer resolves the send true, and never reaches the bridge", async () => {
+    const { bridge, send, peerFor } = receiptNode();
+    const first = send("w0"); // creates the peer
+    peerFor(peerHex)!.transition("connected");
+    await first;
+    const pending = send("w1");
+    peerFor(peerHex)!.deliver('["OK","w1",true,"p2p"]');
+    expect(await pending).toBe(true);
+    expect(bridge.broadcasts).toHaveLength(0);
+  });
+
+  test("no receipt within the window resolves false", async () => {
+    const { send, peerFor } = receiptNode(30);
+    const pending = send("w1");
+    peerFor(peerHex)!.transition("connected");
+    expect(await pending).toBe(false);
+  });
+
+  test("an OK from a DIFFERENT peer cannot confirm the send", async () => {
+    const other = "d".repeat(64);
+    const { send, peerFor } = receiptNode(40);
+    const pending = send("w1");
+    peerFor(peerHex)!.transition("connected");
+    // Bring up a second peer and have IT ack our id.
+    void send("x", other);
+    peerFor(other)!.transition("connected");
+    peerFor(other)!.deliver('["OK","w1",true,"p2p"]');
+    expect(await pending).toBe(false);
+  });
+
+  test("a rejected OK is not a delivery", async () => {
+    const { send, peerFor } = receiptNode(30);
+    const pending = send("w1");
+    peerFor(peerHex)!.transition("connected");
+    peerFor(peerHex)!.deliver('["OK","w1",false,"blocked"]');
+    expect(await pending).toBe(false);
+  });
+
+  test("a dropped peer releases its waiters immediately", async () => {
+    const { send, peerFor } = receiptNode(60_000);
+    const pending = send("w1");
+    peerFor(peerHex)!.transition("failed");
+    expect(await pending).toBe(false);
+  });
+
+  test("a self-addressed wrap resolves false without a peer", async () => {
+    const { send, peers } = receiptNode();
+    expect(await send("w1", us)).toBe(false);
+    expect(peers).toHaveLength(0);
+  });
+
+  test("an inbound EVENT addressed to us is ingested, then acknowledged on the same channel", () => {
+    const { bridge, send, peerFor } = receiptNode();
+    void send("w0");
+    const peer = peerFor(peerHex)!;
+    peer.transition("connected");
+    peer.sent.length = 0;
+    peer.deliver(wrapTo(us, "e".repeat(64)));
+    expect(bridge.broadcasts).toHaveLength(1);
+    expect(peer.sent).toEqual([JSON.stringify(["OK", "e".repeat(64), true, "p2p"])]);
+  });
+
+  test("no listener took the frame → no receipt", () => {
+    const { bridge, send, peerFor } = receiptNode();
+    void send("w0");
+    const peer = peerFor(peerHex)!;
+    peer.transition("connected");
+    peer.sent.length = 0;
+    bridge.clients = 0;
+    peer.deliver(wrapTo(us));
+    expect(peer.sent).toHaveLength(0);
+  });
+
+  test("a wrap addressed to someone else is not acknowledged", () => {
+    const { send, peerFor } = receiptNode();
+    void send("w0");
+    const peer = peerFor(peerHex)!;
+    peer.transition("connected");
+    peer.sent.length = 0;
+    peer.deliver(wrapTo("9".repeat(64)));
+    expect(peer.sent).toHaveLength(0);
+  });
+});

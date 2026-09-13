@@ -85,6 +85,27 @@ export const QUARANTINE_JITTER = 0.1;
 export const MIN_PUBLISH_RELAYS = 3;
 
 /**
+ * SLOW-relay quarantine (the "sensitive to bad relays" fix). Read-back catches
+ * relays that DROP what we send; it cannot see relays that store everything but
+ * take seconds to acknowledge a publish. Those used to cost every send the full
+ * connect + ack timeout, because the send waited for every relay to settle.
+ * The send path no longer waits for them (see transport.publishWrap), but a
+ * consistently slow relay still earns nothing in the publish set — so it is
+ * quarantined the same way a dropping one is.
+ *
+ * Latency is an EWMA of publish-accept time per relay. A publish that failed or
+ * timed out is scored at its elapsed time, so a relay that times out scores as
+ * slow, never as fast. A relay needs SLOW_RELAY_MIN_SAMPLES observations before
+ * it can be judged, so one cold-connect spike never quarantines anything.
+ */
+export const SLOW_RELAY_ACCEPT_MS = 2000;
+export const SLOW_RELAY_MIN_SAMPLES = 5;
+export const LATENCY_EWMA_ALPHA = 0.3;
+
+/** Why a relay is out of the publish set. */
+export type QuarantineReason = "dropping" | "slow";
+
+/**
  * Per-relay health record. Deliberately small and JSON-shaped: it is cheap to
  * keep in memory, and cheap to persist later if we ever want health to survive
  * a restart (we currently don't — a restart is a reasonable moment to give
@@ -100,6 +121,12 @@ export interface RelayHealthRecord {
   quarantinedUntil: number;
   /** How many quarantines this relay has served — drives the backoff. */
   quarantineCount: number;
+  /** Why the current (or last) quarantine was imposed. */
+  quarantineReason: QuarantineReason | null;
+  /** EWMA of publish-accept latency in ms; 0 until the first sample. */
+  acceptEwmaMs: number;
+  /** Accept samples since the last quarantine (gates the slow judgement). */
+  acceptSamples: number;
 }
 
 const emptyRecord = (): RelayHealthRecord => ({
@@ -108,6 +135,9 @@ const emptyRecord = (): RelayHealthRecord => ({
   dropped: 0,
   quarantinedUntil: 0,
   quarantineCount: 0,
+  quarantineReason: null,
+  acceptEwmaMs: 0,
+  acceptSamples: 0,
 });
 
 /**
@@ -218,9 +248,11 @@ export class RelayHealthTracker {
         });
       }
       r.strikes = 0;
-      // A relay that confirms while quarantined has proved itself — let it
-      // straight back in rather than making it sit out the rest of the span.
-      if (r.quarantinedUntil > now) {
+      // A relay that confirms while quarantined for DROPPING has proved itself
+      // — let it straight back in rather than making it sit out the rest of the
+      // span. A SLOW relay proves nothing by storing (it always stored); it
+      // serves its span.
+      if (r.quarantinedUntil > now && r.quarantineReason === "dropping") {
         r.quarantinedUntil = 0;
         this.announced.delete(url);
         this.log.info("phantomchat: relay released from quarantine early", {
@@ -235,6 +267,45 @@ export class RelayHealthTracker {
     if (r.strikes < READBACK_STRIKE_THRESHOLD) return;
     if (r.quarantinedUntil > now) return; // already serving one
 
+    r.strikes = 0; // streak consumed by the quarantine
+    this.quarantine(url, r, "dropping", now);
+  }
+
+  /**
+   * Record how long one publish took to be accepted by `url`. `accepted` false
+   * means it failed or timed out; `elapsedMs` is still the time it cost us, so
+   * a relay that times out scores as slow. Feeds the slow-relay quarantine.
+   */
+  recordAccept(
+    url: string,
+    elapsedMs: number,
+    accepted: boolean,
+    now = Date.now(),
+  ): void {
+    const r = this.rec(url);
+    // A failure always scores ABOVE the slow threshold: a relay that rejects
+    // instantly (OK:false) is useless for delivery, not fast. Scoring it AT the
+    // threshold would never trip the strict `>` judgement below.
+    const sample = accepted
+      ? Math.max(0, elapsedMs)
+      : Math.max(elapsedMs, SLOW_RELAY_ACCEPT_MS * 2);
+    r.acceptEwmaMs = r.acceptSamples === 0 && r.acceptEwmaMs === 0
+      ? sample
+      : LATENCY_EWMA_ALPHA * sample + (1 - LATENCY_EWMA_ALPHA) * r.acceptEwmaMs;
+    r.acceptSamples++;
+    if (r.acceptSamples < SLOW_RELAY_MIN_SAMPLES) return;
+    if (r.acceptEwmaMs <= SLOW_RELAY_ACCEPT_MS) return;
+    if (r.quarantinedUntil > now) return; // already serving one
+    this.quarantine(url, r, "slow", now);
+  }
+
+  /** Impose a quarantine span with backoff + jitter. The one place spans are set. */
+  private quarantine(
+    url: string,
+    r: RelayHealthRecord,
+    reason: QuarantineReason,
+    now: number,
+  ): void {
     const span = Math.min(
       QUARANTINE_BASE_MS * Math.pow(2, r.quarantineCount),
       QUARANTINE_MAX_MS,
@@ -242,14 +313,19 @@ export class RelayHealthTracker {
     const jittered = Math.round(span * this.jitter());
     r.quarantinedUntil = now + jittered;
     r.quarantineCount++;
-    r.strikes = 0; // streak consumed by the quarantine
+    r.quarantineReason = reason;
+    // A released relay gets a fresh set of samples before it can be judged slow
+    // again — otherwise its stale EWMA re-quarantines it on the first publish.
+    r.acceptSamples = 0;
     this.announced.delete(url);
     this.log.info("phantomchat: relay quarantined from publish set", {
       relay: url,
+      reason,
       forMinutes: Math.round(jittered / 60000),
       offence: r.quarantineCount,
       confirmed: r.confirmed,
       dropped: r.dropped,
+      acceptEwmaMs: Math.round(r.acceptEwmaMs),
     });
   }
 
@@ -274,9 +350,16 @@ export class RelayHealthTracker {
     const active = ranked.filter((url) => !this.isQuarantined(url, now));
     if (active.length >= MIN_PUBLISH_RELAYS) return active;
 
-    // Below the floor — promote the best quarantined relays back, in rank
-    // order, until we hit it (or run out of relays entirely).
-    const promoted = ranked.filter((url) => this.isQuarantined(url, now));
+    // Below the floor — promote the best quarantined relays back until we hit
+    // it (or run out of relays entirely). SLOW relays are promoted before
+    // DROPPING ones: a slow relay still stores what we send, and since the send
+    // path no longer waits on it, holding the floor with it costs no latency.
+    // Within each group the deterministic rank order is kept (property 4).
+    const quarantined = ranked.filter((url) => this.isQuarantined(url, now));
+    const promoted = [
+      ...quarantined.filter((u) => this.health.get(u)?.quarantineReason === "slow"),
+      ...quarantined.filter((u) => this.health.get(u)?.quarantineReason !== "slow"),
+    ];
     const filled = [...active];
     for (const url of promoted) {
       if (filled.length >= MIN_PUBLISH_RELAYS) break;

@@ -36,6 +36,16 @@ import type { NTNostrEvent } from "../lib/nostrCrypto.ts";
 import { buildEventFrame, parseEventFrame, type ParsedEventFrame } from "./frame.ts";
 import type { BridgePort } from "./node.ts";
 
+/**
+ * The node's outbound router. Resolves true once the recipient peer acknowledged
+ * the wrap over the data channel (a P2P delivery receipt), false when it didn't
+ * within the ack window, was self-addressed, or could not be routed.
+ */
+export type OutboundRouter = (
+  frame: ParsedEventFrame,
+  raw: string,
+) => unknown;
+
 /** The channel's inbound gift-wrap handler (its `onWrap`), or null when idle. */
 export type WrapSink = (event: NTNostrEvent) => void | Promise<void>;
 
@@ -51,7 +61,7 @@ export type WrapSink = (event: NTNostrEvent) => void | Promise<void>;
  */
 export class ChannelBridge implements BridgePort {
   /** The node's outbound router, injected by `buildP2PNode` via `setRouter`. */
-  private onOutbound: ((frame: ParsedEventFrame, raw: string) => void) | null = null;
+  private onOutbound: OutboundRouter | null = null;
   /** The channel's `onWrap`, registered while the channel is listening. */
   private sink: WrapSink | null = null;
 
@@ -66,7 +76,7 @@ export class ChannelBridge implements BridgePort {
    * Inject the node's outbound router. Called once by `buildP2PNode` inside the
    * node's `createBridge` seam, so the node stays transport-agnostic.
    */
-  setRouter(onOutbound: (frame: ParsedEventFrame, raw: string) => void): void {
+  setRouter(onOutbound: OutboundRouter): void {
     this.onOutbound = onOutbound;
   }
 
@@ -126,22 +136,33 @@ export class ChannelBridge implements BridgePort {
    * multi-device self-wrap, which has no remote peer). Best-effort: the relay
    * copy the channel also published is the guaranteed floor, so a routing miss
    * here just means that message went relay-only.
+   *
+   * Resolves true only when the peer ACKNOWLEDGED the wrap over the data channel
+   * (see frame.buildOkFrame). The transport uses that to stop waiting on relays
+   * for this send. Never rejects.
    */
-  routeOutbound(event: NTNostrEvent): void {
+  routeOutbound(event: NTNostrEvent): Promise<boolean> {
     const route = this.onOutbound;
-    if (!route) return; // node not wired yet (or disabled) — relay is the floor
+    // node not wired yet (or disabled) — relay is the floor
+    if (!route) return Promise.resolve(false);
     const raw = buildEventFrame(event);
     const parsed = parseEventFrame(raw);
     if (!parsed) {
-      // Our own reply wrap failed the frame validity check — should never happen
-      // (we just built it), but never let it throw into the publish path.
-      log.debug("[p2p] outbound wrap failed frame validation — relay-only");
-      return;
+      // Not a routable gift-wrap (a kind-0 profile, a typing tick) or a wrap
+      // that failed validation. Never let it throw into the publish path.
+      return Promise.resolve(false);
     }
     try {
-      route(parsed, raw);
+      return Promise.resolve(route(parsed, raw)).then(
+        (acked) => acked === true,
+        (err) => {
+          log.debug(`[p2p] outbound route rejected: ${String(err)}`);
+          return false;
+        },
+      );
     } catch (err) {
       log.debug(`[p2p] outbound route failed: ${String(err)}`);
+      return Promise.resolve(false);
     }
   }
 }
