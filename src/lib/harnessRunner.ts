@@ -135,7 +135,10 @@ export function createKillCoordinator(
   const graceMs = opts.graceMs ?? 5000;
   let cause: KillCause;
   let disposed = false;
-  const inFlightTools = new Map<string, ReturnType<typeof setTimeout>>();
+  const inFlightTools = new Map<
+    string,
+    ReturnType<typeof setTimeout> | undefined
+  >();
   let toolInFlightAtKill = false;
 
   const triggerKill = (newCause: Exclude<KillCause, undefined>): void => {
@@ -195,17 +198,17 @@ export function createKillCoordinator(
       if (cause || disposed || inFlightTools.has(id)) return;
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = undefined;
-      const timer = setTimeout(
-        () => triggerKill("tool"),
-        opts.toolTimeoutMs ?? opts.hardTimeoutMs ?? Number.MAX_SAFE_INTEGER,
-      );
+      const timeoutMs = opts.toolTimeoutMs ?? opts.hardTimeoutMs;
+      const timer = timeoutMs !== undefined && Number.isFinite(timeoutMs)
+        ? setTimeout(() => triggerKill("tool"), Math.max(0, timeoutMs))
+        : undefined;
       inFlightTools.set(id, timer);
     },
     toolEnd(id: string): void {
       if (disposed) return;
       const timer = inFlightTools.get(id);
-      if (!timer) return;
-      clearTimeout(timer);
+      if (!inFlightTools.has(id)) return;
+      if (timer) clearTimeout(timer);
       inFlightTools.delete(id);
       if (!cause && inFlightTools.size === 0) armIdle();
     },
@@ -222,7 +225,9 @@ export function createKillCoordinator(
       if (disposed) return;
       disposed = true;
       if (idleTimer) clearTimeout(idleTimer);
-      for (const timer of inFlightTools.values()) clearTimeout(timer);
+      for (const timer of inFlightTools.values()) {
+        if (timer) clearTimeout(timer);
+      }
       inFlightTools.clear();
       if (hardTimer) clearTimeout(hardTimer);
       if (startupTimer) clearTimeout(startupTimer);

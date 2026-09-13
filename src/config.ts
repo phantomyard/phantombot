@@ -1280,6 +1280,9 @@ export async function loadConfig(persona?: string): Promise<Config> {
     asInt(process.env.PHANTOMBOT_HARNESS_TOOL_TIMEOUT_MS) ??
     (asInt(toml.harness_tool_timeout_s) !== undefined
       ? asInt(toml.harness_tool_timeout_s)! * 1000
+      // Audit samples are the best available evidence until task_runs stores
+      // duration: recent full suites took 114–132s; 1200s leaves ~9x headroom.
+      // Revisit this default when duration percentiles become queryable.
       : 1_200_000);
 
   const telegram = buildTelegramConfig(

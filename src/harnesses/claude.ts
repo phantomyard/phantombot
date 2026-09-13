@@ -733,6 +733,9 @@ export function parseStreamJson(parsed: unknown): ParseEventResult {
 }
 
 export function claudeToolBoundaries(parsed: unknown) {
+  // Claude's stream_event deltas do not provide a stable tool lifecycle pair.
+  // The complete assistant message (including tool_use.id) is emitted before
+  // execution begins; the matching complete user message carries tool_result.
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const message = (parsed as Record<string, unknown>).message;
   if (typeof message !== "object" || message === null) return undefined;

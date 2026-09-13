@@ -242,6 +242,29 @@ describe("createKillCoordinator — tool cap (issue #351)", () => {
     expect(killer.killCause()).toBeUndefined();
   });
 
+  test("an uncapped coordinator suspends idle without scheduling an overflow timer", async () => {
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 100,
+      harnessId: "test",
+    });
+
+    killer.toolStart("tool-1");
+    await Bun.sleep(150);
+    expect(killer.killCause()).toBeUndefined();
+    killer.toolEnd("tool-1");
+    await proc.exited;
+    await killer.dispose();
+    expect(killer.killCause()).toBe("idle");
+  });
+
   test("productive output resets the tool-run budget", async () => {
     // Two tool-runs, each under the cap, separated by productive output. Total
     // tool time exceeds toolTimeoutMs, but no SINGLE contiguous run does — so a
