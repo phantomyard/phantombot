@@ -75,10 +75,11 @@ bin precedence chain and the resolver your new harness inherits.
 
 ## Reference: the Pi harness
 
-`src/harnesses/pi.ts` is structurally similar to claude.ts but:
+`src/harnesses/pi.ts` drives the pi engine in two modes (see AGENTS.md invariant 56):
 
-- **Payload via argv** (Pi ignores stdin in `--print` mode). Declares `maxPayloadBytes` so the orchestrator can pre-skip oversize turns.
-- **No `--api-key`** — phantombot's OAuth-on-host model trusts Pi's own configured credentials.
-- Different stream-json schema: `message_update` events with `text_delta` → text chunks; `tool_execution_start` → progress chunks.
+- **native** — spawns the engine EMBEDDED in the phantombot binary (`<phantombot> __pi …`, `lib/embeddedPi.ts`) and threads phantombot's routing: `--provider`, `--model`, `--api-key` from the persona vault, plus the coding-brain swap. The only mode that loads the Phantomyard's Phantombot attribution extension.
+- **pi-host** — spawns the host's `pi` binary and passes none of that; the host's pi configuration decides.
+- **Payload via temp files** (`--system-prompt <file>` and an `@<file>` positional): pi ignores stdin in `--print` mode, and as the usual last harness it must accept any payload size.
+- Different stream-json schema: `message_update` events with `text_delta` → text chunks; `tool_execution_start` → progress chunks; `turn_end` → the completion marker.
 
 When adding another harness (such as Codex), expect to repeat the equivalent investigations for *that* CLI. Read its `--help` carefully and document any equivalent gotchas in the wrapper file. Gemini CLI is retired and must not be reintroduced as an agent harness.

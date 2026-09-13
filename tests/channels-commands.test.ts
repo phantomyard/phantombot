@@ -1140,11 +1140,11 @@ describe("/model", () => {
     const r = await handleSlashCommand(
       "/model deepseek-v3",
       ctx({
-        harnesses: [new StubHarness("pi", true, { model: "old-model" })],
+        harnesses: [new StubHarness("native", true, { model: "old-model" })],
         config,
       }),
     );
-    expect(r!.reply).toContain("pi primary model → deepseek-v3");
+    expect(r!.reply).toContain("native primary model → deepseek-v3");
     expect(r!.reply).toContain("restarting");
     expect(typeof r!.afterSend).toBe("function");
     // NOTE: afterSend is NOT invoked — it self-restarts the process.
@@ -1162,12 +1162,12 @@ describe("/model", () => {
     const r = await handleSlashCommand(
       "/model deepseek-v3",
       ctx({
-        harnesses: [new StubHarness("pi", true, { model: "old-model" })],
+        harnesses: [new StubHarness("native", true, { model: "old-model" })],
         config,
         persona: "lena",
       }),
     );
-    expect(r!.reply).toContain("pi primary model → deepseek-v3");
+    expect(r!.reply).toContain("native primary model → deepseek-v3");
     const personaToml = await readConfigToml(
       join(dir, "personas", "lena", "config.toml"),
     );

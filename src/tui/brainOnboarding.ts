@@ -5,22 +5,21 @@
  * target) but is presented as the wizard's continuation — the last questions
  * before the app lands somewhere real. Order is Andrew's spec:
  *
- *   1. Primary brain — Pi (default) / Claude / Codex / Skip.
+ *   1. Primary brain — Native (default, always offered: the pi engine built
+ *      into this binary) / Claude / Codex / Pi host configuration / Skip.
+ *      Host harnesses are detected live and offered ONLY when installed;
+ *      nothing is installed from here.
  *   2. Skip → land in CONFIGURE, Brain row red `required`.
- *   3. Pi is the default; if it isn't installed, offer the official installer
- *      (or go back and pick another brain — "can't continue" is too harsh for
- *      a default the user never explicitly chose).
- *   4. Pi installed → "configure here" (provider → key → model slots) or
- *      "use host configuration".
- *   5. Fallback brain — `(none)` allowed (a single-harness chain is valid).
- *   6. Test now / Skip: a REAL one-shot turn through the primary. Pass →
+ *   3. Native → provider → key → model slots, configured here.
+ *   4. Fallback brain — `(none)` allowed (a single-harness chain is valid).
+ *   5. Test now / Skip: a REAL one-shot turn through the primary. Pass →
  *      chain saved, land in CHAT. Fail → nothing saved, land in Configure
  *      with Brain still red `required` and the actual error on screen.
  *      Skip test → chain saved (the choices were real), land in Configure —
  *      unverified, so no chat yet.
  *
- * Claude and Codex are chain-only picks: they inherit the host's harness
- * configuration for them, exactly as the Configure Brain flow says — so for
+ * Claude, Codex and host Pi are chain-only picks: they inherit the host's
+ * harness configuration, exactly as the Configure Brain flow says — so for
  * those the flow is primary → fallback → test.
  *
  * The asking is injected (`BrainQuestions`, the same contract configureBrain
@@ -33,7 +32,13 @@ import type { PiModel } from "../lib/piModels.ts";
 import type { RoutingChoices } from "../lib/piRouting.ts";
 import type { PiAuthWriteResult } from "../lib/piAuthStore.ts";
 import type { KeyProbeResult } from "../lib/providerKeyProbe.ts";
-import { configurePi, type BrainQuestions } from "./brainFlow.ts";
+import {
+  brainMenuId,
+  configureNative,
+  HARNESS_LABELS as MENU_LABELS,
+  offeredBrains,
+  type BrainQuestions,
+} from "./brainFlow.ts";
 import type { Consequence } from "./actions.ts";
 
 export interface CreateBrainOnboardingDepsOptions {
@@ -55,14 +60,11 @@ export async function createBrainOnboardingDeps(
   const {
     applyHarnessChain,
     applyRouting,
-    clearPiRouting,
     restorePiRouting,
     snapshotPiRouting,
-    defaultInstallRunner,
     detectAvailability,
-    installPi,
-    piInstallCommand,
   } = await import("../cli/harness.ts");
+  const { embeddedPiCommand } = await import("../lib/embeddedPi.ts");
   const { resolveHarnessWriteTarget } = await import(
     "../lib/harnessWriteTarget.ts"
   );
@@ -82,26 +84,12 @@ export async function createBrainOnboardingDeps(
   const { probeProviderKey } = await import("../lib/providerKeyProbe.ts");
 
   const config = await loadConfig(persona);
-  const availability = await detectAvailability(config);
   const writeTarget = await resolveHarnessWriteTarget(config, persona);
   const routing = config.harnesses.pi.routing ?? {};
 
   return {
     persona,
     availability: () => detectAvailability(config),
-    installCommand: piInstallCommand().join(" "),
-    installPi: async () => {
-      const { withPromptTerminal } = await import("./prompts.ts");
-      const ok = await withPromptTerminal(async () =>
-        installPi(defaultInstallRunner, {
-          note: (body: string, title?: string) =>
-            options?.setNotice?.(
-              title ? `${title}: ${body.split("\n")[0]}` : body,
-            ),
-        } as never),
-      );
-      return ok && Boolean((await detectAvailability(config)).pi);
-    },
     chain: harnessChainIds(config, persona),
     routing: {
       provider: routing.provider,
@@ -130,9 +118,8 @@ export async function createBrainOnboardingDeps(
     },
     targetPath: writeTarget.path,
     personaScope: writeTarget.scope === "persona",
-    piBin: availability.pi,
     listModels: (extraEnv) =>
-      listPiModels(availability.pi!, undefined, extraEnv),
+      listPiModels(embeddedPiCommand(), undefined, extraEnv),
     setSecret: (value, instanceId) =>
       setPersonaSecret(
         config,
@@ -156,9 +143,6 @@ export async function createBrainOnboardingDeps(
       ),
     applyRouting: (choices, instanceId) =>
       applyRouting(writeTarget.path, choices, instanceId),
-    clearRouting: async (opts, instanceId) => {
-      await clearPiRouting(writeTarget.path, opts, instanceId);
-    },
     snapshotWrites: () =>
       snapshotBrainWrites(
         BRAIN_WRITE_SLOT_IDS.map((instanceId) => ({
@@ -224,12 +208,8 @@ export async function createBrainOnboardingDeps(
 
 export interface BrainOnboardingDeps {
   persona: string;
-  /** Re-resolvable availability — an install changes it mid-flow. */
+  /** Live harness detection — re-run every time the flow starts. */
   availability(): Promise<Record<string, string | undefined>>;
-  /** The official Pi installer invocation, as text — shown when Pi is missing. */
-  installCommand: string;
-  /** Run the official Pi installer. Returns whether Pi is usable afterwards. */
-  installPi(): Promise<boolean>;
   /** The chain this persona effectively runs with now (host chain on first run). */
   chain: readonly string[];
   /** The EFFECTIVE Pi routing (provider + three model slots). */
@@ -246,7 +226,6 @@ export interface BrainOnboardingDeps {
   }>>;
   targetPath: string;
   personaScope: boolean;
-  piBin?: string;
   listModels(extraEnv?: Record<string, string>): Promise<PiModel[]>;
   probeProviderKey?(providerId: string, key: string): Promise<KeyProbeResult>;
   setSecret(value: string, instanceId?: string): Promise<{ ok: boolean; persona?: string; error?: string }>;
@@ -254,7 +233,6 @@ export interface BrainOnboardingDeps {
   writeAuth(provider: string, value: string): Promise<PiAuthWriteResult>;
   applyChain(chain: readonly string[]): Promise<void>;
   applyRouting(choices: RoutingChoices, instanceId?: string): Promise<unknown>;
-  clearRouting(opts?: { tombstone?: boolean }, instanceId?: string): Promise<void>;
   /** One real turn through the named harness. The truth, not a `which`. */
   probe(id: string): Promise<{ ok: boolean; detail: string }>;
   maybePromptRestart?(): Promise<void>;
@@ -395,16 +373,20 @@ export interface BrainOnboardingResult {
 
 const SKIP_NOTICE = "no brain yet — Configure's Brain row (marked required) finishes setup";
 
+/** Short harness names for notices and the test screen (menus use MENU_LABELS). */
 const HARNESS_LABELS: Record<string, string> = {
-  pi: "Pi",
+  native: "Native",
+  "pi-host": "Pi (host configuration)",
   codex: "Codex",
   claude: "Claude",
 };
 
-function hostConfigHint(id: string, available: boolean): string {
-  const label = HARNESS_LABELS[id] ?? id;
-  const found = available ? "" : " (not on PATH — will fail)";
-  return `uses this host's ${label} configuration — nothing to set up${found}`;
+function onboardingHint(id: string): string {
+  if (id === "native") {
+    return "built in — provider + model routing configured here (recommended)";
+  }
+  const label = id === "pi-host" ? "pi" : (HARNESS_LABELS[id] ?? id);
+  return `uses this host's ${label} configuration — nothing to set up`;
 }
 
 /**
@@ -450,100 +432,48 @@ async function runOnce(
   q: BrainQuestions,
   deps: BrainOnboardingDeps,
 ): Promise<BrainOnboardingResult> {
-  let availability = await deps.availability();
+  // Detected LIVE on every run: a harness installed or removed since last
+  // time appears (or disappears) here, never from a cached path.
+  const availability = await deps.availability();
+  const offered = offeredBrains(availability);
 
-  // Steps 1–3: primary, with the Pi install offer.
-  let primary: string | undefined;
-  while (primary === undefined) {
-    const pick = await q.choose({
-      title: `Primary brain for ${deps.persona}`,
-      description: PRIMARY_DESCRIPTION,
-      options: [
-        {
-          value: "pi",
-          label: "Pi",
-          hint: availability.pi
-            ? "installed — provider + model routing configured here (recommended)"
-            : "not installed — you'll be offered the official installer",
-        },
-        {
-          value: "claude",
-          label: "Claude",
-          hint: hostConfigHint("claude", Boolean(availability.claude)),
-        },
-        {
-          value: "codex",
-          label: "Codex",
-          hint: hostConfigHint("codex", Boolean(availability.codex)),
-        },
-        {
-          value: "skip",
-          label: "Skip — set up later",
-          hint: "lands in Configure with Brain marked required",
-        },
-      ],
-      initial: "pi",
-    });
-    if (pick === undefined || pick === "skip") {
-      return { landing: "configure", notice: SKIP_NOTICE };
-    }
-    primary = pick;
-
-    if (pick === "pi" && !availability.pi) {
-      const install = await q.choose({
-        title: "Pi is not installed",
-        description:
-          `Pi is the default brain, but it isn't on this host yet. The official installer is user-space (no sudo):\n\n  ${deps.installCommand}`,
-        options: [
-          {
-            value: "install",
-            label: "Install Pi now",
-            hint: "runs the official installer right here, then re-checks",
-          },
-          { value: "back", label: "Pick a different brain" },
-          { value: "skip", label: "Skip — set up later in Configure" },
-        ],
-        initial: "install",
-      });
-      if (install === "install") {
-        q.note(
-          "Installing Pi",
-          "running the official installer — this can take a minute",
-        );
-        const installed = await deps.installPi();
-        availability = await deps.availability();
-        if (installed && availability.pi) {
-          q.note("Pi installed", `found at ${availability.pi}`);
-        } else {
-          q.note(
-            "Pi still missing",
-            "the install didn't put pi on PATH — a new terminal may be needed, or pick a different brain",
-          );
-          primary = undefined;
-          continue;
-        }
-      } else if (install === "back") {
-        primary = undefined;
-        continue;
-      } else {
-        return { landing: "configure", notice: SKIP_NOTICE };
-      }
-    }
+  // Step 1: primary. Native is the default and always offered — it is built
+  // in, so there is nothing to install. Host harnesses only when found.
+  const primary = await q.choose({
+    title: `Primary brain for ${deps.persona}`,
+    description: PRIMARY_DESCRIPTION,
+    options: [
+      ...offered.map((id) => ({
+        value: id,
+        label: MENU_LABELS[id] ?? id,
+        hint: onboardingHint(id),
+      })),
+      {
+        value: "skip",
+        label: "Skip — set up later",
+        hint: "lands in Configure with Brain marked required",
+      },
+    ],
+    initial: "native",
+  });
+  if (primary === undefined || primary === "skip") {
+    return { landing: "configure", notice: SKIP_NOTICE };
   }
 
-  // Step 4: fallback — (none) is a first-class answer. Pi remains available
-  // behind Pi because each occurrence becomes an independent named instance.
+  // Step 4: fallback — (none) is a first-class answer. Native remains
+  // available behind native because each occurrence becomes an independent
+  // named instance.
   const fallback = await q.choose({
     title: "Fallback brain (optional)",
     description: FALLBACK_DESCRIPTION,
     options: [
       { value: "", label: "(none)", hint: "no fallback if the primary fails" },
-      ...(["pi", "claude", "codex"] as const)
-        .filter((id) => id !== primary || id === "pi")
+      ...offered
+        .filter((id) => id !== primary || id === "native")
         .map((id) => ({
           value: id,
-          label: HARNESS_LABELS[id] ?? id,
-          hint: hostConfigHint(id, Boolean(availability[id])),
+          label: MENU_LABELS[id] ?? id,
+          hint: onboardingHint(id),
         })),
     ],
     initial: "",
@@ -552,7 +482,7 @@ async function runOnce(
     return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
   }
 
-  const bothPi = primary === "pi" && fallback === "pi";
+  const bothNative = primary === "native" && fallback === "native";
   const brainDeps = {
     persona: deps.persona,
     chain: deps.chain,
@@ -562,8 +492,6 @@ async function runOnce(
     piInstances: deps.piInstances,
     targetPath: deps.targetPath,
     personaScope: deps.personaScope,
-    piBin: availability.pi,
-    installCommand: deps.installCommand,
     listModels: deps.listModels,
     probeProviderKey: deps.probeProviderKey,
     setSecret: deps.setSecret,
@@ -571,7 +499,6 @@ async function runOnce(
     writeAuth: deps.writeAuth,
     applyChain: deps.applyChain,
     applyRouting: deps.applyRouting,
-    clearRouting: deps.clearRouting,
   };
   // Everything below this line WRITES as it goes: each model slot, the API
   // key and Pi's auth store are persisted the moment they are answered, long
@@ -608,29 +535,26 @@ async function runOnce(
     };
   };
 
-  let primaryMode: "configure" | "host" | undefined;
-  if (primary === "pi") {
-    const cancelled = await configurePi(
+  if (primary === "native") {
+    const cancelled = await configureNative(
       q,
       brainDeps,
       "primary",
-      { onMode: (m) => { primaryMode = m; } },
-      bothPi ? "pi-primary" : undefined,
+      bothNative ? "pi-primary" : undefined,
     );
     if (cancelled) return discard("finish it in Configure");
   }
-  if (fallback === "pi") {
-    const cancelled = await configurePi(
+  if (fallback === "native") {
+    const cancelled = await configureNative(
       q,
       brainDeps,
       "fallback",
-      { allowHostConfig: primaryMode !== "host" },
-      bothPi ? "pi-fallback" : undefined,
+      bothNative ? "pi-fallback" : undefined,
     );
     if (cancelled) return discard("finish it in Configure");
   }
 
-  const chain = bothPi
+  const chain = bothNative
     ? ["pi-primary", "pi-fallback"]
     : [primary, ...(fallback !== "" ? [fallback] : [])];
 
@@ -653,7 +577,7 @@ async function runOnce(
     if (q.testBrain) {
       const testResult = await q.testBrain({
         persona: deps.persona,
-        harness: HARNESS_LABELS[chain[0]!] ?? chain[0]!,
+        harness: HARNESS_LABELS[brainMenuId(chain[0]) ?? ""] ?? chain[0]!,
         probe: () => deps.probe(chain[0]!),
       });
 

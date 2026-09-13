@@ -27,9 +27,10 @@ function fakeInput(): InitFlowInput {
   return {
     config: {} as Config,
     availability: {
+      native: undefined,
       claude: undefined,
-      pi: undefined,
       codex: undefined,
+      "pi-host": undefined,
     } as Record<HarnessId, string | undefined>,
   };
 }

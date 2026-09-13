@@ -29,8 +29,9 @@ export function expectedSecrets(
   if (persona.channels.includes("telegram")) {
     out.push({ name: "TELEGRAM_BOT_TOKEN", usedBy: "channel: telegram" });
   }
-  if (persona.chain.includes("pi")) {
-    out.push({ name: "ANTHROPIC_API_KEY", usedBy: "harness: pi" });
+  if (persona.chain.includes("native")) {
+    // The embedded engine reads its provider key from the vault, per turn.
+    out.push({ name: "PHANTOMBOT_PI_API_KEY", usedBy: "harness: native" });
   }
   const provider = persona.memory.embedding?.provider;
   if (provider === "gemini") {

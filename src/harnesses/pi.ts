@@ -64,10 +64,36 @@ import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
 import { createHarnessTempDir } from "../lib/harnessArgvFiles.ts";
 import { renderConversationPayload } from "./payload.ts";
+import { xdgDataHome } from "../config.ts";
+import {
+  embeddedPiChildEnv,
+  embeddedPiCommand,
+  ENV_PHANTOMBOT_PI_COMMAND,
+} from "../lib/embeddedPi.ts";
 
 export interface PiHarnessConfig {
-  /** Path to the `pi` CLI binary. Default: "pi" (looked up in PATH). */
+  /**
+   * Path to the host `pi` CLI binary (`pi-host` mode). Ignored in native mode,
+   * which always spawns the pi engine embedded in this binary.
+   */
   bin: string;
+  /**
+   * Which pi engine this slot runs on:
+   *   native — the engine EMBEDDED in the phantombot binary, with phantombot's
+   *            routing (provider, models, api key) threaded onto every turn.
+   *            The only mode that loads the Phantomyard's Phantombot
+   *            attribution extension.
+   *   host   — the host's own `pi` (`pi-host`), configured by its owner.
+   *            Phantombot passes no --provider/--model/--api-key and no
+   *            delegate routing, exactly as it passes none to claude or codex.
+   * Default: host — the shape every pre-native caller constructed.
+   */
+  mode?: "native" | "host";
+  /**
+   * Native mode only: override the embedded-pi argv prefix. A TEST SEAM (point
+   * it at a fake pi script); production always uses embeddedPiCommand().
+   */
+  command?: string[];
   /**
    * Resolved capability routing (env-over-TOML, from config.ts). When present
    * it does ONE runtime thing in this harness:
@@ -91,11 +117,26 @@ export class PiHarness implements Harness {
   readonly id: string;
 
   constructor(private readonly config: PiHarnessConfig) {
-    this.id = config.id ?? "pi";
+    this.id = config.id ?? (config.mode === "native" ? "native" : "pi-host");
+  }
+
+  /** Routing applies to native mode only; a host pi decides for itself. */
+  private routing(): PiRoutingConfig | undefined {
+    return this.config.mode === "native" ? this.config.routing : undefined;
+  }
+
+  /** The argv prefix to spawn: the embedded engine, or the host binary. */
+  private command(): string[] {
+    return this.config.mode === "native"
+      ? (this.config.command ?? embeddedPiCommand())
+      : [this.config.bin];
   }
 
   modelInfo(): HarnessModelInfo {
-    const r = this.config.routing;
+    if (this.config.mode !== "native") {
+      return { model: "(host pi configuration)" };
+    }
+    const r = this.routing();
     return {
       model: r?.primaryModel ?? "(pi default)",
       provider: r?.provider,
@@ -105,6 +146,8 @@ export class PiHarness implements Harness {
   }
 
   async available(): Promise<boolean> {
+    // The embedded engine ships inside this binary — it cannot be missing.
+    if (this.config.mode === "native") return true;
     try {
       if (this.config.bin.startsWith("/")) {
         await access(this.config.bin, constants.X_OK);
@@ -175,8 +218,9 @@ export class PiHarness implements Harness {
     // there is no distinct brain to swap to, so consulting the override store
     // and the scorer would be pure I/O and log noise (and a "swapped" turn on
     // an equal model would activate the retry ladder for nothing).
-    const primaryModel = this.config.routing?.primaryModel;
-    const codingModel = this.config.routing?.codingModel;
+    const routing = this.routing();
+    const primaryModel = routing?.primaryModel;
+    const codingModel = routing?.codingModel;
     const coderSwapEligible =
       req.toolsMode !== "none" &&
       !!codingModel &&
@@ -221,7 +265,7 @@ export class PiHarness implements Harness {
     // omit the flag and let Pi use its own default. Read from the static routing
     // config (like the model), not per-turn env, since the provider is a config
     // choice that pairs with the saved models.
-    const provider = this.config.routing?.provider;
+    const provider = routing?.provider;
 
     // Reconcile this persona's encrypted vault into the env BEFORE the Pi API
     // key is read below — the key is a vault secret post-migration. See claude.ts.
@@ -241,7 +285,9 @@ export class PiHarness implements Harness {
     // host is the HOST's key, so honouring it here would fire another persona's
     // credential at a provider this persona never chose. Withholding the flag
     // is what "Pi decides for itself" actually means.
-    const piApiKey = this.config.routing?.useLocalConfig
+    // A host pi (`pi-host`) never gets phantombot's key either: its owner
+    // configured its auth, and the ambient key may belong to another persona.
+    const piApiKey = this.config.mode !== "native" || routing?.useLocalConfig
       ? undefined
       : process.env[this.config.apiKeyEnv ?? ENV_PI_API_KEY]?.trim();
 
@@ -276,7 +322,8 @@ export class PiHarness implements Harness {
       return argv;
     };
     log.debug("pi.invoke spawning", {
-      bin: this.config.bin,
+      command: this.command(),
+      mode: this.config.mode ?? "host",
       payloadBytes: totalBytes,
       tempFiles: true,
     });
@@ -311,7 +358,7 @@ export class PiHarness implements Harness {
     // stamped delegate.
     childEnv[ENV_ROUTING_JSON] = await temp.file(
       "routing.json",
-      JSON.stringify(routingModelsForChild(this.config.routing)),
+      JSON.stringify(routingModelsForChild(routing)),
     );
     // Route the pi capability-routing extension's `phantombot-route-*` temp
     // files into the persona tmp dir too (issue #365). We pass our OWN var, not
@@ -319,6 +366,19 @@ export class PiHarness implements Harness {
     // processes (Kai's review point). spawnPi.ts falls back to os.tmpdir() when
     // it's unset (degraded/no-persona paths).
     if (req.tmpBaseDir) childEnv[ENV_PHANTOMBOT_TMP_DIR] = req.tmpBaseDir;
+    // Native: hand the child the embedded engine's package dir (compiled
+    // binaries only) and the self-exec argv, so the capability-routing
+    // extension's delegates re-enter THIS engine rather than hunting for a
+    // host pi. Host: blank the var so a host pi's delegates never inherit a
+    // native invocation from an ambient environment.
+    if (this.config.mode === "native") {
+      Object.assign(childEnv, embeddedPiChildEnv(xdgDataHome()));
+      if (this.config.command) {
+        childEnv[ENV_PHANTOMBOT_PI_COMMAND] = JSON.stringify(this.config.command);
+      }
+    } else {
+      childEnv[ENV_PHANTOMBOT_PI_COMMAND] = "";
+    }
 
     /**
      * Spawn ONE pi attempt on the given model and stream its chunks. Fresh
@@ -329,7 +389,7 @@ export class PiHarness implements Harness {
       this: PiHarness,
       model: string | undefined,
     ): AsyncGenerator<HarnessChunk> {
-      const proc = spawnInNewSession([this.config.bin, ...buildArgs(model)], {
+      const proc = spawnInNewSession([...this.command(), ...buildArgs(model)], {
         cwd: req.workingDir,
         env: childEnv,
         stdin: "ignore",

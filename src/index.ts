@@ -19,6 +19,12 @@
  *      runtime path by which a secret reaches `process.env`.
  *
  * Wrapped so a bootstrap hiccup never blocks the CLI from running.
+ *
+ * `__pi <args>` is dispatched FIRST and never reaches any of the above: it
+ * turns this binary into the pi engine the `native` harness spawns (see
+ * lib/embeddedPi.ts). The CLI keeps its static import graph on purpose — a
+ * dynamic-import entry changes bun's module init order in a compiled binary
+ * and breaks @peculiar/x509's tsyringe reflect polyfill at startup.
  */
 
 import { runMain, showUsage } from "citty";
@@ -31,80 +37,90 @@ import { runComplete } from "./lib/completion.ts";
 import { log } from "./lib/logger.ts";
 import { loadVaultIntoEnv } from "./lib/vault.ts";
 import { migratePlaintextToVault } from "./lib/vaultMigrate.ts";
+import { EMBEDDED_PI_SUBCOMMAND, runEmbeddedPi } from "./lib/embeddedPi.ts";
 
-// Hidden dynamic-completion backend. The shell stubs emitted by
-// `phantombot completion <shell>` call `phantombot _complete -- <words…>` on
-// every <TAB>. Handle it here, before the credential bootstrap, so a tab press
-// is as cheap and side-effect-free as --help and never touches the vault. It is
-// intentionally not a Citty subcommand, so it stays out of --help output.
-if (process.argv[2] === "_complete") {
-  const candidates = await runComplete(mainCommand, process.argv.slice(3));
-  if (candidates.length > 0) process.stdout.write(candidates.join("\n") + "\n");
-  process.exit(0);
-}
-
-// A bare, TTY-attached `phantombot` opens the full-screen app (issue #471):
-// chat with the default phantom, or the wizard when it is not configured yet.
-//
-// The gate is TTY-based, NOT argv-based, and it is a SECOND question asked
-// after `isReadOnlyInvocation` rather than a change to it. A bare call stays
-// read-only whenever nobody is watching — CI uses bare/`--help` as "does the
-// binary run?" smoke tests and every <TAB> shells through this same entry, so
-// an argv-based gate would write to disk on a runner and hang `phantombot |
-// head` forever on a renderer nobody can see. See lib/tuiGate.ts.
-const bareMode = bareInvocationMode(process.argv, currentTty());
-
-// Skip the credential bootstrap entirely for read-only invocations
-// (--help/--version/bare-and-unwatched) so they never mutate disk or provision
-// a persona. An interactive TUI is the one bare invocation that DOES need the
-// bootstrap: it is about to open a vault-backed conversation.
-if (!isReadOnlyInvocation(process.argv) || bareMode === "tui") {
-  try {
-    const config = await loadConfig();
-    await migratePlaintextToVault(config);
-    const activePersona = process.env.PHANTOMBOT_PERSONA || config.defaultPersona;
-    const activePersonaDir = personaDir(config, activePersona);
-    await loadVaultIntoEnv(activePersonaDir);
-    // Aggressive startup sweep of the persona's tmp dir (issue #365): reap
-    // harness/route residue older than 1h left by crashed/SIGKILL'd turns that
-    // never ran their `finally`. Age-gated so a live in-flight turn survives;
-    // best-effort so it never wedges startup. The run lock is NOT in this dir.
-    try {
-      cleanupPersonaTmpDir(activePersonaDir);
-    } catch (e) {
-      log.warn("startup: persona tmp cleanup failed", {
-        error: (e as Error).message,
-      });
-    }
-  } catch (e) {
-    // Never let credential bootstrap wedge the CLI — log and carry on. The
-    // subcommand may still work (e.g. `phantombot persona` on a fresh box).
-    log.warn("startup: vault bootstrap failed", { error: (e as Error).message });
-  }
-}
-if (bareMode === "tui") {
-  const { startTui } = await import("./tui/index.tsx");
-  process.exitCode = await startTui();
-} else if (bareMode === "repl") {
-  const { runRepl } = await import("./tui/index.tsx");
-  process.exitCode = await runRepl();
+if (process.argv[2] === EMBEDDED_PI_SUBCOMMAND) {
+  await runEmbeddedPi(process.argv.slice(3));
 } else {
-  runMain(mainCommand, {
-    // `persona new` is dispatched by hand rather than through citty's
-    // `subCommands` (see cli/persona.ts — registering it there breaks
-    // `persona <name>`), so citty resolves `persona new --help` to the
-    // PARENT command. Redirect that one case back to the real usage.
-    async showUsage(cmd, parent) {
-      const positionals = process.argv
-        .slice(2)
-        .filter((a) => !a.startsWith("-"));
-      if (positionals[0] === "persona" && positionals[1] === "new") {
-        const { default: personaNewCmd } = await import(
-          "./cli/persona-new.ts"
-        );
-        return showUsage(personaNewCmd);
+  await runPhantombotCli();
+}
+
+async function runPhantombotCli(): Promise<void> {
+
+  // Hidden dynamic-completion backend. The shell stubs emitted by
+  // `phantombot completion <shell>` call `phantombot _complete -- <words…>` on
+  // every <TAB>. Handle it here, before the credential bootstrap, so a tab press
+  // is as cheap and side-effect-free as --help and never touches the vault. It is
+  // intentionally not a Citty subcommand, so it stays out of --help output.
+  if (process.argv[2] === "_complete") {
+    const candidates = await runComplete(mainCommand, process.argv.slice(3));
+    if (candidates.length > 0) process.stdout.write(candidates.join("\n") + "\n");
+    process.exit(0);
+  }
+
+  // A bare, TTY-attached `phantombot` opens the full-screen app (issue #471):
+  // chat with the default phantom, or the wizard when it is not configured yet.
+  //
+  // The gate is TTY-based, NOT argv-based, and it is a SECOND question asked
+  // after `isReadOnlyInvocation` rather than a change to it. A bare call stays
+  // read-only whenever nobody is watching — CI uses bare/`--help` as "does the
+  // binary run?" smoke tests and every <TAB> shells through this same entry, so
+  // an argv-based gate would write to disk on a runner and hang `phantombot |
+  // head` forever on a renderer nobody can see. See lib/tuiGate.ts.
+  const bareMode = bareInvocationMode(process.argv, currentTty());
+
+  // Skip the credential bootstrap entirely for read-only invocations
+  // (--help/--version/bare-and-unwatched) so they never mutate disk or provision
+  // a persona. An interactive TUI is the one bare invocation that DOES need the
+  // bootstrap: it is about to open a vault-backed conversation.
+  if (!isReadOnlyInvocation(process.argv) || bareMode === "tui") {
+    try {
+      const config = await loadConfig();
+      await migratePlaintextToVault(config);
+      const activePersona = process.env.PHANTOMBOT_PERSONA || config.defaultPersona;
+      const activePersonaDir = personaDir(config, activePersona);
+      await loadVaultIntoEnv(activePersonaDir);
+      // Aggressive startup sweep of the persona's tmp dir (issue #365): reap
+      // harness/route residue older than 1h left by crashed/SIGKILL'd turns that
+      // never ran their `finally`. Age-gated so a live in-flight turn survives;
+      // best-effort so it never wedges startup. The run lock is NOT in this dir.
+      try {
+        cleanupPersonaTmpDir(activePersonaDir);
+      } catch (e) {
+        log.warn("startup: persona tmp cleanup failed", {
+          error: (e as Error).message,
+        });
       }
-      return showUsage(cmd, parent);
-    },
-  });
+    } catch (e) {
+      // Never let credential bootstrap wedge the CLI — log and carry on. The
+      // subcommand may still work (e.g. `phantombot persona` on a fresh box).
+      log.warn("startup: vault bootstrap failed", { error: (e as Error).message });
+    }
+  }
+  if (bareMode === "tui") {
+    const { startTui } = await import("./tui/index.tsx");
+    process.exitCode = await startTui();
+  } else if (bareMode === "repl") {
+    const { runRepl } = await import("./tui/index.tsx");
+    process.exitCode = await runRepl();
+  } else {
+    runMain(mainCommand, {
+      // `persona new` is dispatched by hand rather than through citty's
+      // `subCommands` (see cli/persona.ts — registering it there breaks
+      // `persona <name>`), so citty resolves `persona new --help` to the
+      // PARENT command. Redirect that one case back to the real usage.
+      async showUsage(cmd, parent) {
+        const positionals = process.argv
+          .slice(2)
+          .filter((a) => !a.startsWith("-"));
+        if (positionals[0] === "persona" && positionals[1] === "new") {
+          const { default: personaNewCmd } = await import(
+            "./cli/persona-new.ts"
+          );
+          return showUsage(personaNewCmd);
+        }
+        return showUsage(cmd, parent);
+      },
+    });
+  }
 }

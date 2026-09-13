@@ -26,6 +26,7 @@
  * dispatcher fires selfRestart via afterSend, same dance as /restart.
  */
 
+import { piEngineFor } from "./harnessReconcile.ts";
 import type { Config } from "../config.ts";
 import { getIn, setIn, updateConfigToml } from "./configWriter.ts";
 import {
@@ -103,7 +104,7 @@ export function formatModelShow(
   if (!info) {
     return `${harnessId}: model info unavailable (harness doesn't report it)`;
   }
-  if (harnessId === "pi" || harnessId.startsWith("pi-")) {
+  if (harnessId === "pi" || harnessId === "native" || harnessId.startsWith("pi-")) {
       const lines = [`${harnessId} primary: ${info.model}`];
       if (info.provider) lines.push(`provider:   ${info.provider}`);
       lines.push(`coding:     ${info.codingModel ?? "(same as primary)"}`);
@@ -167,8 +168,18 @@ export async function applyModelRequest(
   persona?: string,
 ): Promise<ModelApplyResult> {
   const target = await resolveHarnessWriteTarget(config, persona);
-  if (harnessId === "pi" || config.harnesses.instances?.[harnessId]?.type === "pi") {
-    return applyPi(req, config, target, harnessId === "pi" ? undefined : harnessId);
+  const engine = piEngineFor(config.harnesses, harnessId);
+  if (engine === "pi-host") {
+    return {
+      ok: false,
+      error:
+        "pi-host uses this host's own pi configuration — change its model in pi " +
+        "itself, or switch the brain to native to manage models here",
+    };
+  }
+  if (engine === "native") {
+    const instanceId = config.harnesses.instances?.[harnessId] ? harnessId : undefined;
+    return applyPi(req, config, target, instanceId);
   }
   switch (harnessId) {
     case "claude":
@@ -202,7 +213,7 @@ async function applyPi(
     ? ["harnesses", "instances", instanceId, "routing"]
     : ["harnesses", "pi", "routing"];
   await updateConfigToml(target.path, (toml) => {
-    if (instanceId) setIn(toml, ["harnesses", "instances", instanceId, "type"], "pi");
+    if (instanceId) setIn(toml, ["harnesses", "instances", instanceId, "type"], "native");
     setIn(toml, [...base, tomlKey], req.slug);
     // Naming a model REVOKES a previous "use Pi's own config" opt-out, exactly
     // as the wizard's configure path does — otherwise the tombstone would keep
@@ -225,7 +236,7 @@ async function applyPi(
   delete routing.useLocalConfig;
   routing[routingField] = req.slug;
   for (const [k, v] of Object.entries(envWrites)) process.env[k] = v;
-  return { ok: true, summary: `${instanceId ?? "pi"} ${req.role} model → ${req.slug}` };
+  return { ok: true, summary: `${instanceId ?? "native"} ${req.role} model → ${req.slug}` };
 }
 
 async function applyClaude(

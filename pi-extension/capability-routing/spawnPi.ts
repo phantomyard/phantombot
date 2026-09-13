@@ -131,6 +131,15 @@ export interface DelegateOptions {
  * to "pi" on PATH. Lifted from the subagent example's getPiInvocation.
  */
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
+  // Native harness: phantombot runs pi EMBEDDED in its own binary
+  // (`<phantombot> __pi …`). Neither heuristic below can recover that argv —
+  // execPath is phantombot, not pi — so the harness hands the exact
+  // invocation over in PHANTOMBOT_PI_COMMAND. A host pi (`pi-host`) is spawned
+  // with it empty and falls through to the original resolution.
+  const embedded = parseEmbeddedPiCommand(process.env.PHANTOMBOT_PI_COMMAND);
+  if (embedded) {
+    return { command: embedded[0]!, args: [...embedded.slice(1), ...args] };
+  }
   const currentScript = process.argv[1];
   const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
   if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
@@ -147,6 +156,29 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
   // failure on the Windows port. Resolve the concrete file ourselves so the
   // spawn stays shell:false (no arg-quoting hazard). No-op on POSIX.
   return { command: resolveCommandOnPath("pi"), args };
+}
+
+/**
+ * Parse PHANTOMBOT_PI_COMMAND: a JSON array of non-empty strings naming the
+ * embedded pi invocation (e.g. `["/usr/local/bin/phantombot","__pi"]`). Empty,
+ * malformed or non-array values mean "not native" and return undefined, so a
+ * stray or blanked var can never produce a broken spawn.
+ */
+export function parseEmbeddedPiCommand(raw: string | undefined): string[] | undefined {
+  if (!raw || raw.trim() === "") return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      Array.isArray(parsed) &&
+      parsed.length > 0 &&
+      parsed.every((part) => typeof part === "string" && part.length > 0)
+    ) {
+      return parsed as string[];
+    }
+  } catch {
+    // fall through
+  }
+  return undefined;
 }
 
 /**

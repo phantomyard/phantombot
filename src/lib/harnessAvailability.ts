@@ -6,14 +6,23 @@ import { log } from "./logger.ts";
 import { saveHarnessBins } from "../state.ts";
 import { recordHarnessBinDirs } from "./processGroup.ts";
 import type { WriteSink } from "./io.ts";
+import { piEngineFor } from "./harnessReconcile.ts";
 
-export type KnownHarnessId = "claude" | "pi" | "codex";
+export type KnownHarnessId = "claude" | "native" | "pi-host" | "codex";
 
 export interface HarnessAvailability {
   id: string;
   bin: string;
   resolved?: string;
   source?: "path" | "configured" | "search";
+  /**
+   * The `state.json harness_bins` key this binary persists under, or null when
+   * it must not be persisted. The embedded engine (`native`) is this binary
+   * itself — persisting it would pin a path that moves on every update. A
+   * `pi-host` persists under the `pi` key that loadConfig reads for
+   * `[harnesses.pi] bin`. Absent = the id itself.
+   */
+  stateKey?: string | null;
 }
 
 export interface ResolvedHarnessBinary {
@@ -23,15 +32,20 @@ export interface ResolvedHarnessBinary {
 
 export function harnessBin(config: Config, id: string): string | undefined {
   if (id === "claude") return config.harnesses.claude.bin;
-  if (id === "pi") return config.harnesses.pi.bin;
   if (id === "codex") return config.harnesses.codex?.bin ?? "codex";
-  if (config.harnesses.instances?.[id]?.type === "pi") return config.harnesses.instances[id]!.bin;
+  const engine = piEngineFor(config.harnesses, id);
+  // Native runs the pi engine compiled into THIS binary, so its "binary" is
+  // always present: detection reports it installed on every host.
+  if (engine === "native") return process.execPath;
+  if (engine === "pi-host") {
+    return config.harnesses.instances?.[id]?.bin ?? config.harnesses.pi.bin;
+  }
   return undefined;
 }
 
 function defaultHarnessBin(id: string): string | undefined {
   if (id === "claude") return "claude";
-  if (id === "pi") return "pi";
+  if (id === "pi-host" || id === "pi") return "pi";
   if (id === "codex") return "codex";
   if (id.startsWith("pi-")) return "pi";
   return undefined;
@@ -215,9 +229,17 @@ export async function resolveHarnessAvailability(
       resolved = await resolveHarnessBinary(fallbackBin, pathEnv);
     }
   }
+  const engine = piEngineFor(config.harnesses, id);
+  const stateKey =
+    engine === "native"
+      ? null
+      : engine === "pi-host" && !config.harnesses.instances?.[id]
+        ? "pi"
+        : undefined;
   return {
     id,
     bin,
+    ...(stateKey !== undefined ? { stateKey } : {}),
     ...(resolved.path ? { resolved: resolved.path } : {}),
     ...(resolved.source ? { source: resolved.source } : {}),
   };
@@ -256,8 +278,8 @@ export function resolvedHarnessBins(
 ): Record<string, string> {
   return Object.fromEntries(
     availability
-      .filter((h) => h.resolved)
-      .map((h) => [h.id, h.resolved!]),
+      .filter((h) => h.resolved && h.stateKey !== null)
+      .map((h) => [h.stateKey ?? h.id, h.resolved!]),
   );
 }
 

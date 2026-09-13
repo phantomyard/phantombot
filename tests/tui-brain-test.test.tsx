@@ -182,9 +182,7 @@ describe("BrainTestScreen checklist", () => {
     let appliedChain: string[] = [];
     const deps: BrainOnboardingDeps = {
       persona: "batman",
-      availability: async () => ({ pi: "/usr/bin/pi", claude: undefined, codex: undefined }),
-      installCommand: "",
-      installPi: async () => true,
+      availability: async () => ({ native: process.execPath, "pi-host": "/usr/bin/pi", claude: undefined, codex: undefined }),
       chain: [],
       routing: {},
       targetPath: "/tmp/config.toml",
@@ -195,25 +193,23 @@ describe("BrainTestScreen checklist", () => {
       writeAuth: async () => ({ ok: true, path: "/tmp/auth.json" }),
       applyChain: async (chain) => { appliedChain = [...chain]; },
       applyRouting: async () => undefined,
-      clearRouting: async () => undefined,
       probe: async () => ({ ok: true, detail: "test ok" }),
     };
 
-    // primary = pi, fallback = "" (none), mode = host, test = test
+    // primary = pi-host (chain-only), fallback = "" (none), test = test
     let chooseCount = 0;
     q.choose = async () => {
       chooseCount++;
-      if (chooseCount === 1) return "pi"; // primary
+      if (chooseCount === 1) return "pi-host"; // primary
       if (chooseCount === 2) return ""; // fallback none
-      if (chooseCount === 3) return "host"; // mode
-      if (chooseCount === 4) return "test"; // test the brain
+      if (chooseCount === 3) return "test"; // test the brain
       return undefined;
     };
 
     const result = await runBrainOnboarding(q, deps);
     expect(result.landing).toBe("chat");
-    expect(appliedChain).toEqual(["pi"]);
-    expect(result.notice).toContain("brain verified: pi");
+    expect(appliedChain).toEqual(["pi-host"]);
+    expect(result.notice).toContain("brain verified: pi-host");
   });
 
   test("runBrainOnboarding with testBrain lands in configure on discard", async () => {
@@ -222,10 +218,9 @@ describe("BrainTestScreen checklist", () => {
     const q: BrainQuestions = {
       choose: async () => {
         chooseCount++;
-        if (chooseCount === 1) return "pi";
+        if (chooseCount === 1) return "pi-host";
         if (chooseCount === 2) return "";
-        if (chooseCount === 3) return "host";
-        if (chooseCount === 4) return "test";
+        if (chooseCount === 3) return "test";
         return undefined;
       },
       search: async () => "",
@@ -240,9 +235,7 @@ describe("BrainTestScreen checklist", () => {
 
     const deps: BrainOnboardingDeps = {
       persona: "batman",
-      availability: async () => ({ pi: "/usr/bin/pi", claude: undefined, codex: undefined }),
-      installCommand: "",
-      installPi: async () => true,
+      availability: async () => ({ native: process.execPath, "pi-host": "/usr/bin/pi", claude: undefined, codex: undefined }),
       chain: [],
       routing: {},
       targetPath: "/tmp/config.toml",
@@ -253,7 +246,6 @@ describe("BrainTestScreen checklist", () => {
       writeAuth: async () => ({ ok: true, path: "/tmp/auth.json" }),
       applyChain: async (chain) => { appliedChain = [...chain]; },
       applyRouting: async () => undefined,
-      clearRouting: async () => undefined,
       probe: async () => ({ ok: true, detail: "test ok" }),
       // Production deps always carry these; discard rolls back what the
       // interview already wrote (see brain-onboarding.test.ts).

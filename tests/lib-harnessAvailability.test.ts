@@ -182,6 +182,8 @@ describe("checkConfiguredHarnesses", () => {
       {
         id: "pi",
         bin: join(dir, "old", "pi"),
+        // A routing-less legacy pi runs the HOST pi, persisted under `pi`.
+        stateKey: "pi",
         resolved: pi,
         source: "path",
       },

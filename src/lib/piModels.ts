@@ -101,7 +101,12 @@ export function parsePiModels(stdout: string): PiModel[] {
  * unit's narrow PATH.
  */
 export type PiModelsRunner = (
-  bin: string,
+  /**
+   * A host pi binary path, or a full argv prefix — the native harness passes
+   * `embeddedPiCommand()` (`[<phantombot>, "__pi"]`) to list the embedded
+   * engine's catalogue.
+   */
+  bin: string | readonly string[],
   /**
    * Extra env for the child, MERGED over the current process env. Used to hand
    * Pi a just-entered key via its native var (see PiProvider.envVar) so the
@@ -114,8 +119,9 @@ export type PiModelsRunner = (
 }>;
 
 const defaultRunner: PiModelsRunner = async (bin, extraEnv) => {
-  const env = withCommandDirOnPath(bin, { ...process.env, ...extraEnv });
-  const proc = Bun.spawn([bin, "--list-models"], {
+  const argv = typeof bin === "string" ? [bin] : [...bin];
+  const env = withCommandDirOnPath(argv[0]!, { ...process.env, ...extraEnv });
+  const proc = Bun.spawn([...argv, "--list-models"], {
     stdout: "pipe",
     stderr: "ignore",
     // Undefined ⇒ inherit as before; merge (not replace) so PATH/HOME survive
@@ -128,7 +134,7 @@ const defaultRunner: PiModelsRunner = async (bin, extraEnv) => {
 };
 
 export async function listPiModels(
-  bin = "pi",
+  bin: string | readonly string[] = "pi",
   runner: PiModelsRunner = defaultRunner,
   extraEnv?: Record<string, string>,
 ): Promise<PiModel[]> {

@@ -42,6 +42,14 @@ import type { TomlObject } from "./lib/configWriter.ts";
 import { loadState } from "./state.ts";
 import { usablePersistedBin } from "./lib/harnessBinPath.ts";
 import {
+  decideLegacyPi,
+  isPiEngineType,
+  mapLegacyChain,
+  routingIsConfigured,
+  type LegacyPiFacts,
+  type PiEngineType,
+} from "./lib/harnessReconcile.ts";
+import {
   isVaultInjectedEnvKey,
   isVaultLoadedPersonaDir,
 } from "./lib/vaultEnvTracking.ts";
@@ -731,7 +739,12 @@ export interface Config {
   configPath: string;
 
   harnesses: {
-    /** Order = primary → fallback. Recognized ids: "claude", "pi", "codex". */
+    /**
+     * Order = primary → fallback. Recognized ids: "claude", "codex", "native"
+     * (the pi engine embedded in this binary), "pi-host" (the host's own pi),
+     * or an `instances` id. A legacy "pi" is mapped at read time and written
+     * by `phantombot doctor` — see lib/harnessReconcile.ts.
+     */
     chain: string[];
     /**
      * Optional chain overrides keyed by persona name. A persona without an
@@ -749,7 +762,8 @@ export interface Config {
     ownBins?: string[];
     /** Named harness instances used when the same harness appears twice. */
     instances?: Record<string, {
-      type: "pi";
+      /** A legacy "pi" is mapped at read time; tolerated for hand-built configs. */
+      type: PiEngineType | "pi";
       bin: string;
       routing?: import("./lib/piRouting.ts").PiRoutingConfig;
     }>;
@@ -1272,10 +1286,14 @@ export async function loadConfig(persona?: string): Promise<Config> {
     : undefined;
   const harnessInstances: Config["harnesses"]["instances"] = {};
   for (const [name, raw] of Object.entries(tomlHarnessInstances ?? {})) {
-    if (!isTomlTable(raw) || asString(raw.type) !== "pi") continue;
+    if (!isTomlTable(raw) || !isPiEngineType(asString(raw.type))) continue;
     const routing = isTomlTable(raw.routing) ? raw.routing : undefined;
+    const rawType = asString(raw.type) as PiEngineType | "pi";
     harnessInstances[name] = {
-      type: "pi",
+      // Legacy "pi" mapped IN MEMORY only; doctor is what writes it.
+      type: rawType === "pi"
+        ? decideLegacyPi({ routingConfigured: routingIsConfigured(routing) })
+        : rawType,
       bin: asString(raw.bin) ?? asString(tomlPi.bin) ?? usablePersistedBin(state.harness_bins?.pi) ?? "pi",
       routing: resolveRouting(routing, {}),
     };
@@ -1324,6 +1342,36 @@ export async function loadConfig(persona?: string): Promise<Config> {
       statedRouting = statedRouting.filter((name) => name !== personaLayer);
     }
   }
+
+  // Resolved ahead of the returned object so the legacy-`pi` chain mapping can
+  // see it: a legacy pi WITH routing means the embedded engine (native). Read
+  // time never probes binaries, so hostPiInstalled stays unknown and a
+  // routing-less pi keeps its pre-upgrade meaning (the host pi).
+  const piRouting = buildPiRoutingConfig(tomlPi, {
+    [ENV_PI_PROVIDER]: harnessEnv(ENV_PI_PROVIDER, [
+      "pi",
+      "routing",
+      "provider",
+    ]),
+    [ENV_PRIMARY_MODEL]: harnessEnv(ENV_PRIMARY_MODEL, [
+      "pi",
+      "routing",
+      "primary_model",
+    ]),
+    [ENV_IMAGE_MODEL]: harnessEnv(ENV_IMAGE_MODEL, [
+      "pi",
+      "routing",
+      "image_model",
+    ]),
+    [ENV_CODING_MODEL]: harnessEnv(ENV_CODING_MODEL, [
+      "pi",
+      "routing",
+      "coding_model",
+    ]),
+  });
+  const legacyPiFacts: LegacyPiFacts = {
+    routingConfigured: routingIsConfigured(piRouting),
+  };
 
   return {
     defaultPersona:
@@ -1386,8 +1434,11 @@ export async function loadConfig(persona?: string): Promise<Config> {
     configPath,
 
     harnesses: {
-      chain: migratedChain,
-      personas: buildHarnessPersonasConfig(tomlHarnessPersonas),
+      chain: mapLegacyChain(migratedChain, legacyPiFacts),
+      personas: mapLegacyPersonaChains(
+        buildHarnessPersonasConfig(tomlHarnessPersonas),
+        legacyPiFacts,
+      ),
       instances: Object.keys(harnessInstances).length > 0 ? harnessInstances : undefined,
 
       ownBins: personaOwnBins,
@@ -1417,28 +1468,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
           asString(tomlPi.bin) ??
           usablePersistedBin(state.harness_bins?.pi) ??
           "pi",
-        routing: buildPiRoutingConfig(tomlPi, {
-          [ENV_PI_PROVIDER]: harnessEnv(ENV_PI_PROVIDER, [
-            "pi",
-            "routing",
-            "provider",
-          ]),
-          [ENV_PRIMARY_MODEL]: harnessEnv(ENV_PRIMARY_MODEL, [
-            "pi",
-            "routing",
-            "primary_model",
-          ]),
-          [ENV_IMAGE_MODEL]: harnessEnv(ENV_IMAGE_MODEL, [
-            "pi",
-            "routing",
-            "image_model",
-          ]),
-          [ENV_CODING_MODEL]: harnessEnv(ENV_CODING_MODEL, [
-            "pi",
-            "routing",
-            "coding_model",
-          ]),
-        }),
+        routing: piRouting,
       },
 
       codex: {
@@ -2067,6 +2097,19 @@ function buildPiRoutingConfig(
  * the global chain. Unknown ids remain intact and are reported by the shared
  * chain builder in the same way as unknown ids in the global chain.
  */
+function mapLegacyPersonaChains(
+  personas: Record<string, { chain: string[] }> | undefined,
+  facts: LegacyPiFacts,
+): Record<string, { chain: string[] }> | undefined {
+  if (!personas) return personas;
+  return Object.fromEntries(
+    Object.entries(personas).map(([name, entry]) => [
+      name,
+      { chain: mapLegacyChain(entry.chain, facts) },
+    ]),
+  );
+}
+
 function buildHarnessPersonasConfig(
   tomlPersonas: Record<string, unknown>,
 ): Record<string, { chain: string[] }> | undefined {

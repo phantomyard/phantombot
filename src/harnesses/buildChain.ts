@@ -4,6 +4,16 @@
  * now imported from both. The "third place" risk surfaces every time
  * a new harness lands; this helper retires it.
  *
+ * Harness ids:
+ *   claude, codex  — the host's CLIs, configured by their owner.
+ *   native         — the pi engine embedded in this binary, with phantombot's
+ *                    `[harnesses.pi.routing]`.
+ *   pi-host        — the host's own `pi`, configured by its owner.
+ *   <instance id>  — `[harnesses.instances.<id>]` with `type = "native"` or
+ *                    `"pi-host"` (a chain that uses the pi engine twice).
+ * A legacy `pi` is mapped at read time (lib/harnessReconcile.ts); if one still
+ * reaches here it is decided by that same function, never guessed.
+ *
  * Unknown harness ids are logged to err and skipped — same lenient
  * shape the duplicated copies had. Returning [] from here is treated
  * by the callers as "no harnesses configured" → exit 2 with a hint.
@@ -11,6 +21,7 @@
 
 import { type Config } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { piEngineFor } from "../lib/harnessReconcile.ts";
 import { ClaudeHarness } from "./claude.ts";
 import { PiHarness } from "./pi.ts";
 import { CodexHarness } from "./codex.ts";
@@ -28,6 +39,29 @@ export function harnessChainIds(config: Config, persona?: string): string[] {
   return config.harnesses.chain;
 }
 
+/**
+ * Build ONE harness for a chain id, or undefined when the id is unknown. Shared
+ * by the chain builder and the brain probe so a probed harness is constructed
+ * exactly like the one a real turn runs.
+ */
+export function buildHarness(config: Config, id: string): Harness | undefined {
+  if (id === "claude") return new ClaudeHarness(config.harnesses.claude);
+  if (id === "codex") {
+    return new CodexHarness(config.harnesses.codex ?? { bin: "codex", model: "" });
+  }
+  const engine = piEngineFor(config.harnesses, id);
+  if (!engine) return undefined;
+  const instance = config.harnesses.instances?.[id];
+  const slot = instance ?? config.harnesses.pi;
+  return new PiHarness({
+    bin: slot.bin,
+    routing: slot.routing,
+    id,
+    mode: engine === "native" ? "native" : "host",
+    ...(instance ? { apiKeyEnv: piInstanceSecretName(id) } : {}),
+  });
+}
+
 export function buildHarnessChain(
   config: Config,
   err: WriteSink,
@@ -35,19 +69,9 @@ export function buildHarnessChain(
 ): Harness[] {
   const out: Harness[] = [];
   for (const id of harnessChainIds(config, persona)) {
-    if (id === "claude") {
-      out.push(new ClaudeHarness(config.harnesses.claude));
-    } else if (id === "pi") {
-      out.push(new PiHarness(config.harnesses.pi));
-    } else if (id === "codex") {
-      out.push(new CodexHarness(config.harnesses.codex ?? { bin: "codex", model: "" }));
-    } else if (config.harnesses.instances?.[id]?.type === "pi") {
-      const instance = config.harnesses.instances[id]!;
-      out.push(new PiHarness({
-        ...instance,
-        id,
-        apiKeyEnv: piInstanceSecretName(id),
-      }));
+    const harness = buildHarness(config, id);
+    if (harness) {
+      out.push(harness);
     } else {
       err.write(`warning: unknown harness '${id}', skipping\n`);
     }

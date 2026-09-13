@@ -14,7 +14,11 @@ value:
 | 1 | Env var | `PHANTOMBOT_CLAUDE_BIN=/opt/claude/bin/claude` |
 | 2 | `config.toml` | `[harnesses.claude] bin = "claude.cmd"` |
 | 3 | **`state.json` → `harness_bins.<id>`** | written automatically on a successful resolve |
-| 4 | Bare-name default | `"claude"`, `"pi"`, `"codex"` |
+| 4 | Bare-name default | `"claude"`, `"pi"` (for `pi-host`), `"codex"` |
+
+The `native` harness has no entry in this chain: its engine is compiled into
+the phantombot binary, so detection always reports it present (its "binary" is
+`process.execPath`) and it is never written to `state.json`.
 
 Layer 3 is the one that surprises people. `state.json` lives in the **data
 dir**, not next to `config.toml`, so it is not cleared by editing — or even

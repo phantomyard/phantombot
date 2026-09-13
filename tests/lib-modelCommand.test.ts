@@ -178,10 +178,10 @@ describe("applyModelRequest pi", () => {
     const config = makeConfig();
     const r = await applyModelRequest(
       { kind: "set", role: "primary", slug: "deepseek-v3" },
-      "pi",
+      "native",
       config
     );
-    expect(r).toEqual({ ok: true, summary: "pi primary model → deepseek-v3" });
+    expect(r).toEqual({ ok: true, summary: "native primary model → deepseek-v3" });
 
     const toml = await readConfigToml(configPath);
     expect(getIn(toml, ["harnesses", "pi", "routing", "primary_model"])).toBe(
@@ -197,12 +197,12 @@ describe("applyModelRequest pi", () => {
     const config = makeConfig();
     await applyModelRequest(
       { kind: "set", role: "coding", slug: "qwen-coder" },
-      "pi",
+      "native",
       config
     );
     await applyModelRequest(
       { kind: "set", role: "image", slug: "qwen-vl" },
-      "pi",
+      "native",
       config
     );
     const toml = await readConfigToml(configPath);
@@ -240,7 +240,7 @@ describe("applyModelRequest pi", () => {
   test("clear is refused — pi has no default to fall back to", async () => {
     const r = await applyModelRequest(
       { kind: "clear" },
-      "pi",
+      "native",
       makeConfig()
     );
     expect(r.ok).toBe(false);
@@ -268,7 +268,7 @@ describe("applyModelRequest persona scope", () => {
     const config = makeConfig();
     await applyModelRequest(
       { kind: "set", role: "primary", slug: "lena-primary" },
-      "pi",
+      "native",
       config,
       "lena",
     );
@@ -325,7 +325,7 @@ describe("applyModelRequest persona scope", () => {
     );
     await applyModelRequest(
       { kind: "set", role: "primary", slug: "lena-primary" },
-      "pi",
+      "native",
       config,
       "lena",
     );
@@ -341,7 +341,7 @@ describe("applyModelRequest persona scope", () => {
     const config = makeConfig();
     await applyModelRequest(
       { kind: "set", role: "primary", slug: "host-primary" },
-      "pi",
+      "native",
       config,
       "phantom",
     );
@@ -449,4 +449,22 @@ test("unknown harness id is refused", async () => {
     makeConfig()
   );
   expect(r.ok).toBe(false);
+});
+
+describe("applyModelRequest pi-host", () => {
+  test("refuses: a host pi's models belong to the host's own pi configuration", async () => {
+    const config = {
+      configPath: "/nonexistent/config.toml",
+      personasDir: "/nonexistent/personas",
+      defaultPersona: "phantom",
+      harnesses: { chain: ["pi-host"], pi: { bin: "pi" } },
+    } as unknown as Parameters<typeof applyModelRequest>[2];
+    const r = await applyModelRequest(
+      { kind: "set", role: "primary", slug: "deepseek-v3" },
+      "pi-host",
+      config,
+    );
+    expect(r.ok).toBe(false);
+    expect((r as { error: string }).error).toContain("host's own pi configuration");
+  });
 });

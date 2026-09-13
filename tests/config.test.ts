@@ -353,7 +353,8 @@ model = "gpt-5.3-codex"
     // stricter 120s idle default applied silently.
     expect(c.harnessHardTimeoutMs).toBe(120_000);
     expect(c.harnessIdleTimeoutMs).toBe(120_000);
-    expect(c.harnesses.chain).toEqual(["pi", "claude"]);
+    // A legacy `pi` is mapped at read time (no routing → the host pi).
+    expect(c.harnesses.chain).toEqual(["pi-host", "claude"]);
     expect(c.harnesses.claude.model).toBe("sonnet");
     expect(c.harnesses.claude.fallbackModel).toBe("");
     expect(c.harnesses.pi.bin).toBe("/opt/pi/pi");
@@ -589,7 +590,8 @@ model = "from-toml"
   test("PHANTOMBOT_HARNESS_CHAIN parses comma-separated list", async () => {
     process.env.PHANTOMBOT_HARNESS_CHAIN = "claude, pi";
     const c = await loadConfig();
-    expect(c.harnesses.chain).toEqual(["claude", "pi"]);
+    // Legacy `pi` from the env is mapped too (no routing here → the host pi).
+    expect(c.harnesses.chain).toEqual(["claude", "pi-host"]);
   });
 
   test("Telegram streaming env vars override TOML", async () => {

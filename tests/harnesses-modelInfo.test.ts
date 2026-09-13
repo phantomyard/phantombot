@@ -13,6 +13,7 @@ import { CodexHarness } from "../src/harnesses/codex.ts";
 describe("PiHarness.modelInfo", () => {
   test("with full routing configured", () => {
     const h = new PiHarness({
+      mode: "native",
       bin: "pi",
       routing: {
         provider: "openrouter",
@@ -30,7 +31,7 @@ describe("PiHarness.modelInfo", () => {
   });
 
   test("without routing → pi default sentinel", () => {
-    const h = new PiHarness({ bin: "pi" });
+    const h = new PiHarness({ bin: "pi", mode: "native" });
     const info = h.modelInfo();
     expect(info.model).toBe("(pi default)");
     expect(info.provider).toBeUndefined();
@@ -65,5 +66,15 @@ describe("CodexHarness.modelInfo", () => {
     expect(new CodexHarness({ bin: "codex", model: "" }).modelInfo()).toEqual({
       model: "(default)",
     });
+  });
+});
+
+describe("PiHarness.modelInfo — pi-host", () => {
+  test("a host pi reports its own configuration, never phantombot routing", () => {
+    const h = new PiHarness({
+      bin: "pi",
+      routing: { provider: "openrouter", primaryModel: "deepseek-v3" },
+    });
+    expect(h.modelInfo()).toEqual({ model: "(host pi configuration)" });
   });
 });

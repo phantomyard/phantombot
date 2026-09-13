@@ -23,9 +23,23 @@ const SAVED = {
   personas: process.env.PHANTOMBOT_PERSONAS_DIR,
   data: process.env.XDG_DATA_HOME,
 };
+// Ambient routing env makes a legacy `pi` read as native (read-time mapping,
+// lib/harnessReconcile.ts). Another test file leaving one set must not change
+// what these configs mean, so they are cleared per test and put back after.
+const ROUTING_ENV = [
+  "PHANTOMBOT_PI_PROVIDER",
+  "PHANTOMBOT_PRIMARY_MODEL",
+  "PHANTOMBOT_IMAGE_MODEL",
+  "PHANTOMBOT_CODING_MODEL",
+] as const;
+const SAVED_ROUTING = Object.fromEntries(ROUTING_ENV.map((k) => [k, process.env[k]]));
 const WORK = mkdtempSync(join(tmpdir(), "tui-snapshot-brain-"));
 
 afterEach(() => {
+  for (const k of ROUTING_ENV) {
+    if (SAVED_ROUTING[k] === undefined) delete process.env[k];
+    else process.env[k] = SAVED_ROUTING[k];
+  }
   if (SAVED.config === undefined) delete process.env.PHANTOMBOT_CONFIG;
   else process.env.PHANTOMBOT_CONFIG = SAVED.config;
   if (SAVED.personas === undefined) delete process.env.PHANTOMBOT_PERSONAS_DIR;
@@ -36,6 +50,7 @@ afterEach(() => {
 });
 
 function setup(configToml: string): string {
+  for (const k of ROUTING_ENV) delete process.env[k];
   const personasDir = join(WORK, "personas");
   mkdirSync(join(personasDir, "alice"), { recursive: true });
   mkdirSync(join(personasDir, "bob"), { recursive: true });
@@ -64,8 +79,9 @@ describe("personaSnapshot brain badge source of truth", () => {
 
     // The badge's two fields agree with the runtime and the boot gate:
     expect(snap.brainConfigured).toBe(true);
-    expect(snap.chain).toEqual(["pi"]);
-    expect(snap.resolvedHarness?.id).toBe("pi");
+    // A routing-less legacy pi is read as the host pi (pi-host).
+    expect(snap.chain).toEqual(["pi-host"]);
+    expect(snap.resolvedHarness?.id).toBe("pi-host");
     expect(snap.resolvedHarness?.path).toBe("/bin/true");
     expect(snap.completeness.complete).toBe(true);
   });
