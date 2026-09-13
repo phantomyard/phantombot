@@ -256,7 +256,8 @@ export function parseCodexEvent(parsed: unknown): ParseEventResult {
     }
     // Reasoning summary item (codex emits SUMMARIES, not raw chain-of-thought).
     // Capture the summary into the narration-decay replay buffer (issue #551);
-    // the chunk stays a payload-less heartbeat, exactly as before.
+    // the chunk stays a payload-less heartbeat, exactly as before. The buffer
+    // appends byte-for-byte — no synthesized separators.
     if (it.type === "reasoning" && typeof it.text === "string") {
       return it.text.trim()
         ? { reasoning: it.text, chunk: { type: "heartbeat" } }

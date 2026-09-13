@@ -1430,12 +1430,21 @@ async function processChatMessage(
       if (chunk.type === "progress") {
         progressCount++;
         // Stash the latest progress note on the active-turn handle so
-        // /status can show "currently: <tool>" in real time.
+        // /status can show "currently: <tool>" in real time. Ephemeral
+        // rows (reasoning replay) still drive the live indicator, but their
+        // text must never reach a persisted log — redact below.
         turnHandle.lastProgressNote = chunk.note.slice(0, 500);
-        log.debug("telegram: progress", {
-          chatId: msg.conversationId,
-          note: chunk.note.slice(0, 200),
-        });
+        if (chunk.ephemeral) {
+          log.debug("telegram: progress", {
+            chatId: msg.conversationId,
+            note: "(reasoning replay — redacted)",
+          });
+        } else {
+          log.debug("telegram: progress", {
+            chatId: msg.conversationId,
+            note: chunk.note.slice(0, 200),
+          });
+        }
         // A tool is about to run. The text emitted since the previous
         // boundary was progress narration unless it already crossed the
         // markdown-aware final-answer splitter and got sent as a readable

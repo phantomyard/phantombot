@@ -72,13 +72,42 @@ describe("ReasoningReplay — reasoning path", () => {
     expect(out.endsWith("TAIL")).toBe(true);
   });
 
-  test("accumulates delta fragments into one string", () => {
+  test("accumulates delta fragments byte-for-byte (verbatim slices)", () => {
     const { r, set } = replayWithClock();
-    r.note("check");
-    r.note("the");
+    // Real claude/pi deltas are verbatim slices of the model's text — they
+    // carry their own whitespace where the model wrote it.
+    r.note("check ");
+    r.note("the ");
     r.note("calendar");
     set(10_000);
     expect(r.due()).toBe("check the calendar");
+  });
+
+  test("REGRESSION: split-mid-token deltas are never separated by invented whitespace", () => {
+    const { r, set } = replayWithClock();
+    r.note("investig");
+    r.note("ating");
+    r.note(" the logs");
+    set(10_000);
+    expect(r.due()).toBe("investigating the logs");
+  });
+
+  test("delta leading/trailing whitespace survives untouched", () => {
+    const { r, set } = replayWithClock();
+    r.note("word");
+    r.note("  more  ");
+    set(10_000);
+    expect(r.due()).toBe("word  more"); // due() trims the ends, preserves the middle
+  });
+
+  test("complete summary items append byte-for-byte (no synthesized separator)", () => {
+    const { r, set } = replayWithClock();
+    r.note("First idea.");
+    r.note("Second idea.");
+    set(10_000);
+    // Cosmetically the seam runs together — accepted; corrupting a mid-word
+    // delta would be worse. Capture-not-synthesis over prettiness.
+    expect(r.due()).toBe("First idea.Second idea.");
   });
 });
 
@@ -177,10 +206,13 @@ function replayWithClock(): {
 }
 
 describe("replayChunk + isReasoningCapture", () => {
-  test("replayChunk is a payload-less progress row (no tool detail)", () => {
+  test("replayChunk is a payload-less, EPHEMERAL progress row (no tool detail)", () => {
+    // ephemeral:true is the privacy discriminator — logging/persistence
+    // paths must redact these rows (issue #551 review fix).
     expect(replayChunk("some reasoning")).toEqual({
       type: "progress",
       note: "some reasoning",
+      ephemeral: true,
     });
   });
   test("isReasoningCapture discriminates the widened parser result", () => {
@@ -228,7 +260,7 @@ describe("runHarnessProcess — narration-decay replay (issue #551)", () => {
       [
         "sh",
         "-c",
-        `for i in 1 2 3 4 5 6; do echo "{\\"thinking\\":\\"thought $i\\"}"; sleep 0.2; done; echo "{\\"text\\":\\"final reply\\"}"`,
+        `for i in 1 2 3 4 5 6; do echo "{\\"thinking\\":\\"thought $i \\"}"; sleep 0.2; done; echo "{\\"text\\":\\"final reply\\"}"`,
       ],
       { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
     );

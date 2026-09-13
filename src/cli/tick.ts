@@ -677,7 +677,11 @@ function logBackgroundWakeChunk(
     log.info("tick: background wake stream", {
       ...fields,
       chars: chunk.note.length,
-      ...previewForLog(chunk.note),
+      // Ephemeral rows (reasoning replay) carry model reasoning — redact
+      // the preview so nothing lands in persisted logs.
+      ...(chunk.ephemeral
+        ? { preview: "(reasoning replay — redacted)", truncated: false }
+        : previewForLog(chunk.note)),
     });
     return;
   }

@@ -31,6 +31,8 @@
  *   - Privacy: reasoning rides the payload-less `progress` path, which every
  *     channel layer treats as ephemeral UI state (live indicator + /status),
  *     never persisted as reply text, narration bubble, memory, or journal.
+ *     The chunk carries `ephemeral: true` so every logging/persistence path
+ *     can (and must) redact it — see replayChunk().
  */
 
 import type { HarnessChunk } from "./types.ts";
@@ -119,17 +121,18 @@ export class ReasoningReplay {
    * Model reasoning arrived (fragment or complete summary). Appended to the
    * un-emitted buffer; capped so a chatty thinker can't grow it unbounded.
    * Exported for tests.
+   *
+   * Capture-not-synthesis: fragments are appended BYTE-FOR-BYTE — a
+   * fragment ending mid-word (`investig`) flows into the next (`ating`)
+   * without invented separators, and surrounding whitespace survives
+   * untouched. `trim()` is used only to detect empty fragments. Discrete
+   * summary items (codex) run together at the seam if the model didn't
+   * emit boundary whitespace — an acceptable cosmetic cost next to ever
+   * corrupting streamed text.
    */
   note(text: string): void {
-    const t = text.trim();
-    if (!t) return;
-    // Join fragments with a single space unless they already run on (deltas
-    // arrive mid-sentence; complete summaries are sentences). Never invent
-    // punctuation — the separator is whitespace, not synthesized text.
-    this.pending =
-      this.pending.length === 0
-        ? t
-        : (this.pending + (/\s$/.test(this.pending) ? "" : " ") + t);
+    if (!text.trim()) return;
+    this.pending += text;
     if (this.pending.length > PENDING_CAP) {
       this.pending = this.pending.slice(-PENDING_CAP);
     }
@@ -242,7 +245,11 @@ export class ReasoningReplay {
  * narration-adjacent liveness, not a tool call, so ACP/panel consumers
  * render it as a plain progress row and resume evidence ignores it (the
  * resume log only counts `progress` chunks with a structured `tool`).
+ *
+ * `ephemeral: true` is the privacy discriminator (issue #551): model
+ * reasoning rides the payload-less progress path, so every consumer that
+ * writes a note into a persisted log must redact these rows.
  */
 export function replayChunk(text: string): HarnessChunk {
-  return { type: "progress", note: text };
+  return { type: "progress", note: text, ephemeral: true };
 }
