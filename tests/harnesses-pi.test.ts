@@ -81,7 +81,7 @@ describe("parsePiEvent", () => {
     expect(c).toEqual({ type: "text", text: "hi" });
   });
 
-  test("emits heartbeat for thinking_delta (and does NOT leak the chain-of-thought content)", () => {
+  test("thinking_delta: heartbeat stays payload-less, content captured for replay (#551)", () => {
     const c = parsePiEvent({
       type: "message_update",
       assistantMessageEvent: {
@@ -92,9 +92,17 @@ describe("parsePiEvent", () => {
       },
       message: {},
     });
-    expect(c).toEqual({ type: "heartbeat" });
-    // The reasoning content MUST NOT appear in the chunk.
-    expect(JSON.stringify(c)).not.toContain("internal reasoning");
+    // The surfaced chunk MUST NOT carry the reasoning content — it stays a
+    // payload-less heartbeat. The capture itself only feeds the narration-
+    // decay replay buffer (ephemeral progress rows after a quiet window),
+    // never the reply stream.
+    expect(c).not.toBeNull();
+    expect(c && "reasoning" in c && c.chunk).toEqual({ type: "heartbeat" });
+    expect(JSON.stringify(c && "reasoning" in c ? c.chunk : c)).not.toContain(
+      "internal reasoning",
+    );
+    // The content IS captured for the replay path — model text only.
+    expect(c && "reasoning" in c && c.reasoning).toBe("internal reasoning");
   });
 
   test("emits progress for tool_execution_start (pi 0.79.x toolName field)", () => {
@@ -289,14 +297,19 @@ describe("piActivity — idle-watchdog classification", () => {
     // classified 'model', which does NOT reset the timer once a tool is running.
     // Forcing 'tool' is what lets a long-but-working coder stay alive.
     const parsed = { type: "tool_execution_update", toolName: "coder" };
-    const chunk = parsePiEvent(parsed)!;
-    expect(chunk).toEqual({ type: "heartbeat" });
-    expect(piActivity(parsed, chunk)).toBe("tool");
+    const res = parsePiEvent(parsed)!;
+    if ("reasoning" in res) throw new Error("unexpected reasoning capture");
+    expect(res).toEqual({ type: "heartbeat" });
+    expect(piActivity(parsed, res)).toBe("tool");
   });
 
   test("tool_execution_start is in-tool activity", () => {
     const parsed = { type: "tool_execution_start", toolName: "coder" };
-    expect(piActivity(parsed, parsePiEvent(parsed)!)).toBe("tool");
+    {
+      const res = parsePiEvent(parsed)!;
+      if ("reasoning" in res) throw new Error("unexpected reasoning capture");
+      expect(piActivity(parsed, res)).toBe("tool");
+    }
   });
 
   test("a plain thinking heartbeat stays 'model' (must NOT reset a running tool)", () => {

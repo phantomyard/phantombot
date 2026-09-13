@@ -55,6 +55,7 @@ import type {
   HarnessRequest,
 } from "./types.ts";
 import { buildToolCall } from "./toolNote.ts";
+import { DEFAULT_REASONING_REPLAY, type ParseEventResult, type ReasoningReplayConfig } from "./reasoningReplay.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
 import { reloadVaultForPersona } from "../lib/vault.ts";
 import {
@@ -81,6 +82,11 @@ export interface ClaudeHarnessConfig {
   model: string;
   /** Model alias passed to --fallback-model. Empty string disables. */
   fallbackModel: string;
+  /**
+   * Narration-decay replay config (issue #551). Omitted = defaults
+   * (DEFAULT_REASONING_REPLAY); tests pass short windows. Present = on.
+   */
+  reasoningReplay?: Partial<ReasoningReplayConfig>;
 }
 
 export class ClaudeHarness implements Harness {
@@ -238,6 +244,7 @@ export class ClaudeHarness implements Harness {
       stdinPayload: renderStdinPayload(req),
       parseEvent: parseStreamJson,
       activity: claudeActivity,
+      reasoningReplay: this.config.reasoningReplay ?? DEFAULT_REASONING_REPLAY,
       buildDoneMeta: () => ({
         harnessId: this.id,
         model: this.config.model,
@@ -498,14 +505,20 @@ export function renderStdinPayload(req: HarnessRequest): string {
  *   - `thinking` / `tool_result` → `heartbeat` (refreshes typing indicator,
  *     but does NOT flush narration — mirrors pi.ts behavior).
  *
+ *   - `thinking` / `tool_result` → `heartbeat` (refreshes typing indicator,
+ *     but does NOT flush narration — mirrors pi.ts behavior).
+ *
  * If a single assistant message contains BOTH text and non-text blocks,
  * text wins (it carries strictly more signal). If it has both tool_use
  * and thinking, progress wins (tool_use is the signal that matters).
  * Thinking-only messages get a heartbeat — they don't fragment the
  * narration bubble.
  *
- * Actual content stays inside the subprocess; we never leak
- * chain-of-thought.
+ * Reasoning content is never streamed as reply text. It IS captured (from
+ * `stream_event` thinking_delta fragments) into the narration-decay replay
+ * buffer (issue #551), where the engine's quiet window may surface the
+ * newest un-emitted slice as an ephemeral `progress` row — model-written
+ * text only, user-channel-only, never persisted.
  *
  * Exported for testing.
  */
@@ -584,7 +597,7 @@ export function apiErrorStatus(obj: Record<string, unknown>): string | undefined
   return status;
 }
 
-export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
+export function parseStreamJson(parsed: unknown): ParseEventResult {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
 
@@ -626,7 +639,39 @@ export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   }
 
   const message = obj.message as Record<string, unknown> | undefined;
-  if (!message) return undefined;
+  if (!message) {
+    // Reasoning capture (issue #551). With --include-partial-messages the CLI
+    // streams raw Anthropic SSE events wrapped in `stream_event` envelopes;
+    // thinking_delta fragments carry the model's chain-of-thought. Capture
+    // the text into the shared replay buffer (the engine's narration-decay
+    // quiet window decides if/when the user sees it) and emit a payload-less
+    // heartbeat exactly like a complete thinking block — the signal is "the
+    // model is alive", never a leak of chain-of-thought into the reply.
+    if (obj.type === "stream_event") {
+      const event = obj.event as Record<string, unknown> | undefined;
+      const delta =
+        typeof event === "object" && event !== null
+          ? (event.delta as Record<string, unknown> | undefined)
+          : undefined;
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        event.type === "content_block_delta" &&
+        typeof delta === "object" &&
+        delta !== null &&
+        delta.type === "thinking_delta" &&
+        typeof delta.thinking === "string"
+      ) {
+        return delta.thinking.trim()
+          ? { reasoning: delta.thinking, chunk: { type: "heartbeat" } }
+          : { type: "heartbeat" };
+      }
+      // Text deltas arrive via the same envelopes; text surfaces from the
+      // complete `assistant` envelopes below, so raw deltas stay ignored.
+      return undefined;
+    }
+    return undefined;
+  }
   const content = message.content;
   if (!Array.isArray(content)) return undefined;
 

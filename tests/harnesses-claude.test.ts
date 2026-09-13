@@ -922,12 +922,12 @@ describe("parseStreamJson subagent tripwire", () => {
   });
 
   test("a Task tool_use becomes a recoverable error, not progress", () => {
-    const chunk = parseStreamJson({
+    const chunk = asChunk(parseStreamJson({
       type: "assistant",
       message: {
         content: [{ type: "tool_use", name: "Task", input: { prompt: "x" } }],
       },
-    });
+    }));
     expect(chunk?.type).toBe("error");
     if (chunk?.type === "error") {
       expect(chunk.recoverable).toBe(true);
@@ -935,6 +935,15 @@ describe("parseStreamJson subagent tripwire", () => {
     }
   });
 });
+
+
+// Narrow a widened ParseEventResult to a plain chunk (parsers return
+// ReasoningCapture for thinking events; these legacy assertions only
+// exercise pure-chunk paths).
+const asChunk = (r: ReturnType<typeof parseStreamJson>) => {
+  if (r && "reasoning" in r) throw new Error("unexpected reasoning capture");
+  return r;
+};
 
 describe("ClaudeHarness background-agent lockdown", () => {
   test("--disallowedTools removes Task as well as Workflow", async () => {

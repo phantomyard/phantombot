@@ -91,10 +91,19 @@ describe("parseCodexEvent", () => {
   });
 
   test("turn.completed -> done-shaped stats carrier", () => {
-    const c = parseCodexEvent({ type: "turn.completed", usage: { output_tokens: 2 } });
+    const c = asChunk(parseCodexEvent({ type: "turn.completed", usage: { output_tokens: 2 } }));
     expect(c?.type).toBe("done");
   });
 });
+
+
+// Narrow a widened ParseEventResult to a plain chunk (parsers return
+// ReasoningCapture for thinking events; these legacy assertions only
+// exercise pure-chunk paths).
+const asChunk = (r: ReturnType<typeof parseCodexEvent>) => {
+  if (r && "reasoning" in r) throw new Error("unexpected reasoning capture");
+  return r;
+};
 
 describe("CodexHarness.invoke", () => {
   const mkHarness = (model = "") => new CodexHarness({ bin: FAKE_CODEX, model });
@@ -328,11 +337,16 @@ describe("isCodexSubagentActivity", () => {
 });
 
 describe("parseCodexEvent subagent tripwire", () => {
+  const tripwireChunk = (r: ReturnType<typeof parseCodexEvent>) => {
+    if (r && "reasoning" in r) throw new Error("unexpected reasoning capture");
+    return r;
+  };
+
   test("a collab_agent_spawn item becomes a recoverable error", () => {
-    const chunk = parseCodexEvent({
+    const chunk = tripwireChunk(parseCodexEvent({
       type: "item.started",
       item: { type: "collab_agent_spawn_begin", name: "spawn_agent" },
-    });
+    }));
     expect(chunk?.type).toBe("error");
     if (chunk?.type === "error") {
       expect(chunk.recoverable).toBe(true);
@@ -342,10 +356,10 @@ describe("parseCodexEvent subagent tripwire", () => {
   });
 
   test("a spawn_agent tool call becomes a recoverable error, not progress", () => {
-    const chunk = parseCodexEvent({
+    const chunk = tripwireChunk(parseCodexEvent({
       type: "item.started",
       item: { type: "tool_call", name: "spawn_agent" },
-    });
+    }));
     expect(chunk?.type).toBe("error");
     if (chunk?.type === "error") {
       expect(chunk.recoverable).toBe(true);
@@ -354,10 +368,10 @@ describe("parseCodexEvent subagent tripwire", () => {
   });
 
   test("a completed sub_agent_activity item is caught too", () => {
-    const chunk = parseCodexEvent({
+    const chunk = tripwireChunk(parseCodexEvent({
       type: "item.completed",
       item: { type: "sub_agent_activity" },
-    });
+    }));
     expect(chunk?.type).toBe("error");
   });
 
