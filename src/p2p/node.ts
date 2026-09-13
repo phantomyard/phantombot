@@ -24,7 +24,12 @@
  */
 
 import { log } from "../lib/logger.ts";
-import type { ParsedEventFrame } from "./frame.ts";
+import {
+  buildOkFrame,
+  parseEventFrame,
+  parseOkFrame,
+  type ParsedEventFrame,
+} from "./frame.ts";
 import type { PeerConnectionOptions, PeerState } from "./peerConnection.ts";
 import { PeerConnection } from "./peerConnection.ts";
 import type { SignalMessage, Signaling } from "./signaling.ts";
@@ -63,15 +68,35 @@ export interface P2PNodeDeps {
   iceServers: { urls: string }[];
   /** Nostr-backed signaling (or a fake in tests). */
   signaling: Signaling;
-  /** Build the local ws bridge, given the outbound-frame handler to call. */
-  createBridge: (onOutbound: (frame: ParsedEventFrame, raw: string) => void) => BridgePort;
+  /**
+   * Build the local bridge, given the outbound-frame handler to call. The
+   * handler resolves true once the recipient peer acknowledged the frame.
+   */
+  createBridge: (
+    onOutbound: (frame: ParsedEventFrame, raw: string) => Promise<boolean>,
+  ) => BridgePort;
   /** Build a peer connection. Defaults to a real werift `PeerConnection`. */
   createPeer?: (opts: PeerConnectionOptions) => PeerLike;
   /** Max frames buffered per peer while its channel comes up. Default 64. */
   maxOutboxPerPeer?: number;
+  /** How long an outbound frame waits for the peer's OK receipt. */
+  ackTimeoutMs?: number;
 }
 
 const DEFAULT_MAX_OUTBOX = 64;
+
+/**
+ * How long a sent frame waits for the peer's `["OK", id, true]` receipt before
+ * the sender stops counting on P2P for it. Relays are publishing in parallel
+ * the whole time, so this only bounds how long a receipt can still win; it
+ * never delays a send. A live data channel answers in well under 100ms.
+ */
+export const P2P_ACK_TIMEOUT_MS = 2000;
+
+interface AckWaiter {
+  promise: Promise<boolean>;
+  settle: (acked: boolean) => void;
+}
 
 export class P2PNode {
   private readonly ourPubHex: string;
@@ -93,6 +118,13 @@ export class P2PNode {
    * of the SAME offer doesn't tear down a connection we just built from it.
    */
   private readonly lastOfferSdp = new Map<string, string>();
+  /**
+   * Outbound frames awaiting the peer's OK receipt, keyed `peerHex:eventId`.
+   * Keyed by peer so only the peer we sent to can confirm it — an OK from any
+   * other data channel for the same id is ignored.
+   */
+  private readonly ackWaiters = new Map<string, AckWaiter>();
+  private readonly ackTimeoutMs: number;
   private started = false;
 
   constructor(deps: P2PNodeDeps) {
@@ -101,6 +133,7 @@ export class P2PNode {
     this.signaling = deps.signaling;
     this.createPeer = deps.createPeer ?? ((o) => new PeerConnection(o));
     this.maxOutbox = deps.maxOutboxPerPeer ?? DEFAULT_MAX_OUTBOX;
+    this.ackTimeoutMs = deps.ackTimeoutMs ?? P2P_ACK_TIMEOUT_MS;
     this.bridge = deps.createBridge((frame, raw) => this.onOutbound(frame, raw));
   }
 
@@ -144,6 +177,7 @@ export class P2PNode {
     this.peers.clear();
     this.outbox.clear();
     this.negotiating.clear();
+    for (const key of [...this.ackWaiters.keys()]) this.settleAck(key, false);
     this.signaling.stop();
     this.bridge.stop();
     log.info("[p2p] node stopped");
@@ -164,21 +198,60 @@ export class P2PNode {
     return this.ourPubHex < peerHex;
   }
 
-  /** An outgoing PWA frame → route it to the recipient peer's channel. */
-  private onOutbound(frame: ParsedEventFrame, raw: string): void {
+  /**
+   * An outgoing frame → route it to the recipient peer's channel. Resolves true
+   * once that peer acknowledges it with an OK receipt, false on timeout, on a
+   * self-addressed wrap, or if the peer drops first. Never rejects.
+   */
+  private onOutbound(frame: ParsedEventFrame, raw: string): Promise<boolean> {
     const peerHex = frame.recipientHex;
     if (peerHex === this.ourPubHex) {
       // A self-addressed wrap (multi-device sync copy). There is no remote peer
       // to route it to; the relay copy handles multi-device. Drop silently.
-      return;
+      return Promise.resolve(false);
     }
+    // Arm the waiter BEFORE sending, so a receipt can never beat its waiter.
+    const acked = this.awaitAck(peerHex, frame.wrap?.id);
     const peer = this.getOrCreatePeer(peerHex);
     if (peer.isReady()) {
-      if (peer.send(raw)) return;
+      if (peer.send(raw)) return acked;
       // Send failed on a supposedly-open channel — fall through to buffer/redial.
     }
     this.enqueue(peerHex, raw);
     this.kickstart(peerHex, peer);
+    // A frame flushed once the channel opens can still be acked in the window.
+    return acked;
+  }
+
+  private ackKey(peerHex: string, eventId: string): string {
+    return `${peerHex}:${eventId}`;
+  }
+
+  /** Wait for `peerHex` to OK `eventId`; resolves false after the ack window. */
+  private awaitAck(peerHex: string, eventId: string | undefined): Promise<boolean> {
+    if (!eventId) return Promise.resolve(false);
+    const key = this.ackKey(peerHex, eventId);
+    const existing = this.ackWaiters.get(key);
+    if (existing) return existing.promise; // same wrap re-sent — share the wait
+    let settle!: (acked: boolean) => void;
+    const promise = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => this.settleAck(key, false), this.ackTimeoutMs);
+      // Never keep a one-shot process alive just to wait for a receipt.
+      (timer as { unref?: () => void }).unref?.();
+      settle = (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      };
+    });
+    this.ackWaiters.set(key, { promise, settle });
+    return promise;
+  }
+
+  private settleAck(key: string, acked: boolean): void {
+    const waiter = this.ackWaiters.get(key);
+    if (!waiter) return;
+    this.ackWaiters.delete(key);
+    waiter.settle(acked);
   }
 
   /** An inbound signal from a peer. */
@@ -221,9 +294,31 @@ export class P2PNode {
     await peer.handleSignal(msg);
   }
 
-  /** An inbound frame off a peer's data channel → hand to the local PWA. */
-  private onPeerFrame(_peerHex: string, frame: string): void {
-    this.bridge.broadcast(frame);
+  /**
+   * An inbound frame off a peer's data channel.
+   *
+   * - An `["OK", id, true]` receipt settles the waiter for a frame WE sent to
+   *   this peer. A receipt never reaches the channel ingest.
+   * - An `["EVENT", wrap]` addressed to us is handed to the channel ingest, and
+   *   if a listener took it we answer with an OK receipt on the same channel,
+   *   so the sender can stop waiting on relays for it.
+   */
+  private onPeerFrame(peerHex: string, frame: string): void {
+    const ok = parseOkFrame(frame);
+    if (ok) {
+      // A rejection (accepted=false) is not a delivery; let the window lapse —
+      // relays are already carrying the message.
+      if (ok.accepted) this.settleAck(this.ackKey(peerHex, ok.eventId), true);
+      return;
+    }
+    const delivered = this.bridge.broadcast(frame);
+    if (delivered <= 0) return; // no live listener took it — no receipt
+    const parsed = parseEventFrame(frame);
+    if (!parsed || parsed.recipientHex !== this.ourPubHex) return;
+    const peer = this.peers.get(peerHex);
+    if (!peer?.send(buildOkFrame(parsed.wrap.id))) {
+      log.debug(`[p2p] could not send receipt to ${peerHex.slice(0, 8)}`);
+    }
   }
 
   private onPeerState(peerHex: string, state: PeerState): void {
@@ -307,5 +402,10 @@ export class P2PNode {
     this.peers.delete(peerHex);
     this.outbox.delete(peerHex);
     this.negotiating.delete(peerHex);
+    // A dropped peer will never ack — release its waiters now, not at timeout.
+    const prefix = `${peerHex}:`;
+    for (const key of [...this.ackWaiters.keys()]) {
+      if (key.startsWith(prefix)) this.settleAck(key, false);
+    }
   }
 }

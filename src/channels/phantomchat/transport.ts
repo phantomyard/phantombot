@@ -129,6 +129,17 @@ export const PUBLISH_READBACK_SETTLE_MS = 750;
 export const PUBLISH_READBACK_TIMEOUT_MS = 5000;
 
 /**
+ * nostr-tools' `SimplePool.publish` does NOT reject when it can't reach a
+ * relay: it RESOLVES that relay's promise with the string
+ * `"connection failure: …"`. Counting every fulfilled promise as an accept
+ * therefore scored a dead relay as a success. This is the one place that tells
+ * a real accept from that.
+ */
+export function isRelayConnectionFailure(reason: unknown): boolean {
+  return typeof reason === "string" && reason.startsWith("connection failure");
+}
+
+/**
  * The Nostr filter shape we subscribe with. Kept minimal: kind-1059 gift-wraps
  * tagged to our pubkey, from roughly now. We deliberately set `since` to a
  * SMALL window (or omit it) because a gift-wrap's `created_at` is randomized up
@@ -283,8 +294,19 @@ export interface PhantomchatTransport extends ChannelTransport {
    * returned map (caller treats absence as "human / unknown"). Never throws.
    */
   fetchProfiles(authors: string[]): Promise<Map<string, NostrProfileMeta>>;
-  /** Publish an already-wrapped kind-1059 event to all relays. */
+  /**
+   * Publish an already-wrapped event to the relays. Resolves as soon as ONE
+   * relay accepted it or the recipient peer acknowledged it over P2P —
+   * whichever is first — or once every relay has failed. The remaining relays
+   * keep publishing in the background. Never rejects.
+   */
   publishWrap(event: NTNostrEvent): Promise<void>;
+  /**
+   * Wait for every background relay publish still in flight to settle. A
+   * one-shot caller (notify) calls this before close(), so returning early
+   * from publishWrap never cuts the redundant relay copies short.
+   */
+  flush?(): Promise<void>;
   /**
    * Publish (or replace) this identity's NIP-01 kind-0 profile metadata so the
    * PhantomChat PWA shows a real display name for the persona instead of a raw
@@ -354,6 +376,14 @@ export interface PhantomchatTransport extends ChannelTransport {
 }
 
 /**
+ * Tee for every published event, wired to the P2P bridge. May resolve true to
+ * report that the recipient peer ACKNOWLEDGED the wrap over the data channel.
+ */
+export type PublishObserver = (
+  event: NTNostrEvent,
+) => boolean | void | Promise<boolean | void>;
+
+/**
  * Real relay-pool transport over nostr-tools' `SimplePool`.
  *
  * `sendMessage` is the `ChannelTransport` egress entry point: it takes the
@@ -380,7 +410,10 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    * BOTH the recipient wrap and the multi-device self-wrap; the node drops the
    * self-wrap (recipient === us). Null when P2P is disabled.
    */
-  private publishObserver: ((event: NTNostrEvent) => void) | null = null;
+  private publishObserver: PublishObserver | null = null;
+
+  /** Background relay publishes still settling — drained by flush(). */
+  private readonly inflight = new Set<Promise<void>>();
 
   /**
    * Set by the server (see setOutboundRecorder) to record each sent text
@@ -429,7 +462,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    * fired BEFORE the relay round-trip so P2P delivery isn't gated on relay
    * latency. Best-effort: a throwing observer must never break a publish.
    */
-  setPublishObserver(observer: ((event: NTNostrEvent) => void) | null): void {
+  setPublishObserver(observer: PublishObserver | null): void {
     this.publishObserver = observer;
   }
 
@@ -588,48 +621,107 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   }
 
   async publishWrap(event: NTNostrEvent): Promise<void> {
-    // Tee to the P2P bridge FIRST (fire-and-forget) so a reply races out over
-    // WebRTC in parallel with the relay publish, not after it. Guarded so a
-    // bridge fault can never break relay delivery — the relay is the floor.
+    // Tee to the P2P bridge FIRST so a reply races out over WebRTC in parallel
+    // with the relay publish, not after it. The bridge answers with whether the
+    // peer ACKNOWLEDGED the wrap (a P2P delivery receipt). Guarded so a bridge
+    // fault can never break relay delivery — the relay is the floor.
+    let p2pAcked: Promise<boolean> = Promise.resolve(false);
     if (this.publishObserver) {
       try {
-        this.publishObserver(event);
+        const result = this.publishObserver(event);
+        p2pAcked = Promise.resolve(result).then(
+          (v) => v === true,
+          () => false,
+        );
       } catch (err) {
         log.debug("phantomchat: publish observer threw", {
           error: (err as Error).message,
         });
       }
     }
-    // SimplePool.publish returns one promise per relay; a publish that fails on
-    // some relays but lands on others is still a success from our side. We wait
-    // on all of them (allSettled) so a single dead relay can't reject the send,
-    // and log if EVERY relay rejected. `onauth` is the NIP-42 signer: when a
-    // relay rejects the publish with `auth-required:`, nostr-tools signs a
-    // kind-22242 auth event and retries the publish once, authenticated
-    // (issue #368 — without this, AUTH-requiring relays drop everything).
-    // Publish only to relays that are currently trusted to STORE what we send
-    // (issue #359). Quarantined relays are skipped here and here only — they
-    // keep their read subscription, so this costs no connection churn and the
-    // set can widen again the instant health recovers. Never fewer than
-    // MIN_PUBLISH_RELAYS: the floor outranks the quarantine.
+    // Publish only to relays currently trusted to store what we send, and not
+    // consistently slow (issue #359 + slow-relay quarantine). Never fewer than
+    // MIN_PUBLISH_RELAYS: the floor outranks the quarantine. `onauth` is the
+    // NIP-42 signer (issue #368).
     const targets = this.relayHealth.publishTargets();
-    const results = await Promise.allSettled(
-      this.pool.publish(targets, event, { onauth: this.authSigner }),
-    );
-    const ok = results.some((r) => r.status === "fulfilled");
-    if (!ok) {
-      log.warn("phantomchat: publish failed on all relays", {
-        relays: targets.length,
-        eventId: event.id,
-      });
+    const startedAt = Date.now();
+    let perRelay: Promise<string>[];
+    try {
+      perRelay = this.pool.publish(targets, event, { onauth: this.authSigner });
+    } catch (err) {
+      perRelay = targets.map(() => Promise.reject(err));
     }
-    // Read-back verification (issue #368): even an `OK:true` publish may never
-    // be stored — observed on nostr-rs-relay with nip42_auth, which ACKs and
-    // silently drops. Re-query each relay for the event id and warn loudly,
-    // naming the relays, when it isn't there. Detached: never blocks the send.
-    // Its per-relay results are what feed the health tracker above, which is
-    // why health costs no extra traffic — this pass was already running.
-    void this.verifyStored(event, undefined, targets);
+    // One boolean per relay: did it really accept? Each outcome also feeds the
+    // relay's accept latency into the slow-relay quarantine.
+    const outcomes = perRelay.map((p, i) => {
+      const relay = targets[i];
+      const score = (accepted: boolean): boolean => {
+        if (relay) {
+          this.relayHealth.recordAccept(relay, Date.now() - startedAt, accepted);
+        }
+        return accepted;
+      };
+      return p.then(
+        (reason) => score(!isRelayConnectionFailure(reason)),
+        () => score(false),
+      );
+    });
+
+    // THE FIX for "every send waits for the slowest relay". We used to
+    // `await Promise.allSettled(...)` here, so one bad relay cost each message
+    // its full connect + ack timeout (up to ~16s with a NIP-42 retry), and each
+    // bubble of a multi-bubble reply stacked it again. Now the send returns on
+    // the FIRST relay accept; the others carry on in the background for
+    // redundancy, history and multi-device, and still feed health + read-back.
+    const firstAccept = new Promise<boolean>((resolve) => {
+      let pending = outcomes.length;
+      if (pending === 0) {
+        resolve(false);
+        return;
+      }
+      for (const o of outcomes) {
+        void o.then((ok) => {
+          if (ok) resolve(true);
+          else if (--pending === 0) resolve(false);
+        });
+      }
+    });
+
+    const settled = Promise.all(outcomes).then(async (accepted) => {
+      if (!accepted.some(Boolean)) {
+        const viaP2P = await p2pAcked;
+        log.warn("phantomchat: publish failed on all relays", {
+          relays: targets.length,
+          eventId: event.id,
+          deliveredOverP2P: viaP2P,
+        });
+      }
+      // Read-back verification (issue #368): even an `OK:true` publish may
+      // never be stored — re-query each relay for the event id and warn,
+      // naming the relays. Detached, and started only once every relay has
+      // answered, so a merely SLOW relay isn't scored as a dropping one.
+      void this.verifyStored(event, undefined, targets);
+    });
+    const tracked: Promise<void> = settled
+      .catch(() => {})
+      .finally(() => this.inflight.delete(tracked));
+    this.inflight.add(tracked);
+
+    // Return on whichever lands first: a relay accept, or a P2P receipt from
+    // the recipient. If one side comes back empty, wait for the other — so a
+    // P2P-only delivery during a relay outage still counts, and every relay
+    // failing is still reported. Both sides are bounded (nostr-tools publish
+    // timeouts; the node's ack window), so this can't hang.
+    await Promise.race([
+      firstAccept.then((ok) => ok || p2pAcked),
+      p2pAcked.then((ok) => ok || firstAccept),
+    ]);
+  }
+
+  async flush(): Promise<void> {
+    while (this.inflight.size > 0) {
+      await Promise.all([...this.inflight]);
+    }
   }
 
   /**

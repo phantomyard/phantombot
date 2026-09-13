@@ -34,6 +34,8 @@ import {
   QUARANTINE_MAX_MS,
   READBACK_STRIKE_THRESHOLD,
   RelayHealthTracker,
+  SLOW_RELAY_ACCEPT_MS,
+  SLOW_RELAY_MIN_SAMPLES,
   rankRelays,
   relayScore,
   type RelayHealthRecord,
@@ -211,8 +213,8 @@ describe("the floor of 3 outranks quarantine", () => {
 describe("deterministic ranking", () => {
   test("same observations produce the same order (pure, no clock)", () => {
     const health = new Map<string, RelayHealthRecord>([
-      ["wss://r1.example", { strikes: 0, confirmed: 10, dropped: 0, quarantinedUntil: 0, quarantineCount: 0 }],
-      ["wss://r2.example", { strikes: 0, confirmed: 5, dropped: 5, quarantinedUntil: 0, quarantineCount: 0 }],
+      ["wss://r1.example", { strikes: 0, confirmed: 10, dropped: 0, quarantinedUntil: 0, quarantineCount: 0, quarantineReason: null, acceptEwmaMs: 0, acceptSamples: 0 }],
+      ["wss://r2.example", { strikes: 0, confirmed: 5, dropped: 5, quarantinedUntil: 0, quarantineCount: 0, quarantineReason: null, acceptEwmaMs: 0, acceptSamples: 0 }],
     ]);
     const a = rankRelays(SEVEN, health);
     const b = rankRelays([...SEVEN].reverse(), health);
@@ -226,8 +228,8 @@ describe("deterministic ranking", () => {
 
   test("a dropping relay ranks below a confirming one", () => {
     const health = new Map<string, RelayHealthRecord>([
-      ["wss://r7.example", { strikes: 0, confirmed: 10, dropped: 0, quarantinedUntil: 0, quarantineCount: 0 }],
-      ["wss://r1.example", { strikes: 0, confirmed: 0, dropped: 10, quarantinedUntil: 0, quarantineCount: 0 }],
+      ["wss://r7.example", { strikes: 0, confirmed: 10, dropped: 0, quarantinedUntil: 0, quarantineCount: 0, quarantineReason: null, acceptEwmaMs: 0, acceptSamples: 0 }],
+      ["wss://r1.example", { strikes: 0, confirmed: 0, dropped: 10, quarantinedUntil: 0, quarantineCount: 0, quarantineReason: null, acceptEwmaMs: 0, acceptSamples: 0 }],
     ]);
     const ranked = rankRelays(SEVEN, health);
     // r7 confirms everything, r1 drops everything. Note the unobserved relays
@@ -243,7 +245,7 @@ describe("deterministic ranking", () => {
   });
 
   test("current strikes penalise an otherwise-good ratio", () => {
-    const clean: RelayHealthRecord = { strikes: 0, confirmed: 10, dropped: 0, quarantinedUntil: 0, quarantineCount: 0 };
+    const clean: RelayHealthRecord = { strikes: 0, confirmed: 10, dropped: 0, quarantinedUntil: 0, quarantineCount: 0, quarantineReason: null, acceptEwmaMs: 0, acceptSamples: 0 };
     const striking: RelayHealthRecord = { ...clean, strikes: 3 };
     expect(relayScore(striking)).toBeLessThan(relayScore(clean));
   });
@@ -372,5 +374,73 @@ describe("setRelays — surviving a relay-config change", () => {
     const next = ["wss://r2.example", "wss://r3.example", "wss://r4.example"];
     t.setRelays(next);
     expect(t.publishTargets(Date.now()).sort()).toEqual([...next].sort());
+  });
+});
+
+
+describe("slow-relay quarantine (publish-accept latency)", () => {
+  const RELAYS = ["wss://a.example", "wss://b.example", "wss://c.example", "wss://d.example"];
+  const quiet = { info: () => {}, debug: () => {} };
+  const fresh = () => new RelayHealthTracker(RELAYS, quiet, () => 1);
+
+  test("a consistently slow relay leaves the publish set", () => {
+    const t = fresh();
+    const now = Date.now();
+    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
+      t.recordAccept("wss://d.example", SLOW_RELAY_ACCEPT_MS * 2, true, now);
+    }
+    expect(t.isQuarantined("wss://d.example", now)).toBe(true);
+    expect(t.publishTargets(now)).not.toContain("wss://d.example");
+  });
+
+  test("one cold-connect spike never quarantines (needs the minimum samples)", () => {
+    const t = fresh();
+    const now = Date.now();
+    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES - 1; i++) {
+      t.recordAccept("wss://d.example", SLOW_RELAY_ACCEPT_MS * 5, true, now);
+    }
+    expect(t.isQuarantined("wss://d.example", now)).toBe(false);
+  });
+
+  test("a fast relay is never quarantined", () => {
+    const t = fresh();
+    const now = Date.now();
+    for (let i = 0; i < 50; i++) t.recordAccept("wss://a.example", 120, true, now);
+    expect(t.isQuarantined("wss://a.example", now)).toBe(false);
+  });
+
+  test("an instant rejection scores as slow, not fast", () => {
+    const t = fresh();
+    const now = Date.now();
+    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES + 1; i++) {
+      t.recordAccept("wss://d.example", 5, false, now);
+    }
+    expect(t.isQuarantined("wss://d.example", now)).toBe(true);
+  });
+
+  test("a read-back confirmation does not release a SLOW quarantine", () => {
+    const t = fresh();
+    const now = Date.now();
+    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
+      t.recordAccept("wss://d.example", SLOW_RELAY_ACCEPT_MS * 2, true, now);
+    }
+    t.record("wss://d.example", true, now);
+    expect(t.isQuarantined("wss://d.example", now)).toBe(true);
+  });
+
+  test("below the floor, a slow relay is promoted before a dropping one", () => {
+    const t = fresh();
+    const now = Date.now();
+    // b + c drop (read-back strikes), d is slow — only a is healthy.
+    for (const url of ["wss://b.example", "wss://c.example"]) {
+      for (let i = 0; i < READBACK_STRIKE_THRESHOLD; i++) t.record(url, false, now);
+    }
+    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
+      t.recordAccept("wss://d.example", SLOW_RELAY_ACCEPT_MS * 2, true, now);
+    }
+    const targets = t.publishTargets(now);
+    expect(targets).toHaveLength(MIN_PUBLISH_RELAYS);
+    expect(targets).toContain("wss://a.example");
+    expect(targets).toContain("wss://d.example");
   });
 });

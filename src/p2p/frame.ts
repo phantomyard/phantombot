@@ -99,3 +99,55 @@ export function parseEventFrame(raw: string): ParsedEventFrame | null {
 
   return { wrap, recipientHex };
 }
+
+/**
+ * P2P delivery receipt (the "P2P lock still needs relays" fix, #542). When a
+ * node or PWA takes in an `["EVENT", wrap]` frame off a data channel, it answers
+ * on the SAME channel with a standard NIP-01 relay acknowledgement:
+ * `["OK", <wrap id>, true, "p2p"]`. The peer treats our data channel exactly
+ * like a relay, so the ack is the relay wire's own vocabulary, not a new one.
+ *
+ * Meaning, stated precisely: the receiving PROCESS got this wrap and handed it
+ * to its ingest. It is not a read or render receipt. That is exactly what the
+ * sender needs to stop waiting on relays for that message.
+ *
+ * Compatibility: a peer that predates receipts sends none, and every existing
+ * receiver ignores non-EVENT frames — so an old peer just means the sender
+ * falls back to the first relay accept, the pre-receipt behaviour.
+ */
+export const P2P_OK_MESSAGE = "p2p";
+
+/** Longest event id we accept in an OK frame (hex ids are 64 chars). */
+const MAX_OK_EVENT_ID_LEN = 128;
+
+export interface ParsedOkFrame {
+  eventId: string;
+  accepted: boolean;
+}
+
+/** Build the `["OK", id, true, "p2p"]` receipt for a wrap we just took in. */
+export function buildOkFrame(eventId: string): string {
+  return JSON.stringify(["OK", eventId, true, P2P_OK_MESSAGE]);
+}
+
+/**
+ * Parse a raw data-channel payload as an `["OK", id, accepted, msg?]` receipt,
+ * or `null` for anything else. Never throws.
+ */
+export function parseOkFrame(raw: string): ParsedOkFrame | null {
+  // Cheap pre-check so every EVENT frame isn't JSON-parsed twice.
+  if (!raw.startsWith('["OK"')) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed[0] !== "OK") return null;
+  const eventId = parsed[1];
+  const accepted = parsed[2];
+  if (typeof eventId !== "string" || eventId.length === 0) return null;
+  if (eventId.length > MAX_OK_EVENT_ID_LEN) return null;
+  if (typeof accepted !== "boolean") return null;
+  return { eventId, accepted };
+}

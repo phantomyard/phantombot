@@ -51,6 +51,10 @@ export const defaultPhantomchatOneShotSend: PhantomchatOneShotSend = async ({
   );
   try {
     await transport.sendMessage(recipientHex, text);
+    // sendMessage returns on the FIRST relay accept. Let the other relays
+    // finish before tearing the pool down, so a one-shot send keeps its
+    // redundant copies instead of landing on a single relay.
+    await transport.flush();
   } finally {
     transport.close();
   }

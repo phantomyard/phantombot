@@ -196,3 +196,24 @@ describe("AuthGuardedSimplePool", () => {
     expect(signed.pubkey).toBe(getPublicKey(sk));
   });
 });
+
+import {
+  RELAY_CONNECT_TIMEOUT_MS,
+  RELAY_PUBLISH_TIMEOUT_MS,
+} from "../src/channels/phantomchat/authGuardedPool.ts";
+
+describe("relay timeouts (slow-relay fix)", () => {
+  test("the pool connects with the shorter timeout", () => {
+    const pool = new AuthGuardedSimplePool(generateSecretKey());
+    expect(pool.maxWaitForConnection).toBe(RELAY_CONNECT_TIMEOUT_MS);
+  });
+
+  test("every relay the pool hands the auth hook gets the shorter publish timeout", () => {
+    const pool = new AuthGuardedSimplePool(generateSecretKey());
+    const { relay } = fakeRelay();
+    (relay as unknown as { publishTimeout: number }).publishTimeout = 4400;
+    (pool as unknown as { relays: Map<string, AbstractRelay> }).relays.set(relay.url, relay);
+    pool.automaticallyAuth!(relay.url);
+    expect(relay.publishTimeout).toBe(RELAY_PUBLISH_TIMEOUT_MS);
+  });
+});

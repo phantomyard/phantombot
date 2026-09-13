@@ -49,6 +49,17 @@ import { automaticallyAuthWith, type RelayAuthSigner } from "./relayAuth.ts";
  */
 const AUTH_GUARDED = Symbol.for("phantombot.relayAuthGuarded");
 
+/**
+ * Relay timeouts (the slow-relay fix). nostr-tools defaults are 3000ms to
+ * connect and 4400ms for a relay to OK a publish (and the same again for a
+ * NIP-42 auth round). Sends no longer WAIT for a slow relay (see
+ * transport.publishWrap), but these still bound how long a dead relay holds a
+ * background publish, a read-back and the P2P signaling pool. A healthy relay
+ * connects and OKs in a few hundred ms, so both leave wide headroom.
+ */
+export const RELAY_CONNECT_TIMEOUT_MS = 2000;
+export const RELAY_PUBLISH_TIMEOUT_MS = 3000;
+
 type AuthGuardable = AbstractRelay & { [AUTH_GUARDED]?: true };
 
 /**
@@ -93,10 +104,18 @@ export class AuthGuardedSimplePool extends SimplePool {
     options?: ConstructorParameters<typeof SimplePool>[0],
   ) {
     super(options);
+    // SimplePool's constructor type only exposes enablePing/enableReconnect,
+    // but the connect timeout is a public field on the pool — set it directly.
+    this.maxWaitForConnection = RELAY_CONNECT_TIMEOUT_MS;
     const signerFor = automaticallyAuthWith(secretKey);
     this.automaticallyAuth = (relayURL: string): RelayAuthSigner => {
       const relay = this.relays.get(relayURL);
-      if (relay) guardRelayAuthRejection(relay);
+      if (relay) {
+        guardRelayAuthRejection(relay);
+        // Same hook, same window (after registration, before connect): the
+        // only place the pool hands us each relay instance. Also bounds auth().
+        relay.publishTimeout = RELAY_PUBLISH_TIMEOUT_MS;
+      }
       return signerFor(relayURL);
     };
   }
