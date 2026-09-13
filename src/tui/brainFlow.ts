@@ -36,7 +36,11 @@ import {
   providerChoices,
   providerEnvVar,
 } from "../lib/piModels.ts";
-import { resolvePiApiKeyWrite, type RoutingChoices } from "../lib/piRouting.ts";
+import {
+  MAX_NATIVE_KEY_ATTEMPTS,
+  resolvePiApiKeyWrite,
+  type RoutingChoices,
+} from "../lib/piRouting.ts";
 import { probeProviderKey, type KeyProbeResult } from "../lib/providerKeyProbe.ts";
 import { fetchProviderModels } from "../lib/providerModelCatalog.ts";
 import type { PiAuthWriteResult } from "../lib/piAuthStore.ts";
@@ -364,8 +368,10 @@ export async function configureNative(
   // So "no key" is refused here instead of being saved as a broken brain: the
   // loop re-asks until a key resolves (typed now, or already stored) or the
   // operator aborts. resolvePiApiKeyWrite's "clear" only survives when NO
-  // provider is configured (nothing to authenticate against).
-  for (;;) {
+  // provider is configured (nothing to authenticate against). The re-ask is
+  // BOUNDED: a prompt source that keeps answering blank (a script, a broken
+  // input) must abort cleanly, never spin forever.
+  for (let attempt = 1; ; attempt++) {
     const gateWrite = resolvePiApiKeyWrite(
       key,
       provider || undefined,
@@ -378,6 +384,13 @@ export async function configureNative(
           ? current.storedKey
           : undefined;
     if (!provider || gateCandidate) break;
+    if (attempt > MAX_NATIVE_KEY_ATTEMPTS) {
+      q.note(
+        "API key required",
+        `no ${keyLabel} after ${MAX_NATIVE_KEY_ATTEMPTS} attempts — nothing was changed. Re-run Configure → Brain with the key to hand.`,
+      );
+      return true;
+    }
     q.note(
       "API key required",
       `the ${role} brain cannot run without a key: native never reads the host's own pi configuration. Paste the ${keyLabel} (esc aborts without changing anything).`,

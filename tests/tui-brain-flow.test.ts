@@ -8,8 +8,8 @@
  *   - Host harnesses are CHAIN-ONLY: picking them collects nothing and makes
  *     no routing write — agents inherit the host's configuration.
  *   - The stored API key is idempotent: an empty answer with an unchanged
- *     provider writes no secret; a provider switch with an empty answer clears
- *     the stale key.
+ *     provider writes no secret. A native brain never saves WITHOUT a key: a
+ *     provider switch with an empty answer re-asks instead of clearing.
  *   - Vision is skipped when the primary is vision-capable; the coder slot
  *     defaults to the primary.
  *   - `undefined` from any question leaves the config untouched.
@@ -328,16 +328,48 @@ describe("the brain flow", () => {
     ]);
   });
 
-  test("native configured: provider switch with a blank key clears the stale key", async () => {
+  test("native configured: provider switch with a blank key re-asks instead of clearing", async () => {
+    // Regression (2026-09-13 Atlas): a blank key used to CLEAR the stored key
+    // and save a native brain that could never authenticate.
     const h = harness({
       choose: ["native", "CURRENT"],
       search: ["google", "gemini-3-pro", "gemini-3-pro"],
-      value: [""], // blank after a provider switch = clear
+      value: ["", "sk-google"], // blank after a provider switch -> gate re-asks
       storedKey: "sk-old",
       routing: { provider: "openrouter" },
     });
     await configureBrain(h.q, h.deps);
-    expect(h.applied.secrets).toEqual(["CLEARED"]);
+    expect(h.applied.secrets).toEqual(["sk-google"]);
+    expect(h.applied.secrets).not.toContain("CLEARED");
+  });
+
+  test("the key gate is bounded: endless blank answers abort instead of spinning", async () => {
+    // Regression (2026-09-13): an unbounded re-ask loop pinned a CPU forever
+    // when the prompt source kept answering blank, hanging the whole suite.
+    const h = harness({
+      choose: ["native", "CURRENT"],
+      search: ["google", "gemini-3-pro", "gemini-3-pro"],
+    });
+    // An INEXHAUSTIBLE blank source: a finite queue would eventually return
+    // undefined (= esc) and end the loop by itself, proving nothing.
+    h.q.value = async () => "";
+    await configureBrain(h.q, h.deps);
+    expect(h.applied.secrets).toEqual([]);
+    expect(h.applied.routings).toEqual([]);
+    expect(h.applied.chains).toEqual([]);
+  });
+
+  test("native with no resolvable key: aborting the key gate changes nothing", async () => {
+    const h = harness({
+      choose: ["native", "CURRENT"],
+      search: ["google", "gemini-3-pro", "gemini-3-pro"],
+      value: ["", undefined], // blank, then esc at the gate
+      routing: { provider: "openrouter" },
+    });
+    await configureBrain(h.q, h.deps);
+    expect(h.applied.secrets).toEqual([]);
+    expect(h.applied.routings).toEqual([]);
+    expect(h.applied.chains).toEqual([]);
   });
 
   test("native configured: a typed key is set in the vault and Pi's own store", async () => {
@@ -407,7 +439,7 @@ describe("the brain flow", () => {
     const h = harness({
       choose: ["native", "CURRENT"],
       search: ["google", "gemini-3-pro", "gemini-3-pro"], // provider, primary, coder
-      value: [""],
+      value: ["sk-test"],
     });
     await configureBrain(h.q, h.deps);
     const banners = h.applied.searches.map((s) => s.banner ?? "");
@@ -421,7 +453,7 @@ describe("the brain flow", () => {
     const h = harness({
       choose: ["native", "CURRENT"],
       search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
-      value: [""],
+      value: ["sk-test"],
     });
     const realSearch = h.q.search;
     h.q.search = async (input) => {
@@ -440,7 +472,7 @@ describe("the brain flow", () => {
     const h = harness({
       choose: ["native", "CURRENT"],
       search: ["google", "gemini-3-pro", "gemini-3-pro"],
-      value: [""],
+      value: ["sk-test"],
     });
     await configureBrain(h.q, h.deps);
     const coder = h.applied.searches.find((s) => s.banner?.includes("CODER"));

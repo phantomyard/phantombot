@@ -41,6 +41,7 @@ import {
   computeRoutingWrites,
   ENV_PI_API_KEY,
   resolvePiApiKeyWrite,
+  MAX_NATIVE_KEY_ATTEMPTS,
   resolveRoutingProvider,
   type RoutingChoices,
 } from "../lib/piRouting.ts";
@@ -583,7 +584,7 @@ async function configureNative(
   const storedBefore = await getPersonaSecret(config, apiKeyName, target.persona);
   let apiKey: string | undefined;
   let keyWrite: ReturnType<typeof resolvePiApiKeyWrite>;
-  for (;;) {
+  for (let attempt = 1; ; attempt++) {
     apiKey = await q.password({
       message: `${keyLabel} (passed per-turn; blank to keep the stored key)`,
     });
@@ -606,6 +607,13 @@ async function configureNative(
         `the ${role} brain cannot run without a key: native never reads the host's own pi configuration. Paste the ${keyLabel} (esc aborts without changing anything).`,
         "API key required",
       );
+      if (attempt >= MAX_NATIVE_KEY_ATTEMPTS) {
+        q.note(
+          `no ${keyLabel} after ${attempt} attempts — nothing was changed. Re-run \`phantombot harness\` with the key to hand.`,
+          "API key required",
+        );
+        return true;
+      }
       continue;
     }
     if (keyWrite.action === "set") {
@@ -624,7 +632,14 @@ async function configureNative(
           "Paste the key again (esc aborts without changing anything).",
         "API key required",
       );
-      continue;
+        if (attempt >= MAX_NATIVE_KEY_ATTEMPTS) {
+          q.note(
+            `no ${keyLabel} after ${attempt} attempts — nothing was changed. Re-run \`phantombot harness\` with the key to hand.`,
+            "API key required",
+          );
+          return true;
+        }
+        continue;
     }
     q.note(`saved ${apiKeyName} to the ${stored.persona} vault`, "Pi API key");
     // Refresh the catalog with the key we just took. On a fresh install the
@@ -696,6 +711,8 @@ async function configureNative(
     );
     break;
   }
+  // "keep": the stored key stands (or no provider needs one) — nothing to write.
+  break;
   }
 
   // Straight into custom routing — Pi is already the chosen harness, so we don't

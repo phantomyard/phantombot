@@ -71,7 +71,11 @@ export interface ProvisionOpts {
 }
 
 function extensionDir(agentDir?: string): string {
-  return path.join(agentDir ?? nativeExtensionsDir(), "capability-routing");
+  // ONE derivation for both paths: an explicit agent dir gets the same
+  // `extensions/` segment the native default already carries — otherwise an
+  // override stamps into <agent>/capability-routing, where pi never looks.
+  const extensions = agentDir ? path.join(agentDir, "extensions") : nativeExtensionsDir();
+  return path.join(extensions, "capability-routing");
 }
 
 /** Prepend the managed banner as a language-appropriate comment line. */
