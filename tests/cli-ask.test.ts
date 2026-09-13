@@ -256,7 +256,7 @@ describe("runAsk — pre-tool narration", () => {
     });
     const prompt = harness.lastRequest?.systemPrompt ?? "";
     expect(prompt).toContain("Narration before tool calls");
-    expect(prompt).toMatch(/user'?s language/i);
+    expect(prompt).toMatch(/language of the user'?s LATEST message/i);
   });
 
   test("plain ask (no --stream) does NOT enable narration", async () => {

@@ -1796,31 +1796,33 @@ If TTS is not configured, phantombot degrades to text.
 
 ## Reply Language
 
-Chat channels (Telegram and PhantomChat) detect the language of each inbound
-message and tell the harness which language to answer in, the same way the
-voice overlay tells it which format to answer in. Reply language is therefore
-resolved in code, not inferred by the model from whatever else is in the turn.
+Chat channels (Telegram and PhantomChat) state one deterministic rule to the
+harness on every turn: **reply in the language of your latest message** — and
+that includes the agent's pre-tool narration lines. Everything else in the turn
+is data, whatever language it is written in.
 
-- Detection runs on **your message only** — never on retrieved memory, the
-  daily journal, a quoted reply, group catch-up context, or the agent's own
-  previous turn. Those are data, and a Spanish email being read is not a
-  request for a Spanish reply.
-- It is a local heuristic (weighted function words), not a model call, so it
-  adds no latency and no cost to the message path. English, Spanish, Dutch,
-  German, French, Italian and Portuguese are recognised.
-- Short messages ("ok", "yes please") fall below a confidence floor and carry
-  the conversation's last confidently-detected language forward instead of
-  flipping it. The remembered language is per persona + conversation and
-  expires after 24 hours of silence.
-- If nothing can be detected and nothing is remembered, no language
-  instruction is injected at all and the persona's own guidance applies.
+- The rule names, explicitly, what does *not* decide the language: a document
+  or email being read, tool output, retrieved memory, the daily journal, a
+  quoted reply, group catch-up context, and the agent's own previous turns. A
+  Spanish email being read is not a request for a Spanish reply.
+- It covers **every** language, including ones nobody anticipated — it points
+  at your message rather than trying to classify it, so there is no list of
+  supported languages to maintain and no "unrecognised" case that falls back
+  to inference.
+- Short messages ("ok", "yes please") need no special handling: the rule points
+  at the message, and the model already has the conversation.
 
 Text the agent composes *for a third party* — an outbound email, a message to
 a supplier — is still written in that party's language. Only the reply to you
 is fixed.
 
-State file: `$XDG_STATE_HOME/phantombot/reply-language.json`, overridable with
-`PHANTOMBOT_REPLY_LANGUAGE_STATE`.
+Earlier releases (0.9.x–1.1.361) classified each inbound message in code and
+injected a concrete "Reply in English". That was stronger on the seven
+languages it knew and silent on all others: anything outside its Latin-script
+word lists resolved to "unknown" and got no instruction at all, so drift was
+worst exactly where detection was weakest. There is no state file any more;
+`PHANTOMBOT_REPLY_LANGUAGE_STATE` and `reply-language.json` are gone, and a
+leftover file is ignored.
 
 ## Scheduled Tasks
 

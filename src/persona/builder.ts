@@ -593,9 +593,11 @@ you're about to do. Then run the tool. Examples:
   "Looking at your email now..."
   "One sec, asking Home Assistant..."
 
-Use the user's language — match whatever language the conversation
-is in. (Don't always say it in English. If the user wrote to you in
-Spanish, narrate in Spanish.)
+Narrate in the language of the user's LATEST message — the same
+language as your reply. Not the language of the file you are opening,
+the email you are reading, or your own previous turn. (So don't
+default to English: if the user wrote to you in Spanish, narrate in
+Spanish.)
 
 One sentence per tool call, no more. Don't pile multiple
 narrations together ahead of time, and don't repeat yourself across

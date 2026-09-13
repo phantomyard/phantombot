@@ -160,34 +160,59 @@ reads them awkwardly), no "according to my analysis" preamble.
 Just the human reply.`;
 
 /**
- * Language overlay, stacked alongside VOICE_REPLY_INSTRUCTION when the
- * channel layer has confidently resolved the inbound message's language.
+ * Language overlay, stacked alongside VOICE_REPLY_INSTRUCTION on every
+ * chat turn.
  *
  * Why this exists separately from a persona norm: a standing "mirror the
  * user" rule is one line of prose competing with, on a bad turn, several
  * kilobytes of Spanish retrieved context, a Dutch journal entry, or the
- * persona's own previous turn spent composing a Honduran email. It is a
- * nudge, and it degrades exactly when the context is most polluted -
- * which is when it is most needed.
+ * persona's own previous turn spent composing a Honduran email. Left to
+ * prose it is a nudge, and it degrades exactly when the context is most
+ * polluted - which is when it is most needed.
  *
- * Naming the CONCRETE language is the load-bearing part. "Mirror the
- * user" requires an inference that context can corrupt; "reply in
- * English" cannot be argued with by a Spanish snippet.
+ * The load-bearing part is that the rule names the SOURCE - the user's
+ * latest message - and then enumerates, by name, everything that is NOT
+ * that source. "Mirror the user" leaves the model to work out what "the
+ * user" means in a turn that also contains a quoted reply, a group
+ * catch-up block and a retrieved Spanish email; naming the deciding text
+ * and listing the decoys closes that inference.
+ *
+ * This replaced a classifier (issue #534, removed in #548) that resolved
+ * a concrete language code in the channel layer and injected "Reply in
+ * English". That was strictly stronger ON THE LANGUAGES IT KNEW, and
+ * silent on every other one: a Chinese or Russian message scored zero in
+ * a Latin-script function-word lexicon, resolved to "unknown", and got NO
+ * overlay at all - the drift was worst exactly where detection was
+ * weakest. Widening the lexicon is an unbounded maintenance job that
+ * still cannot separate the Latin-script languages this deployment mixes
+ * daily, so the rule now points at the message instead of classifying it:
+ * nothing to maintain, and every language covered including the ones
+ * nobody thought of.
  */
-export function languageReplyInstruction(languageName: string): string {
-  return `# Reply language (this turn only)
+export const REPLY_LANGUAGE_INSTRUCTION =
+  `# Reply language
 
-Reply in ${languageName}. This message arrived in ${languageName}, and
-${languageName} is what the user is reading. Pre-tool narration is in
-${languageName} too.
+Write your reply - including every pre-tool narration line - in the
+language of the USER'S LATEST MESSAGE, the one you are answering right
+now. That message alone decides it.
 
-Task content in other languages does NOT change your reply language:
-an email you are reading, a document, a retrieved memory excerpt, your
-own previous turn, or a quoted message are all DATA, whatever language
-they happen to be in. Text you compose FOR a third party (an outbound
-email, a message to a supplier) is still written in that party's
-language - only your reply to the user is fixed here.`;
-}
+Nothing else in this turn changes your reply language. All of the
+following are DATA, whatever language they happen to be written in:
+
+  - a document, email or file you are reading
+  - tool output and search results
+  - retrieved memory excerpts and your daily journal
+  - a quoted/replied-to message, and group catch-up context
+  - your own previous turns, including ones spent writing in another
+    language
+
+If the user's latest message is in Chinese, reply in Chinese; if it is
+in Dutch, reply in Dutch - including when the material you are working
+through is in some other language.
+
+Text you compose FOR a third party (an outbound email, a message to a
+supplier) is still written in that party's language - only your reply to
+the user is fixed here.`;
 
 /**
  * Render an honest, actionable explanation when sttSupport() rules a
