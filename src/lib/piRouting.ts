@@ -185,6 +185,13 @@ export type PiApiKeyWrite =
   | { action: "clear" }
   | { action: "keep" };
 
+/**
+ * How many times a native key prompt may re-ask before the flow aborts with no
+ * change. Bounded so a prompt source that keeps answering blank (a script, a
+ * closed stdin) can never spin a flow forever at 100% CPU.
+ */
+export const MAX_NATIVE_KEY_ATTEMPTS = 3;
+
 export function resolvePiApiKeyWrite(
   enteredKey: string | undefined | null,
   newProvider: string | undefined,

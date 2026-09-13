@@ -75,6 +75,7 @@ import {
   embeddedPiCommand,
   ENV_PHANTOMBOT_PI_COMMAND,
 } from "../lib/embeddedPi.ts";
+import { nativeAgentEnv } from "../lib/nativeAgentDir.ts";
 
 export interface PiHarnessConfig {
   /**
@@ -297,9 +298,32 @@ export class PiHarness implements Harness {
     // is what "Pi decides for itself" actually means.
     // A host pi (`pi-host`) never gets phantombot's key either: its owner
     // configured its auth, and the ambient key may belong to another persona.
+    //
+    // NATIVE (2026-09-13, Atlas postmortem): there IS no local-store fallback.
+    // The embedded engine gets an ISOLATED agent dir (nativeAgentEnv below) —
+    // it must never read the user's `~/.pi`, and its own auth store is empty
+    // by design. So a native slot with a configured provider and no resolvable
+    // key fails LOUDLY and ACTIONABLY here instead of with pi's cryptic
+    // "No API key found" from an empty store. copyNativeKeys (startup/doctor)
+    // is what keeps this path rare: it copies the legacy key into the vault
+    // before anything depends on native.
     const piApiKey = this.config.mode !== "native" || routing?.useLocalConfig
       ? undefined
       : process.env[this.config.apiKeyEnv ?? ENV_PI_API_KEY]?.trim();
+    if (
+      this.config.mode === "native" &&
+      !routing?.useLocalConfig &&
+      provider &&
+      !piApiKey
+    ) {
+      const secret = this.config.apiKeyEnv ?? ENV_PI_API_KEY;
+      throw new Error(
+        `${this.id}: no API key found for provider '${provider}'. ` +
+          `Save your ${provider} API key once with 'phantombot doctor --fix' ` +
+          `(or Configure → Brain) and it is stored for every native brain ` +
+          `(secret ${secret}).`,
+      );
+    }
 
     /**
      * Assemble the full argv for ONE attempt. `model` is the brain this
@@ -383,6 +407,11 @@ export class PiHarness implements Harness {
     // native invocation from an ambient environment.
     if (this.config.mode === "native") {
       Object.assign(childEnv, embeddedPiChildEnv(xdgDataHome()));
+      // ISOLATION: the embedded engine gets a phantombot-owned agent dir
+      // (auth.json, models-store.json, extensions). It never reads or writes
+      // the user's ~/.pi — that dependency broke Atlas when her owner deleted
+      // pi. Host mode: leave the var UNSET so the host pi keeps ~/.pi.
+      Object.assign(childEnv, nativeAgentEnv(xdgDataHome()));
       if (this.config.command) {
         childEnv[ENV_PHANTOMBOT_PI_COMMAND] = JSON.stringify(this.config.command);
       }

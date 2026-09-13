@@ -15,13 +15,15 @@
 
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
   PI_EXTENSION_ASSETS_HASH,
   PI_EXTENSION_FILES,
 } from "./piExtensionAssets.generated.ts";
 import type { PiRoutingConfig } from "./piRouting.ts";
+import type { Config } from "../config.ts";
+import { routingIsConfigured } from "./harnessReconcile.ts";
+import { nativeExtensionsDir } from "./nativeAgentDir.ts";
 
 /** Marker file recording what we last stamped (drift detection for doctor). */
 const MARKER_FILE = ".phantombot-managed";
@@ -59,12 +61,21 @@ export interface ProvisionResult {
 }
 
 export interface ProvisionOpts {
-  /** Base home dir; defaults to os.homedir(). Overridable for tests. */
-  home?: string;
+  /**
+   * The pi AGENT dir to stamp the extension into. Defaults to the NATIVE
+   * engine's isolated agent dir (lib/nativeAgentDir.ts): the managed extension
+   * exists for the embedded engine, which must never read the user's ~/.pi.
+   * Overridable for tests.
+   */
+  agentDir?: string;
 }
 
-function extensionDir(home: string): string {
-  return path.join(home, ".pi", "agent", "extensions", "capability-routing");
+function extensionDir(agentDir?: string): string {
+  // ONE derivation for both paths: an explicit agent dir gets the same
+  // `extensions/` segment the native default already carries — otherwise an
+  // override stamps into <agent>/capability-routing, where pi never looks.
+  const extensions = agentDir ? path.join(agentDir, "extensions") : nativeExtensionsDir();
+  return path.join(extensions, "capability-routing");
 }
 
 /** Prepend the managed banner as a language-appropriate comment line. */
@@ -216,8 +227,7 @@ async function pruneEmptyDirs(root: string): Promise<void> {
 export async function removeRoutingExtension(
   opts: ProvisionOpts = {},
 ): Promise<{ removed: boolean; dir: string }> {
-  const home = opts.home ?? os.homedir();
-  const dir = extensionDir(home);
+  const dir = extensionDir(opts.agentDir);
   if (!existsSync(dir)) return { removed: false, dir };
   await rm(dir, { recursive: true, force: true });
   return { removed: true, dir };
@@ -241,13 +251,12 @@ export async function ensureRoutingExtension(
   routing: PiRoutingConfig | undefined,
   opts: ProvisionOpts = {},
 ): Promise<ProvisionResult> {
-  const home = opts.home ?? os.homedir();
-  const dir = extensionDir(home);
+  const dir = extensionDir(opts.agentDir);
 
   // No image model ⇒ the extension would register no tools. Remove any
   // previously-stamped dir instead of leaving an inert shell behind.
   if (!hasRoutableCapability(routing)) {
-    const { removed } = await removeRoutingExtension({ home });
+    const { removed } = await removeRoutingExtension(opts);
     return {
       dir,
       action: removed ? "removed" : "absent",
@@ -330,8 +339,7 @@ export async function routingExtensionStatus(
   drifted: boolean;
   dir: string;
 }> {
-  const home = opts.home ?? os.homedir();
-  const dir = extensionDir(home);
+  const dir = extensionDir(opts.agentDir);
   const shouldExist = hasRoutableCapability(routing);
 
   // No image model ⇒ desired state is absence. Any leftover dir (even a partial
@@ -370,4 +378,33 @@ export async function routingExtensionStatus(
   }
 
   return { shouldExist, present: true, drifted: false, dir };
+}
+
+/**
+ * The routing the managed extension should be stamped for: the first native
+ * slot's routing that registers a tool (an image model), falling back to the
+ * first CONFIGURED routing (a primary/coding-only setup stamps nothing either
+ * way, but the doctor must not call a configured slot "absent"). Native
+ * INSTANCES count (pi-primary/pi-fallback with their own routing) — only the
+ * top-level `[harnesses.pi.routing]` table used to be consulted, which stripped
+ * a native-only host of its image/coding delegates after the upgrade (2026-09-13).
+ * Per-turn reads are persona-scoped via PHANTOMBOT_ROUTING_JSON; this stamped
+ * sibling is only the default-persona / bare-`pi` fallback.
+ */
+export function effectiveNativeRouting(
+  config: Pick<Config, "harnesses">,
+  persona?: string,
+): PiRoutingConfig | undefined {
+  const chain =
+    persona && config.harnesses.personas?.[persona]?.chain?.length
+      ? config.harnesses.personas[persona]!.chain
+      : config.harnesses.chain;
+  const top = config.harnesses.pi?.routing;
+  const candidates = [
+    ...(top ? [top] : []),
+    ...(chain ?? []).map((id) => config.harnesses.instances?.[id]?.routing),
+  ].filter((r): r is PiRoutingConfig => !!r);
+  const capable = candidates.find((r) => hasRoutableCapability(r));
+  if (capable) return capable;
+  return candidates.find((r) => routingIsConfigured(r));
 }

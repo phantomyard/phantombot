@@ -75,6 +75,15 @@ export interface ReconcileHarnessConfigFilesInput {
   routingConfigured(persona: string | undefined): boolean;
   /** Live probe result — doctor always knows, unlike read time. */
   hostPiInstalled: boolean;
+  /**
+   * Key resolvability per native slot (lib/nativeKeyCopy.ts). Omitted (or
+   * returning undefined) never blocks the switch — read time has no vault
+   * open; doctor's copy pass gives the real answer.
+   */
+  nativeKeyResolvable?(
+    persona?: string,
+    instanceId?: string,
+  ): boolean | undefined;
   repair: boolean;
   now?: Date;
 }
@@ -117,6 +126,10 @@ export async function reconcileHarnessConfigFiles(
       routingConfigured: (chainPersona) =>
         input.routingConfigured(chainPersona ?? file.persona),
       hostPiInstalled: input.hostPiInstalled,
+      nativeKeyResolvable: input.nativeKeyResolvable
+        ? (chainPersona, instanceId) =>
+            input.nativeKeyResolvable!(chainPersona ?? file.persona, instanceId)
+        : undefined,
     });
     if (changes.length === 0) continue;
 

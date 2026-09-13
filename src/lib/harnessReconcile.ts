@@ -27,7 +27,15 @@
  *      — nothing else could ever have served that entry.
  *
  * Decision table (legacy `pi` only):
- *   routing configured                         -> native
+ *   routing configured, key resolvable          -> native
+ *   routing configured, key NOWHERE, host pi
+ *     present/unknown                           -> pi-host  (never switch a
+ *                                                working setup to a brain
+ *                                                with no key — Atlas defect)
+ *   routing configured, key NOWHERE, host pi
+ *     known ABSENT                              -> native   (only engine that
+ *                                                could serve; doctor --fix
+ *                                                then guides the key paste)
  *   no routing, host pi known to be ABSENT      -> native   (repair)
  *   no routing, host pi present OR unknown      -> pi-host
  *
@@ -58,11 +66,31 @@ export interface LegacyPiFacts {
    * Only a definite `false` may repair a routing-less legacy pi to native.
    */
   hostPiInstalled?: boolean;
+  /**
+   * Can the slot's provider key be resolved for native mode (vault row, the
+   * legacy auth store, a sibling native slot)? `undefined` = not checked
+   * (read time, which never has the persona vault open). Only a definite
+   * `false` may BLOCK the switch: native never reads the host `~/.pi`, so
+   * switching a routing-configured slot to native without a key anywhere
+   * turns a working setup into "No API key found" (the 2026-09-13 Atlas
+   * defect). `doctor` copies the key first; only a key that is genuinely
+   * nowhere blocks, and then only when the host pi can still serve.
+   */
+  nativeKeyResolvable?: boolean;
 }
 
 /** The single decision. See the module doc for the table. */
 export function decideLegacyPi(facts: LegacyPiFacts): PiEngineType {
-  if (facts.routingConfigured) return NATIVE_HARNESS_ID;
+  if (facts.routingConfigured) {
+    if (facts.nativeKeyResolvable === false && facts.hostPiInstalled !== false) {
+      // A key exists nowhere and the host pi can still answer with its own
+      // configuration: DON'T switch — that would break a working setup.
+      return PI_HOST_HARNESS_ID;
+    }
+    // Key resolvable, or no host pi to fall back to (then native is the only
+    // engine that could ever serve this slot; doctor --fix guides the key).
+    return NATIVE_HARNESS_ID;
+  }
   if (facts.hostPiInstalled === false) return NATIVE_HARNESS_ID;
   return PI_HOST_HARNESS_ID;
 }
@@ -166,6 +194,14 @@ export interface ReconcileFacts {
    */
   routingConfigured(persona?: string): boolean;
   hostPiInstalled?: boolean;
+  /**
+   * Key resolvability for a native slot, per persona and instance. Same
+   * function-per-persona contract as `routingConfigured`; `instanceId` is
+   * omitted for the unnamed `[harnesses.pi]` slot. Omitting the whole
+   * function (read time) leaves the fact `undefined` — which never blocks
+   * a switch.
+   */
+  nativeKeyResolvable?(persona?: string, instanceId?: string): boolean | undefined;
 }
 
 export interface ReconcileResult {
@@ -179,6 +215,9 @@ function isTable(v: unknown): v is TomlObject {
 
 function reasonFor(facts: LegacyPiFacts, to: PiEngineType): string {
   if (to === PI_HOST_HARNESS_ID) {
+    if (facts.routingConfigured && facts.nativeKeyResolvable === false) {
+      return "routing is configured but no provider key was found anywhere — kept on the host's own pi rather than switch to a native brain that cannot authenticate";
+    }
     return "no phantombot routing — runs the host's own pi configuration";
   }
   return facts.routingConfigured
@@ -212,6 +251,7 @@ export function reconcileHarnessToml(
     const legacyFacts: LegacyPiFacts = {
       routingConfigured: facts.routingConfigured(persona),
       hostPiInstalled: facts.hostPiInstalled,
+      nativeKeyResolvable: facts.nativeKeyResolvable?.(persona),
     };
     const next = mapLegacyChain(ids, legacyFacts);
     const to = decideLegacyPi(legacyFacts);
@@ -238,6 +278,7 @@ export function reconcileHarnessToml(
       const legacyFacts: LegacyPiFacts = {
         routingConfigured: routingIsConfigured(entry.routing),
         hostPiInstalled: facts.hostPiInstalled,
+        nativeKeyResolvable: facts.nativeKeyResolvable?.(undefined, id),
       };
       const to = decideLegacyPi(legacyFacts);
       entry.type = to;

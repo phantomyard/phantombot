@@ -68,6 +68,23 @@ export function piAuthJsonPath(home: string = homedir()): string {
   return join(home, ".pi", "agent", "auth.json");
 }
 
+/**
+ * Where a write/read should land. Default: the host pi's own auth.json.
+ * NATIVE callers pass the isolated agent dir (lib/nativeAgentDir.ts) — the
+ * embedded engine must never read or write the user's `~/.pi`.
+ */
+export type PiAuthTarget = { home?: string; agentDir?: string };
+
+function authPathFor(target?: PiAuthTarget): string {
+  if (target?.agentDir) return join(target.agentDir, "auth.json");
+  return piAuthJsonPath(target?.home);
+}
+
+/** Back-compat: older callers passed a plain home dir string. */
+function normalizeAuthTarget(target?: PiAuthTarget | string): PiAuthTarget | undefined {
+  return typeof target === "string" ? { home: target } : target;
+}
+
 /** One entry in Pi's auth.json. OAuth entries carry more fields; we only read `type`. */
 interface PiAuthEntry {
   type?: string;
@@ -125,9 +142,9 @@ export function mergePiApiKey(
  * and asks later.
  */
 export async function snapshotPiAuth(
-  home?: string,
+  target?: PiAuthTarget | string,
 ): Promise<string | undefined> {
-  const path = piAuthJsonPath(home);
+  const path = authPathFor(normalizeAuthTarget(target));
   return serialized(path, async () => {
     try {
       return await readFile(path, "utf8");
@@ -146,9 +163,9 @@ export async function snapshotPiAuth(
  */
 export async function restorePiAuth(
   snapshot: string | undefined,
-  home?: string,
+  target?: PiAuthTarget | string,
 ): Promise<{ ok: boolean; path: string; reason?: string }> {
-  const path = piAuthJsonPath(home);
+  const path = authPathFor(normalizeAuthTarget(target));
   return serialized(path, async () => {
     try {
       if (snapshot === undefined) {
@@ -194,9 +211,9 @@ export type PiAuthWriteResult =
 export async function writePiApiKey(
   provider: string,
   apiKey: string,
-  home?: string,
+  target?: PiAuthTarget,
 ): Promise<PiAuthWriteResult> {
-  const path = piAuthJsonPath(home);
+  const path = authPathFor(target);
   return serialized(path, () => writePiApiKeyInner(provider, apiKey, path));
 }
 

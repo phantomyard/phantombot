@@ -1765,3 +1765,46 @@ describe("runDoctor — per-persona secrets vault", () => {
     expect(out.text).not.toContain("sk-secret");
   });
 });
+
+describe("runDoctor — native harness keys", () => {
+  // Regression (2026-09-13, Atlas): a native brain with no resolvable provider
+  // key reported "ok" while every native turn died with "No API key found".
+  const report = (resolved: boolean, repairedWith?: string) => async () => ({
+    files: [],
+    warnings: [],
+    nativeKeys: [
+      {
+        id: "pi-primary",
+        secretName: "PHANTOMBOT_PI_API_KEY_PI_PRIMARY",
+        provider: "openrouter",
+        resolved,
+        ...(repairedWith ? { repairedWith } : {}),
+      },
+    ],
+  });
+
+  test("an unresolvable native key is a FAIL and exits 1", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkHarnessConfig: report(false) as never,
+    });
+    expect(out.text).toContain("native key (default chain, pi-primary): FAIL");
+    expect(out.text).toContain("PHANTOMBOT_PI_API_KEY_PI_PRIMARY");
+    expect(code).toBe(1);
+  });
+
+  test("a key copied this run is OK and does not fail doctor", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkHarnessConfig: report(true, "copied from auth-store") as never,
+    });
+    expect(out.text).toContain("native key (default chain, pi-primary): OK");
+    expect(code).toBe(0);
+  });
+});

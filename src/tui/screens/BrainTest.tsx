@@ -205,7 +205,11 @@ export function BrainTestScreen(props: {
                     : undefined
               }
             >
-              Test in progress....
+              {stage === "success"
+                ? "Test succeeded"
+                : stage === "failure"
+                  ? "Test failed"
+                  : "Test in progress...."}
             </Text>
           </Box>
 
@@ -219,9 +223,12 @@ export function BrainTestScreen(props: {
           ) : null}
 
           {stage === "failure" && detail ? (
+            // Show the WHOLE detail, stderr tail included — the first line
+            // alone used to hide pi's actual error ("No API key found…"),
+            // leaving a red cross with no diagnosis (2026-09-13 Atlas).
             <Box marginTop={0} paddingLeft={2}>
               <Text color={theme.warn} wrap="wrap">
-                {detail.split("\n")[0]}
+                {detail}
               </Text>
             </Box>
           ) : null}

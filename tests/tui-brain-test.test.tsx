@@ -84,7 +84,9 @@ describe("BrainTestScreen checklist", () => {
     resolveProbe({ ok: true, detail: "I am ready to help." });
     await sleep(60);
 
-    expect(ui.frame()).toContain("Test in progress....");
+    // A finished test never keeps the in-progress label next to its result.
+    expect(ui.frame()).not.toContain("Test in progress....");
+    expect(ui.frame()).toContain("Test succeeded");
     expect(ui.frame()).toContain("Test successful, apply? (Y/n)");
     expect(ui.frame()).toContain("Yes, apply configuration");
 
@@ -132,7 +134,8 @@ describe("BrainTestScreen checklist", () => {
     );
     await sleep(60);
 
-    expect(ui.frame()).toContain("Test in progress....");
+    expect(ui.frame()).not.toContain("Test in progress....");
+    expect(ui.frame()).toContain("Test failed");
     expect(ui.frame()).toContain("401 Unauthorized: Invalid API key");
     expect(ui.frame()).toContain("Test failed, retry? (Y/n)");
     expect(ui.frame()).toContain("Yes, retry setup & test");
@@ -143,6 +146,23 @@ describe("BrainTestScreen checklist", () => {
       retry: true,
       detail: "401 Unauthorized: Invalid API key",
     });
+  });
+
+  test("shows the harness stderr tail, not just the first line of the failure", async () => {
+    // Regression (2026-09-13 Atlas): pi's real error lives on a later line;
+    // the screen used to render only line one and hide the diagnosis.
+    const req: BrainTestRequest = {
+      persona: "batman",
+      harness: "native",
+      probe: async () => ({
+        ok: false,
+        detail: "pi exited with code 1\nstderr tail: No API key found for openrouter",
+      }),
+    };
+    const ui = mount(<BrainTestScreen request={req} onAnswer={() => {}} />);
+    await sleep(60);
+    expect(ui.frame()).toContain("pi exited with code 1");
+    expect(ui.frame()).toContain("No API key found for openrouter");
   });
 
   test("cancels on esc when test fails", async () => {

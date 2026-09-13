@@ -17,8 +17,13 @@ import { PI_EXTENSION_FILES } from "../src/lib/piExtensionAssets.generated.ts";
 let home: string;
 const EXT_REL = [".pi", "agent", "extensions", "capability-routing"];
 
+// The provision seam is now an AGENT dir (lib/nativeAgentDir.ts) instead of a
+// home; pointing it at home/.pi/agent keeps every asserted path identical.
 function extDir(h: string): string {
   return join(h, ...EXT_REL);
+}
+function agentDir(h: string): string {
+  return join(h, ".pi", "agent");
 }
 
 beforeEach(async () => {
@@ -36,7 +41,7 @@ describe("ensureRoutingExtension", () => {
       imageModel: "gpt-4o",
       codingModel: "gpt-5.2-codex",
     };
-    const r = await ensureRoutingExtension(routing, { home });
+    const r = await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
 
     // The coding model is NOT baked into routing.json — it drives the per-turn
     // coding-brain swap, not any tool the extension registers.
@@ -72,7 +77,7 @@ describe("ensureRoutingExtension", () => {
     // so it no longer justifies provisioning the managed dir.
     const r = await ensureRoutingExtension(
       { primaryModel: "gpt-5.2", codingModel: "qwen-coder" },
-      { home },
+      { agentDir: agentDir(home) },
     );
     expect(r.action).toBe("absent");
     expect(r.wrote).toEqual([]);
@@ -82,7 +87,7 @@ describe("ensureRoutingExtension", () => {
   test("image capability stamps the dir; coding fields are not baked", async () => {
     const r = await ensureRoutingExtension(
       { primaryModel: "gpt-5.2", imageModel: "gpt-4o", codingModel: "qwen-coder" },
-      { home },
+      { agentDir: agentDir(home) },
     );
     expect(r.action).toBe("created");
     const routingJson = JSON.parse(
@@ -94,14 +99,14 @@ describe("ensureRoutingExtension", () => {
   });
 
   test("no routable capability (primaryModel only) does not create the dir", async () => {
-    const r = await ensureRoutingExtension({ primaryModel: "gpt-5.2" }, { home });
+    const r = await ensureRoutingExtension({ primaryModel: "gpt-5.2" }, { agentDir: agentDir(home) });
     expect(r.action).toBe("absent");
     expect(r.wrote).toEqual([]);
     expect(existsSync(extDir(home))).toBe(false);
   });
 
   test("undefined routing does not create the dir (action 'absent')", async () => {
-    const r = await ensureRoutingExtension(undefined, { home });
+    const r = await ensureRoutingExtension(undefined, { agentDir: agentDir(home) });
     expect(r.action).toBe("absent");
     expect(existsSync(extDir(home))).toBe(false);
   });
@@ -109,7 +114,7 @@ describe("ensureRoutingExtension", () => {
   test("blank model strings count as unset (whitespace trimmed)", async () => {
     const r = await ensureRoutingExtension(
       { primaryModel: "gpt-5.2", codingModel: "   ", imageModel: "" },
-      { home },
+      { agentDir: agentDir(home) },
     );
     expect(r.action).toBe("absent");
     expect(existsSync(extDir(home))).toBe(false);
@@ -118,13 +123,13 @@ describe("ensureRoutingExtension", () => {
   test("dropping the image model removes a previously-stamped dir (action 'removed')", async () => {
     await ensureRoutingExtension(
       { primaryModel: "gpt-5.2", imageModel: "gpt-4o" },
-      { home },
+      { agentDir: agentDir(home) },
     );
     expect(existsSync(extDir(home))).toBe(true);
 
     const r = await ensureRoutingExtension(
       { primaryModel: "gpt-5.2", codingModel: "qwen-coder" },
-      { home },
+      { agentDir: agentDir(home) },
     );
     expect(r.action).toBe("removed");
     expect(existsSync(extDir(home))).toBe(false);
@@ -132,15 +137,15 @@ describe("ensureRoutingExtension", () => {
 
   test("second run on identical input returns action 'unchanged'", async () => {
     const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
-    await ensureRoutingExtension(routing, { home });
-    const second = await ensureRoutingExtension(routing, { home });
+    await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
+    const second = await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
     expect(second.action).toBe("unchanged");
     expect(second.wrote).toEqual([]);
   });
 
   test("prunes a stale orphan file (e.g. agents/coder.md) left from a prior asset set", async () => {
     const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
-    await ensureRoutingExtension(routing, { home });
+    await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
 
     // Simulate a host stamped by an OLDER phantombot whose embedded asset set
     // still shipped the coder agent file. It must NOT survive a re-stamp.
@@ -149,7 +154,7 @@ describe("ensureRoutingExtension", () => {
     await writeFile(stalePath, "<!-- stale coder agent -->\n", "utf8");
     expect(existsSync(stalePath)).toBe(true);
 
-    const r = await ensureRoutingExtension(routing, { home });
+    const r = await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
     expect(r.action).toBe("updated");
     expect(r.pruned).toContain("agents/coder.md");
     expect(existsSync(stalePath)).toBe(false);
@@ -161,21 +166,21 @@ describe("ensureRoutingExtension", () => {
 
   test("a clean second run prunes nothing and stays 'unchanged'", async () => {
     const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
-    await ensureRoutingExtension(routing, { home });
-    const second = await ensureRoutingExtension(routing, { home });
+    await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
+    const second = await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
     expect(second.action).toBe("unchanged");
     expect(second.pruned).toEqual([]);
   });
 
   test("mutating a stamped file then re-running restores it (action 'updated')", async () => {
     const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
-    await ensureRoutingExtension(routing, { home });
+    await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
 
     const toolsPath = join(extDir(home), "tools.ts");
     const managed = await readFile(toolsPath, "utf8");
     await writeFile(toolsPath, "// tampered\n", "utf8");
 
-    const r = await ensureRoutingExtension(routing, { home });
+    const r = await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
     expect(r.action).toBe("updated");
     expect(r.wrote).toContain("tools.ts");
     // Content restored to the managed version.
@@ -185,7 +190,7 @@ describe("ensureRoutingExtension", () => {
 
 describe("routingExtensionStatus", () => {
   test("should-exist but missing on a fresh temp home → drifted", async () => {
-    const status = await routingExtensionStatus({ imageModel: "gpt-4o" }, { home });
+    const status = await routingExtensionStatus({ imageModel: "gpt-4o" }, { agentDir: agentDir(home) });
     expect(status.shouldExist).toBe(true);
     expect(status.present).toBe(false);
     expect(status.drifted).toBe(true);
@@ -193,14 +198,14 @@ describe("routingExtensionStatus", () => {
   });
 
   test("no capability + fresh home → correctly absent (not drifted)", async () => {
-    const status = await routingExtensionStatus({ primaryModel: "x" }, { home });
+    const status = await routingExtensionStatus({ primaryModel: "x" }, { agentDir: agentDir(home) });
     expect(status.shouldExist).toBe(false);
     expect(status.present).toBe(false);
     expect(status.drifted).toBe(false);
   });
 
   test("coding model alone does not make the extension should-exist", async () => {
-    const status = await routingExtensionStatus({ codingModel: "x" }, { home });
+    const status = await routingExtensionStatus({ codingModel: "x" }, { agentDir: agentDir(home) });
     expect(status.shouldExist).toBe(false);
     expect(status.present).toBe(false);
     expect(status.drifted).toBe(false);
@@ -208,8 +213,8 @@ describe("routingExtensionStatus", () => {
 
   test("present + not drifted after a clean provision", async () => {
     const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
-    await ensureRoutingExtension(routing, { home });
-    const status = await routingExtensionStatus(routing, { home });
+    await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
+    const status = await routingExtensionStatus(routing, { agentDir: agentDir(home) });
     expect(status.shouldExist).toBe(true);
     expect(status.present).toBe(true);
     expect(status.drifted).toBe(false);
@@ -217,30 +222,30 @@ describe("routingExtensionStatus", () => {
 
   test("reports drifted=true after a source file is mutated", async () => {
     const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
-    await ensureRoutingExtension(routing, { home });
+    await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
     await writeFile(join(extDir(home), "index.ts"), "// tampered\n", "utf8");
-    const status = await routingExtensionStatus(routing, { home });
+    const status = await routingExtensionStatus(routing, { agentDir: agentDir(home) });
     expect(status.present).toBe(true);
     expect(status.drifted).toBe(true);
   });
 
   test("reports drifted=true when a stale orphan file is present", async () => {
     const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
-    await ensureRoutingExtension(routing, { home });
+    await ensureRoutingExtension(routing, { agentDir: agentDir(home) });
     // Plant an orphan that is NOT in the desired set.
     await writeFile(join(extDir(home), "stale-orphan.md"), "x\n", "utf8");
-    const status = await routingExtensionStatus(routing, { home });
+    const status = await routingExtensionStatus(routing, { agentDir: agentDir(home) });
     expect(status.shouldExist).toBe(true);
     expect(status.present).toBe(true);
     expect(status.drifted).toBe(true);
   });
 
   test("reports drifted=true when routing.json no longer matches desired", async () => {
-    await ensureRoutingExtension({ imageModel: "gpt-4o" }, { home });
+    await ensureRoutingExtension({ imageModel: "gpt-4o" }, { agentDir: agentDir(home) });
     // Ask about a different (still-capable) routing config → routing.json differs.
     const status = await routingExtensionStatus(
       { imageModel: "different-image" },
-      { home },
+      { agentDir: agentDir(home) },
     );
     expect(status.shouldExist).toBe(true);
     expect(status.present).toBe(true);
@@ -248,8 +253,8 @@ describe("routingExtensionStatus", () => {
   });
 
   test("stamped, then the image model dropped → drifted (needs removal)", async () => {
-    await ensureRoutingExtension({ imageModel: "gpt-4o" }, { home });
-    const status = await routingExtensionStatus({ primaryModel: "x" }, { home });
+    await ensureRoutingExtension({ imageModel: "gpt-4o" }, { agentDir: agentDir(home) });
+    const status = await routingExtensionStatus({ primaryModel: "x" }, { agentDir: agentDir(home) });
     expect(status.shouldExist).toBe(false);
     expect(status.present).toBe(true);
     expect(status.drifted).toBe(true);
@@ -270,14 +275,14 @@ describe("hasRoutableCapability", () => {
 
 describe("removeRoutingExtension", () => {
   test("removes a stamped dir; idempotent when already absent", async () => {
-    await ensureRoutingExtension({ imageModel: "gpt-4o" }, { home });
+    await ensureRoutingExtension({ imageModel: "gpt-4o" }, { agentDir: agentDir(home) });
     expect(existsSync(extDir(home))).toBe(true);
 
-    const first = await removeRoutingExtension({ home });
+    const first = await removeRoutingExtension({ agentDir: agentDir(home) });
     expect(first.removed).toBe(true);
     expect(existsSync(extDir(home))).toBe(false);
 
-    const second = await removeRoutingExtension({ home });
+    const second = await removeRoutingExtension({ agentDir: agentDir(home) });
     expect(second.removed).toBe(false);
   });
 });
