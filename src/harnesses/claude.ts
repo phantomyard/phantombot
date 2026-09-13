@@ -517,8 +517,10 @@ export function renderStdinPayload(req: HarnessRequest): string {
  * Reasoning content is never streamed as reply text. It IS captured (from
  * `stream_event` thinking_delta fragments) into the narration-decay replay
  * buffer (issue #551), where the engine's quiet window may surface the
- * newest un-emitted slice as an ephemeral `progress` row — model-written
- * text only, user-channel-only, never persisted.
+ * newest un-emitted slice as a `replay` row — model-written text only,
+ * user-channel-only, never persisted. `redacted_thinking` blocks (complete
+ * envelopes and content_block_start events) carry no readable text but ARM
+ * the replay fallback chain.
  *
  * Exported for testing.
  */
@@ -668,6 +670,19 @@ export function parseStreamJson(parsed: unknown): ParseEventResult {
       }
       // Text deltas arrive via the same envelopes; text surfaces from the
       // complete `assistant` envelopes below, so raw deltas stay ignored.
+      // A redacted_thinking block ALSO announces itself here (content_block_start):
+      // reasoning exists but is encrypted — arm the fallback chain (issue #551).
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        event.type === "content_block_start" &&
+        typeof event.content_block === "object" &&
+        event.content_block !== null &&
+        (event.content_block as Record<string, unknown>).type ===
+          "redacted_thinking"
+      ) {
+        return { redacted: true, chunk: { type: "heartbeat" } };
+      }
       return undefined;
     }
     return undefined;
@@ -688,6 +703,7 @@ export function parseStreamJson(parsed: unknown): ParseEventResult {
   let toolName: string | undefined;
   let toolInput: unknown;
   let sawOtherNonText = false;
+  let sawRedactedThinking = false;
   for (const part of content) {
     if (typeof part === "object" && part !== null) {
       const p = part as Record<string, unknown>;
@@ -696,6 +712,10 @@ export function parseStreamJson(parsed: unknown): ParseEventResult {
       } else if (p.type === "tool_use") {
         toolName = typeof p.name === "string" ? p.name : toolName ?? "tool";
         toolInput = p.input;
+      } else if (p.type === "redacted_thinking") {
+        // Encrypted reasoning: nothing readable to capture, but its presence
+        // arms the narration/tool-note fallback (issue #551).
+        sawRedactedThinking = true;
       } else if (typeof p.type === "string") {
         sawOtherNonText = true;
       }
@@ -706,6 +726,7 @@ export function parseStreamJson(parsed: unknown): ParseEventResult {
     const tool = buildToolCall(toolName, toolInput);
     return { type: "progress", note: tool.title, tool };
   }
+  if (sawRedactedThinking) return { redacted: true, chunk: { type: "heartbeat" } };
   if (sawOtherNonText) return { type: "heartbeat" };
   return undefined;
 }

@@ -290,6 +290,16 @@ export function ChatScreen(props: {
             // The harness is alive but silent. Say so rather than freezing the
             // label on whatever the last tool happened to be.
             setActivity("thinking");
+          } else if (event.type === "reasoning") {
+            // Narration-decay replay (issue #551): model-written reasoning as
+            // liveness on the activity line. Trimmed to the first line — it
+            // is a label, not a transcript row — and never persisted.
+            const firstLine = event.text.split("\n")[0] ?? event.text;
+            setActivity(
+              firstLine.length > 120
+                ? `${Array.from(firstLine).slice(0, 120).join("")}…`
+                : firstLine,
+            );
           } else if (event.type === "tool") {
             setActivity(event.title.split("\n")[0] ?? "working");
             patch((m) => ({

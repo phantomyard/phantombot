@@ -505,6 +505,68 @@ describe("ACP server — session/prompt", () => {
     expect(harness3.lastRequest?.userMessage).toBe("say hi");
   });
 
+  test("reasoning replay rides agent_thought_chunk, never a tool call (#551)", async () => {
+    const cwd = "/home/dev/proj-thought";
+    const input = new PassThrough();
+    const captured = new CapturingOut();
+    const harness = new ScriptedHarness("h", () => [
+      { type: "text", text: "On it." },
+      { type: "replay", note: "reasoning: checking the agenda" },
+      { type: "done", finalText: "On it." },
+    ]);
+    const done = runAcpServer({
+      config,
+      memory,
+      harnesses: [harness],
+      input,
+      output: captured as any,
+      logErr: new CapturingErr(),
+      screen: async () => ({ action: "pass", score: 0, reason: "x" }),
+    });
+    input.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: { cwd },
+      }) + "\n",
+    );
+    await new Promise((r) => setImmediate(r));
+    const sid = captured.objects().find((o) => o.id === 1).result.sessionId;
+    input.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: {
+          sessionId: sid,
+          prompt: [{ type: "text", text: "go" }],
+        },
+      }) + "\n",
+    );
+    await new Promise((r) => setImmediate(r));
+    input.end();
+    await done;
+
+    const objs = captured.objects();
+    const thoughts = objs.filter(
+      (o) =>
+        o.method === "session/update" &&
+        o.params.update.sessionUpdate === "agent_thought_chunk",
+    );
+    expect(thoughts.map((t) => t.params.update.content.text)).toEqual([
+      "reasoning: checking the agenda",
+    ]);
+    // And no tool_call was minted for the replay note.
+    const toolCalls = objs.filter(
+      (o) =>
+        o.method === "session/update" &&
+        o.params.update.sessionUpdate === "tool_call" &&
+        o.params.update.title.includes("reasoning"),
+    );
+    expect(toolCalls).toEqual([]);
+  });
+
   test("resource blocks land in labelled context, never in userMessage", async () => {
     const harness = new ScriptedHarness("h", () => [
       { type: "done", finalText: "ok" },

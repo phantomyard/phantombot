@@ -1430,21 +1430,12 @@ async function processChatMessage(
       if (chunk.type === "progress") {
         progressCount++;
         // Stash the latest progress note on the active-turn handle so
-        // /status can show "currently: <tool>" in real time. Ephemeral
-        // rows (reasoning replay) still drive the live indicator, but their
-        // text must never reach a persisted log — redact below.
+        // /status can show "currently: <tool>" in real time.
         turnHandle.lastProgressNote = chunk.note.slice(0, 500);
-        if (chunk.ephemeral) {
-          log.debug("telegram: progress", {
-            chatId: msg.conversationId,
-            note: "(reasoning replay — redacted)",
-          });
-        } else {
-          log.debug("telegram: progress", {
-            chatId: msg.conversationId,
-            note: chunk.note.slice(0, 200),
-          });
-        }
+        log.debug("telegram: progress", {
+          chatId: msg.conversationId,
+          note: chunk.note.slice(0, 200),
+        });
         // A tool is about to run. The text emitted since the previous
         // boundary was progress narration unless it already crossed the
         // markdown-aware final-answer splitter and got sent as a readable
@@ -1464,6 +1455,16 @@ async function processChatMessage(
         // to expire after ~5s, making it look like the bot has frozen.
         // Stopped on the next text/heartbeat/done/error.
         startIndicatorKeepalive();
+      }
+      if (chunk.type === "replay") {
+        // Narration-decay liveness (issue #551): model-written reasoning
+        // after a quiet window. A dedicated kind — never a bubble (bubbles
+        // persist), never a tool-boundary flush; it refreshes the typing
+        // indicator and /status. During long redacted-thinking stretches no
+        // chunks flow at all, so the keepalive armed on the last progress
+        // chunk keeps the indicator alive through the gap.
+        turnHandle.lastProgressNote = chunk.note.slice(0, 500);
+        refreshIndicator();
       }
       if (chunk.type === "done") {
         finalReply = chunk.finalText;

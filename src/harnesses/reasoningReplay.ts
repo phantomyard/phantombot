@@ -23,11 +23,18 @@
  *   - Only NEW reasoning replays: the buffer holds text not yet emitted; a
  *     tick with nothing new stays silent. Replaying a stale line is worse
  *     than silence.
- *   - Fallback chain (redacted_thinking / no readable reasoning): the last
- *     narration text, then the last tool note — but ONLY while the fallback
- *     content is fresh (fallbackFreshMs) and only if it differs from the
- *     last emitted string, so a claude-heavy session never re-replays a
- *     minutes-old narration line.
+ *   - Fallback chain (redacted_thinking ONLY): the narration text
+ *     accumulated since the last boundary, then the last tool note. The
+ *     fallback is ARMED only when the parser actually SAW a redacted_thinking
+ *     block — a session that emits no reasoning at all stays silent, because
+ *     echoing narration the user just watched stream past, or re-emitting a
+ *     tool note whose row is already on screen, is "stale progress is worse
+ *     than silence" (issue thread). While armed, the same freshness
+ *     (fallbackFreshMs) and emit-once (never-repeat set) guards apply.
+ *   - Privacy: reasoning rides the dedicated payload-less `replay` chunk kind
+ *     (see types.ts), which consumers render on their live surface only and
+ *     never persist — no reply bubble, narration bubble, memory, journal, or
+ *     log line carries the text. See replayChunk().
  *   - Privacy: reasoning rides the payload-less `progress` path, which every
  *     channel layer treats as ephemeral UI state (live indicator + /status),
  *     never persisted as reply text, narration bubble, memory, or journal.
@@ -64,7 +71,14 @@ export const DEFAULT_REASONING_REPLAY: ReasoningReplayConfig = {
  * as if the parser had returned it directly.
  */
 export interface ReasoningCapture {
-  reasoning: string;
+  /** Readable model reasoning (a delta fragment or a complete summary). */
+  reasoning?: string;
+  /**
+   * The stream carried a `redacted_thinking` block (claude): reasoning EXISTS
+   * but is encrypted, so the only replayable content is the fallback chain.
+   * Arm the fallback — sessions without this marker never fall back.
+   */
+  redacted?: true;
   chunk?: HarnessChunk;
 }
 
@@ -77,12 +91,24 @@ export type ParseEventResult = HarnessChunk | ReasoningCapture | undefined;
 export function isReasoningCapture(
   r: ParseEventResult,
 ): r is ReasoningCapture {
-  return (
-    typeof r === "object" &&
-    r !== null &&
-    "reasoning" in r &&
-    typeof (r as ReasoningCapture).reasoning === "string"
-  );
+  if (typeof r !== "object" || r === null) return false;
+  const c = r as ReasoningCapture;
+  return typeof c.reasoning === "string" || c.redacted === true;
+}
+
+/**
+ * Cap on the text accumulated since the last boundary for the narration
+ * fallback slot — the same order of magnitude as PENDING_CAP.
+ */
+const NARRATION_CAP = 2_000;
+
+/**
+ * Codepoint-safe tail slice. `slice(-n)` cuts UTF-16 code units and can split
+ * a surrogate pair (emoji) at the seam; this keeps whole codepoints.
+ */
+export function codepointTail(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return Array.from(text).slice(-maxChars).join("");
 }
 
 /** Cap on the un-emitted rolling buffer — progress rows don't need history. */
@@ -98,16 +124,34 @@ export class ReasoningReplay {
 
   /** Un-emitted model reasoning, newest text wins (rolling, capped). */
   private pending = "";
-  /** Last user-visible narration text (text chunk) + when. */
-  private lastNarration = "";
+  /**
+   * User-visible text accumulated since the last boundary (progress). The
+   * narration fallback replays this — not the last fragment: pi streams text
+   * as deltas, so a single-chunk slot would replay a word fragment.
+   */
+  private narrationAccum = "";
+  /** When the last user-visible text chunk arrived (freshness). */
   private lastNarrationAt = 0;
+  /**
+   * Set when the parser actually SAW a redacted_thinking block. Only then may
+   * the narration/tool-note fallback fire — a session whose model never emits
+   * readable reasoning must stay silent rather than echo already-seen text.
+   */
+  private fallbackArmed = false;
   /** Last tool progress note + when (second fallback slot). */
   private lastToolNote = "";
   private lastToolNoteAt = 0;
   /** Emission bookkeeping. */
   private lastEmitAt = 0;
   private lastVisibleAt = 0;
-  private lastEmitted = "";
+  /**
+   * Every string emitted this turn. A string replays AT MOST ONCE per turn —
+   * no back-to-back-only dedupe (that would let narration and tool note
+   * ping-pong the same two strings every quiet window). Bounded: a very long
+   * turn forgets its oldest emissions, which freshness would have blocked
+   * anyway (fallbackFreshMs).
+   */
+  private emittedSeen = new Set<string>();
 
   constructor(
     overrides?: Partial<ReasoningReplayConfig>,
@@ -139,17 +183,28 @@ export class ReasoningReplay {
   }
 
   /**
+   * The parser saw a redacted_thinking block — arm the fallback chain for
+   * the rest of the turn. Exported for tests.
+   */
+  armFallback(): void {
+    this.fallbackArmed = true;
+  }
+
+  /**
    * User-visible output happened — the channel is NOT quiet. `text` chunks
    * are narration (and the final reply); `progress` notes are tool-call
-   * titles. Both reset the quiet window; both also feed the fallback slots.
-   * Heartbeats deliberately do NOT reset it: they carry no user-facing text,
-   * and a thinking-heavy turn must still trigger replays.
+   * titles. Both reset the quiet window. A `progress` note is also a
+   * BOUNDARY: text accumulated before it is narration the tool run replaced,
+   * so the narration slot drops it. Heartbeats deliberately do NOT reset the
+   * window: they carry no user-facing text, and a thinking-heavy turn must
+   * still trigger replays.
    */
   visible(kind: "text" | "progress", text?: string): void {
     const t = this.now();
     this.lastVisibleAt = t;
     if (kind === "text") {
-      this.lastNarration = text ?? "";
+      if (!text) return;
+      this.narrationAccum = (this.narrationAccum + text).slice(-NARRATION_CAP);
       this.lastNarrationAt = t;
       return;
     }
@@ -157,6 +212,7 @@ export class ReasoningReplay {
     if (note) {
       this.lastToolNote = note;
       this.lastToolNoteAt = t;
+      this.narrationAccum = "";
     }
   }
 
@@ -170,16 +226,17 @@ export class ReasoningReplay {
     const t = this.now();
     // Content that could ever emit: un-emitted reasoning, or a fallback slot
     // that is fresh AND not already emitted (identical strings never repeat —
-    // see due()). Without the lastEmitted guard a fresh-but-emitted fallback
+    // see due()). Without the never-repeat guard a fresh-but-emitted fallback
     // would re-arm an already-elapsed deadline and busy-loop the tick race.
     const canReason = this.pending.trim().length > 0;
     const freshUnemittedFallback =
-      (this.lastNarration.length > 0 &&
-        this.lastNarration !== this.lastEmitted &&
+      this.fallbackArmed &&
+      ((this.fallbackNarration().length > 0 &&
+        !this.emittedSeen.has(this.fallbackNarration()) &&
         t - this.lastNarrationAt <= this.cfg.fallbackFreshMs) ||
-      (this.lastToolNote.length > 0 &&
-        this.lastToolNote !== this.lastEmitted &&
-        t - this.lastToolNoteAt <= this.cfg.fallbackFreshMs);
+        (this.lastToolNote.length > 0 &&
+          !this.emittedSeen.has(this.lastToolNote) &&
+          t - this.lastToolNoteAt <= this.cfg.fallbackFreshMs));
     if (!canReason && !freshUnemittedFallback) return undefined;
     const deadline = Math.max(
       this.lastVisibleAt + this.cfg.quietWindowMs,
@@ -206,50 +263,71 @@ export class ReasoningReplay {
       this.pending = "";
       this.lastEmitAt = t;
       this.lastVisibleAt = t;
-      this.lastEmitted = pending;
-      return pending.length > this.cfg.maxEmitChars
-        ? pending.slice(-this.cfg.maxEmitChars)
-        : pending;
+      this.rememberEmitted(pending);
+      return codepointTail(pending, this.cfg.maxEmitChars);
     }
 
-    // 2. Fresh narration, then tool note — each replays AT MOST once (identical
-    //    strings never repeat: lastEmitted guards), and only while fresh.
+    // 2. ARMED-ONLY fallback: without a redacted_thinking sighting the honest
+    //    answer is silence — replaying narration the user already watched or a
+    //    tool note whose row is on screen is stale progress.
+    if (!this.fallbackArmed) return undefined;
+    // Fresh narration accumulated since the last boundary, then the tool
+    // note — each replays AT MOST once (identical strings never repeat:
+    // never-repeat set), and only while fresh.
+    const narration = this.fallbackNarration();
     if (
-      this.lastNarration &&
-      this.lastNarration !== this.lastEmitted &&
+      narration &&
+      !this.emittedSeen.has(narration) &&
       t - this.lastNarrationAt <= this.cfg.fallbackFreshMs
     ) {
       this.lastEmitAt = t;
       this.lastVisibleAt = t;
-      this.lastEmitted = this.lastNarration;
-      return this.lastNarration;
+      this.rememberEmitted(narration);
+      // The emit consumed the accumulated text: without this, the next
+      // emission would replay the old text again inside the new accumulated
+      // string (an echo of text the user already watched).
+      this.narrationAccum = "";
+      return narration;
     }
     if (
       this.lastToolNote &&
-      this.lastToolNote !== this.lastEmitted &&
+      !this.emittedSeen.has(this.lastToolNote) &&
       t - this.lastToolNoteAt <= this.cfg.fallbackFreshMs
     ) {
       this.lastEmitAt = t;
       this.lastVisibleAt = t;
-      this.lastEmitted = this.lastToolNote;
+      this.rememberEmitted(this.lastToolNote);
       return this.lastToolNote;
     }
 
     return undefined;
   }
+
+  /** Record an emitted string, bounded. */
+  private rememberEmitted(text: string): void {
+    this.emittedSeen.add(text);
+    if (this.emittedSeen.size > 50) {
+      // Drop the OLDEST entries — Sets iterate in insertion order.
+      const drop = [...this.emittedSeen].slice(0, this.emittedSeen.size - 50);
+      for (const d of drop) this.emittedSeen.delete(d);
+    }
+  }
+
+  /**
+   * The narration fallback slot: the tail of the text accumulated since the
+   * last boundary, codepoint-safe. Empty when nothing accumulated.
+   */
+  private fallbackNarration(): string {
+    return codepointTail(this.narrationAccum.trim(), this.cfg.maxEmitChars);
+  }
 }
 
 /**
- * Build the progress chunk the engine yields for a due replay. Kept here so
- * the engine and tests share the exact shape. No `tool` payload — this is
- * narration-adjacent liveness, not a tool call, so ACP/panel consumers
- * render it as a plain progress row and resume evidence ignores it (the
- * resume log only counts `progress` chunks with a structured `tool`).
- *
- * `ephemeral: true` is the privacy discriminator (issue #551): model
- * reasoning rides the payload-less progress path, so every consumer that
- * writes a note into a persisted log must redact these rows.
+ * Build the chunk the engine yields for a due replay. Kept here so the
+ * engine and tests share the exact shape. A dedicated `replay` kind — no
+ * `tool` payload, never a tool call anywhere, and every consumer that could
+ * persist the note can see by the TYPE alone that it must not.
  */
 export function replayChunk(text: string): HarnessChunk {
-  return { type: "progress", note: text, ephemeral: true };
+  return { type: "replay", note: text };
 }

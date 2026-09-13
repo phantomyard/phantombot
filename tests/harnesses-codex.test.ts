@@ -10,6 +10,7 @@ import {
   renderStdinPayload,
 } from "../src/harnesses/codex.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
+import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
 
 const FAKE_CODEX = resolve(__dirname, "fixtures/fake-codex.sh");
 
@@ -101,7 +102,7 @@ describe("parseCodexEvent", () => {
 // ReasoningCapture for thinking events; these legacy assertions only
 // exercise pure-chunk paths).
 const asChunk = (r: ReturnType<typeof parseCodexEvent>) => {
-  if (r && "reasoning" in r) throw new Error("unexpected reasoning capture");
+  if (isReasoningCapture(r)) throw new Error("unexpected reasoning capture");
   return r;
 };
 
@@ -338,7 +339,7 @@ describe("isCodexSubagentActivity", () => {
 
 describe("parseCodexEvent subagent tripwire", () => {
   const tripwireChunk = (r: ReturnType<typeof parseCodexEvent>) => {
-    if (r && "reasoning" in r) throw new Error("unexpected reasoning capture");
+    if (isReasoningCapture(r)) throw new Error("unexpected reasoning capture");
     return r;
   };
 

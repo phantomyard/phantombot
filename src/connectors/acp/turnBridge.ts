@@ -79,6 +79,12 @@ export interface BridgeSink {
    * ACP server threads into the update; sinks that don't need it ignore it.
    */
   progress(note: string, tool?: ToolCallDetail): void;
+  /**
+   * Narration-decay replay (issue #551): model-written reasoning as liveness.
+   * The server surfaces it as an `agent_thought_chunk` — deliberately NOT a
+   * tool call, so it never lands in the editor's tool list.
+   */
+  replay(note: string): void;
 }
 
 /**
@@ -127,6 +133,8 @@ export async function runBridgeTurn(
       sink.text(chunk.text);
     } else if (chunk.type === "progress") {
       sink.progress(chunk.note, chunk.tool);
+    } else if (chunk.type === "replay") {
+      sink.replay(chunk.note);
     } else if (chunk.type === "error") {
       sawError = true;
       sink.text(`\n[error] ${chunk.error}`);

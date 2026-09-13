@@ -614,7 +614,8 @@ export async function* runHarnessProcess(
     if (!res) return;
     let c: HarnessChunk;
     if (isReasoningCapture(res)) {
-      replay?.note(res.reasoning);
+      if (res.redacted) replay?.armFallback();
+      if (res.reasoning) replay?.note(res.reasoning);
       if (!res.chunk) return;
       c = res.chunk;
     } else {

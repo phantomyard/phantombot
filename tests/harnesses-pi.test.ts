@@ -18,6 +18,7 @@ import {
   renderPayload,
 } from "../src/harnesses/pi.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
+import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
 import * as vault from "../src/lib/vault.ts";
 
 const FAKE_PI = resolve(__dirname, "fixtures/fake-pi.sh");
@@ -298,7 +299,7 @@ describe("piActivity — idle-watchdog classification", () => {
     // Forcing 'tool' is what lets a long-but-working coder stay alive.
     const parsed = { type: "tool_execution_update", toolName: "coder" };
     const res = parsePiEvent(parsed)!;
-    if ("reasoning" in res) throw new Error("unexpected reasoning capture");
+    if (isReasoningCapture(res)) throw new Error("unexpected reasoning capture");
     expect(res).toEqual({ type: "heartbeat" });
     expect(piActivity(parsed, res)).toBe("tool");
   });
@@ -307,7 +308,7 @@ describe("piActivity — idle-watchdog classification", () => {
     const parsed = { type: "tool_execution_start", toolName: "coder" };
     {
       const res = parsePiEvent(parsed)!;
-      if ("reasoning" in res) throw new Error("unexpected reasoning capture");
+      if (isReasoningCapture(res)) throw new Error("unexpected reasoning capture");
       expect(piActivity(parsed, res)).toBe("tool");
     }
   });

@@ -578,7 +578,7 @@ export function renderPayload(req: HarnessRequest): string {
  * `thinking_delta` events are the model's chain-of-thought; the content is
  * never surfaced as reply text (no leak into the bubble), but it IS captured
  * into the narration-decay replay buffer (issue #551) — the engine may
- * replay the newest un-emitted slice as an ephemeral progress row after a
+ * replay the newest un-emitted slice as a replay row after a
  * quiet window. The emitted chunk itself stays a payload-less `heartbeat`
  * so the channel layer can refresh its typing indicator. When the user
  * sees `typing…` come and go in real time, that's pi actually thinking — the
@@ -667,7 +667,7 @@ export function parsePiEvent(parsed: unknown): ParseEventResult {
     // Chain-of-thought fragment. Content still never streams to the user as
     // reply text — but it IS captured into the narration-decay replay buffer
     // (issue #551), where the engine's quiet window decides if/when the
-    // newest un-emitted slice surfaces as an ephemeral progress row. The
+    // newest un-emitted slice surfaces as a replay row. The
     // chunk itself stays payload-less, exactly as before.
     const delta = ame.delta;
     if (typeof delta === "string" && delta.trim().length > 0) {

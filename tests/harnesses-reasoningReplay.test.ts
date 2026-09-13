@@ -111,9 +111,38 @@ describe("ReasoningReplay — reasoning path", () => {
   });
 });
 
-describe("ReasoningReplay — fallback chain", () => {
-  test("no reasoning: fresh narration replays once, then stays silent", () => {
+describe("ReasoningReplay — fallback chain (ARMED by redacted_thinking only)", () => {
+  // Regression rows from the round-2 review: without an actual
+  // redacted_thinking sighting the fallback must NEVER fire, no matter how
+  // fresh the narration or tool note is.
+  test("NOT armed: a fresh tool note never replays (long tools stay silent)", () => {
     const { r, set } = replayWithClock();
+    r.visible("progress", "tool: Bash");
+    set(10_000);
+    expect(r.due()).toBeUndefined();
+    set(65_000);
+    expect(r.due()).toBeUndefined();
+  });
+
+  test("NOT armed: a fresh narration line never echoes 10s later", () => {
+    const { r, set } = replayWithClock();
+    r.visible("text", "Checking your calendar...");
+    set(10_000);
+    expect(r.due()).toBeUndefined();
+  });
+
+  test("NOT armed: pi delta fragments never replay as a word fragment", () => {
+    const { r, set } = replayWithClock();
+    for (const frag of ["Checking", " the", " config", " fi", "le."]) {
+      r.visible("text", frag);
+    }
+    set(10_000);
+    expect(r.due()).toBeUndefined();
+  });
+
+  test("ARMED: fresh narration replays once, then stays silent", () => {
+    const { r, set } = replayWithClock();
+    r.armFallback(); // redacted_thinking seen
     r.visible("text", "checking your calendar");
     set(10_000);
     expect(r.due()).toBe("checking your calendar");
@@ -121,30 +150,37 @@ describe("ReasoningReplay — fallback chain", () => {
     expect(r.due()).toBeUndefined(); // identical string never repeats
   });
 
-  test("stale narration (past fallbackFreshMs) is never replayed", () => {
+  test("ARMED: narration slot is the text ACCUMULATED since the last boundary, not the last fragment", () => {
     const { r, set } = replayWithClock();
+    r.armFallback();
+    for (const frag of ["Checking", " the", " config", " fi", "le."]) {
+      r.visible("text", frag);
+    }
+    set(10_000);
+    expect(r.due()).toBe("Checking the config file.");
+  });
+
+  test("ARMED: stale narration (past fallbackFreshMs) is never replayed", () => {
+    const { r, set } = replayWithClock();
+    r.armFallback();
     r.visible("text", "checking your calendar");
     set(70_000); // past fallbackFreshMs (60s)
     expect(r.due()).toBeUndefined();
   });
 
-  test("tool note is the second fallback slot", () => {
+  test("ARMED: a progress boundary resets the narration slot; the tool note is the second fallback", () => {
     const { r, set } = replayWithClock();
+    r.armFallback();
+    r.visible("text", "narration before the tool");
     r.visible("progress", "bash: ls -la");
     set(10_000);
+    // Narration was consumed by the boundary — the tool note is what is left.
     expect(r.due()).toBe("bash: ls -la");
   });
 
-  test("narration wins over tool note when both are available", () => {
+  test("ARMED: new narration after an emitted one can replay once more", () => {
     const { r, set } = replayWithClock();
-    r.visible("progress", "bash: ls -la");
-    r.visible("text", "narration line");
-    set(10_000);
-    expect(r.due()).toBe("narration line");
-  });
-
-  test("new narration after an emitted one can replay once more", () => {
-    const { r, set } = replayWithClock();
+    r.armFallback();
     r.visible("text", "first narration");
     set(10_000);
     expect(r.due()).toBe("first narration");
@@ -153,6 +189,23 @@ describe("ReasoningReplay — fallback chain", () => {
     set(30_000);
     expect(r.due()).toBe("second narration");
     set(45_000);
+    expect(r.due()).toBeUndefined();
+  });
+
+  test("never-repeat: a re-streamed narration or re-run tool note stays silent", () => {
+    const { r, set } = replayWithClock();
+    r.armFallback();
+    r.visible("text", "same narration");
+    set(10_000);
+    expect(r.due()).toBe("same narration");
+    r.visible("progress", "tool: bash");
+    r.visible("text", "same narration"); // same text re-streamed after boundary
+    set(25_000);
+    // The re-streamed narration is already emitted — blocked. But the tool
+    // note was never emitted and is fresh, so the second slot fires once.
+    expect(r.due()).toBe("tool: bash");
+    set(65_000);
+    // Both strings emitted; nothing new — silence, no ping-pong.
     expect(r.due()).toBeUndefined();
   });
 
@@ -187,11 +240,13 @@ describe("ReasoningReplay — dueIn (engine tick scheduling)", () => {
 
   test("fresh-but-already-emitted fallback does NOT re-arm (no busy tick loop)", () => {
     const { r, set } = replayWithClock();
+    r.armFallback();
     r.visible("text", "narration");
     set(10_000);
     expect(r.due()).toBe("narration");
     set(11_000);
-    // Still fresh, but identical to lastEmitted — must not arm a deadline.
+    // The emit consumed the slot (accumulation cleared) and the identical
+    // string is blocked by lastEmitted — must not arm a deadline.
     expect(r.dueIn()).toBeUndefined();
   });
 });
@@ -206,17 +261,19 @@ function replayWithClock(): {
 }
 
 describe("replayChunk + isReasoningCapture", () => {
-  test("replayChunk is a payload-less, EPHEMERAL progress row (no tool detail)", () => {
-    // ephemeral:true is the privacy discriminator — logging/persistence
-    // paths must redact these rows (issue #551 review fix).
+  test("replayChunk is a dedicated replay row — never a progress/tool chunk", () => {
+    // The dedicated kind is the privacy mechanism: every consumer that could
+    // persist the note can see by the TYPE alone that it must not (issue #551
+    // review round 2 — supersedes the ephemeral discriminator).
     expect(replayChunk("some reasoning")).toEqual({
-      type: "progress",
+      type: "replay",
       note: "some reasoning",
-      ephemeral: true,
     });
   });
   test("isReasoningCapture discriminates the widened parser result", () => {
     expect(isReasoningCapture({ reasoning: "x" })).toBe(true);
+    expect(isReasoningCapture({ redacted: true })).toBe(true);
+    expect(isReasoningCapture({ redacted: true, chunk: { type: "heartbeat" } })).toBe(true);
     expect(isReasoningCapture({ type: "heartbeat" })).toBe(false);
     expect(isReasoningCapture(undefined)).toBe(false);
   });
@@ -287,8 +344,8 @@ describe("runHarnessProcess — narration-decay replay (issue #551)", () => {
       }),
     );
     const replays = chunks.filter(
-      (c) => c.type === "progress" && (c as { note?: string }).note?.startsWith("thought "),
-    ) as { type: "progress"; note: string }[];
+      (c) => c.type === "replay",
+    ) as { type: "replay"; note: string }[];
     // 1.2s of thinking with a 400ms window → several bounded emissions,
     // each carrying NEW reasoning (no duplicates).
     expect(replays.length).toBeGreaterThanOrEqual(2);
@@ -336,7 +393,7 @@ describe("runHarnessProcess — narration-decay replay (issue #551)", () => {
       }),
     );
     const replays = chunks.filter(
-      (c) => c.type === "progress" && (c as { note?: string }).note === "only thought",
+      (c) => c.type === "replay" && c.note === "only thought",
     );
     expect(replays).toHaveLength(1);
   });
@@ -360,7 +417,10 @@ describe("runHarnessProcess — narration-decay replay (issue #551)", () => {
         harnessId: "test",
         parseEvent: (p) => {
           const obj = p as Record<string, unknown>;
-          if (obj.redacted === true) return { type: "heartbeat" } as const;
+          // Mirror the claude parser: a redacted block arms the fallback.
+          if (obj.redacted === true) {
+            return { redacted: true, chunk: { type: "heartbeat" } as const };
+          }
           if (typeof obj.text === "string") {
             return { type: "text", text: obj.text } as const;
           }
@@ -373,9 +433,7 @@ describe("runHarnessProcess — narration-decay replay (issue #551)", () => {
       }),
     );
     const replays = chunks.filter(
-      (c) =>
-        c.type === "progress" &&
-        (c as { note?: string }).note === "checking the thing",
+      (c) => c.type === "replay" && c.note === "checking the thing",
     );
     expect(replays).toHaveLength(1);
   });

@@ -1014,6 +1014,43 @@ describe("runTelegramServer dispatch", () => {
     ]);
   });
 
+  test("reasoning replay refreshes the typing indicator, never sends a bubble (channel-level, #551)", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      conversationId: "1001",
+      senderId: "42",
+      fromUsername: "alice",
+      text: "hello",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "hi alice" },
+      { type: "replay", note: "reasoning: deciding how to greet" },
+      { type: "replay", note: "reasoning: still deciding" },
+      { type: "done", finalText: "hi alice" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    // The user receives ONLY the reply — the replay note must never become a
+    // persisted message (or reach the persisted turn history).
+    expect(transport.sent).toEqual([{ chatId: "1001", text: "hi alice" }]);
+    const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
+    expect(stored).toEqual([
+      { role: "user", text: "hello" },
+      { role: "assistant", text: "hi alice" },
+    ]);
+    // Liveness: typing actions were sent (opening tick + chunk refreshes).
+    expect(transport.typing.length).toBeGreaterThanOrEqual(1);
+  });
+
   // A reply that signs off with an emoji ("…all merged. ⚡") splits into two
   // sentences, because the emoji follows terminal punctuation. The real bubble
   // is already SENT by the time the emoji arrives as the leftover suffix, so it
