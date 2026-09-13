@@ -1085,6 +1085,15 @@ export async function runPhantomchatServer(
           resetFinalCandidate();
           await narration.flush();
         }
+        if (chunk.type === "replay") {
+          // Narration-decay liveness (issue #551): model-written reasoning
+          // surfaced after a quiet window. A dedicated kind — it is NOT a
+          // tool boundary, so no narration flush, no final-candidate reset;
+          // and it never becomes a bubble (bubbles persist in the
+          // conversation). It refreshes the typing dots and /status.
+          turnHandle.lastProgressNote = chunk.note.slice(0, 500);
+          sendTypingTick();
+        }
         if (chunk.type === "done") {
           finalReply = chunk.finalText;
           requestedReplyMode = normalizeReplyModeRequest(chunk.meta?.replyMode);

@@ -37,6 +37,7 @@ import { VERSION } from "../../version.ts";
 import {
   ACP_PROTOCOL_VERSION,
   agentMessageChunk,
+  agentThoughtChunk,
   availableCommandsUpdate,
   jsonRpcError,
   jsonRpcResult,
@@ -375,6 +376,13 @@ export async function runAcpServer(
                 tool,
               ),
             );
+          },
+          replay: (note) => {
+            // Narration-decay liveness (issue #551): model reasoning rides
+            // ACP's own thought surface — never a tool call. Feeds /status
+            // too, so a quiet turn still reads as alive.
+            activeTurn.lastProgressNote = note;
+            send(agentThoughtChunk(session.sessionId, note));
           },
         },
       );

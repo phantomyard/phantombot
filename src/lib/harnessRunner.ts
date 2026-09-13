@@ -33,6 +33,13 @@ import { killProcessGroup } from "./processGroup.ts";
 import { log } from "./logger.ts";
 import { redactForLog } from "./redact.ts";
 import type { HarnessChunk, HarnessRequest } from "../harnesses/types.ts";
+import {
+  isReasoningCapture,
+  ReasoningReplay,
+  type ParseEventResult,
+  type ReasoningReplayConfig,
+  replayChunk,
+} from "../harnesses/reasoningReplay.ts";
 
 type HarnessSubprocess = Subprocess<
   SpawnOptions.Writable,
@@ -407,8 +414,22 @@ export interface HarnessProcessSpec {
   harnessId: string;
   /** Payload to write to stdin then close. Omit for argv-only harnesses (pi). */
   stdinPayload?: string;
-  /** Translate one parsed stdout line into a HarnessChunk (or undefined). */
-  parseEvent: (parsed: unknown) => HarnessChunk | undefined;
+  /**
+   * Translate one parsed stdout line into a HarnessChunk — or, when the line
+   * carries model reasoning the harness wants captured for the narration-decay
+   * replay (issue #551), a ReasoningCapture: the reasoning text goes into the
+   * replay buffer and `chunk` (usually a payload-less heartbeat) continues
+   * downstream exactly as if the parser had returned it directly.
+   */
+  parseEvent: (parsed: unknown) => ParseEventResult;
+  /**
+   * Narration-decay replay config (issue #551). When present, the engine
+   * buffers model reasoning the parser captures and, after a quiet window
+   * with no narration/text/progress, emits the newest un-emitted reasoning
+   * (or a fresh narration/tool-note fallback) as a payload-less `progress`
+   * row. Omit to disable (degraded/background callers are unaffected).
+   */
+  reasoningReplay?: Partial<ReasoningReplayConfig>;
   /** Classify a chunk for the idle timer (model / tool / productive). */
   activity: (parsed: unknown, chunk: HarnessChunk) => HarnessActivity;
   /**
@@ -578,13 +599,28 @@ export async function* runHarnessProcess(
   // process says after violating policy may reach the user.
   let terminalError: HarnessChunk | undefined;
   const decoder = new TextDecoder();
+  // Narration-decay replay state (issue #551). Present only when the harness
+  // opts in via spec.reasoningReplay — parsers that never capture reasoning
+  // keep the old pure-chunk contract with zero behaviour change.
+  const replay = spec.reasoningReplay
+    ? new ReasoningReplay(spec.reasoningReplay)
+    : undefined;
 
   // Translate one parsed line, feed the idle timer, fold text/done. Yields the
   // chunk for everything except `done` (whose meta is captured, not surfaced —
   // the single terminal `done` is synthesized after the loop).
   function* consume(parsed: unknown): Generator<HarnessChunk> {
-    const c = spec.parseEvent(parsed);
-    if (!c) return;
+    const res = spec.parseEvent(parsed);
+    if (!res) return;
+    let c: HarnessChunk;
+    if (isReasoningCapture(res)) {
+      if (res.redacted) replay?.armFallback();
+      if (res.reasoning) replay?.note(res.reasoning);
+      if (!res.chunk) return;
+      c = res.chunk;
+    } else {
+      c = res;
+    }
     if (c.type === "error" && c.terminal) {
       terminalError = c;
       killer.terminate(); // SIGTERM → grace → SIGKILL the whole group
@@ -592,6 +628,11 @@ export async function* runHarnessProcess(
       return;
     }
     killer.touch(spec.activity(parsed, c));
+    // Replay bookkeeping: narration (text) and tool/progress notes reset the
+    // quiet window and feed the fallback slots. Heartbeats and done/error
+    // deliberately do not — only user-visible output means "not quiet".
+    if (c.type === "text") replay?.visible("text", c.text);
+    else if (c.type === "progress") replay?.visible("progress", c.note);
     if (c.type === "text") finalText += c.text;
     if (c.type === "done") {
       captured = c.meta;
@@ -601,8 +642,56 @@ export async function* runHarnessProcess(
     yield c;
   }
 
+  const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+  type StdoutReadResult = { done: boolean; value?: Uint8Array };
+  // One cancellable tick timer for the replay race. Recreated (after clearing
+  // the old) whenever the loop waits again — the deadline it targets is
+  // absolute (computed from replay state), so stdout chunks that are merely
+  // heartbeats do NOT push the quiet window back; only visible output and
+  // emissions do (inside ReasoningReplay).
+  let tickTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearTick = (): void => {
+    if (tickTimer !== undefined) {
+      clearTimeout(tickTimer);
+      tickTimer = undefined;
+    }
+  };
+
   try {
-    for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+    let readPromise: Promise<StdoutReadResult> | undefined;
+    while (true) {
+      if (!readPromise) readPromise = reader.read();
+      // Race the next stdout chunk against the replay deadline. When no
+      // replay is configured (or nothing can ever emit again), just await
+      // the read — zero new machinery on the legacy path.
+      const dueIn = replay?.dueIn();
+      let readResult: StdoutReadResult;
+      if (replay && dueIn !== undefined) {
+        const tickOrRead = await Promise.race([
+          readPromise.then(
+            (r) => ({ kind: "read" as const, r }),
+          ),
+          new Promise<{ kind: "tick" }>((resolve) => {
+            tickTimer = setTimeout(
+              () => resolve({ kind: "tick" }),
+              Math.max(0, dueIn),
+            );
+          }),
+        ]);
+        if (tickOrRead.kind === "tick") {
+          clearTick();
+          const text = replay.due();
+          if (text !== undefined) yield replayChunk(text);
+          continue; // re-arm: either a fresh deadline or just the next read
+        }
+        clearTick();
+        readResult = tickOrRead.r;
+      } else {
+        readResult = await readPromise;
+      }
+      readPromise = undefined;
+      if (readResult.done) break;
+      const chunk = readResult.value;
       // First stdout byte means the subprocess got past its startup/init
       // handshake and is alive — cancel the startup timer. Idempotent, so
       // calling it every iteration is cheap. NB: this is deliberately distinct
@@ -624,11 +713,15 @@ export async function* runHarnessProcess(
         } catch {
           spec.onNonJsonLine?.(trimmed);
           killer.touch("productive"); // non-JSON line is real output
+          // Non-JSON output is visible too — it resets the replay quiet
+          // window and feeds the tool-note fallback slot.
+          const note = spec.progressNoteLimit
+            ? trimmed.slice(0, spec.progressNoteLimit)
+            : trimmed;
+          replay?.visible("progress", note);
           yield {
             type: "progress",
-            note: spec.progressNoteLimit
-              ? trimmed.slice(0, spec.progressNoteLimit)
-              : trimmed,
+            note,
           };
           continue;
         }
@@ -649,7 +742,11 @@ export async function* runHarnessProcess(
       }
     }
   } finally {
+    clearTick();
     await killer.dispose();
+    // Match for-await semantics: breaking out (consumer stop, terminal error)
+    // cancels the stream so a killed subprocess's pipe doesn't linger.
+    void reader.cancel().catch(() => {});
   }
 
   // Priority order matches the old hand-written loops: a terminal policy

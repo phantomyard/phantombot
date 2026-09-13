@@ -673,6 +673,18 @@ function logBackgroundWakeChunk(
     return;
   }
 
+  if (chunk.type === "replay") {
+    // Narration-decay replay (issue #551): model reasoning — redact the
+    // preview so nothing lands in persisted logs.
+    log.info("tick: background wake stream", {
+      ...fields,
+      chars: chunk.note.length,
+      preview: "(reasoning replay — redacted)",
+      truncated: false,
+    });
+    return;
+  }
+
   if (chunk.type === "progress") {
     log.info("tick: background wake stream", {
       ...fields,

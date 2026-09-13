@@ -1456,6 +1456,16 @@ async function processChatMessage(
         // Stopped on the next text/heartbeat/done/error.
         startIndicatorKeepalive();
       }
+      if (chunk.type === "replay") {
+        // Narration-decay liveness (issue #551): model-written reasoning
+        // after a quiet window. A dedicated kind — never a bubble (bubbles
+        // persist), never a tool-boundary flush; it refreshes the typing
+        // indicator and /status. During long redacted-thinking stretches no
+        // chunks flow at all, so the keepalive armed on the last progress
+        // chunk keeps the indicator alive through the gap.
+        turnHandle.lastProgressNote = chunk.note.slice(0, 500);
+        refreshIndicator();
+      }
       if (chunk.type === "done") {
         finalReply = chunk.finalText;
         requestedReplyMode = normalizeReplyModeRequest(chunk.meta?.replyMode);

@@ -92,7 +92,7 @@ async function acpBridgePrompt(): Promise<string> {
       idleTimeoutMs: 1_000,
       hardTimeoutMs: 5_000,
     },
-    { text: () => {}, progress: () => {} },
+    { text: () => {}, progress: () => {}, replay: () => {} },
   );
   return harness.lastRequest?.systemPrompt ?? "";
 }
