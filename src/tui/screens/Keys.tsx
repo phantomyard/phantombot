@@ -29,9 +29,18 @@ export function expectedSecrets(
   if (persona.channels.includes("telegram")) {
     out.push({ name: "TELEGRAM_BOT_TOKEN", usedBy: "channel: telegram" });
   }
-  if (persona.chain.includes("native")) {
-    // The embedded engine reads its provider key from the vault, per turn.
-    out.push({ name: "PHANTOMBOT_PI_API_KEY", usedBy: "harness: native" });
+  // Every NATIVE entry, resolved through its instance type: a native→native
+  // chain is stored as `pi-primary` / `pi-fallback`, each reading its own key
+  // (PHANTOMBOT_PI_API_KEY_PI_PRIMARY / _PI_FALLBACK). The embedded engine
+  // reads it from the vault per turn, so a missing one needs a row to restore.
+  const seen = new Set<string>();
+  for (const key of persona.nativeKeys ?? []) {
+    if (seen.has(key.name)) continue;
+    seen.add(key.name);
+    out.push({
+      name: key.name,
+      usedBy: key.id === "native" ? "harness: native" : `harness: ${key.id} (native)`,
+    });
   }
   const provider = persona.memory.embedding?.provider;
   if (provider === "gemini") {

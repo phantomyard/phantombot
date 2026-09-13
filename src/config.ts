@@ -1369,6 +1369,14 @@ export async function loadConfig(persona?: string): Promise<Config> {
       "coding_model",
     ]),
   });
+  // Read-time facts come from THE PERSONA BEING LOADED (its env/vault routing),
+  // yet they map every chain in the file — including other personas'
+  // `[harnesses.personas.<name>]` overrides. That is safe only because nothing
+  // serves another persona's chain from this snapshot: every turn, probe and TUI
+  // snapshot calls `harnessChainIds(loadConfig(<that persona>), <that persona>)`
+  // with its own env. Do not SERVE a sibling's chain off this Config. Doctor
+  // resolves facts per persona (computeHarnessConfigReport) before it WRITES;
+  // its post-write health scan only reads sibling ids for warnings.
   const legacyPiFacts: LegacyPiFacts = {
     routingConfigured: routingIsConfigured(piRouting),
   };

@@ -22,6 +22,7 @@
 import { type Config } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { piEngineFor } from "../lib/harnessReconcile.ts";
+import { ENV_PI_API_KEY } from "../lib/piRouting.ts";
 import { ClaudeHarness } from "./claude.ts";
 import { PiHarness } from "./pi.ts";
 import { CodexHarness } from "./codex.ts";
@@ -29,6 +30,19 @@ import type { Harness } from "./types.ts";
 
 export function piInstanceSecretName(id: string): string {
   return `PHANTOMBOT_PI_API_KEY_${id.replace(/[^A-Za-z0-9]+/g, "_").toUpperCase()}`;
+}
+
+/**
+ * The vault key a chain id's EMBEDDED engine reads its provider key from, or
+ * undefined when the id does not run native (claude, codex, pi-host, unknown).
+ * A named instance reads its own suffixed key — the Brain flow persists a
+ * native→native chain as `pi-primary` / `pi-fallback` — and the unnamed slot
+ * reads `PHANTOMBOT_PI_API_KEY`. Same resolution `buildHarness` uses, so the
+ * Vault screen can never expect a different key than the turn reads.
+ */
+export function nativeApiKeyNameFor(config: Config, id: string): string | undefined {
+  if (piEngineFor(config.harnesses, id) !== "native") return undefined;
+  return config.harnesses.instances?.[id] ? piInstanceSecretName(id) : ENV_PI_API_KEY;
 }
 
 export function harnessChainIds(config: Config, persona?: string): string[] {

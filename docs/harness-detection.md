@@ -20,6 +20,16 @@ The `native` harness has no entry in this chain: its engine is compiled into
 the phantombot binary, so detection always reports it present (its "binary" is
 `process.execPath`) and it is never written to `state.json`.
 
+> **Rollback caveat.** `phantombot doctor` rewrites a legacy `pi` harness —
+> in `[harnesses].chain`, `[harnesses.personas.<name>].chain` and
+> `[harnesses.instances.<id>].type` — to `native` or `pi-host` (a backup of
+> `config.toml` is written first). Binaries older than the native harness do
+> not know those ids and skip them, so a native-only chain becomes an empty
+> one: the daemon exits 2 with "no harnesses configured". To roll back past
+> this release, restore the `config.toml` backup doctor wrote (or change the
+> ids back to `pi`) before starting the older binary. Startup alone never
+> writes; only doctor does.
+
 Layer 3 is the one that surprises people. `state.json` lives in the **data
 dir**, not next to `config.toml`, so it is not cleared by editing — or even
 deleting — your config file. It is a cache of "where we found this last time",

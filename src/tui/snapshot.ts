@@ -38,7 +38,7 @@ import {
   type PersonaCompleteness,
 } from "../lib/personaComplete.ts";
 import { resolveHarnessAvailability } from "../lib/harnessAvailability.ts";
-import { harnessChainIds } from "../harnesses/buildChain.ts";
+import { harnessChainIds, nativeApiKeyNameFor } from "../harnesses/buildChain.ts";
 import { openPersonaVault } from "../lib/vault.ts";
 import { embeddingSpaceForConfig } from "../lib/embeddingSpace.ts";
 import { providerHearsVoice } from "../lib/voice.ts";
@@ -201,6 +201,12 @@ export interface PersonaSnapshot {
   autostartViaDefault?: boolean;
   /** Harness chain as configured, and the first one whose binary resolves. */
   chain: string[];
+  /**
+   * The vault key each NATIVE chain entry reads, resolved through the instance
+   * type (`nativeApiKeyNameFor`). A native→native chain is stored as named
+   * instances with their own keys, so `chain.includes("native")` is not enough.
+   */
+  nativeKeys?: Array<{ id: string; name: string }>;
   resolvedHarness?: { id: string; path: string };
   /**
    * Whether the persona has recorded a brain of its OWN (a chain in its
@@ -444,6 +450,10 @@ export async function personaSnapshot(
   // buildChain.ts: the persona's own record first, then the bare chain. Using
   // anything else here is how a badge probes a harness the daemon never runs.
   const chain = harnessChainIds(config, name);
+  const nativeKeys = chain.flatMap((id) => {
+    const keyName = nativeApiKeyNameFor(config, id);
+    return keyName ? [{ id, name: keyName }] : [];
+  });
   const globalToml =
     (await safeAsync(() => readConfigToml(host.configPath))) ?? {};
   const personaToml =
@@ -545,6 +555,7 @@ export async function personaSnapshot(
     autostartMode: autostartMode ?? "login",
     autostartViaDefault: served && !onList,
     chain,
+    nativeKeys,
     brainConfigured,
     resolvedHarness,
     channels: channelsFor(config, dir),
