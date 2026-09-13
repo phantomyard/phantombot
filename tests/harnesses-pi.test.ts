@@ -332,7 +332,22 @@ let originalMode: string | undefined;
 // reload is stubbed to a no-op and asserted separately below.
 let vaultReloadSpy: ReturnType<typeof spyOn> | undefined;
 
+// The same leak, one layer up: the shell running the suite may ALREADY carry a
+// vault-injected key (PHANTOMBOT_PI_API_KEY*, OPENROUTER_API_KEY). A native
+// slot with a provider and no key now fails loudly, so a test that forgot to
+// set a key passed on a dev box and failed on CI. Scrub them per test; a test
+// that needs a key sets its own.
+const AMBIENT_KEY = /^(PHANTOMBOT_PI_API_KEY(_[A-Z0-9_]+)?|OPENROUTER_API_KEY)$/;
+let savedKeys: Record<string, string> = {};
+
 beforeEach(() => {
+  savedKeys = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (AMBIENT_KEY.test(k) && v !== undefined) {
+      savedKeys[k] = v;
+      delete process.env[k];
+    }
+  }
   originalMode = process.env.FAKE_PI_MODE;
   vaultReloadSpy = spyOn(vault, "reloadVaultForPersona").mockResolvedValue(
     undefined as never,
@@ -343,6 +358,10 @@ afterEach(() => {
   if (originalMode === undefined) delete process.env.FAKE_PI_MODE;
   else process.env.FAKE_PI_MODE = originalMode;
   vaultReloadSpy?.mockRestore();
+  for (const k of Object.keys(process.env)) {
+    if (AMBIENT_KEY.test(k)) delete process.env[k];
+  }
+  Object.assign(process.env, savedKeys);
 });
 
 const mkHarness = () => new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI] });
@@ -537,6 +556,7 @@ describe("PiHarness routing (subprocess)", () => {
 
   test("routing.provider is threaded onto --provider (OpenRouter routes to openrouter, NOT google)", async () => {
     process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test";
     const chunks = await collect(
       routed({ provider: "openrouter", primaryModel: "z-ai/glm-5.2" }).invoke(
         newRequest(),
@@ -565,6 +585,7 @@ describe("PiHarness routing (subprocess)", () => {
 
   test("provider is threaded even after a coding-brain swap (one provider covers all models)", async () => {
     process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test";
     // A coding-triggering message should swap primary → coding model, but the
     // single --provider must still apply (both models share the provider).
     const chunks = await collect(
@@ -1059,8 +1080,34 @@ describe("PiHarness native vs pi-host (subprocess)", () => {
     }
   });
 
+  test("native with a provider and NO key fails loudly, naming the secret and the fix", async () => {
+    // Regression (2026-09-13, Atlas): native used to spawn anyway and die with
+    // pi's cryptic "No API key found" from an empty store.
+    process.env.FAKE_PI_MODE = "argv";
+    const harness = new PiHarness({
+      bin: "/no/such/host/pi",
+      mode: "native",
+      command: [FAKE_PI],
+      routing: { provider: "openrouter", primaryModel: "gpt-5.2" },
+    });
+    let message = "";
+    try {
+      const chunks = await collect(harness.invoke(newRequest()));
+      message = chunks
+        .filter((c) => c.type === "error")
+        .map((c) => JSON.stringify(c))
+        .join("");
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain("no API key found for provider 'openrouter'");
+    expect(message).toContain("PHANTOMBOT_PI_API_KEY");
+    expect(message).toContain("phantombot doctor --fix");
+  });
+
   test("native: spawns the engine command prefix (not `bin`) and threads the routing", async () => {
     process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test";
     try {
       const harness = new PiHarness({
         bin: "/no/such/host/pi",
