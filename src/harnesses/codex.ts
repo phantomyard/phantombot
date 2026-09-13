@@ -20,6 +20,11 @@ import type {
   HarnessRequest,
 } from "./types.ts";
 import { buildToolCall } from "./toolNote.ts";
+import {
+  DEFAULT_REASONING_REPLAY,
+  type ParseEventResult,
+  type ReasoningReplayConfig,
+} from "./reasoningReplay.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
 import { reloadVaultForPersona } from "../lib/vault.ts";
 import {
@@ -33,6 +38,11 @@ import { renderConversationPayload } from "./payload.ts";
 export interface CodexHarnessConfig {
   bin: string;
   model: string;
+  /**
+   * Narration-decay replay config (issue #551). Omitted = defaults
+   * (DEFAULT_REASONING_REPLAY); tests pass short windows. Present = on.
+   */
+  reasoningReplay?: Partial<ReasoningReplayConfig>;
 }
 
 export class CodexHarness implements Harness {
@@ -84,6 +94,7 @@ export class CodexHarness implements Harness {
       parseEvent: parseCodexEvent,
       activity: codexActivity,
       progressNoteLimit: 200,
+      reasoningReplay: this.config.reasoningReplay ?? DEFAULT_REASONING_REPLAY,
       buildDoneMeta: (_finalText, captured) => ({
         harnessId: this.id,
         model: this.config.model || "(default)",
@@ -197,7 +208,7 @@ export function isCodexSubagentActivity(
   return itemType.startsWith("collab_") || itemType === "sub_agent_activity";
 }
 
-export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
+export function parseCodexEvent(parsed: unknown): ParseEventResult {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
   const type = obj.type;
@@ -242,6 +253,15 @@ export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
     const it = item as Record<string, unknown>;
     if (it.type === "agent_message" && typeof it.text === "string") {
       return { type: "text", text: it.text };
+    }
+    // Reasoning summary item (codex emits SUMMARIES, not raw chain-of-thought).
+    // Capture the summary into the narration-decay replay buffer (issue #551);
+    // the chunk stays a payload-less heartbeat, exactly as before. The buffer
+    // appends byte-for-byte — no synthesized separators.
+    if (it.type === "reasoning" && typeof it.text === "string") {
+      return it.text.trim()
+        ? { reasoning: it.text, chunk: { type: "heartbeat" } }
+        : { type: "heartbeat" };
     }
     if (typeof it.type === "string" && it.type.includes("tool")) {
       const name = typeof it.name === "string" ? it.name : undefined;

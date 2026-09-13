@@ -145,6 +145,16 @@ export interface AgentMessageChunkUpdate {
   content: AcpTextBlock;
 }
 
+/**
+ * Narration-decay replay (issue #551): model-written reasoning surfaced as
+ * liveness. ACP's own `agent_thought_chunk` update — the editor renders it
+ * as thought text, NOT as a tool call, so it never lands in the tool list.
+ */
+export interface AgentThoughtChunkUpdate {
+  sessionUpdate: "agent_thought_chunk";
+  content: AcpTextBlock;
+}
+
 /** A tool-call `content` item — the panel renders it as a preview body. */
 export interface ToolCallContentBlock {
   type: "content";
@@ -188,6 +198,7 @@ export interface AvailableCommandsUpdate {
 
 export type AcpSessionUpdate =
   | AgentMessageChunkUpdate
+  | AgentThoughtChunkUpdate
   | ToolCallUpdate
   | AvailableCommandsUpdate;
 
@@ -230,6 +241,21 @@ export function agentMessageChunk(
 ): JsonRpcRequest {
   return sessionUpdateNotification(sessionId, {
     sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text },
+  });
+}
+
+/**
+ * Build an `agent_thought_chunk` `session/update` for a reasoning replay
+ * (issue #551). The editor renders thought text distinctly from both the
+ * reply and the tool list — the right surface for model-reasoning liveness.
+ */
+export function agentThoughtChunk(
+  sessionId: string,
+  text: string,
+): JsonRpcRequest {
+  return sessionUpdateNotification(sessionId, {
+    sessionUpdate: "agent_thought_chunk",
     content: { type: "text", text },
   });
 }

@@ -171,8 +171,30 @@ export type HarnessChunk =
    * ACP `kind` (panel icon) + clickable `locations` — for connectors that
    * render it (the Zed/ACP bridge). Omitted for progress that isn't a tool
    * call (e.g. raw stderr liveness), and safely ignored by string-only sinks.
+   *
+   * `ephemeral: true` (issue #551 narration replay) marks model-reasoning
+   * replay rows: payload the channel renders as live UI state but that
+   * MUST never reach a persisted log, transcript, or journal. Every
+   * consumer that writes `note` anywhere durable must redact ephemeral
+   * progress before writing.
    */
-  | { type: "progress"; note: string; tool?: ToolCallDetail }
+  | {
+      type: "progress";
+      note: string;
+      tool?: ToolCallDetail;
+    }
+  /**
+   * Model-reasoning replay (issue #551): model-written text the harness
+   * parser captured from thinking deltas, surfaced as LIVENESS after a
+   * narration quiet window. Its own kind — never `progress` — so no consumer
+   * can mistake it for a tool call or a loggable note:
+   *   - render on the channel's live surface only (typing indicator,
+   *     activity label, agent-thought stream) — never a persisted bubble,
+   *     transcript row, tool list entry, or log line with the text.
+   *   - never narrated, never folded into the final reply, never resume
+   *     evidence, never an audit tool call.
+   */
+  | { type: "replay"; note: string }
   /** Final marker. `finalText` is the full assistant reply (sum of all `text` chunks). `meta.replyMode` may be "text", "voice", or "default"/"disable" for channel adapters that support model-selected reply modality. */
   | { type: "done"; finalText: string; meta?: Record<string, unknown> }
   /**

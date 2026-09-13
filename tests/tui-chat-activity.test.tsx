@@ -216,6 +216,28 @@ describe("chat activity indicator", () => {
     }
   });
 
+  test("a reasoning replay shows on the activity line, never as a tool row (#551)", async () => {
+    const { stdin, stdout, instance } = await mount(
+      pendingSession([
+        { type: "tool", index: 0, title: "gh release view" },
+        { type: "reasoning", text: "reasoning: cross-checking the release notes" },
+      ]),
+    );
+    try {
+      stdin.write("hi");
+      stdin.write("\r");
+      await sleep(150);
+      const frame = lastFrame(stdout.frames);
+      // The replay text is the live activity label...
+      expect(frame).toContain("reasoning: cross-checking the release");
+      // ...but it NEVER becomes a transcript tool row (and the in-flight tool
+      // row is not closed early — one tool row, still running).
+      expect(frame.split("gh release view").length - 1).toBe(1);
+    } finally {
+      instance.unmount();
+    }
+  });
+
   test("the indicator is gone once the turn finishes", async () => {
     const session: ChatSession = {
       persona: "alice",

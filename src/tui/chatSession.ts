@@ -138,6 +138,12 @@ export type ChatEvent =
   | { type: "tool-done"; index: number; ms: number }
   /** The harness is alive but has produced nothing yet. */
   | { type: "thinking" }
+  /**
+   * Narration-decay replay (issue #551): model-written reasoning surfaced as
+   * liveness. Shown on the activity line only — never a transcript row or a
+   * tool entry, and never persisted into the final reply.
+   */
+  | { type: "reasoning"; text: string }
   | { type: "done"; text: string }
   | { type: "error"; message: string };
 
@@ -291,6 +297,13 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
           }
           tools.push({ title: chunk.note, startedAt: now });
           yield { type: "tool", index: tools.length - 1, title: chunk.note };
+        } else if (chunk.type === "replay") {
+          // Narration-decay liveness (issue #551). A dedicated kind — it is
+          // NOT a tool boundary: the in-flight tool row stays open with its
+          // real duration, no tool row is appended, and the note only rides
+          // the activity line.
+          if (activeTurn) activeTurn.lastProgressNote = chunk.note;
+          yield { type: "reasoning", text: chunk.note };
         } else if (chunk.type === "heartbeat") {
           yield { type: "thinking" };
         } else if (chunk.type === "done") {

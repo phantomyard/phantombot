@@ -959,6 +959,43 @@ describe("phantomchat streaming bubbles", () => {
     ]);
   });
 
+  test("reasoning replay refreshes typing dots but never becomes a bubble (channel-level, #551)", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "Checking your calendar." },
+      { type: "replay", note: "reasoning: cross-checking the agenda" },
+      { type: "replay", note: "reasoning: second quiet window" },
+      {
+        type: "done",
+        finalText: "You are free at 3pm.",
+      },
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "am I free at 3?",
+      streaming: STREAM_ONE_PER_SENTENCE,
+      untilInvocations: 1,
+    });
+
+    // The user receives ONLY the real reply bubbles — never the replay text
+    // (a bubble persists in the conversation).
+    expect(await dmBubbles(pool, senderSk)).toEqual([
+      "Checking your calendar.",
+      "You are free at 3pm.",
+    ]);
+    const bubbles = await dmBubbles(pool, senderSk);
+    for (const b of bubbles) {
+      expect(b).not.toContain("reasoning:");
+    }
+    // Liveness: at least one kind-20001 typing tick was published.
+    expect(pool.published.filter((e) => e.kind === 20001).length).toBeGreaterThan(0);
+  });
+
   test("final send emits only the unseen suffix (no duplicated bubbles)", async () => {
     const senderSk = generateSecretKey();
     const botSk = generateSecretKey();

@@ -24,6 +24,7 @@ import {
   renderStdinPayload,
 } from "../src/harnesses/claude.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
+import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
 
 const FAKE_CLAUDE = resolve(__dirname, "fixtures/fake-claude.sh");
 
@@ -279,6 +280,45 @@ describe("parseStreamJson", () => {
       },
     });
     expect(c).toEqual({ type: "heartbeat" });
+  });
+
+  test("redacted_thinking block arms the replay fallback (no readable text captured)", () => {
+    const c = parseStreamJson({
+      type: "assistant",
+      message: {
+        content: [{ type: "redacted_thinking", data: "encrypted" }],
+      },
+    });
+    expect(isReasoningCapture(c)).toBe(true);
+    if (!isReasoningCapture(c)) return;
+    expect(c.redacted).toBe(true);
+    expect(c.reasoning).toBeUndefined();
+    expect(c.chunk).toEqual({ type: "heartbeat" });
+  });
+
+  test("stream_event content_block_start for redacted_thinking arms the fallback", () => {
+    const c = parseStreamJson({
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        content_block: { type: "redacted_thinking", data: "..." },
+      },
+    });
+    expect(isReasoningCapture(c)).toBe(true);
+    if (!isReasoningCapture(c)) return;
+    expect(c.redacted).toBe(true);
+    expect(c.chunk).toEqual({ type: "heartbeat" } as const);
+  });
+
+  test("stream_event content_block_start for a plain thinking block stays ignored", () => {
+    const c = parseStreamJson({
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        content_block: { type: "thinking", thinking: "" },
+      },
+    });
+    expect(c).toBeUndefined();
   });
 
   test("heartbeat for tool_result blocks (no flush)", () => {
@@ -922,12 +962,12 @@ describe("parseStreamJson subagent tripwire", () => {
   });
 
   test("a Task tool_use becomes a recoverable error, not progress", () => {
-    const chunk = parseStreamJson({
+    const chunk = asChunk(parseStreamJson({
       type: "assistant",
       message: {
         content: [{ type: "tool_use", name: "Task", input: { prompt: "x" } }],
       },
-    });
+    }));
     expect(chunk?.type).toBe("error");
     if (chunk?.type === "error") {
       expect(chunk.recoverable).toBe(true);
@@ -935,6 +975,15 @@ describe("parseStreamJson subagent tripwire", () => {
     }
   });
 });
+
+
+// Narrow a widened ParseEventResult to a plain chunk (parsers return
+// ReasoningCapture for thinking events; these legacy assertions only
+// exercise pure-chunk paths).
+const asChunk = (r: ReturnType<typeof parseStreamJson>) => {
+  if (isReasoningCapture(r)) throw new Error("unexpected reasoning capture");
+  return r;
+};
 
 describe("ClaudeHarness background-agent lockdown", () => {
   test("--disallowedTools removes Task as well as Workflow", async () => {

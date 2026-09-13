@@ -51,6 +51,7 @@ import {
   ENV_ROUTING_JSON,
   type PiRoutingConfig,
 } from "../lib/piRouting.ts";
+import type { ParseEventResult } from "./reasoningReplay.ts";
 import { CODER_SWAP_MAX_ATTEMPTS, getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
@@ -64,6 +65,10 @@ import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
 import { createHarnessTempDir } from "../lib/harnessArgvFiles.ts";
 import { renderConversationPayload } from "./payload.ts";
+import {
+  DEFAULT_REASONING_REPLAY,
+  type ReasoningReplayConfig,
+} from "./reasoningReplay.ts";
 import { xdgDataHome } from "../config.ts";
 import {
   embeddedPiChildEnv,
@@ -111,6 +116,11 @@ export interface PiHarnessConfig {
   /** Runtime identity and vault key for a named Pi instance. */
   id?: string;
   apiKeyEnv?: string;
+  /**
+   * Narration-decay replay config (issue #551). Omitted = defaults
+   * (DEFAULT_REASONING_REPLAY); tests pass short windows. Present = on.
+   */
+  reasoningReplay?: Partial<ReasoningReplayConfig>;
 }
 
 export class PiHarness implements Harness {
@@ -405,6 +415,8 @@ export class PiHarness implements Harness {
         harnessId: this.id,
         parseEvent: parsePiEvent,
         activity: piActivity,
+        reasoningReplay:
+          this.config.reasoningReplay ?? DEFAULT_REASONING_REPLAY,
         buildDoneMeta: () => ({ harnessId: this.id, payloadBytes: totalBytes }),
         // pi is the only harness with no native terminal `done` in its stream —
         // it derives completion from turn_end (mapped to a `done` marker in
@@ -563,12 +575,15 @@ export function renderPayload(req: HarnessRequest): string {
  *   {"type":"message_start"|"message_end", ...}
  *
  * `text_delta` events contribute to the user-facing reply.
- * `thinking_delta` events are the model's chain-of-thought; we deliberately
- * do NOT surface their content (would leak reasoning into the reply), but
- * we DO emit a payload-less `heartbeat` so the channel layer can refresh
- * its typing indicator. When the user sees `typing…` come and go in real
- * time, that's pi actually thinking — the indicator vanishing means the
- * model has gone silent (and may be wedged on a tool call).
+ * `thinking_delta` events are the model's chain-of-thought; the content is
+ * never surfaced as reply text (no leak into the bubble), but it IS captured
+ * into the narration-decay replay buffer (issue #551) — the engine may
+ * replay the newest un-emitted slice as a replay row after a
+ * quiet window. The emitted chunk itself stays a payload-less `heartbeat`
+ * so the channel layer can refresh its typing indicator. When the user
+ * sees `typing…` come and go in real time, that's pi actually thinking — the
+ * indicator vanishing means the model has gone silent (and may be wedged on
+ * a tool call).
  *
  * tool_execution_start carries the useful tool name/args and is the primary
  * progress signal. Nameless toolcall_* (pi ≥0.79; formerly tool_use_*) events
@@ -577,7 +592,7 @@ export function renderPayload(req: HarnessRequest): string {
  *
  * Exported for testing.
  */
-export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
+export function parsePiEvent(parsed: unknown): ParseEventResult {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
 
@@ -646,6 +661,19 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
       return { type: "text", text: delta };
     }
     return undefined;
+  }
+
+  if (ame.type === "thinking_delta") {
+    // Chain-of-thought fragment. Content still never streams to the user as
+    // reply text — but it IS captured into the narration-decay replay buffer
+    // (issue #551), where the engine's quiet window decides if/when the
+    // newest un-emitted slice surfaces as a replay row. The
+    // chunk itself stays payload-less, exactly as before.
+    const delta = ame.delta;
+    if (typeof delta === "string" && delta.trim().length > 0) {
+      return { reasoning: delta, chunk: { type: "heartbeat" } };
+    }
+    return { type: "heartbeat" };
   }
 
   if (typeof ame.type === "string") {
