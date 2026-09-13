@@ -1396,6 +1396,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
               harnesses: personaHarnesses,
               idleTimeoutMs: config.harnessIdleTimeoutMs,
               hardTimeoutMs: config.harnessHardTimeoutMs,
+              toolTimeoutMs: config.harnessToolTimeoutMs,
               startupTimeoutMs: config.harnessStartupTimeoutMs,
               signal: ac.signal,
             });

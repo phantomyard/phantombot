@@ -92,6 +92,7 @@ export class CodexHarness implements Harness {
       harnessId: this.id,
       stdinPayload: renderStdinPayload(req),
       parseEvent: parseCodexEvent,
+      toolBoundary: codexToolBoundary,
       activity: codexActivity,
       progressNoteLimit: 200,
       reasoningReplay: this.config.reasoningReplay ?? DEFAULT_REASONING_REPLAY,
@@ -189,6 +190,17 @@ const CODEX_AGENT_TOOL_NAMES = new Set([
   "close_agent",
   "wait_agent",
 ]);
+const CODEX_EXEC_ITEM_TYPES = new Set([
+  "command_execution",
+  "mcp_tool_call",
+  "web_search",
+  "tool_call",
+]);
+
+function isCodexToolItem(type: unknown): type is string {
+  return typeof type === "string" &&
+    (type.includes("tool") || CODEX_EXEC_ITEM_TYPES.has(type));
+}
 
 /**
  * Does this item represent subagent activity? Item types verified against
@@ -238,7 +250,7 @@ export function parseCodexEvent(parsed: unknown): ParseEventResult {
     const item = obj.item;
     if (typeof item !== "object" || item === null) return undefined;
     const it = item as Record<string, unknown>;
-    if (typeof it.type === "string" && it.type.includes("tool")) {
+    if (isCodexToolItem(it.type)) {
       const name = typeof it.name === "string" ? it.name : undefined;
       const tool = buildToolCall(name, it);
       return { type: "progress", note: tool.title, tool };
@@ -263,7 +275,7 @@ export function parseCodexEvent(parsed: unknown): ParseEventResult {
         ? { reasoning: it.text, chunk: { type: "heartbeat" } }
         : { type: "heartbeat" };
     }
-    if (typeof it.type === "string" && it.type.includes("tool")) {
+    if (isCodexToolItem(it.type)) {
       const name = typeof it.name === "string" ? it.name : undefined;
       const tool = buildToolCall(name, it);
       return { type: "progress", note: tool.title, tool };
@@ -281,6 +293,19 @@ export function parseCodexEvent(parsed: unknown): ParseEventResult {
   return undefined;
 }
 
+export function codexToolBoundary(parsed: unknown) {
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const obj = parsed as Record<string, unknown>;
+  if (obj.type !== "item.started" && obj.type !== "item.completed") return undefined;
+  const item = obj.item;
+  if (typeof item !== "object" || item === null) return undefined;
+  const it = item as Record<string, unknown>;
+  if (!isCodexToolItem(it.type) || typeof it.id !== "string") {
+    return undefined;
+  }
+  return { phase: obj.type === "item.started" ? "start" as const : "end" as const, id: it.id };
+}
+
 function codexActivity(
   parsed: unknown,
   chunk: HarnessChunk,
@@ -295,10 +320,10 @@ function codexActivity(
     typeof item === "object" && item !== null
       ? (item as Record<string, unknown>).type
       : undefined;
-  if (obj.type === "item.started" && typeof itemType === "string" && itemType.includes("tool")) {
+  if (obj.type === "item.started" && isCodexToolItem(itemType)) {
     return "tool";
   }
-  if (obj.type === "item.completed" && typeof itemType === "string" && itemType.includes("tool")) {
+  if (obj.type === "item.completed" && isCodexToolItem(itemType)) {
     return "productive";
   }
   return chunk.type === "heartbeat" ? "model" : "productive";

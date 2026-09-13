@@ -184,7 +184,7 @@ describe("createKillCoordinator — startup timer", () => {
 });
 
 describe("createKillCoordinator — tool cap (issue #351)", () => {
-  test("sustained 'tool' activity past toolTimeoutMs lets the idle kill fire", async () => {
+  test("silent in-flight tool is capped independently of idle", async () => {
     // A wedged-but-chattery tool: we drive touch("tool") forever. Without a
     // cap that would reset the idle timer indefinitely and defeat the watchdog
     // up to the hard cap. With toolTimeoutMs the tool-run's idle-reset budget
@@ -205,7 +205,7 @@ describe("createKillCoordinator — tool cap (issue #351)", () => {
       harnessId: "test",
     });
 
-    // Hammer tool activity the whole time — proving it's the cap, not a lull.
+    killer.toolStart("tool-1");
     const interval = setInterval(() => killer.touch("tool"), 30);
     try {
       await proc.exited; // killed once the cap + idle window elapse (~450ms)
@@ -213,7 +213,7 @@ describe("createKillCoordinator — tool cap (issue #351)", () => {
       clearInterval(interval);
       await killer.dispose();
     }
-    expect(killer.killCause()).toBe("idle");
+    expect(killer.killCause()).toBe("tool");
   });
 
   test("without a tool cap, sustained 'tool' activity keeps the process alive", async () => {
@@ -234,6 +234,7 @@ describe("createKillCoordinator — tool cap (issue #351)", () => {
       harnessId: "test",
     });
 
+    killer.toolStart("tool-1");
     const interval = setInterval(() => killer.touch("tool"), 30);
     await Bun.sleep(700);
     clearInterval(interval);
@@ -260,9 +261,11 @@ describe("createKillCoordinator — tool cap (issue #351)", () => {
       harnessId: "test",
     });
 
+    killer.toolStart("tool-1");
     const interval = setInterval(() => killer.touch("tool"), 30);
     await Bun.sleep(250); // first tool-run, under the 300ms cap
-    killer.touch("productive"); // resets the budget (toolRunStart cleared)
+    killer.toolEnd("tool-1");
+    killer.toolStart("tool-2");
     await Bun.sleep(250); // second tool-run, again under the cap
     clearInterval(interval);
     await killer.dispose();
@@ -948,6 +951,47 @@ describe("drainStderr — over-cap boundary never splits a credential (PR #464)"
 });
 
 describe("runHarnessProcess — tool timeout", () => {
+  test("silent tool may exceed idle, then end and complete", async () => {
+    const proc = spawnInNewSession(["sh", "-c",
+      'echo "{\\"type\\":\\"start\\",\\"id\\":\\"a\\"}"; sleep 0.3; echo "{\\"type\\":\\"end\\",\\"id\\":\\"a\\"}"; echo "{\\"type\\":\\"text\\"}"'],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    trackedPids.push(proc.pid!);
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "fake",
+      req: { idleTimeoutMs: 100, toolTimeoutMs: 1000, hardTimeoutMs: 2000,
+        workingDir: process.cwd(), persona: "test", userMessage: "test" } as any,
+      parseEvent: (p: any) => p.type === "text" ? { type: "text", text: "done" } : { type: "heartbeat" },
+      toolBoundary: (p: any) => p.type === "start" || p.type === "end"
+        ? { phase: p.type, id: p.id } : undefined,
+      activity: () => "model",
+      buildDoneMeta: () => ({}),
+    })) chunks.push(chunk);
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+    expect(chunks.find((c) => c.type === "done")?.finalText).toBe("done");
+  });
+
+  test("idle restarts from zero after the final parallel tool ends", async () => {
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore", stdout: "pipe", stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+    const killer = createKillCoordinator({ proc, idleTimeoutMs: 100,
+      toolTimeoutMs: 1000, hardTimeoutMs: 2000, harnessId: "test" });
+    killer.toolStart("a");
+    killer.toolStart("b");
+    await Bun.sleep(140);
+    expect(killer.killCause()).toBeUndefined();
+    killer.toolEnd("b");
+    await Bun.sleep(140);
+    expect(killer.killCause()).toBeUndefined();
+    killer.toolEnd("a");
+    await proc.exited;
+    await killer.dispose();
+    expect(killer.killCause()).toBe("idle");
+  });
+
   test("defaultToolTimeoutMs floors, scales, and caps contiguous tool watchdog correctly", () => {
     expect(defaultToolTimeoutMs(30_000, 3_600_000)).toBe(1_200_000);
     expect(defaultToolTimeoutMs(100, 3_600_000)).toBe(1_200_000);
@@ -956,6 +1000,23 @@ describe("runHarnessProcess — tool timeout", () => {
     expect(defaultToolTimeoutMs(400_000, 1_000_000)).toBe(1_000_000);
     expect(defaultToolTimeoutMs(30_000)).toBe(1_200_000);
     expect(defaultToolTimeoutMs(400_000)).toBe(1_600_000);
+  });
+
+  test("request tool cap is clamped below the hard timeout", async () => {
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    trackedPids.push(proc.pid!);
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc, harnessId: "fake",
+      req: { idleTimeoutMs: 1000, toolTimeoutMs: 5000, hardTimeoutMs: 120,
+        workingDir: process.cwd(), persona: "test", userMessage: "test" } as any,
+      parseEvent: () => undefined,
+      activity: () => "model",
+      buildDoneMeta: () => ({}),
+    })) chunks.push(chunk);
+    expect(chunks.find((c) => c.type === "error")?.killCause).toBe("timeout");
   });
 
   test("spec.toolTimeoutMs bounds sustained tool activity and lets idle watchdog trip", async () => {
@@ -983,6 +1044,7 @@ describe("runHarnessProcess — tool timeout", () => {
         userMessage: "test",
       } as any,
       parseEvent: (p: any) => ({ type: "progress", note: p.type }),
+      toolBoundary: () => ({ phase: "start", id: "tool-1" }),
       activity: () => "tool",
       buildDoneMeta: () => ({}),
     });
@@ -993,8 +1055,8 @@ describe("runHarnessProcess — tool timeout", () => {
 
     const errorChunk = chunks.find((c) => c.type === "error");
     expect(errorChunk).toBeDefined();
-    expect(errorChunk.error).toContain("likely wedged on a tool call");
-    expect(errorChunk.recoverable).toBe(true);
+    expect(errorChunk.killCause).toBe("tool");
+    expect(errorChunk.recoverable).toBe(false);
   });
 
   test("runHarnessProcess derives default toolTimeoutMs via harnessDefaults when omitted", async () => {
@@ -1024,6 +1086,7 @@ describe("runHarnessProcess — tool timeout", () => {
           userMessage: "test",
         } as any,
         parseEvent: (p: any) => ({ type: "progress", note: p.type }),
+        toolBoundary: () => ({ phase: "start", id: "tool-1" }),
         activity: () => "tool",
         buildDoneMeta: () => ({}),
       });
@@ -1035,9 +1098,8 @@ describe("runHarnessProcess — tool timeout", () => {
       expect(spy).toHaveBeenCalledWith(100, 5_000);
       const errorChunk = chunks.find((c) => c.type === "error");
       expect(errorChunk).toBeDefined();
-      expect(errorChunk.killCause).toBe("idle");
-      expect(errorChunk.error).toContain("likely wedged on a tool call");
-      expect(errorChunk.recoverable).toBe(true);
+      expect(errorChunk.killCause).toBe("tool");
+      expect(errorChunk.recoverable).toBe(false);
     } finally {
       spy.mockRestore();
     }

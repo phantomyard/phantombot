@@ -15,6 +15,7 @@ import {
   PiHarness,
   parsePiEvent,
   piActivity,
+  piToolBoundary,
   renderPayload,
 } from "../src/harnesses/pi.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
@@ -22,6 +23,13 @@ import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
 import * as vault from "../src/lib/vault.ts";
 
 const FAKE_PI = resolve(__dirname, "fixtures/fake-pi.sh");
+
+test("pi tool boundaries pair by id and ignore unmatched events", () => {
+  expect(piToolBoundary({ type: "tool_execution_start", toolCallId: "a" })).toEqual({ phase: "start", id: "a" });
+  expect(piToolBoundary({ type: "tool_execution_start", toolCallId: "b" })).toEqual({ phase: "start", id: "b" });
+  expect(piToolBoundary({ type: "tool_execution_end", toolCallId: "b" })).toEqual({ phase: "end", id: "b" });
+  expect(piToolBoundary({ type: "tool_execution_end" })).toBeUndefined();
+});
 
 function newRequest(overrides: Partial<HarnessRequest> = {}): HarnessRequest {
   return {

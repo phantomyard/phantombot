@@ -781,6 +781,10 @@ autostart_personas = ["lena", "kai"]
 # See "Release rings" under Maintenance.
 update_channel = "stable"
 
+harness_idle_timeout_s = 300
+harness_tool_timeout_s = 1200
+harness_hard_timeout_s = 3600
+
 [harnesses]
 chain = ["native", "claude", "codex"]
 
@@ -795,6 +799,14 @@ allowed_user_ids = [123456789]
 ```
 
 Harness notes:
+
+The idle watchdog applies only while the model is in control. While one or
+more tools are in flight, idle watching is suspended and each tool is bounded
+by `harness_tool_timeout_s`, always clamped to `harness_hard_timeout_s`.
+Tool-cap failures do not replay the same operation on a fallback harness. The
+1200-second default is conservative: recent complete PhantomBot suites in the
+harness audit log took 114–132 seconds, leaving roughly 9× the observed high
+sample.
 
 - **native** (recommended) runs the pi engine embedded in the phantombot
   binary through a hidden `phantombot __pi …` subprocess, with the routing in

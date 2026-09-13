@@ -443,6 +443,7 @@ export class PiHarness implements Harness {
         req,
         harnessId: this.id,
         parseEvent: parsePiEvent,
+        toolBoundary: piToolBoundary,
         activity: piActivity,
         reasoningReplay:
           this.config.reasoningReplay ?? DEFAULT_REASONING_REPLAY,
@@ -725,6 +726,19 @@ export function parsePiEvent(parsed: unknown): ParseEventResult {
   }
 
   return undefined;
+}
+
+export function piToolBoundary(parsed: unknown) {
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const obj = parsed as Record<string, unknown>;
+  if (obj.type !== "tool_execution_start" && obj.type !== "tool_execution_end") return undefined;
+  const id = typeof obj.toolCallId === "string"
+    ? obj.toolCallId
+    : typeof obj.tool_call_id === "string"
+      ? obj.tool_call_id
+      : undefined;
+  if (!id) return undefined;
+  return { phase: obj.type === "tool_execution_start" ? "start" as const : "end" as const, id };
 }
 
 export function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivity {

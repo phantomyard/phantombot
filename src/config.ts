@@ -721,6 +721,8 @@ export interface Config {
    * Caps runaway agents that legitimately keep emitting but never finish.
    */
   harnessHardTimeoutMs: number;
+  /** Wall-clock ceiling for one in-flight tool; never exceeds the hard cap. */
+  harnessToolTimeoutMs?: number;
   /**
    * Cap on time-to-first-output for a foreground harness turn. A subprocess
    * that emits nothing at all (classically `claude --print` wedged on its MCP
@@ -1274,6 +1276,11 @@ export async function loadConfig(persona?: string): Promise<Config> {
       : undefined) ??
     legacyTurnTimeoutMs(toml) ??
       3_600_000;
+  const configuredHarnessToolTimeoutMs =
+    asInt(process.env.PHANTOMBOT_HARNESS_TOOL_TIMEOUT_MS) ??
+    (asInt(toml.harness_tool_timeout_s) !== undefined
+      ? asInt(toml.harness_tool_timeout_s)! * 1000
+      : 1_200_000);
 
   const telegram = buildTelegramConfig(
     tomlTelegram,
@@ -1431,6 +1438,10 @@ export async function loadConfig(persona?: string): Promise<Config> {
       60_000,
 
     harnessHardTimeoutMs,
+    harnessToolTimeoutMs: Math.min(
+      harnessHardTimeoutMs,
+      configuredHarnessToolTimeoutMs,
+    ),
 
     personasDir,
 

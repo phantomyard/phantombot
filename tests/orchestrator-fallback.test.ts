@@ -12,6 +12,7 @@ import {
   runWithFallback,
 } from "../src/orchestrator/fallback.ts";
 import { CooldownStore } from "../src/lib/cooldown.ts";
+import { setLogSink } from "../src/lib/logSink.ts";
 import {
   DEGRADE_AFTER_FAILURES,
   HarnessAlerter,
@@ -79,6 +80,38 @@ async function collect(
   for await (const c of iter) out.push(c);
   return out;
 }
+
+describe("tool timeout fallback policy", () => {
+  test("tool cap kill never invokes the next harness", async () => {
+    const first = new FakeHarness("claude", [{ type: "error", error: "tool cap",
+      recoverable: false, killCause: "tool" }]);
+    const second = new FakeHarness("native", [{ type: "done", finalText: "wrong" }]);
+    const chunks = await collect(runWithFallback([first, second], newRequest(), {
+      cooldown: new CooldownStore(),
+    }));
+    expect(second.invocations).toBe(0);
+    expect(chunks.at(-1)).toMatchObject({ type: "error", killCause: "tool" });
+  });
+
+  test("same kill cause on a second harness emits one structured warning", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      const error = (id: string) => new FakeHarness(id, [{ type: "error", error: "hard cap",
+        recoverable: true, killCause: "timeout" }]);
+      const good = new FakeHarness("codex", [{ type: "done", finalText: "ok" }]);
+      await collect(runWithFallback([error("claude"), error("native"), good], newRequest(), {
+        cooldown: new CooldownStore(),
+      }));
+      const repeats = lines.map((line) => JSON.parse(line)).filter((line) =>
+        line.msg === "orchestrator: repeated kill cause across harnesses");
+      expect(repeats).toHaveLength(1);
+      expect(repeats[0]).toMatchObject({ cause: "timeout", firstHarnessId: "claude", secondHarnessId: "native" });
+    } finally {
+      restore();
+    }
+  });
+});
 
 describe("estimatePayloadBytes", () => {
   test("counts system prompt + user message", () => {

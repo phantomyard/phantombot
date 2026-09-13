@@ -59,6 +59,7 @@ export async function resolvePersonaGreeting(input: {
   harnesses: Harness[];
   idleTimeoutMs: number;
   hardTimeoutMs?: number;
+  toolTimeoutMs?: number;
   startupTimeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<string> {
@@ -79,6 +80,7 @@ export async function resolvePersonaGreeting(input: {
       workingDir: input.agentDir,
       idleTimeoutMs: input.idleTimeoutMs,
       hardTimeoutMs: input.hardTimeoutMs,
+      toolTimeoutMs: input.toolTimeoutMs,
       startupTimeoutMs: input.startupTimeoutMs,
       signal: input.signal,
     })) {
