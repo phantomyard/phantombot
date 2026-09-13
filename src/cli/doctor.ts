@@ -27,14 +27,28 @@ import {
   personaDir,
   resolvePersona,
   servedPersonasOf,
+  xdgDataHome,
 } from "../config.ts";
 import {
   checkConfiguredHarnesses,
   expandSystemdPath,
   missingHarnesses,
+  resolveHarnessAvailability,
   resolvedHarnessBins,
   type HarnessAvailability,
 } from "../lib/harnessAvailability.ts";
+import {
+  listHarnessConfigFiles,
+  reconcileHarnessConfigFiles,
+  type HarnessConfigFileResult,
+} from "../lib/harnessConfigRepair.ts";
+import { piEngineFor, routingIsConfigured } from "../lib/harnessReconcile.ts";
+import {
+  embeddedPiAssetsStatus,
+  embeddedPiPackageDir,
+  ensureEmbeddedPiAssets,
+  isCompiledBinary,
+} from "../lib/embeddedPi.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
@@ -390,6 +404,20 @@ export interface DoctorReport {
     checks: HarnessAvailability[];
   };
   /**
+   * Legacy-`pi` reconcile + native-harness health (lib/harnessReconcile.ts).
+   * `files` lists ONLY config files that had something to migrate; a
+   * claude- or codex-only host has none and the whole section is omitted —
+   * no pi engine in a chain is a normal config, not a finding. `warnings`:
+   * a configured pi-host whose binary is gone (never switched automatically),
+   * or a native slot with no provider/model routing. `nativeAssets`: the
+   * embedded engine's extracted package dir, reported only when it drifted.
+   */
+  harnessConfig?: {
+    files: HarnessConfigFileResult[];
+    warnings: string[];
+    nativeAssets?: { dir: string; drifted: string[]; repaired: boolean };
+  };
+  /**
    * Managed Pi capability-routing extension. `shouldExist` = a routable
    * capability (image and/or coding model) is configured, so the owned dir is
    * supposed to be on disk; when false the desired state is absence.
@@ -483,6 +511,15 @@ export interface RunDoctorInput {
   checkHarnesses?:
     | false
     | (() => Promise<DoctorReport["harnesses"] | undefined>);
+  /**
+   * Test seam for the legacy-pi reconcile / native-harness check. Pass false
+   * to skip; a function receives whether repair is on. In production it runs
+   * only as the real phantombot binary, so dev/test never rewrites a
+   * config.toml.
+   */
+  checkHarnessConfig?:
+    | false
+    | ((repair: boolean) => Promise<DoctorReport["harnessConfig"] | undefined>);
   /**
    * Test seam for the managed Pi capability-routing extension check. Pass
    * `false` to skip. Pass a function to substitute a fake report (bypassing
@@ -1033,6 +1070,29 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
 
+  // Legacy `pi` → native / pi-host, written with a backup when repair is on.
+  // Startup already maps legacy ids in memory, so a pending migration is a
+  // notice, never a failure: nothing stops serving either way.
+  let harnessConfigReport: DoctorReport["harnessConfig"] | undefined;
+  if (input.checkHarnessConfig === false) {
+    // explicitly skipped by a test
+  } else if (input.checkHarnessConfig) {
+    harnessConfigReport = await input.checkHarnessConfig(repair);
+  } else if (isPhantombotBinary()) {
+    try {
+      harnessConfigReport = await computeHarnessConfigReport(
+        host,
+        config,
+        persona,
+        repair,
+      );
+    } catch (e) {
+      log.warn("doctor: harness config reconcile failed", {
+        error: (e as Error).message,
+      });
+    }
+  }
+
   // Managed Pi extension. When a routable capability (image and/or coding) is
   // configured the owned dir is stamped/re-stamped on drift; when none is
   // configured the desired state is absence, so a leftover dir is removed.
@@ -1192,6 +1252,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     ...(timersReport ? { timers: timersReport } : {}),
     ...(maintenanceReport ? { maintenance: maintenanceReport } : {}),
     ...(harnessReport ? { harnesses: harnessReport } : {}),
+    ...(harnessConfigReport ? { harnessConfig: harnessConfigReport } : {}),
     ...(piExtensionReport ? { piExtension: piExtensionReport } : {}),
     ...(editorConnectors ? { editorConnectors } : {}),
   };
@@ -1531,6 +1592,33 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
 
+  if (harnessConfigReport) {
+    const r = harnessConfigReport;
+    for (const f of r.files) {
+      const where = f.persona ? `persona '${f.persona}'` : "host config";
+      const status = f.error ? "WARN" : f.written ? "migrated" : "pending";
+      out.write(`  harness config (${where}): ${status} — ${f.path}\n`);
+      for (const c of f.changes) {
+        out.write(`    ${c.path}: ${c.from} → ${c.to} (${c.reason})\n`);
+      }
+      if (f.backupPath) out.write(`    backup: ${f.backupPath}\n`);
+      if (f.error) {
+        out.write(`    → ${f.error}\n`);
+      } else if (!f.written) {
+        out.write(
+          "    → run `phantombot doctor` without --no-repair to write it (startup already maps it in memory)\n",
+        );
+      }
+    }
+    if (r.nativeAssets) {
+      const a = r.nativeAssets;
+      out.write(
+        `  native engine assets: ${tick(a.repaired)} — ${a.repaired ? "re-extracted" : "missing or stale"}: ${a.drifted.join(", ")} (${a.dir})\n`,
+      );
+    }
+    for (const w of r.warnings) out.write(`  harness: WARN — ${w}\n`);
+  }
+
   if (piExtensionReport) {
     const r = piExtensionReport;
     if (!r.shouldExist) {
@@ -1713,6 +1801,97 @@ async function defaultCheckDefaultPersona(
       !(mcpServers === 0 && mcpElsewhere.length > 0),
     detail,
   };
+}
+
+/**
+ * Legacy-`pi` reconcile (written when repair is on) + native-harness health.
+ *
+ * Routing presence per persona comes from `loadConfig(persona)` — the SAME
+ * resolved routing that startup's read-time mapping uses — so doctor and
+ * startup can never map one entry two different ways. The only extra fact
+ * doctor adds is a live probe for a host `pi`, which is what lets it repair a
+ * routing-less legacy pi on a host that has no pi to run it.
+ */
+async function computeHarnessConfigReport(
+  host: Config,
+  config: Config,
+  persona: string,
+  repair: boolean,
+): Promise<DoctorReport["harnessConfig"] | undefined> {
+  const hostPiInstalled = !!(await resolveHarnessAvailability(host, "pi-host"))
+    ?.resolved;
+  const files = await listHarnessConfigFiles(host.configPath, host.personasDir);
+
+  const hostRouting = routingIsConfigured(host.harnesses.pi.routing);
+  const routingByPersona = new Map<string, boolean>();
+  const names = new Set<string>([
+    ...files.flatMap((f) => (f.persona ? [f.persona] : [])),
+    ...Object.keys(host.harnesses.personas ?? {}),
+  ]);
+  for (const name of names) {
+    try {
+      routingByPersona.set(
+        name,
+        routingIsConfigured((await loadConfig(name)).harnesses.pi.routing),
+      );
+    } catch {
+      routingByPersona.set(name, hostRouting);
+    }
+  }
+
+  const results = await reconcileHarnessConfigFiles({
+    files,
+    routingConfigured: (p) =>
+      p === undefined ? hostRouting : (routingByPersona.get(p) ?? hostRouting),
+    hostPiInstalled,
+    repair,
+  });
+
+  // Health of what this persona runs NOW. Re-read after a write so a legacy
+  // entry just repaired to native is not reported against its old meaning.
+  const effective = results.some((r) => r.written) ? await loadConfig(persona) : config;
+  const warnings: string[] = [];
+  let usesNative = false;
+  const ids = new Set([
+    ...effective.harnesses.chain,
+    ...Object.values(effective.harnesses.personas ?? {}).flatMap((e) => e.chain),
+  ]);
+  for (const id of ids) {
+    const engine = piEngineFor(effective.harnesses, id);
+    const instance = effective.harnesses.instances?.[id];
+    if (engine === "pi-host" && !hostPiInstalled) {
+      warnings.push(
+        `'${id}' runs this host's own pi, but no pi binary was found — install pi, or pick Native in Configure → Brain (never switched automatically)`,
+      );
+    } else if (engine === "native") {
+      usesNative = true;
+      const routing = instance ? instance.routing : effective.harnesses.pi.routing;
+      if (!routingIsConfigured(routing)) {
+        warnings.push(
+          `'${id}' (native) has no provider or model configured — set one in Configure → Brain`,
+        );
+      }
+    }
+  }
+
+  let nativeAssets: NonNullable<DoctorReport["harnessConfig"]>["nativeAssets"];
+  if (usesNative && isCompiledBinary()) {
+    const dir = embeddedPiPackageDir(xdgDataHome());
+    const status = embeddedPiAssetsStatus(dir);
+    if (status.drifted.length > 0) {
+      let repaired = false;
+      if (repair) {
+        ensureEmbeddedPiAssets(dir);
+        repaired = true;
+      }
+      nativeAssets = { dir, drifted: status.drifted, repaired };
+    }
+  }
+
+  if (results.length === 0 && warnings.length === 0 && !nativeAssets) {
+    return undefined;
+  }
+  return { files: results, warnings, ...(nativeAssets ? { nativeAssets } : {}) };
 }
 
 async function computeHarnessReport(

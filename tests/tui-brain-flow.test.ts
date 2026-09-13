@@ -1,21 +1,24 @@
 /**
- * The Brain flow: primary → fallback → (Pi only) provider/key/model slots.
+ * The Brain flow: primary → fallback → (native only) provider/key/model slots.
  *
  * The assertions that matter:
- *   - Codex/Claude are CHAIN-ONLY: picking them collects nothing and calls no
- *     Pi write — agents inherit the host's configuration.
+ *   - The menu is detected LIVE: native is always offered (it is built in);
+ *     Claude, Codex and "Pi — Use Host Configuration" appear only when their
+ *     binary is installed. A missing harness is never a choice.
+ *   - Host harnesses are CHAIN-ONLY: picking them collects nothing and makes
+ *     no routing write — agents inherit the host's configuration.
  *   - The stored API key is idempotent: an empty answer with an unchanged
  *     provider writes no secret; a provider switch with an empty answer clears
  *     the stale key.
  *   - Vision is skipped when the primary is vision-capable; the coder slot
  *     defaults to the primary.
- *   - "Use Host Configuration" clears routing (tombstoned in persona scope).
  *   - `undefined` from any question leaves the config untouched.
  */
 import { describe, expect, test } from "bun:test";
 
 import {
   configureBrain,
+  offeredBrains,
   type BrainDeps,
   type BrainQuestions,
 } from "../src/tui/brainFlow.ts";
@@ -32,10 +35,14 @@ interface Harness {
   deps: BrainDeps;
   applied: {
     chains: string[][];
-    routings: unknown[];
-    clears: Array<{ tombstone?: boolean } | undefined>;
+    routings: Array<{ choices: unknown; instanceId?: string }>;
     secrets: Array<string | "CLEARED">;
     authWrites: Array<{ provider: string; key: string }>;
+    chooses: Array<{
+      title: string;
+      initial?: string;
+      options: Array<{ value: string; label: string; hint?: string }>;
+    }>;
     searches: Array<{
       title: string;
       banner?: string;
@@ -59,24 +66,24 @@ function harness(over: {
   probeProviderKey?: BrainDeps["probeProviderKey"];
   fetchProviderModels?: BrainDeps["fetchProviderModels"];
 }): Harness {
-  const applied = {
-    chains: [] as string[][],
-    routings: [] as unknown[],
-    clears: [] as Array<{ tombstone?: boolean } | undefined>,
-    secrets: [] as Array<string | "CLEARED">,
-    authWrites: [] as Array<{ provider: string; key: string }>,
-    searches: [] as Array<{
-      title: string;
-      banner?: string;
-      initial?: string;
-      options: Array<{ value: string; label: string }>;
-    }>,
+  const applied: Harness["applied"] = {
+    chains: [],
+    routings: [],
+    secrets: [],
+    authWrites: [],
+    chooses: [],
+    searches: [],
   };
   const c = [...(over.choose ?? [])];
   const s = [...(over.search ?? [])];
   const v = [...(over.value ?? [])];
   const q: BrainQuestions = {
     choose: async (input) => {
+      applied.chooses.push({
+        title: input.title,
+        initial: input.initial,
+        options: input.options.map((o) => ({ value: o.value, label: o.label, hint: o.hint })),
+      });
       const answer = c.shift();
       return answer === "CURRENT" ? (input.initial ?? "") : answer;
     },
@@ -97,14 +104,17 @@ function harness(over: {
   const deps: BrainDeps = {
     persona: "robbie",
     chain: over.chain ?? [],
-    availability: over.availability ?? { pi: "/usr/bin/pi", codex: "/usr/bin/codex", claude: undefined },
+    availability: over.availability ?? {
+      native: process.execPath,
+      "pi-host": "/usr/bin/pi",
+      codex: "/usr/bin/codex",
+      claude: undefined,
+    },
     routing: over.routing ?? {},
     storedKey: over.storedKey,
     piInstances: over.piInstances,
     targetPath: "/tmp/personas/robbie/config.toml",
     personaScope: over.personaScope ?? true,
-    piBin: over.availability?.pi ?? "/usr/bin/pi",
-    installCommand: "curl -fsSL https://pi.sh | bash",
     listModels: async () => models,
     probeProviderKey: over.probeProviderKey ?? (async () => ({ status: "verified", detail: "" })),
     // Default: the provider's own API answers nothing, so a test that doesn't
@@ -122,14 +132,28 @@ function harness(over: {
       return { ok: true, path: "/tmp/.pi/agent/auth.json" };
     },
     applyChain: async (chain) => void applied.chains.push([...chain]),
-    applyRouting: async (choices) => void applied.routings.push(choices),
-    clearRouting: async (opts) => void applied.clears.push(opts),
+    applyRouting: async (choices, instanceId) =>
+      void applied.routings.push({ choices, instanceId }),
   };
   return { q, deps, applied };
 }
 
+describe("offeredBrains — live detection decides the menu", () => {
+  test("native is always offered, first, even with nothing installed", () => {
+    expect(offeredBrains({})).toEqual(["native"]);
+    expect(
+      offeredBrains({ "pi-host": undefined, codex: undefined, claude: undefined }),
+    ).toEqual(["native"]);
+  });
+
+  test("host harnesses appear only when their binary resolved", () => {
+    expect(offeredBrains({ "pi-host": "/usr/bin/pi", claude: undefined, codex: "/bin/codex" }))
+      .toEqual(["native", "pi-host", "codex"]);
+  });
+});
+
 describe("the brain flow", () => {
-  test("codex primary + no fallback: chain-only, nothing collected, nothing for Pi", async () => {
+  test("codex primary + no fallback: chain-only, nothing collected, no routing", async () => {
     const h = harness({
       choose: ["codex", "CURRENT"], // primary, fallback (none)
     });
@@ -137,43 +161,91 @@ describe("the brain flow", () => {
     expect(notice).toBe("brain saved: codex");
     expect(h.applied.chains).toEqual([["codex"]]);
     expect(h.applied.routings).toEqual([]);
-    expect(h.applied.clears).toEqual([]);
     expect(h.applied.secrets).toEqual([]);
     expect(h.applied.searches).toEqual([]);
   });
 
-  test("codex/claude options explain that the host owns their configuration", async () => {
-    let options: Array<{ value: string; label: string; hint?: string }> = [];
-    const h = harness({});
+  test("pi-host primary: chain-only — the host's pi keeps its own configuration", async () => {
+    const h = harness({ choose: ["pi-host", "CURRENT"] });
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain saved: pi-host");
+    expect(h.applied.chains).toEqual([["pi-host"]]);
+    expect(h.applied.routings).toEqual([]);
+    expect(h.applied.secrets).toEqual([]);
+    expect(h.applied.authWrites).toEqual([]);
+    expect(h.applied.searches).toEqual([]);
+  });
+
+  test("labels: native configures here; host harnesses say the host owns their config", async () => {
+    const h = harness({
+      availability: {
+        native: process.execPath,
+        "pi-host": "/usr/bin/pi",
+        codex: "/usr/bin/codex",
+        claude: "/usr/bin/claude",
+      },
+    });
     h.q.choose = async (input) => {
-      options = [...input.options];
+      h.applied.chooses.push({ title: input.title, options: [...input.options] });
       return undefined;
     };
     await configureBrain(h.q, h.deps);
-    const codex = options.find((o) => o.value === "codex");
-    const claude = options.find((o) => o.value === "claude");
-    expect(codex?.hint).toContain("uses this host's Codex configuration");
-    expect(claude?.hint).toContain("uses this host's Claude configuration");
+    const options = h.applied.chooses[0]!.options;
+    expect(options.map((o) => o.value)).toEqual(["native", "pi-host", "codex", "claude"]);
+    const byValue = (v: string) => options.find((o) => o.value === v)!;
+    expect(byValue("native").label).toContain("Configure Provider and Model Swap Settings");
+    expect(byValue("pi-host").label).toBe("Pi — Use Host Configuration");
+    expect(byValue("pi-host").hint).toContain("uses this host's pi configuration");
+    expect(byValue("codex").hint).toContain("uses this host's Codex configuration");
+    expect(byValue("claude").hint).toContain("uses this host's Claude configuration");
+  });
+
+  test("a host harness that is not installed is not offered, and a stale chain entry is not pre-selected", async () => {
+    const h = harness({
+      chain: ["claude"], // configured once, since uninstalled
+      availability: { native: process.execPath, "pi-host": undefined, codex: undefined, claude: undefined },
+    });
+    h.q.choose = async (input) => {
+      h.applied.chooses.push({ title: input.title, initial: input.initial, options: [...input.options] });
+      return undefined;
+    };
+    await configureBrain(h.q, h.deps);
+    const first = h.applied.chooses[0]!;
+    expect(first.options.map((o) => o.value)).toEqual(["native"]);
+    expect(first.initial).toBe("native");
+  });
+
+  test("a native → native chain pre-selects native for both slots", async () => {
+    const h = harness({ chain: ["pi-primary", "pi-fallback"] });
+    h.q.choose = async (input) => {
+      h.applied.chooses.push({ title: input.title, initial: input.initial, options: [...input.options] });
+      return h.applied.chooses.length === 1 ? input.initial : undefined;
+    };
+    await configureBrain(h.q, h.deps);
+    expect(h.applied.chooses.map((c) => c.initial)).toEqual(["native", "native"]);
   });
 
   test("esc at the fallback leaves the config untouched", async () => {
-    const h = harness({ choose: ["pi", undefined] });
+    const h = harness({ choose: ["native", undefined] });
     const notice = await configureBrain(h.q, h.deps);
     expect(notice).toBe("brain unchanged");
     expect(h.applied.chains).toEqual([]);
     expect(h.applied.routings).toEqual([]);
   });
 
-  test("pi primary with host configuration: routing cleared (tombstoned), chain still applied", async () => {
+  test("native never asks a configure-vs-host question: straight to the provider", async () => {
     const h = harness({
-      choose: ["pi", "CURRENT", "host"], // primary, pi mode, fallback (none)
-      routing: { provider: "openrouter", primaryModel: "gpt-5.2" },
+      choose: ["native", "CURRENT"],
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: ["sk-new"],
     });
-    const notice = await configureBrain(h.q, h.deps);
-    expect(notice).toBe("brain saved: pi");
-    expect(h.applied.clears).toEqual([{ tombstone: true }]);
-    expect(h.applied.routings).toEqual([]);
-    expect(h.applied.chains).toEqual([["pi"]]);
+    await configureBrain(h.q, h.deps);
+    // Two chooses only: primary and fallback.
+    expect(h.applied.chooses.map((c) => c.title)).toEqual([
+      "Primary brain",
+      "Fallback brain (optional)",
+    ]);
+    expect(h.applied.searches[0]!.title.toLowerCase()).toContain("provider");
   });
 
   test("pi lists no models for the provider: the picker is filled from the provider's own API", async () => {
@@ -184,7 +256,7 @@ describe("the brain flow", () => {
     const asked: Array<{ provider: string; key: string }> = [];
     const h = harness({
       models: [], // pi knows nothing
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["openrouter", "anthropic/claude-sonnet-4.6", ""], // provider, primary (vision-capable ⇒ no vision slot), coder
       value: ["sk-or-new"],
       fetchProviderModels: async (provider, key) => {
@@ -196,7 +268,7 @@ describe("the brain flow", () => {
       },
     });
     const notice = await configureBrain(h.q, h.deps);
-    expect(notice).toBe("brain saved: pi");
+    expect(notice).toBe("brain saved: native");
     // Asked with the key just entered — that is what authenticates the fetch.
     expect(asked).toEqual([{ provider: "openrouter", key: "sk-or-new" }]);
     const primary = h.applied.searches.find((x) => x.banner?.includes("PRIMARY"));
@@ -205,7 +277,7 @@ describe("the brain flow", () => {
       "anthropic/claude-sonnet-4.6",
       "deepseek/deepseek-v4-pro",
     ]);
-    expect(h.applied.routings).toEqual([
+    expect(h.applied.routings.map((r) => r.choices)).toEqual([
       {
         provider: "openrouter",
         primaryModel: "anthropic/claude-sonnet-4.6",
@@ -218,7 +290,7 @@ describe("the brain flow", () => {
   test("the live catalogue is not consulted when pi already listed the provider", async () => {
     let calls = 0;
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
       value: [""],
       storedKey: "sk-existing",
@@ -232,30 +304,33 @@ describe("the brain flow", () => {
     expect(calls).toBe(0);
   });
 
-  test("pi configured: key kept when blank and provider unchanged (idempotent)", async () => {
+  test("native configured: key kept when blank and provider unchanged (idempotent)", async () => {
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"], // primary, mode, fallback (none)
+      choose: ["native", "CURRENT"], // primary, fallback (none)
       search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"], // provider, primary, vision, coder
       value: [""], // blank key = keep
       storedKey: "sk-existing",
       routing: { provider: "openrouter" },
     });
     const notice = await configureBrain(h.q, h.deps);
-    expect(notice).toBe("brain saved: pi");
+    expect(notice).toBe("brain saved: native");
     expect(h.applied.secrets).toEqual([]); // nothing written, nothing cleared
     expect(h.applied.routings).toEqual([
       {
-        provider: "openrouter",
-        primaryModel: "gpt-5.2",
-        imageModel: "gpt-5.2-vision",
-        codingModel: "gpt-5.2",
+        choices: {
+          provider: "openrouter",
+          primaryModel: "gpt-5.2",
+          imageModel: "gpt-5.2-vision",
+          codingModel: "gpt-5.2",
+        },
+        instanceId: undefined,
       },
     ]);
   });
 
-  test("pi configured: provider switch with a blank key clears the stale key", async () => {
+  test("native configured: provider switch with a blank key clears the stale key", async () => {
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["google", "gemini-3-pro", "gemini-3-pro"],
       value: [""], // blank after a provider switch = clear
       storedKey: "sk-old",
@@ -265,21 +340,22 @@ describe("the brain flow", () => {
     expect(h.applied.secrets).toEqual(["CLEARED"]);
   });
 
-  test("pi configured: a typed key is set in the vault and Pi's own store", async () => {
+  test("native configured: a typed key is set in the vault and Pi's own store", async () => {
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
       value: ["sk-new"],
     });
     await configureBrain(h.q, h.deps);
     expect(h.applied.secrets).toEqual(["sk-new"]);
-    expect(h.applied.routings[0]).toMatchObject({ provider: "openrouter" });
+    expect(h.applied.authWrites).toEqual([{ provider: "openrouter", key: "sk-new" }]);
+    expect(h.applied.routings[0]!.choices).toMatchObject({ provider: "openrouter" });
   });
 
   test("a key the provider rejects is re-asked and saved only once valid", async () => {
     let calls = 0;
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["openai", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
       value: ["sk-bad", "sk-good"],
       probeProviderKey: async () =>
@@ -295,7 +371,7 @@ describe("the brain flow", () => {
 
   test("an unverifiable key warns but does not block the flow", async () => {
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["zai", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
       value: ["sk-mystery"],
       probeProviderKey: async () => ({
@@ -305,13 +381,13 @@ describe("the brain flow", () => {
     });
     await configureBrain(h.q, h.deps);
     expect(h.applied.secrets).toEqual(["sk-mystery"]);
-    expect(h.applied.routings[0]).toMatchObject({ provider: "zai" });
+    expect(h.applied.routings[0]!.choices).toMatchObject({ provider: "zai" });
   });
 
   test("a kept (stored) key is validated too, before any write", async () => {
     let probed: string | undefined;
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["openai", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
       value: [""], // blank = keep stored
       routing: { provider: "openai" },
@@ -324,12 +400,12 @@ describe("the brain flow", () => {
     await configureBrain(h.q, h.deps);
     expect(probed).toBe("sk-stored");
     expect(h.applied.secrets).toEqual([]); // keep = no new write
-    expect(h.applied.routings[0]).toMatchObject({ provider: "openai" });
+    expect(h.applied.routings[0]!.choices).toMatchObject({ provider: "openai" });
   });
 
   test("a vision-capable primary skips the vision slot", async () => {
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["google", "gemini-3-pro", "gemini-3-pro"], // provider, primary, coder
       value: [""],
     });
@@ -343,7 +419,7 @@ describe("the brain flow", () => {
   test("a text-only primary asks for vision, narrowed to vision-capable models", async () => {
     let visionOptions: readonly unknown[] = [];
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
       value: [""],
     });
@@ -362,7 +438,7 @@ describe("the brain flow", () => {
 
   test("the coder slot's initial defaults to the primary model", async () => {
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["google", "gemini-3-pro", "gemini-3-pro"],
       value: [""],
     });
@@ -371,29 +447,30 @@ describe("the brain flow", () => {
     expect(coder?.initial).toBe("gemini-3-pro");
   });
 
-  test("every pi question names its slot and the provider list searches", async () => {
+  test("every native question names its slot and the provider list searches", async () => {
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["openrouter", "gpt-5.2", "gpt-5.2", "gpt-5.2"],
       value: ["sk-new"],
     });
     await configureBrain(h.q, h.deps);
-    expect(h.applied.searches[0]?.title).toContain("provider");
+    expect(h.applied.searches[0]?.title.toLowerCase()).toContain("provider");
+    expect(h.applied.searches[0]?.title).toContain("primary");
     expect(h.applied.searches[1]?.banner).toContain("PRIMARY");
     expect(h.applied.searches[2]?.banner).toContain("VISION");
     expect(h.applied.searches[3]?.banner).toContain("CODER");
   });
 
-  test("no pi binary: the flow still completes via free-text model entry", async () => {
+  test("an empty catalogue still completes via free-text model entry", async () => {
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      models: [],
+      choose: ["native", "CURRENT"],
       search: ["openrouter", "gpt-5.2", "", ""],
       value: ["sk-new"],
-      availability: { pi: undefined, codex: undefined, claude: undefined },
     });
     const notice = await configureBrain(h.q, h.deps);
-    expect(notice).toBe("brain saved: pi");
-    expect(h.applied.routings[0]).toMatchObject({
+    expect(notice).toBe("brain saved: native");
+    expect(h.applied.routings[0]!.choices).toMatchObject({
       provider: "openrouter",
       primaryModel: "gpt-5.2",
     });
@@ -402,7 +479,7 @@ describe("the brain flow", () => {
   test("keeping a stored key refreshes models if initially empty for provider", async () => {
     let listCalls = 0;
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
       value: [""], // keep stored key
       storedKey: "sk-stored",
@@ -411,13 +488,12 @@ describe("the brain flow", () => {
     });
     h.deps.listModels = async (extraEnv) => {
       listCalls++;
-      // On second call (or with extraEnv), return models
       return extraEnv?.OPENROUTER_API_KEY === "sk-stored" ? MODELS : [];
     };
     const notice = await configureBrain(h.q, h.deps);
-    expect(notice).toBe("brain saved: pi");
+    expect(notice).toBe("brain saved: native");
     expect(listCalls).toBeGreaterThanOrEqual(2);
-    expect(h.applied.routings[0]).toMatchObject({
+    expect(h.applied.routings[0]!.choices).toMatchObject({
       provider: "openrouter",
       primaryModel: "gpt-5.2",
     });
@@ -425,73 +501,61 @@ describe("the brain flow", () => {
 
   test("cancelling the wizard before completion does not mutate Pi's shared auth store", async () => {
     const h = harness({
-      choose: ["pi", "CURRENT", "configure"],
+      choose: ["native", "CURRENT"],
       search: [undefined], // Esc / cancel at the provider selection prompt
       storedKey: "sk-instance-key",
       routing: { provider: "openrouter" },
-      models: [], // empty initial models triggers pre-selection refresh attempt
+      models: [],
     });
     const notice = await configureBrain(h.q, h.deps);
     expect(notice).toBe("brain unchanged");
     expect(h.applied.authWrites).toEqual([]);
   });
 
-  test("Pi primary (host) and Pi fallback (configure): fallback Pi skips host config choice and runs configure", async () => {
+  test("native primary and native fallback: each slot is its own named instance, configured separately", async () => {
     const h = harness({
-      choose: ["pi", "pi", "host"], // primary = pi, fallback = pi, primary picks host
-      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
-      value: ["sk-fallback-key"],
+      choose: ["native", "native"],
+      search: [
+        "openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2", // primary slot
+        "google", "gemini-3-pro", "gemini-3-pro", // fallback slot
+      ],
+      value: ["sk-primary", "sk-fallback"],
     });
     const notice = await configureBrain(h.q, h.deps);
     expect(notice).toBe("brain saved: pi-primary → pi-fallback");
     expect(h.applied.chains).toEqual([["pi-primary", "pi-fallback"]]);
-    expect(h.applied.routings).toHaveLength(1);
-    expect(h.applied.routings[0]).toMatchObject({
-      provider: "openrouter",
-      primaryModel: "gpt-5.2",
-    });
+    expect(h.applied.routings.map((r) => r.instanceId)).toEqual(["pi-primary", "pi-fallback"]);
+    expect(h.applied.routings[1]!.choices).toMatchObject({ provider: "google" });
+    expect(h.applied.secrets).toEqual(["sk-primary", "sk-fallback"]);
   });
 
-  test("named Pi instances: keeping a stored key on fallback Pi writes the instance key and refreshes models", async () => {
+  test("named native instances: kept keys are each slot's OWN instance key, never the global one", async () => {
     let listCalls = 0;
     const h = harness({
-      choose: ["pi", "pi", "host"], // primary = pi (host), fallback = pi (auto-configure)
-      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
-      value: [""], // keep stored key on fallback
+      choose: ["native", "native"],
+      search: [
+        "openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2",
+        "openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2",
+      ],
+      value: ["", ""], // keep stored keys on both slots
       storedKey: "sk-global-wrong-key",
       piInstances: {
-        fallback: {
-          routing: { provider: "openrouter" },
-          storedKey: "sk-fallback-instance-key",
-        },
+        primary: { routing: { provider: "openrouter" }, storedKey: "sk-primary-instance-key" },
+        fallback: { routing: { provider: "openrouter" }, storedKey: "sk-fallback-instance-key" },
       },
-      models: [], // empty initial models forces keep-branch refresh
+      models: [],
     });
     h.deps.listModels = async (extraEnv) => {
       listCalls++;
-      return extraEnv?.OPENROUTER_API_KEY === "sk-fallback-instance-key" ? MODELS : [];
+      const key = extraEnv?.OPENROUTER_API_KEY;
+      return key === "sk-primary-instance-key" || key === "sk-fallback-instance-key" ? MODELS : [];
     };
     const notice = await configureBrain(h.q, h.deps);
     expect(notice).toBe("brain saved: pi-primary → pi-fallback");
-    // Assert writeAuth wrote the instance key into auth store, not the global key
     expect(h.applied.authWrites).toEqual([
+      { provider: "openrouter", key: "sk-primary-instance-key" },
       { provider: "openrouter", key: "sk-fallback-instance-key" },
     ]);
     expect(listCalls).toBeGreaterThanOrEqual(2);
-    expect(h.applied.routings[0]).toMatchObject({
-      provider: "openrouter",
-      primaryModel: "gpt-5.2",
-    });
-  });
-
-  test("Pi primary (configure) and Pi fallback (host): fallback Pi can choose host config", async () => {
-    const h = harness({
-      choose: ["pi", "pi", "configure", "host"], // primary picks configure, fallback picks host
-      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
-      value: ["sk-primary-key"],
-    });
-    const notice = await configureBrain(h.q, h.deps);
-    expect(notice).toBe("brain saved: pi-primary → pi-fallback");
-    expect(h.applied.chains).toEqual([["pi-primary", "pi-fallback"]]);
   });
 });

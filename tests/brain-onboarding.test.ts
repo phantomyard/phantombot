@@ -52,9 +52,12 @@ function fakeDeps(overrides: Partial<BrainOnboardingDeps> = {}): {
     chains,
     deps: {
       persona: "batman",
-      availability: async () => ({ pi: "/usr/bin/pi", claude: "/usr/bin/claude", codex: undefined }),
-      installCommand: "sh -c 'curl pi.dev | sh'",
-      installPi: async () => true,
+      availability: async () => ({
+        native: process.execPath,
+        "pi-host": "/usr/bin/pi",
+        claude: "/usr/bin/claude",
+        codex: undefined,
+      }),
       chain: [],
       routing: {},
       targetPath: "/tmp/personas/batman/config.toml",
@@ -66,7 +69,6 @@ function fakeDeps(overrides: Partial<BrainOnboardingDeps> = {}): {
       writeAuth: async () => ({ ok: true, path: "/tmp/auth.json" }),
       applyChain: async (chain) => void chains.push([...chain]),
       applyRouting: async () => undefined,
-      clearRouting: async () => undefined,
       probe: async () => ({ ok: true, detail: "ready" }),
       ...overrides,
     } satisfies BrainOnboardingDeps,
@@ -91,12 +93,9 @@ describe("wizard brain onboarding", () => {
   });
 
   test("a failed probe writes nothing and offers a restart; configure ends it", async () => {
-    // pi (installed) → configure-here pass → provider none → key keep →
-    // primary model free-text → coder none → test → fail → back to configure.
     const { q } = fakeQ([
-      "pi", // primary
+      "claude", // primary (chain-only: no configure pass)
       "", // fallback: none
-      "host", // use host configuration (skip the long provider pass)
       "test", // test now
       "configure", // restart prompt → back to configure
     ]);
@@ -110,7 +109,7 @@ describe("wizard brain onboarding", () => {
   });
 
   test("a failed probe then start-over reruns the flow; a passing retest lands in chat", async () => {
-    const attempt = ["pi", "", "host", "test"];
+    const attempt = ["claude", "", "test"];
     const { q } = fakeQ([...attempt, "restart", ...attempt]);
     let calls = 0;
     const { deps, chains } = fakeDeps({
@@ -120,137 +119,97 @@ describe("wizard brain onboarding", () => {
     });
     const r = await runBrainOnboarding(q, deps);
     expect(r.landing).toBe("chat");
-    expect(chains).toEqual([["pi"]]);
+    expect(chains).toEqual([["claude"]]);
   });
 
   test("a passing probe saves the chain and lands in chat", async () => {
     const { q } = fakeQ([
-      "claude", // primary (chain-only: no configure step)
-      "pi", // fallback
-      "host", // fallback Pi uses its local configuration
+      "claude", // primary (chain-only)
+      "pi-host", // fallback: the host's own pi (chain-only too)
       "test", // test now
     ]);
     const { deps, chains } = fakeDeps();
     const r = await runBrainOnboarding(q, deps);
     expect(r.landing).toBe("chat");
-    expect(r.notice).toContain("claude → pi");
-    expect(chains).toEqual([["claude", "pi"]]);
+    expect(r.notice).toContain("claude → pi-host");
+    expect(chains).toEqual([["claude", "pi-host"]]);
   });
 
   test("skipping the test saves the chain but lands in configure", async () => {
     const { q } = fakeQ([
-      "pi",
+      "pi-host",
       "", // fallback: none
-      "host", // host configuration
       "skip", // skip the test
     ]);
     const { deps, chains } = fakeDeps();
     const r = await runBrainOnboarding(q, deps);
     expect(r.landing).toBe("configure");
-    expect(chains).toEqual([["pi"]]);
+    expect(chains).toEqual([["pi-host"]]);
     expect(r.notice).toContain("untested");
   });
 
-  test("pi missing → install offer; going back re-asks the primary", async () => {
-    const { q } = fakeQ([
-      "pi", // primary (not installed)
-      "back", // pick a different brain
-      "claude", // primary, chain-only
-      "", // fallback: none
-      "test", // test → pass
-    ]);
-    const { deps, chains } = fakeDeps({
-      availability: async () => ({ pi: undefined, claude: "/usr/bin/claude", codex: undefined }),
-    });
-    const r = await runBrainOnboarding(q, deps);
-    expect(r.landing).toBe("chat");
-    expect(chains).toEqual([["claude"]]);
-  });
-
-  test("pi missing → install runs, then the flow continues with pi", async () => {
-    let installs = 0;
-    const { q } = fakeQ([
-      "pi", // primary (not installed yet)
-      "install", // install now
-      "", // fallback: none
-      "host", // use host configuration
-      "test", // test → pass
-    ]);
-    const { deps, chains } = fakeDeps({
-      availability: async () => ({
-        pi: installs > 0 ? "/usr/bin/pi" : undefined,
-        claude: "/usr/bin/claude",
-        codex: undefined,
-      }),
-      installPi: async () => {
-        installs++;
-        return true;
+  test("native is the default and always offered; a missing host harness is not offered at all", async () => {
+    const menus: Array<{ title: string; initial?: string; values: string[] }> = [];
+    const q: BrainQuestions = {
+      choose: async (input) => {
+        menus.push({ title: input.title, initial: input.initial, values: input.options.map((o) => o.value) });
+        return "skip";
       },
+      search: async () => undefined,
+      value: async () => undefined,
+      note: () => {},
+    };
+    const { deps } = fakeDeps({
+      availability: async () => ({ native: process.execPath, "pi-host": undefined, claude: undefined, codex: undefined }),
     });
     const r = await runBrainOnboarding(q, deps);
-    expect(installs).toBe(1);
-    expect(r.landing).toBe("chat");
-    expect(chains).toEqual([["pi"]]);
+    expect(r.landing).toBe("configure");
+    expect(menus[0]!.values).toEqual(["native", "skip"]);
+    expect(menus[0]!.initial).toBe("native");
+    // Nothing offers to install anything any more.
+    expect(menus.some((m) => m.title.toLowerCase().includes("install"))).toBe(false);
   });
 
-  test("Pi primary (host) and Pi fallback (configure): fallback Pi cannot be host config and configures models directly", async () => {
-    let routedChoices: unknown = undefined;
-    const { q, picked } = fakeQ([
-      "pi", "pi", // primary, fallback
-      "host", // primary uses host config
-      // fallback Pi does not get asked host vs configure — goes straight to provider & model search
+  test("no host harness installed: native configures here and is saved", async () => {
+    const { q } = fakeQ([
+      "native", // primary
+      "", // fallback: none
       "openrouter", // provider
-      "sk-fallback-key", // api key
+      "sk-key", // api key
       "gpt-5.2", // primary model
       "gpt-5.2-vision", // vision model
       "gpt-5.2-coder", // coding model
-      "skip",
+      "skip", // skip the test
     ]);
     const { deps, chains } = fakeDeps({
-      applyRouting: async (choices) => {
-        routedChoices = choices;
+      availability: async () => ({ native: process.execPath, "pi-host": undefined, claude: undefined, codex: undefined }),
+      listModels: async () => MODELS,
+    });
+    const r = await runBrainOnboarding(q, deps);
+    expect(chains).toEqual([["native"]]);
+    expect(r.notice).toContain("brain saved (untested): native");
+  });
+
+  test("native primary and native fallback become named instances, each configured", async () => {
+    const routed: Array<{ choices: unknown; instanceId?: string }> = [];
+    const slot = ["openrouter", "sk-key", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2-coder"];
+    const { q } = fakeQ(["native", "native", ...slot, ...slot, "skip"]);
+    const { deps, chains } = fakeDeps({
+      listModels: async () => MODELS,
+      applyRouting: async (choices, instanceId) => {
+        routed.push({ choices, instanceId });
       },
-      listModels: async () => [
-        { id: "gpt-5.2", name: "GPT 5.2", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2", supportsImages: false },
-        { id: "gpt-5.2-vision", name: "GPT 5 Vision", provider: "openrouter", reasoning: false, input: ["text", "image"], model: "gpt-5.2-vision", supportsImages: true },
-        { id: "gpt-5.2-coder", name: "GPT 5 Coder", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2-coder", supportsImages: false },
-      ],
     });
     const r = await runBrainOnboarding(q, deps);
     expect(r.notice).toContain("pi-primary → pi-fallback");
     expect(chains).toEqual([["pi-primary", "pi-fallback"]]);
-    expect(routedChoices).toEqual({
+    expect(routed.map((x) => x.instanceId)).toEqual(["pi-primary", "pi-fallback"]);
+    expect(routed[1]!.choices).toEqual({
       provider: "openrouter",
       primaryModel: "gpt-5.2",
       imageModel: "gpt-5.2-vision",
       codingModel: "gpt-5.2-coder",
     });
-    // Fallback Pi did not prompt for host config
-    expect(picked.filter((p) => p.includes("fallback brain) — how should its models be configured"))).toHaveLength(0);
-  });
-
-  test("Pi primary (configure) and Pi fallback (host): fallback Pi can use host config", async () => {
-    const { q } = fakeQ([
-      "pi", "pi", // primary, fallback
-      "configure", // primary configures models
-      "openrouter", // provider
-      "sk-primary-key", // api key
-      "gpt-5.2", // primary model
-      "gpt-5.2-vision", // vision model
-      "gpt-5.2-coder", // coding model
-      "host", // fallback Pi can pick host config because primary is custom
-      "skip",
-    ]);
-    const { deps, chains } = fakeDeps({
-      listModels: async () => [
-        { id: "gpt-5.2", name: "GPT 5.2", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2", supportsImages: false },
-        { id: "gpt-5.2-vision", name: "GPT 5 Vision", provider: "openrouter", reasoning: false, input: ["text", "image"], model: "gpt-5.2-vision", supportsImages: true },
-        { id: "gpt-5.2-coder", name: "GPT 5 Coder", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2-coder", supportsImages: false },
-      ],
-    });
-    const r = await runBrainOnboarding(q, deps);
-    expect(r.notice).toContain("pi-primary → pi-fallback");
-    expect(chains).toEqual([["pi-primary", "pi-fallback"]]);
   });
 
   test("maybePromptRestart is called on test pass", async () => {
@@ -278,6 +237,12 @@ describe("wizard brain onboarding", () => {
  * / `restoreWrites` are wired the same way `createBrainOnboardingDeps` wires
  * the real ones, so a rollback here exercises the flow's contract with them.
  */
+const MODELS = [
+  { id: "gpt-5.2", name: "GPT 5.2", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2", supportsImages: false },
+  { id: "gpt-5.2-vision", name: "GPT 5 Vision", provider: "openrouter", reasoning: false, input: ["text", "image"], model: "gpt-5.2-vision", supportsImages: true },
+  { id: "gpt-5.2-coder", name: "GPT 5 Coder", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2-coder", supportsImages: false },
+];
+
 function worldDeps(prior: {
   routing?: Record<string, unknown>;
   secret?: string;
@@ -293,9 +258,6 @@ function worldDeps(prior: {
     storedKey: prior.secret,
     applyRouting: async (choices) => {
       world.routing = { ...(choices as unknown as Record<string, unknown>) };
-    },
-    clearRouting: async () => {
-      world.routing = undefined;
     },
     setSecret: async (value) => {
       world.secret = value;
@@ -344,11 +306,10 @@ function worldDeps(prior: {
   return { deps, chains, world };
 }
 
-/** The full "configure this Pi here" interview, from primary brain to test. */
+/** The full "configure native here" interview, from primary brain to test. */
 const CONFIGURE_ANSWERS = [
-  "pi", // primary brain
+  "native", // primary brain
   "", // fallback: none
-  "configure", // configure provider + models here
   "openrouter", // provider
   "sk-new-key", // api key
   "gpt-5.2", // primary model
@@ -426,14 +387,14 @@ describe("brain onboarding rollback (PR #539 review)", () => {
     });
     expect(world.secret).toBe("sk-new-key");
     expect(world.auth).toBe("openrouter:sk-new-key");
-    expect(chains).toEqual([["pi"]]);
+    expect(chains).toEqual([["native"]]);
     expect(r.landing).toBe("chat");
   });
 
   test("cancelling mid-interview rolls back the slots already answered", async () => {
     // esc on the CODER slot, after provider + key + primary + vision landed.
     const { q } = fakeQ([
-      "pi", "", "configure", "openrouter", "sk-new-key",
+      "native", "", "openrouter", "sk-new-key",
       "gpt-5.2", "gpt-5.2-vision", undefined,
     ]);
     const { deps, world } = worldDeps(PRIOR);

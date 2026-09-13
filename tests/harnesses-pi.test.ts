@@ -345,7 +345,7 @@ afterEach(() => {
   vaultReloadSpy?.mockRestore();
 });
 
-const mkHarness = () => new PiHarness({ bin: FAKE_PI });
+const mkHarness = () => new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI] });
 
 describe("PiHarness.invoke (subprocess)", () => {
   test("normal exit: text chunks (thinking ignored) + done with finalText", async () => {
@@ -361,7 +361,7 @@ describe("PiHarness.invoke (subprocess)", () => {
     expect(dones[0]).toMatchObject({
       type: "done",
       finalText: "hello world",
-      meta: { harnessId: "pi" },
+      meta: { harnessId: "native" },
     });
   });
 
@@ -465,7 +465,7 @@ describe("PiHarness.invoke payload-via-temp-files", () => {
 
   test("system prompt + payload go to temp files, not raw argv", async () => {
     process.env.FAKE_PI_MODE = "argv";
-    const harness = new PiHarness({ bin: FAKE_PI });
+    const harness = new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI] });
     const chunks = await collect(
       harness.invoke(
         newRequest({ systemPrompt: "SECRET-PERSONA-PROMPT", userMessage: "SECRET-USER-MSG" }),
@@ -484,7 +484,7 @@ describe("PiHarness.invoke payload-via-temp-files", () => {
 
   test("temp dir is cleaned up after the run", async () => {
     process.env.FAKE_PI_MODE = "argv";
-    const harness = new PiHarness({ bin: FAKE_PI });
+    const harness = new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI] });
     const chunks = await collect(harness.invoke(newRequest()));
     const argv = argvOf(chunks);
     const match = argv.match(/@(\S*payload\.md)/);
@@ -496,7 +496,7 @@ describe("PiHarness.invoke payload-via-temp-files", () => {
 
   test("a large payload still spills to files and is answered (no size ceiling)", async () => {
     process.env.FAKE_PI_MODE = "argv";
-    const harness = new PiHarness({ bin: FAKE_PI });
+    const harness = new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI] });
     // ~200 KB — far past any old maxPayloadBytes cap and past a raw Windows
     // command line. Must still spill to a file and produce a reply, never a
     // recoverable "exceeds" error.
@@ -523,7 +523,7 @@ describe("PiHarness routing (subprocess)", () => {
     primaryModel?: string;
     imageModel?: string;
     codingModel?: string;
-  }) => new PiHarness({ bin: FAKE_PI, routing });
+  }) => new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing });
 
   test("routing.primaryModel pins the orchestrator via --model", async () => {
     process.env.FAKE_PI_MODE = "argv";
@@ -724,6 +724,8 @@ describe("PiHarness routing (subprocess)", () => {
       const chunks = await collect(
         new PiHarness({
           bin: FAKE_PI,
+          mode: "native",
+          command: [FAKE_PI],
           id: "pi-primary",
           apiKeyEnv: "PHANTOMBOT_PI_API_KEY_PI_PRIMARY",
           routing: { provider: "openrouter", primaryModel: "model-a" },
@@ -762,7 +764,7 @@ describe("PiHarness routing (subprocess)", () => {
     try {
       const argv = (
         await collect(
-          new PiHarness({ bin: FAKE_PI, routing: { useLocalConfig: true } })
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { useLocalConfig: true } })
             .invoke(newRequest()),
         )
       )
@@ -849,6 +851,8 @@ describe("PiHarness coder-swap retry ladder", () => {
     const chunks = await collect(
       new PiHarness({
         bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
         routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
       }).invoke(newRequest({ userMessage: PR_MSG })),
     );
@@ -870,6 +874,8 @@ describe("PiHarness coder-swap retry ladder", () => {
     const chunks = await collect(
       new PiHarness({
         bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
         routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
       }).invoke(newRequest({ userMessage: PR_MSG })),
     );
@@ -887,6 +893,8 @@ describe("PiHarness coder-swap retry ladder", () => {
     const chunks = await collect(
       new PiHarness({
         bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
         routing: { primaryModel: "z-ai/glm-5.2", codingModel: "z-ai/glm-5.2" },
       }).invoke(newRequest({ userMessage: PR_MSG })),
     );
@@ -902,6 +910,8 @@ describe("PiHarness coder-swap retry ladder", () => {
     const chunks = await collect(
       new PiHarness({
         bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
         routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
       }).invoke(newRequest({ userMessage: PR_MSG })),
     );
@@ -924,6 +934,8 @@ describe("PiHarness coder-swap retry ladder", () => {
     const chunks = await collect(
       new PiHarness({
         bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
         routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
       }).invoke(newRequest({ userMessage: PR_MSG })),
     );
@@ -946,6 +958,8 @@ describe("PiHarness coder-swap retry ladder", () => {
     const chunks = await collect(
       new PiHarness({
         bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
         routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
       }).invoke(newRequest({ userMessage: PR_MSG })),
     );
@@ -966,6 +980,8 @@ describe("PiHarness coder-swap retry ladder", () => {
     const chunks = await collect(
       new PiHarness({
         bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
         routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
       }).invoke(
         newRequest({ userMessage: PR_MSG, idleTimeoutMs: 10_000, hardTimeoutMs: 300 }),
@@ -985,6 +1001,8 @@ describe("PiHarness coder-swap retry ladder", () => {
     const chunks = await collect(
       new PiHarness({
         bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
         routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
       }).invoke(newRequest({ userMessage: PR_MSG })),
     );
@@ -995,5 +1013,69 @@ describe("PiHarness coder-swap retry ladder", () => {
     const argvs = await loggedArgv();
     expect(argvs).toHaveLength(1);
     expect(argvs[0]).toContain("--model z-ai/glm-5.2");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// native vs pi-host. native spawns the embedded engine (the command prefix)
+// with phantombot's routing; pi-host spawns the host binary and passes NONE of
+// phantombot's routing, provider or key — its owner configured it.
+// ---------------------------------------------------------------------------
+
+describe("PiHarness native vs pi-host (subprocess)", () => {
+  const argvOf = (chunks: HarnessChunk[]): string =>
+    chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+  const saved = {
+    mode: process.env.FAKE_PI_MODE,
+    key: process.env.PHANTOMBOT_PI_API_KEY,
+  };
+  const restore = () => {
+    if (saved.mode === undefined) delete process.env.FAKE_PI_MODE;
+    else process.env.FAKE_PI_MODE = saved.mode;
+    if (saved.key === undefined) delete process.env.PHANTOMBOT_PI_API_KEY;
+    else process.env.PHANTOMBOT_PI_API_KEY = saved.key;
+  };
+
+  test("pi-host: no --provider, --model or --api-key, even with routing and a key in the env", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-must-not-reach-host-pi";
+    try {
+      const harness = new PiHarness({
+        bin: FAKE_PI,
+        routing: { provider: "openrouter", primaryModel: "gpt-5.2", codingModel: "coder-x" },
+      });
+      expect(harness.id).toBe("pi-host");
+      const argv = argvOf(await collect(harness.invoke(newRequest())));
+      expect(argv).toContain("--print");
+      expect(argv).not.toContain("--provider");
+      expect(argv).not.toContain("--model");
+      expect(argv).not.toContain("--api-key");
+      expect(argv).not.toContain("sk-must-not-reach-host-pi");
+    } finally {
+      restore();
+    }
+  });
+
+  test("native: spawns the engine command prefix (not `bin`) and threads the routing", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    try {
+      const harness = new PiHarness({
+        bin: "/no/such/host/pi",
+        mode: "native",
+        command: [FAKE_PI],
+        routing: { provider: "openrouter", primaryModel: "gpt-5.2" },
+      });
+      expect(harness.id).toBe("native");
+      const chunks = await collect(harness.invoke(newRequest()));
+      expect(chunks.some((c) => c.type === "error")).toBe(false);
+      const argv = argvOf(chunks);
+      expect(argv).toContain("--provider openrouter");
+      expect(argv).toContain("--model gpt-5.2");
+    } finally {
+      restore();
+    }
   });
 });

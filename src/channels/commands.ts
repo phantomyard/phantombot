@@ -20,6 +20,8 @@
  *     so the LLM can interpret it (some personas use `/remember`, etc.).
  */
 
+import { piEngineFor } from "../lib/harnessReconcile.ts";
+import { embeddedPiCommand } from "../lib/embeddedPi.ts";
 import { stopNoteText } from "./core/backlog.ts";
 import { type Config } from "../config.ts";
 import { DEFAULT_UPDATE_CHANNEL } from "../lib/githubReleases.ts";
@@ -1111,12 +1113,17 @@ async function handleModelList(
   primary: Harness,
   ctx: SlashCommandContext,
 ): Promise<SlashCommandResult> {
-  const primaryType =
-    ctx.config?.harnesses.instances?.[primary.id]?.type ?? primary.id;
+  const engine = piEngineFor(ctx.config?.harnesses ?? { pi: {} }, primary.id);
+  const primaryType = engine
+    ? "pi"
+    : (ctx.config?.harnesses.instances?.[primary.id]?.type ?? primary.id);
   switch (primaryType) {
     case "pi": {
-      const bin = ctx.config?.harnesses.instances?.[primary.id]?.bin ??
-        ctx.config?.harnesses.pi.bin ?? "pi";
+      // native lists the EMBEDDED engine's catalogue; pi-host its own binary.
+      const bin = engine === "native"
+        ? embeddedPiCommand()
+        : (ctx.config?.harnesses.instances?.[primary.id]?.bin ??
+          ctx.config?.harnesses.pi.bin ?? "pi");
       const provider = primary.modelInfo?.().provider;
       let models = await listPiModels(bin);
       if (provider) models = models.filter((m) => m.provider === provider);
@@ -1180,6 +1187,7 @@ export function nominalContextWindow(harnessId: string): number {
     case "claude":
       return 200_000;
     case "pi":
+    case "native":
       return 64_000;
     default:
       return 128_000;

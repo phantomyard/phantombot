@@ -13,11 +13,9 @@
  * model + network, nothing else.
  */
 
+import { buildHarness } from "../harnesses/buildChain.ts";
+import { applyResolvedHarnessBins } from "./harnessAvailability.ts";
 import { type Config } from "../config.ts";
-import { ClaudeHarness } from "../harnesses/claude.ts";
-import { CodexHarness } from "../harnesses/codex.ts";
-import { PiHarness } from "../harnesses/pi.ts";
-import { piInstanceSecretName } from "../harnesses/buildChain.ts";
 import { resolveHarnessAvailability } from "./harnessAvailability.ts";
 
 export interface ProbeResult {
@@ -48,25 +46,15 @@ export async function probeHarness(opts: {
   if (!resolved?.resolved) {
     return { ok: false, detail: `'${opts.id}' is not on PATH` };
   }
-  const bin = resolved.resolved;
-  const namedPi = opts.config.harnesses.instances?.[opts.id];
-  const harness =
-    opts.id === "pi" || namedPi?.type === "pi"
-      ? new PiHarness({
-          ...(namedPi ?? opts.config.harnesses.pi),
-          bin,
-          id: opts.id,
-          ...(namedPi ? { apiKeyEnv: piInstanceSecretName(opts.id) } : {}),
-        })
-      : opts.id === "claude"
-        ? new ClaudeHarness({
-            ...opts.config.harnesses.claude,
-            bin,
-          })
-        : new CodexHarness({
-            ...(opts.config.harnesses.codex ?? { bin: "codex", model: "" }),
-            bin,
-          });
+  // Construct through the SAME builder a real turn uses (claude, codex,
+  // native, pi-host, named instances), on the live-resolved binary.
+  const harness = buildHarness(
+    applyResolvedHarnessBins(opts.config, [resolved]),
+    opts.id,
+  );
+  if (!harness) {
+    return { ok: false, detail: `'${opts.id}' is not a known harness` };
+  }
   try {
     for await (const chunk of harness.invoke({
       systemPrompt:

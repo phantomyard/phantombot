@@ -8,17 +8,17 @@
  * the TUI and the CLI cannot write different shapes of the same files.
  *
  * The flow:
- *   1. Primary brain — Pi / Codex / Claude, with a plain-words description.
- *   2. Fallback brain — optional, `(none)` allowed.
- *   3. If Pi was picked, HOW Pi's models are configured:
- *        · "Configure Provider and Model Swap Settings" (the default) —
- *          provider → API key → primary / vision / coder model slots, each a
- *          searchable windowed list (`SearchListScreen`).
- *        · "Use Host Configuration" — clear phantombot's routing and let Pi
- *          decide from its own local config.
+ *   1. Primary brain — detected LIVE each time the menu opens:
+ *        · "Native — Configure Provider and Model Swap Settings" is always
+ *          offered: the pi engine built into this binary, configured here
+ *          (provider → API key → primary / vision / coder model slots, each a
+ *          searchable windowed list, `SearchListScreen`).
+ *        · Claude, Codex and "Pi — Use Host Configuration" appear ONLY when
+ *          their binary is installed. A missing harness is not a choice.
+ *   2. Fallback brain — optional, `(none)` allowed; native may back itself up.
  *
- * Codex and Claude are CHAIN-ONLY choices: agents inherit the host's harness
- * configuration for them (auth, models, everything the host install owns), so
+ * Codex, Claude and host Pi are CHAIN-ONLY choices: agents inherit the host's
+ * harness configuration for them (auth, models, everything the host install owns), so
  * this flow never collects a token or a model for either — it writes their
  * chain entry and nothing else. The per-option hints say exactly that, because
  * "nothing to set up here" is the answer, not an omission.
@@ -76,7 +76,7 @@ export interface BrainDeps {
   persona?: string;
   /** The chain this persona effectively runs with now. */
   chain: readonly string[];
-  /** pi/codex/claude → resolved binary path, or undefined when not on PATH. */
+  /** native/pi-host/codex/claude → resolved binary path, or undefined when not installed. */
   availability: Record<string, string | undefined>;
   /** The EFFECTIVE Pi routing now (provider + the three model slots). */
   routing: {
@@ -96,11 +96,7 @@ export interface BrainDeps {
   targetPath: string;
   /** Persona scope (vs the global fallback file) — decides the tombstone. */
   personaScope: boolean;
-  /** Resolved pi binary, when present. Absent ⇒ free-text model entry. */
-  piBin?: string;
-  /** The install command, handed over as text — the TUI never runs installers. */
-  installCommand: string;
-  /** `pi --list-models`, injectable for tests. */
+  /** The embedded engine's `pi --list-models`, injectable for tests. */
   listModels(extraEnv?: Record<string, string>): Promise<PiModel[]>;
   /**
    * Cheap provider-side key check, run the moment a key is entered — before
@@ -123,27 +119,47 @@ export interface BrainDeps {
   writeAuth(provider: string, value: string): Promise<PiAuthWriteResult>;
   applyChain(chain: readonly string[]): Promise<void>;
   applyRouting(choices: RoutingChoices, instanceId?: string): Promise<unknown>;
-  clearRouting(opts?: { tombstone?: boolean }, instanceId?: string): Promise<void>;
 }
 
 const NONE = "";
 
-const HARNESS_LABELS: Record<string, string> = {
-  pi: "Pi",
+export const HARNESS_LABELS: Record<string, string> = {
+  native: "Native — Configure Provider and Model Swap Settings",
+  "pi-host": "Pi — Use Host Configuration",
   codex: "Codex",
   claude: "Claude",
 };
 
+/** Menu order. Native first: it is built in, the one brain every host can run. */
+const BRAIN_ORDER = ["native", "pi-host", "codex", "claude"] as const;
+
 /**
- * Per-harness hints. Codex/Claude state the inheritance up front — an operator
- * picking Codex must learn HERE that there is nothing to configure, not
- * discover it from an empty wizard.
+ * The brains this host can run right now: native always, the host harnesses
+ * only when their binary resolved in this (live) detection.
  */
-function harnessHint(id: string, deps: BrainDeps): string {
-  if (id === "pi") return "provider + model routing configured in this app";
-  const label = HARNESS_LABELS[id] ?? id;
-  const found = deps.availability[id] ? "" : " (not on PATH — will fail)";
-  return `uses this host's ${label} configuration — nothing to set up${found}`;
+export function offeredBrains(
+  availability: Record<string, string | undefined>,
+): string[] {
+  return BRAIN_ORDER.filter((id) => id === "native" || !!availability[id]);
+}
+
+/** Stored chain id → menu entry (the named native instances pick "native"). */
+export function brainMenuId(id: string | undefined): string | undefined {
+  if (id === "pi-primary" || id === "pi-fallback") return "native";
+  return id;
+}
+
+/**
+ * Per-harness hints. Host harnesses state the inheritance up front — an
+ * operator picking Codex must learn HERE that there is nothing to configure,
+ * not discover it from an empty wizard.
+ */
+function harnessHint(id: string): string {
+  if (id === "native") {
+    return "built-in pi engine — pick provider, API key and the primary / vision / coder models here (recommended)";
+  }
+  const label = id === "pi-host" ? "pi" : (HARNESS_LABELS[id] ?? id);
+  return `uses this host's ${label} configuration — nothing to set up here`;
 }
 
 const PRIMARY_DESCRIPTION =
@@ -151,9 +167,6 @@ const PRIMARY_DESCRIPTION =
 
 const FALLBACK_DESCRIPTION =
   "Used when the primary errors, hangs, or returns an empty reply. Leave it as (none) if you don't want a safety net — everything still works, there is just nothing to fall back to.";
-
-const PI_MODE_DESCRIPTION =
-  "Configure here picks the provider and which model handles primary, vision and coding turns — recommended. Use Host Configuration hands model choice back to Pi itself (whatever you set up by running `pi` on this host).";
 
 /**
  * Run the flow. Returns the line to show in the notice bar — every exit,
@@ -163,17 +176,21 @@ export async function configureBrain(
   q: BrainQuestions,
   deps: BrainDeps,
 ): Promise<string> {
-  const harnessIds = ["pi", "codex", "claude"];
+  const offered = offeredBrains(deps.availability);
+  const initialOf = (id: string | undefined): string | undefined => {
+    const mapped = brainMenuId(id);
+    return mapped !== undefined && offered.includes(mapped) ? mapped : undefined;
+  };
 
   const primary = await q.choose({
     title: "Primary brain",
     description: PRIMARY_DESCRIPTION,
-    options: harnessIds.map((id) => ({
+    options: offered.map((id) => ({
       value: id,
       label: HARNESS_LABELS[id] ?? id,
-      hint: harnessHint(id, deps),
+      hint: harnessHint(id),
     })),
-    initial: deps.chain[0]?.startsWith("pi-") ? "pi" : deps.chain[0],
+    initial: initialOf(deps.chain[0]) ?? "native",
   });
   if (primary === undefined) return "brain unchanged";
 
@@ -182,42 +199,39 @@ export async function configureBrain(
     description: FALLBACK_DESCRIPTION,
     options: [
       { value: NONE, label: "(none)", hint: "no fallback if the primary fails" },
-      ...harnessIds
-        .filter((id) => id !== primary || id === "pi")
+      ...offered
+        .filter((id) => id !== primary || id === "native")
         .map((id) => ({
           value: id,
           label: HARNESS_LABELS[id] ?? id,
-          hint: harnessHint(id, deps),
+          hint: harnessHint(id),
         })),
     ],
-    initial: deps.chain[1]?.startsWith("pi-") ? "pi" : (deps.chain[1] ?? NONE),
+    initial: initialOf(deps.chain[1]) ?? NONE,
   });
   if (fallback === undefined) return "brain unchanged";
 
-  const bothPi = primary === "pi" && fallback === "pi";
-  let primaryMode: "configure" | "host" | undefined;
-  if (primary === "pi") {
-    const cancelled = await configurePi(
+  const bothNative = primary === "native" && fallback === "native";
+  if (primary === "native") {
+    const cancelled = await configureNative(
       q,
       deps,
       "primary",
-      { onMode: (m) => { primaryMode = m; } },
-      bothPi ? "pi-primary" : undefined,
+      bothNative ? "pi-primary" : undefined,
     );
     if (cancelled) return "brain unchanged";
   }
-  if (fallback === "pi") {
-    const cancelled = await configurePi(
+  if (fallback === "native") {
+    const cancelled = await configureNative(
       q,
       deps,
       "fallback",
-      { allowHostConfig: primaryMode !== "host" },
-      bothPi ? "pi-fallback" : undefined,
+      bothNative ? "pi-fallback" : undefined,
     );
     if (cancelled) return "brain unchanged";
   }
 
-  const chain = bothPi
+  const chain = bothNative
     ? ["pi-primary", "pi-fallback"]
     : [primary, ...(fallback !== NONE ? [fallback] : [])];
   await deps.applyChain(chain);
@@ -229,89 +243,34 @@ export async function configureBrain(
   return `brain saved: ${chain.join(" → ")}`;
 }
 
-export interface ConfigurePiOptions {
-  askMode?: boolean;
-  allowHostConfig?: boolean;
-  onMode?: (mode: "configure" | "host") => void;
-}
-
 /**
- * Configure Pi for the slot it occupies (`primary` or `fallback` — the banner
- * always names which). Returns `true` when the operator cancelled, so the
- * caller can abort the whole flow untouched.
+ * Configure the native harness for the slot it occupies (`primary` or
+ * `fallback` — the provider screen names which). Returns `true` when the
+ * operator cancelled, so the caller can abort the whole flow untouched.
+ *
+ * There is no "configure vs host configuration" question: native is
+ * phantombot-configured by definition, and the host's own pi is the separate
+ * "Pi — Use Host Configuration" brain.
  *
  * Idempotency contract: a key is written ONLY when the operator types one.
  * Submitting the key box empty keeps what is stored (when the provider is
  * unchanged — `resolvePiApiKeyWrite` decides), so re-running the flow and
  * changing nothing rewrites no secret.
  */
-export async function configurePi(
+export async function configureNative(
   q: BrainQuestions,
   deps: BrainDeps,
   role: "primary" | "fallback",
-  opts?: ConfigurePiOptions,
   instanceId?: string,
 ): Promise<boolean> {
   const current = instanceId
     ? (deps.piInstances?.[role] ?? { routing: {}, storedKey: undefined })
     : { routing: deps.routing, storedKey: deps.storedKey };
-  // askMode:false — the caller already asked the configure-vs-host question
-  // (brain onboarding does, to show it in flow order) and chose "configure".
-  if (!deps.piBin) {
-    q.note(
-      "Pi not found",
-      `pi isn't on this host yet. Run this in a terminal, then come back:\n\n  ${deps.installCommand}`,
-    );
-  }
 
-  let mode: "configure" | "host" = "configure";
-  if (opts?.askMode !== false) {
-    if (opts?.allowHostConfig === false) {
-      mode = "configure";
-      q.note(
-        "Pi: fallback models",
-        "the fallback must configure its own models — two Pi instances on host config would be identical",
-      );
-    } else {
-      const pick = await q.choose({
-        title: `Pi (${role} brain) — how should its models be configured?`,
-        description: PI_MODE_DESCRIPTION,
-        options: [
-          {
-            value: "configure",
-            label: "Configure Provider and Model Swap Settings",
-            hint: "pick provider, API key, and the primary / vision / coder models here (recommended)",
-          },
-          {
-            value: "host",
-            label: "Use Host Configuration",
-            hint: "reuse the Pi provider and model routing already configured on this host",
-          },
-        ],
-        initial: "configure",
-      });
-      if (pick === undefined) return true;
-      mode = pick as "configure" | "host";
-    }
-  }
-  opts?.onMode?.(mode);
-
-  if (mode === "host") {
-    // ACTIVELY clear — see clearPiRouting. The tombstone only exists in
-    // persona scope: in the global file it would be inherited by every persona
-    // that has not stated its own routing.
-    await deps.clearRouting({ tombstone: deps.personaScope }, instanceId);
-    q.note(
-      "Pi: using host configuration",
-      `cleared phantombot's Pi routing from ${deps.targetPath} — Pi decides for itself, from its own local config. Re-run Brain and choose Configure to override.`,
-    );
-    return false;
-  }
-
-  // The catalogue is fetched once and reused by every slot's list. With no pi
-  // binary the lists degrade to free-text rows inside the search screen.
-  let models = deps.piBin ? await deps.listModels() : [];
-  if (current.storedKey && current.routing.provider && deps.piBin) {
+  // The catalogue is fetched once and reused by every slot's list. With no
+  // catalogue (no key yet) the lists degrade to free-text rows.
+  let models = await deps.listModels();
+  if (current.storedKey && current.routing.provider) {
     if (models.filter((m) => m.provider === current.routing.provider).length === 0) {
       const envVar = providerEnvVar(current.routing.provider);
       if (envVar) {
@@ -322,7 +281,7 @@ export async function configurePi(
   }
 
   const provider = await q.search({
-    title: "Pi provider",
+    title: `Provider for the ${role} brain`,
     description:
       "Scopes the API key and every model list. Type to search — the catalogue is long.",
     options: [
@@ -429,16 +388,16 @@ export async function configurePi(
           `couldn't write Pi's auth store: ${authWrite.reason} — falling back to an env-injected model refresh`,
         );
       }
-      if (authWrite.ok && deps.piBin) refreshed = await deps.listModels();
+      if (authWrite.ok) refreshed = await deps.listModels();
     }
-    if (refreshed.length === 0 && provider && deps.piBin) {
+    if (refreshed.length === 0 && provider) {
       const envVar = providerEnvVar(provider);
       if (envVar) refreshed = await deps.listModels({ [envVar]: keyWrite.value });
     }
     if (refreshed.length > 0) models = mergeModels(models, refreshed);
   } else if (keyWrite.action === "keep") {
     const effectiveKey = current.storedKey;
-    if (provider && effectiveKey && deps.piBin) {
+    if (provider && effectiveKey) {
       const authWrite = await deps.writeAuth(provider, effectiveKey);
       let refreshed: PiModel[] = [];
       if (authWrite.ok) refreshed = await deps.listModels();
@@ -571,7 +530,7 @@ async function pickModelSlot(
       title: "Pi model",
       banner: `Selecting the ${SLOT_LABELS[opts.slot]} model — ${opts.what}`,
       description:
-        "No model catalogue available (pi not installed, or no key yet). Type the model id as `pi --list-models` would print it, e.g. gpt-5.2.",
+        "No model catalogue available (no key for this provider yet). Type the model id as `pi --list-models` would print it, e.g. gpt-5.2.",
       options: opts.allowNone
         ? [{ value: NONE, label: "(none)", hint: "no override" }]
         : [],

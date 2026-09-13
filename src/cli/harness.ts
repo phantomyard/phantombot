@@ -20,7 +20,6 @@ import { type PersonaWriteScope } from "../lib/personaConfig.ts";
 import {
   harnessBin,
   resolveHarnessAvailability,
-  resolveHarnessBinary,
 } from "../lib/harnessAvailability.ts";
 import {
   defaultServiceControl,
@@ -48,6 +47,7 @@ import {
 import { setPersonaSecret, unsetPersonaSecret } from "../lib/vaultSecrets.ts";
 import { writePiApiKey } from "../lib/piAuthStore.ts";
 import { saveHarnessBins } from "../state.ts";
+import { EMBEDDED_PI_VERSION, embeddedPiCommand } from "../lib/embeddedPi.ts";
 import { harnessChainIds, piInstanceSecretName } from "../harnesses/buildChain.ts";
 
 export { whichBinary } from "../lib/harnessAvailability.ts";
@@ -64,49 +64,71 @@ import {
   type HarnessWriteTarget,
 } from "../lib/harnessWriteTarget.ts";
 
-export type HarnessId = "claude" | "pi" | "codex";
-// Pi is listed FIRST so it is the default primary in the wizard (both the
-// pre-selected option and the SUPPORTED_HARNESSES[0] fallback). Pi is
-// phantombot's reference harness — capability routing, the coding-brain swap,
-// and the vision delegate are all Pi features — so a fresh install should land
-// on Pi unless the operator deliberately picks another.
+export type HarnessId = "native" | "claude" | "codex" | "pi-host";
+// native is listed FIRST so it is the default primary: it is the pi engine
+// compiled into this binary, so it is the one brain every host can run — it
+// only needs a provider key. The host harnesses follow and are OFFERED only
+// when installed (offeredHarnesses). Nothing is ever installed from here.
 export const SUPPORTED_HARNESSES: ReadonlyArray<HarnessId> = [
-  "pi",
+  "native",
   "claude",
   "codex",
+  "pi-host",
 ];
 
-/**
- * The official Pi installer invocation — user-space, no sudo. Returned as an
- * argv array (not a shell string) so callers spawn it explicitly; it is pure
- * and unit-tested so the wizard's shell-out stays a thin wrapper.
- *
- * Platform-aware (issue #269): POSIX runs Pi's shell installer
- * (pi.dev/install.sh) via `sh`, but on Windows there is no `sh` and that path
- * either fails outright or, if Git Bash is present, installs a POSIX layout the
- * Windows runtime can't launch. Windows instead runs Pi's PowerShell installer
- * (pi.dev/install.ps1) through `powershell`. The `platform` arg defaults to the
- * host but is injectable so both branches stay unit-tested on a single OS.
- */
-export function piInstallCommand(
-  platform: NodeJS.Platform = process.platform,
-): string[] {
-  if (platform === "win32") {
-    return [
-      "powershell",
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Command",
-      "irm https://pi.dev/install.ps1 | iex",
-    ];
-  }
-  return [
-    "sh",
-    "-c",
-    "curl -f -s -S -L https://pi.dev/install.sh -o /tmp/pi-install.sh && sh /tmp/pi-install.sh && rm -f /tmp/pi-install.sh",
-  ];
+/** Native is always offered (built in); host harnesses only when detected. */
+export function offeredHarnesses(
+  availability: Record<HarnessId, string | undefined>,
+): HarnessId[] {
+  return SUPPORTED_HARNESSES.filter((id) => id === "native" || !!availability[id]);
 }
+
+/**
+ * Map a stored chain id to the menu entry it came from, or undefined when that
+ * entry is not offered on this host. The named instances a native → native
+ * chain writes (`pi-primary` / `pi-fallback`) pick "native".
+ */
+export function pickableId(
+  id: string | undefined,
+  offered: readonly HarnessId[],
+): HarnessId | undefined {
+  if (id === undefined) return undefined;
+  const mapped = id === "pi-primary" || id === "pi-fallback" ? "native" : id;
+  return (offered as readonly string[]).includes(mapped)
+    ? (mapped as HarnessId)
+    : undefined;
+}
+
+/**
+ * The `state.json harness_bins` shape for a detection result. native is never
+ * persisted — its "binary" is this executable, which moves on every update —
+ * and pi-host persists under the `pi` key that loadConfig reads.
+ */
+export function availabilityStateBins(
+  availability: Record<HarnessId, string | undefined>,
+): Record<string, string | undefined> {
+  return {
+    claude: availability.claude,
+    codex: availability.codex,
+    pi: availability["pi-host"],
+  };
+}
+
+/** The "Detected harnesses" note body. */
+export function formatDetectedHarnesses(
+  config: Config,
+  availability: Record<HarnessId, string | undefined>,
+): string {
+  return SUPPORTED_HARNESSES.map((id) =>
+    id === "native"
+      ? `  [built in]  native: pi ${EMBEDDED_PI_VERSION} engine inside phantombot`
+      : `  ${availability[id] ? "[ok]       " : "[not found]"} ${id}: ${availability[id] ?? harnessBin(config, id)}`,
+  ).join("\n");
+}
+
+export const NO_HOST_HARNESS_NOTE =
+  "No host harness (claude, codex, pi) was found on your PATH — that's fine.\n" +
+  "The built-in native harness needs nothing installed; it only needs a provider API key.";
 
 /**
  * What the wizard and `init` show as "installed".
@@ -124,7 +146,7 @@ export async function detectAvailability(
   config: Config,
   pathEnv = process.env.PATH ?? "",
 ): Promise<Record<HarnessId, string | undefined>> {
-  const ids: HarnessId[] = ["claude", "pi", "codex"];
+  const ids: HarnessId[] = [...SUPPORTED_HARNESSES];
   const entries = await Promise.all(
     ids.map(
       async (id) =>
@@ -179,7 +201,7 @@ export async function applyRouting(
     const base = instanceId
       ? ["harnesses", "instances", instanceId, "routing"]
       : ["harnesses", "pi", "routing"];
-    if (instanceId) setIn(toml, ["harnesses", "instances", instanceId, "type"], "pi");
+    if (instanceId) setIn(toml, ["harnesses", "instances", instanceId, "type"], "native");
     setIn(toml, [...base, "primary_model"], writes.toml.primary_model);
     // Provider: drop the key when none was chosen so a switch back to Pi's
     // default clears a stale provider (mirrors the env "" = unset semantics).
@@ -218,7 +240,7 @@ export async function clearPiRouting(
     const base = instanceId
       ? ["harnesses", "instances", instanceId, "routing"]
       : ["harnesses", "pi", "routing"];
-    if (instanceId) setIn(toml, ["harnesses", "instances", instanceId, "type"], "pi");
+    if (instanceId) setIn(toml, ["harnesses", "instances", instanceId, "type"], "native");
     if (opts.tombstone) {
       // PERSONA scope: deleting the keys is not clearing them. A key this
       // persona no longer states falls back to the host's
@@ -308,14 +330,14 @@ export interface RunHarnessCheckInput {
   config?: Config;
   prompts?: HarnessPrompts;
   dryRun?: boolean;
-  installRunner?: InstallRunner;
   availability?: Record<HarnessId, string | undefined>;
   pathEnv?: string;
 }
 
 /**
- * Harness detection probe used during installation. Shows detected harnesses
- * and, if all are missing, proposes running the official Pi installer.
+ * Harness detection probe used during installation. Shows what is installed —
+ * and installs nothing. The native harness is built in, so a host with no
+ * harness CLI at all still has a brain; the old "Install Pi now?" offer is gone.
  */
 export async function runHarnessCheck(
   input: RunHarnessCheckInput = {},
@@ -323,117 +345,32 @@ export async function runHarnessCheck(
   const config = input.config ?? (await loadConfig());
   const availability =
     input.availability ?? (await detectAvailability(config, input.pathEnv));
-  await saveHarnessBins(availability);
+  await saveHarnessBins(availabilityStateBins(availability));
+  const hasHostHarness = offeredHarnesses(availability).length > 1;
+  const summary = formatDetectedHarnesses(config, availability);
 
   if (input.prompts || !process.stdin.isTTY) {
     const q = input.prompts ?? clackPrompts;
-    q.note(
-      SUPPORTED_HARNESSES.map(
-        (id) =>
-          `  ${availability[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${availability[id] ?? harnessBin(config, id)}`,
-      ).join("\n"),
-      "Detected harnesses",
-    );
-
-    const hasAnyHarness = Object.values(availability).some(
-      (path) => path !== undefined,
-    );
-    if (!hasAnyHarness) {
-      q.note(
-        "No supported harness (claude, pi, codex) was found on your PATH.\n" +
-          "You will need to install at least one of them before the agent can think.",
-        "Warning: No Harness Found",
-      );
-      if (!input.dryRun) {
-        const runner = input.installRunner ?? defaultInstallRunner;
-        const wantsPi = await (q.confirm ?? p.confirm)({
-          message: "Install Pi now? (official Pi installer: pi.dev)",
-          initialValue: true,
-        });
-        if (wantsPi && !p.isCancel(wantsPi)) {
-          await installPi(runner, q);
-          const refreshed = await detectAvailability(config);
-          await saveHarnessBins(refreshed);
-          q.note(
-            SUPPORTED_HARNESSES.map(
-              (id) =>
-                `  ${refreshed[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${refreshed[id] ?? harnessBin(config, id)}`,
-            ).join("\n"),
-            "Detected harnesses",
-          );
-        }
-      }
-    }
-
+    q.note(summary, "Detected harnesses");
+    if (!hasHostHarness) q.note(NO_HOST_HARNESS_NOTE, "Native harness");
     const proceed = await (q.confirm ?? p.confirm)({
       message: "Continue to phantombot TUI?",
       initialValue: true,
     });
-    if (proceed !== true) {
-      return 1;
-    }
-
-    return 0;
+    return proceed === true ? 0 : 1;
   }
 
   const { runStandaloneFlow } = await import("../tui/standalone.tsx");
   return await runStandaloneFlow(async (q) => {
-    let currentAvailability = availability;
-    const formatSummary = (avail: Record<HarnessId, string | undefined>) =>
-      SUPPORTED_HARNESSES.map(
-        (id) =>
-          `  ${avail[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${avail[id] ?? harnessBin(config, id)}`,
-      ).join("\n");
-
-    const hasAnyHarness = Object.values(currentAvailability).some(
-      (path) => path !== undefined,
-    );
-    if (!hasAnyHarness) {
-      if (!input.dryRun) {
-        const wantsPi = await q.choose({
-          title: "Warning: No Harness Found",
-          description:
-            "No supported harness (claude, pi, codex) was found on your PATH.\n" +
-            "You will need to install at least one of them before the agent can think.\n\n" +
-            formatSummary(currentAvailability),
-          options: [
-            {
-              value: "yes",
-              label: "Install Pi now (official Pi installer: pi.dev)",
-              hint: "recommended",
-            },
-            { value: "skip", label: "Skip harness installation for now" },
-          ],
-        });
-
-        if (wantsPi === "yes") {
-          const runner = input.installRunner ?? defaultInstallRunner;
-          const { withPromptTerminal } = await import("../tui/prompts.ts");
-          await withPromptTerminal(async () => {
-            await installPi(runner, {
-              note: (body: string, title?: string) =>
-                q.note(title ?? "", body),
-            } as never);
-          });
-          currentAvailability = await detectAvailability(config);
-          await saveHarnessBins(currentAvailability);
-        }
-      }
-    }
-
     const proceed = await q.choose({
       title: "Continue to phantombot TUI?",
-      description: formatSummary(currentAvailability),
+      description: hasHostHarness ? summary : `${summary}\n\n${NO_HOST_HARNESS_NOTE}`,
       options: [
         { value: "yes", label: "Yes, continue into phantombot TUI" },
         { value: "no", label: "No, exit back to terminal" },
       ],
     });
-
-    if (proceed !== "yes") {
-      return 1;
-    }
-    return 0;
+    return proceed === "yes" ? 0 : 1;
   }, ["phantombot", "harness-check"]);
 }
 
@@ -454,6 +391,12 @@ export interface RunInput {
    * flow runs inside the app — same writes, same order, no terminal hand-over.
    */
   prompts?: HarnessPrompts;
+  /**
+   * TEST SEAM: the argv that lists the native engine's models. Production
+   * always uses embeddedPiCommand(); tests point it at a missing binary so the
+   * wizard never spawns a real engine.
+   */
+  piCommand?: readonly string[];
 }
 
 export async function runHarness(input: RunInput = {}): Promise<number> {
@@ -490,39 +433,28 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   // the global file (legacy shape) until then.
   const target = await resolveHarnessWriteTarget(config, persona);
   const availability = input.availability ?? (await detectAvailability(config));
-  await saveHarnessBins(availability);
+  await saveHarnessBins(availabilityStateBins(availability));
   const svc = input.serviceControl ?? defaultServiceControl();
 
   q.intro("Configure the harness chain");
 
-  q.note(
-    SUPPORTED_HARNESSES.map(
-      (id) => `  ${availability[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${availability[id] ?? harnessBin(config, id)}`,
-    ).join("\n"),
-    "Detected harnesses",
-  );
+  q.note(formatDetectedHarnesses(config, availability), "Detected harnesses");
+  // Detected live: a host harness that is not installed is not offered at all.
+  const offered = offeredHarnesses(availability);
+  if (offered.length === 1) q.note(NO_HOST_HARNESS_NOTE, "Native harness");
 
-  const hasAnyHarness = Object.values(availability).some((path) => path !== undefined);
-  if (!hasAnyHarness) {
-    q.note(
-      "No supported harness (claude, pi, codex) was found on your PATH.\n" +
-      "You will need to install at least one of them before the agent can think.\n" +
-      "We will continue the setup anyway so your configuration is ready.",
-      "Warning: No Harness Found",
-    );
-  }
+  const hints: Record<HarnessId, string> = {
+    native: "built in — configure provider and model swap settings here",
+    claude: "uses this host's claude configuration",
+    codex: "uses this host's codex configuration",
+    "pi-host": "uses this host's own pi configuration",
+  };
 
   const primary = await q.select<HarnessId>({
     message: "Primary harness",
-    options: SUPPORTED_HARNESSES.map((id) => ({
-      value: id,
-      label: id,
-      hint: availability[id] ? availability[id] : "not on PATH (will fail)",
-    })),
-    // Pi is the default (SUPPORTED_HARNESSES[0]); an existing config wins.
-    initialValue:
-      ((currentChain[0]?.startsWith("pi-") ? "pi" : currentChain[0]) as HarnessId) ??
-      SUPPORTED_HARNESSES[0],
+    options: offered.map((id) => ({ value: id, label: id, hint: hints[id] })),
+    // native is the default; an existing (still-offered) choice wins.
+    initialValue: pickableId(currentChain[0], offered) ?? offered[0]!,
   });
   if (primary === undefined) {
     q.cancel("cancelled");
@@ -535,32 +467,30 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     hint?: string;
   }> = [
     { value: "none", label: "(none)", hint: "no fallback if primary fails" },
-    ...SUPPORTED_HARNESSES.filter((id) => id !== primary || id === "pi").map((id) => ({
+    // native may back itself up: each occurrence is an independent instance.
+    ...offered.filter((id) => id !== primary || id === "native").map((id) => ({
       value: id,
       label: id,
-      hint: availability[id] ?? "not on PATH",
+      hint: hints[id],
     })),
   ];
 
   const fallbackPick = await q.select<HarnessId | "none">({
     message: "Fallback harness",
     options: fallbackOptions,
-    initialValue:
-      ((currentChain[1]?.startsWith("pi-") ? "pi" : currentChain[1]) as HarnessId | undefined) ??
-      "none",
+    initialValue: pickableId(currentChain[1], offered) ?? "none",
   });
   if (fallbackPick === undefined) {
     q.cancel("cancelled");
     return 1;
   }
 
-  const bothPi = primary === "pi" && fallbackPick === "pi";
-  let primaryMode: "configure" | "local" | undefined;
-  if (primary === "pi") {
-    const cancelled = await configurePi(
-      config, availability, "primary", target, q,
-      bothPi ? "pi-primary" : undefined,
-      { onMode: (m) => { primaryMode = m; } },
+  const bothNative = primary === "native" && fallbackPick === "native";
+  if (primary === "native") {
+    const cancelled = await configureNative(
+      config, "primary", target, q,
+      bothNative ? "pi-primary" : undefined,
+      input.piCommand,
     );
     if (cancelled) {
       q.cancel("cancelled");
@@ -568,11 +498,11 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     }
   }
 
-  if (fallbackPick === "pi") {
-    const cancelled = await configurePi(
-      config, availability, "fallback", target, q,
-      bothPi ? "pi-fallback" : undefined,
-      { allowLocalConfig: primaryMode !== "local" },
+  if (fallbackPick === "native") {
+    const cancelled = await configureNative(
+      config, "fallback", target, q,
+      bothNative ? "pi-fallback" : undefined,
+      input.piCommand,
     );
     if (cancelled) {
       q.cancel("cancelled");
@@ -580,8 +510,8 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     }
   }
 
-  const chain: string[] = bothPi ? ["pi-primary", "pi-fallback"] : [primary];
-  if (!bothPi && fallbackPick !== "none") chain.push(fallbackPick);
+  const chain: string[] = bothNative ? ["pi-primary", "pi-fallback"] : [primary];
+  if (!bothNative && fallbackPick !== "none") chain.push(fallbackPick);
 
   await applyHarnessChain(target.path, chain, persona, target.scope);
   q.note(
@@ -600,170 +530,33 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
 }
 
 /**
- * Run the official Pi installer (user-space, no sudo). stdout/stdin inherit so
- * the operator goes through Pi's own onboarding live; stderr is captured for the
- * failure note. Injectable for tests via the `runner` param. Returns whether it
- * exited cleanly.
- */
-export type InstallRunner = (cmd: string[]) => Promise<{
-  exitCode: number;
-  stderr: string;
-}>;
-
-export const defaultInstallRunner: InstallRunner = async (cmd) => {
-  const [bin, ...rest] = cmd;
-  const proc = Bun.spawn([bin!, ...rest], {
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const exitCode = await proc.exited;
-  return { exitCode, stderr: "" };
-};
-
-export async function installPi(
-  runner: InstallRunner = defaultInstallRunner,
-  q: HarnessPrompts = clackPrompts,
-): Promise<boolean> {
-  const r = await runner(piInstallCommand());
-  if (r.exitCode === 0) return true;
-  q.note(
-    `pi install exited ${r.exitCode}.\n${(r.stderr || "(no stderr)").trim()}`,
-    "Install failed",
-  );
-  return false;
-}
-
-/**
- * Configure Pi when it's chosen as a harness (primary OR fallback). Steps:
- *   1. If Pi isn't on PATH, offer to run the official installer, then redetect
- *      (and update the shared `availability` map so the caller's later prompts
- *      see the freshly-installed binary).
- *   2. Ask WHO owns the model config — the real choice behind the old
- *      "now / later" wording, which described *when* you'd configure rather than
- *      *what* would drive Pi:
- *        · "Use Pi's own config" ⇒ delegate to Pi's local settings (what the
- *          user set by running `pi` and logging into a provider). CLEARS both of
- *          phantombot's routing stores, then stops — see clearPiRouting for why
- *          skipping the write isn't enough.
- *        · "Configure models" ⇒ continue to 3.
- *   3. Pick the provider (from Pi's full static catalogue, NOT just what's
- *      already keyed), collect that provider's API key (stored in ~/.env as
- *      PHANTOMBOT_PI_API_KEY, threaded per-turn onto `--api-key`; AND
- *      merge-written into Pi's own auth.json so `pi --list-models` sees it —
- *      the env-injected refresh alone proved unreliable off-Linux, #312),
- *      refresh the model catalogue with it, then run the routing wizard for
- *      primary / image / coding (no "use defaults?" detour).
+ * Configure the native harness for the slot it occupies (primary OR fallback):
+ * provider → API key (persona vault, plus pi's own auth store so the model
+ * listing sees it, #312) → primary / image / coding models.
  *
- * `availability` is mutated in place when an install succeeds. Returns `true`
- * only when the operator cancelled outright (Esc), so the caller can abort.
+ * There is no "whose config?" question and no install step any more. native
+ * is phantombot-configured by definition and runs the engine built into this
+ * binary; the host's own pi is the separate `pi-host` harness, configured by
+ * its owner exactly like claude and codex.
+ *
+ * Returns `true` only when the operator cancelled outright (Esc).
  */
-async function configurePi(
+async function configureNative(
   config: Config,
-  availability: Record<HarnessId, string | undefined>,
   role: "primary" | "fallback",
   target: HarnessWriteTarget,
   q: HarnessPrompts = clackPrompts,
   instanceId?: string,
-  opts?: { allowLocalConfig?: boolean; onMode?: (mode: "configure" | "local") => void },
+  piCommand: readonly string[] = embeddedPiCommand(),
 ): Promise<boolean> {
-  if (!availability.pi) {
-    const doInstall = await q.confirm({
-      message: `Pi isn't installed. Install it now (official installer, user-space)?`,
-      initialValue: true,
-    });
-    if (doInstall === undefined) return true;
-    if (doInstall && !q.canRunInteractiveInstaller) {
-      // The installer inherits stdin and draws its own onboarding. Inside the
-      // TUI that is a hand-over mid-render, i.e. the wedge this whole port
-      // exists to remove — so hand the operator the command instead.
-      q.note(
-        `run this in a terminal, then come back:\n\n  ${piInstallCommand().join(" ")}`,
-        "Install Pi",
-      );
-    } else if (doInstall) {
-      const { withPromptTerminal } = await import("../tui/prompts.ts");
-      const ok = await withPromptTerminal(async () =>
-        installPi(defaultInstallRunner, q),
-      );
-      if (ok) {
-        // Redetect against the broad search path (Pi may land in ~/.local/bin or
-        // ~/.pi/agent/bin, not the current process PATH).
-        const resolved = await resolveHarnessBinary("pi");
-        availability.pi = resolved.path;
-        await saveHarnessBins(availability);
-        q.note(
-          availability.pi
-            ? `pi installed: ${availability.pi}`
-            : "pi installed, but not yet detected on the search path — you can still configure routing by hand below.",
-          "Install",
-        );
-      }
-    }
-  }
-
-  let mode: "configure" | "local" = "configure";
-  if (opts?.allowLocalConfig === false) {
-    mode = "configure";
-    q.note(
-      "the fallback must configure its own models — two Pi instances on host config would be identical",
-      "Pi fallback",
-    );
-  } else {
-    const pick = await q.select<"configure" | "local">({
-      message: `Pi (${role}): how should models be configured?`,
-      options: [
-        {
-          value: "configure",
-          label: "Configure models",
-          hint: "pick provider + API key, then primary / vision / coding models",
-        },
-        {
-          value: "local",
-          label: "Use Pi's own config",
-          hint: "delegate to Pi's local settings (from `pi` login) — clears any routing here",
-        },
-      ],
-      initialValue: "configure",
-    });
-    if (pick === undefined) return true;
-    mode = pick;
-  }
-  opts?.onMode?.(mode);
-  if (mode === "local") {
-    // ACTIVELY clear both stores — see clearPiRouting/computeRoutingClears. The
-    // old "later" branch returned without clearing, so any previously-configured
-    // routing kept being threaded onto every turn and this option did nothing.
-    await clearPiRouting(target.path, {
-      // Only a persona file may carry the opt-out tombstone: in the global
-      // file it would be inherited by every persona that has not stated its
-      // own routing, turning one persona's "use Pi's own config" into the
-      // host's. In global scope the delete is already a true clear — there is
-      // no layer above it to fall back to.
-      tombstone: target.scope === "persona",
-    }, instanceId);
-    q.note(
-      [
-        "Pi will use its own local config (~/.pi/agent/settings.json) — the",
-        "provider + model you set by running `pi` and logging in.",
-        "",
-        `cleared phantombot's Pi routing from ${target.path}`,
-        "(provider, primary/image/coding model), so no --model/--provider is",
-        "passed and Pi decides for itself.",
-        "",
-        "Re-run `phantombot harness` and pick 'Configure models' to override.",
-      ].join("\n"),
-      "Pi: using Pi's own config",
-    );
-    return false;
-  }
+  q.note(`configuring the ${role} brain: provider, API key and models`, "Native harness");
 
   // CONFIGURE: provider FIRST. Pi's `--provider` defaults to google, so a key is
   // meaningless until we know which provider it's FOR — and the provider also
   // scopes the key prompt label and the model pickers. Query the model catalog
   // once here: it yields the models the routing wizard will filter (and marks
   // which providers are already keyed), so we don't shell out twice.
-  let models = availability.pi ? await listPiModels(availability.pi) : [];
+  let models = await listPiModels(piCommand);
   // Read the EFFECTIVE routing for the persona being configured, not the raw
   // global file: with a persona layer the file on disk is only half the answer
   // (its own config.toml wins per key), and pre-selecting the host's models for
@@ -842,14 +635,14 @@ async function configurePi(
       // Plain listing first whenever the store keys this provider — either we
       // just wrote the key, or an oauth login already did (skipped ⇒ the
       // provider is keyed, so a plain listing is populated).
-      if (authWrite.ok && availability.pi) {
-        refreshed = await listPiModels(availability.pi);
+      if (authWrite.ok) {
+        refreshed = await listPiModels(piCommand);
       }
     }
     if (refreshed.length === 0) {
       const envVar = provider ? providerEnvVar(provider) : undefined;
-      if (availability.pi && envVar) {
-        refreshed = await listPiModels(availability.pi, undefined, {
+      if (envVar) {
+        refreshed = await listPiModels(piCommand, undefined, {
           [envVar]: keyWrite.value,
         });
       }
@@ -875,7 +668,7 @@ async function configurePi(
   // "" is the explicit "clear the provider" sentinel; collapsing it to undefined
   // here (the old `provider || undefined`) made runRoutingWizard fall back to the
   // existing provider, so "(none)" could never clear a previously-set one.
-  return runRoutingWizard(config, availability.pi, q, {
+  return runRoutingWizard(config, piCommand, q, {
     forceCustom: true,
     provider,
     models,
@@ -902,7 +695,7 @@ async function configurePi(
  */
 async function runRoutingWizard(
   config: Config,
-  piBin: string | undefined,
+  piCommand: readonly string[] | undefined,
   q: HarnessPrompts = clackPrompts,
   opts: {
     forceCustom?: boolean;
@@ -962,7 +755,7 @@ async function runRoutingWizard(
   // Custom routing: use the catalog configurePi already fetched, else query pi
   // now so the picker only shows models that are actually available. Falls back
   // to free-text if pi can't be queried (not installed, or output unparseable).
-  const allModels = opts.models ?? (piBin ? await listPiModels(piBin) : []);
+  const allModels = opts.models ?? (piCommand ? await listPiModels(piCommand) : []);
   if (allModels.length === 0) {
     q.note(
       "Couldn't read `pi --list-models` — entering model ids by hand.\n" +
@@ -1239,7 +1032,7 @@ export default defineCommand({
     check: {
       type: "boolean",
       description:
-        "Detect installed harnesses and propose Pi install if none found (used during install).",
+        "Detect installed harnesses (used during install). Installs nothing — the native harness is built in.",
     },
     dryrun: {
       type: "boolean",

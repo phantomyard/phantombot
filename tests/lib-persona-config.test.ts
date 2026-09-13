@@ -575,7 +575,8 @@ describe("loadConfig persona layering", () => {
       "utf8",
     );
     const lena = await loadConfig("lena");
-    expect(harnessChainIds(lena, "lena")).toEqual(["pi"]);
+    // Her legacy `pi` (no routing) reads as the host pi.
+    expect(harnessChainIds(lena, "lena")).toEqual(["pi-host"]);
     // Another persona's legacy entry is untouched by lena's layer.
     const robbie = await loadConfig("robbie");
     expect(harnessChainIds(robbie, "lena")).toEqual(["codex"]);
@@ -812,7 +813,8 @@ describe("loadConfig persona layering", () => {
       "utf8",
     );
     const lena = await loadConfig("lena");
-    expect(lena.harnesses.chain).toEqual(["pi", "claude"]);
+    // Legacy `pi` + routing reads as the embedded engine (native).
+    expect(lena.harnesses.chain).toEqual(["native", "claude"]);
     expect(lena.harnesses.pi.routing?.provider).toBe("openrouter");
     expect((await loadConfig("robbie")).harnesses.chain).toEqual(["claude"]);
   });

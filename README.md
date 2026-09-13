@@ -1,12 +1,15 @@
 # Phantombot
 
+**Armors your harness, learns your world, zero context tax.**
+
 Phantombot gives a terminal AI harness a durable soul: one persistent
 identity, long-term memory with semantic search, and a presence that reaches
 you across PhantomChat, Telegram, and your editor — the same persona and
 memory behind every surface.
 
 **It is LLM-agnostic and swaps brains without losing the thread.** Running on
-the recommended [Pi](https://pi.dev) harness, a single conversation routes the
+the built-in **native** harness — the [Pi](https://pi.dev) engine compiled into
+the phantombot binary — a single conversation routes the
 *right model for the moment* — a fast, personable Primary for everyday talk, a
 Vision model when you share an image, and a heavyweight Coder when the work
 turns to code — all inside one continuous turn. Because the harness rebuilds
@@ -54,9 +57,21 @@ work.
 
 Supported harnesses:
 
-- [Pi](https://pi.dev) - recommended primary harness.
-- Claude Code - first-class fallback or primary.
-- OpenAI Codex CLI - first-class fallback or primary.
+- **native** - built in and recommended. The [Pi](https://pi.dev) engine ships
+  inside the phantombot binary, so a host with nothing installed still has a
+  brain; it only needs a provider API key. Provider, API key and the primary /
+  vision / coder models are configured in Configure → Brain ("Native —
+  Configure Provider and Model Swap Settings"). The only mode that reports to
+  OpenRouter as **Phantomyard's Phantombot** (`https://phantombot.bot`).
+- **pi-host** - your own installed `pi`, used exactly as you configured it
+  ("Pi — Use Host Configuration"). Offered only when `pi` is installed.
+- **claude** - Claude Code, first-class fallback or primary. Offered only when
+  installed.
+- **codex** - OpenAI Codex CLI, first-class fallback or primary. Offered only
+  when installed.
+
+Host harnesses keep their own default request headers. Phantombot never
+installs a harness for you.
 
 ## Contents
 
@@ -219,14 +234,16 @@ Installer environment overrides:
 
 You need:
 
-- At least one installed and authenticated harness.
+- Nothing else for the brain: the native harness is built in and only needs
+  a provider API key (OpenRouter, Anthropic, OpenAI, Google, …).
 - Any channel combination you want: PhantomChat, Telegram, both, or neither.
   With neither, use `phantombot ask` or an ACP editor integration.
 
-Install and authenticate a harness first:
+Optionally, install and authenticate a host harness to use its own
+configuration instead of (or behind) native:
 
 ```bash
-# Pi, recommended
+# Pi, used as "Pi — Use Host Configuration"
 curl -fsSL https://pi.dev/install.sh | sh
 pi
 
@@ -765,7 +782,7 @@ autostart_personas = ["lena", "kai"]
 update_channel = "stable"
 
 [harnesses]
-chain = ["pi", "claude", "codex"]
+chain = ["native", "claude", "codex"]
 
 # Legacy per-persona chain table (still read; migrated into Amanda's own
 # personas/amanda/config.toml on the next start). New overrides belong in
@@ -779,8 +796,26 @@ allowed_user_ids = [123456789]
 
 Harness notes:
 
-- Pi is the recommended primary harness.
-- When the `phantombot harness` wizard takes a Pi provider API key (e.g.
+- **native** (recommended) runs the pi engine embedded in the phantombot
+  binary through a hidden `phantombot __pi …` subprocess, with the routing in
+  `[harnesses.pi.routing]`. It is always available and always uses the
+  embedded engine, even when the host has its own `pi`, because the routing
+  schema is tied to the engine version phantombot ships and tests.
+- **pi-host** runs the host's own `pi`. Phantombot passes it no provider,
+  model or API key — configure it by running `pi`, exactly like claude and
+  codex. `doctor` warns when a configured pi-host's binary is missing and never
+  switches it for you.
+- **Upgrading from the old single `pi` id** is automatic and needs nothing
+  from you. At startup a legacy `pi` is read as `native` when
+  `[harnesses.pi.routing]` configures a provider or model, otherwise as
+  `pi-host`. `phantombot doctor` (repair on, which is also what the daemon runs
+  at startup) writes that result into every `config.toml`, keeping a
+  `config.toml.bak-<timestamp>` copy first; a routing-less `pi` on a host with
+  no `pi` installed is repaired to `native`. Running it again changes nothing.
+  Configs that only use claude or codex are left untouched and silent. An older
+  phantombot binary does not know the new ids, so do not roll a migrated host
+  back.
+- When the `phantombot harness` wizard takes a native provider API key (e.g.
   OpenRouter), it merge-writes the key into Pi's own auth store
   (`~/.pi/agent/auth.json`) — the same place an interactive `pi` login
   writes — so `pi --list-models` and the wizard's model pickers populate. An
@@ -794,7 +829,7 @@ Harness notes:
   harnesses.
 - Codex can use `codex login` or `OPENAI_API_KEY`.
 - `chain` order is primary to fallback.
-- Pi may occupy both slots with different providers. Brain and
+- native may occupy both slots with different providers. Brain and
   `phantombot harness` write named instances so routing, credentials,
   cooldowns, alerts, `/model`, and `/status` remain independent:
 
@@ -803,13 +838,13 @@ Harness notes:
   chain = ["pi-primary", "pi-fallback"]
 
   [harnesses.instances.pi-primary]
-  type = "pi"
+  type = "native"
   [harnesses.instances.pi-primary.routing]
   provider = "openrouter"
   primary_model = "anthropic/claude-sonnet-4"
 
   [harnesses.instances.pi-fallback]
-  type = "pi"
+  type = "native"
   [harnesses.instances.pi-fallback.routing]
   provider = "google"
   primary_model = "gemini-2.5-pro"
@@ -817,8 +852,8 @@ Harness notes:
 
   Their keys are stored separately in the persona vault as
   `PHANTOMBOT_PI_API_KEY_PI_PRIMARY` and
-  `PHANTOMBOT_PI_API_KEY_PI_FALLBACK`. Existing bare `pi` configurations
-  remain supported unchanged. The Brain wizard manages exactly the
+  `PHANTOMBOT_PI_API_KEY_PI_FALLBACK`. A legacy `type = "pi"` instance is
+  migrated like a bare `pi` (its own routing decides). The Brain wizard manages exactly the
   `pi-primary` and `pi-fallback` instance ids; hand-authored Pi instance ids
   remain runtime-valid but are not preserved when Brain rewrites the chain.
 - **The whole `[harnesses]` block is per-persona.** Which brain a persona
@@ -849,12 +884,10 @@ Harness notes:
   states the setting, and keeps the row (inert, still readable with
   `phantombot vault get`) when nothing does, because there it is the last copy
   of the value.
-- Picking **"Use Pi's own config"** in the wizard for a persona writes an
-  explicit opt-out, `[harnesses.pi.routing] use_local_config = true`, rather
-  than deleting keys — a deleted key would simply inherit the host's routing
-  again. While it is set, that persona is passed no `--provider`, `--model` or
-  `--api-key` at all and Pi uses its own local settings. Configuring models
-  again (wizard or `/model`) removes it.
+- `[harnesses.pi.routing] use_local_config = true` is the opt-out older wizards
+  wrote for "Use Pi's own config". The migration treats it as "no routing", so
+  such a persona becomes `pi-host`. Configuring native models again (wizard or
+  `/model`) removes it.
 - Host-level harness **bins** are the exception: a persona inherits whatever
   `doctor` last probed on this machine unless it deliberately pins a different
   path.
