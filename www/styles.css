@@ -415,6 +415,10 @@ footer {
     margin-bottom: 2rem;
 }
 
+.tagline-points .terminal-window {
+    margin-top: 0;
+}
+
 .section-eyebrow {
     font-family: var(--font-mono);
     font-size: 0.8rem;
