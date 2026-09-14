@@ -128,6 +128,36 @@ h1 {
     margin-bottom: 3rem;
 }
 
+.hero-points {
+    list-style: none;
+    max-width: 620px;
+    margin: 0 auto 3rem;
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    color: var(--muted);
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+}
+
+.hero-points li {
+    padding-left: 1.4rem;
+    position: relative;
+}
+
+.hero-points li::before {
+    content: '>';
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+    font-weight: bold;
+}
+
+.hero-points strong {
+    color: var(--fg);
+}
+
 .cta-label {
     font-family: var(--font-mono);
     font-size: 0.8rem;
