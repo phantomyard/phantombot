@@ -73,7 +73,7 @@ export function textWidth(text: string): number {
 }
 
 /** The grapheme clusters of a string: the smallest unit safe to cut between. */
-function graphemes(text: string): string[] {
+export function graphemes(text: string): string[] {
   const out: string[] = [];
   for (const { segment } of SEGMENTER.segment(text)) out.push(segment);
   return out;
@@ -84,7 +84,7 @@ function graphemes(text: string): string[] {
  * grapheme clusters so a surrogate pair or a base+combining-mark pair is never
  * split down the middle.
  */
-function sliceToWidth(text: string, width: number): string {
+export function sliceToWidth(text: string, width: number): string {
   if (width <= 0) return "";
   if (textWidth(text) <= width) return text;
   let used = 0;

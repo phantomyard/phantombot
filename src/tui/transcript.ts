@@ -21,10 +21,15 @@
  */
 
 import type { ChatMessage } from "./chatSession.ts";
-import { markdownLines, type Span } from "./markdown.ts";
+import { graphemes, markdownLines, sliceToWidth, textWidth, type Span } from "./markdown.ts";
 
 export type TranscriptLine =
   | { kind: "header"; role: "user" | "assistant"; name: string; time: string }
+  /**
+   * A tool call: `\u203a <title>` on the left, its duration flushed right.
+   * The title is PRE-FITTED to the drawable width here (phantombot#556) —
+   * see `fitToolTitle`, and the renderer truncates as a backstop.
+   */
   | { kind: "tool"; title: string; duration: string }
   | { kind: "text"; text: string; error: boolean }
   /**
@@ -42,15 +47,75 @@ function timeOf(at: number): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-/** Hard-wrap one logical line to `width`, keeping at least one row. */
+const ELLIPSIS = "\u2026";
+
+/**
+ * A tool title cut to what the row can actually DRAW (phantombot#556).
+ *
+ * Every other row kind is fitted to `width` before it is counted; tool rows
+ * used to be pushed through raw, so a title longer than the window measured
+ * one row and drew two. The uncounted rows push the frame past the bottom of
+ * the window, Yoga shrinks the children to compensate, and the transcript's
+ * last rows overwrite each other — and Ink's cursor-up repaint math is left
+ * out by that many rows, which is what leaves a prompt strip with no caret and
+ * a TUI that looks frozen until it is restarted. Tool notes are capped at 160
+ * columns (`MAX_TOOL_NOTE_LEN`), so every terminal under ~166 columns hit it.
+ *
+ * The row draws `\u203a ` then the title, then the duration flushed right, all
+ * inside `width` (the same content width the text rows wrap to), so the title
+ * is charged for both of those. Truncated rather than wrapped: a tool call is
+ * a one-line note, and a second row of it would push the reply itself off the
+ * screen.
+ */
+function fitToolTitle(title: string, duration: string, width: number): string {
+  const budget = width - 2 - textWidth(duration);
+  if (budget <= 0) return "";
+  if (textWidth(title) <= budget) return title;
+  // The ellipsis costs a column of its own, so the content budget is short.
+  return `${sliceToWidth(title, budget - 1)}${ELLIPSIS}`;
+}
+
+/**
+ * Hard-wrap one logical line to `width` COLUMNS, keeping at least one row.
+ *
+ * Measured in terminal columns and cut between grapheme clusters, for the
+ * same reason tool titles are (phantombot#556): `String.length` counts a CJK
+ * ideograph or an emoji as one unit where the terminal draws two, so a line
+ * of wide glyphs measured one row here and drew two on screen. Those extra
+ * rows are not in the count the window is clipped to, which pushes the frame
+ * past the bottom of the terminal — the transcript's last rows overwrite each
+ * other and Ink's repaint math is left out by that many rows, leaving a
+ * caretless prompt strip that looks frozen until phantombot is restarted.
+ * Slicing on code units had a second failure of its own: it could cut a
+ * surrogate pair or a base+combining-mark in half and emit mojibake.
+ *
+ * This is the raw-text path (what the user typed, and error text), so it
+ * wraps rather than truncating: nothing may be dropped from either. A single
+ * grapheme wider than `width` gets a row to itself and overhangs — there is
+ * nowhere narrower to put it, and dropping it would be worse.
+ */
 function wrap(text: string, width: number): string[] {
   const out: string[] = [];
   for (const line of text.split("\n")) {
-    if (line.length <= width) {
+    if (textWidth(line) <= width) {
       out.push(line);
       continue;
     }
-    for (let i = 0; i < line.length; i += width) out.push(line.slice(i, i + width));
+    let row = "";
+    let used = 0;
+    for (const g of graphemes(line)) {
+      const w = textWidth(g);
+      // `row !== ""` keeps a too-wide grapheme on a row of its own instead of
+      // looping forever on a cut that can never fit.
+      if (used + w > width && row !== "") {
+        out.push(row);
+        row = "";
+        used = 0;
+      }
+      row += g;
+      used += w;
+    }
+    if (row !== "") out.push(row);
   }
   return out.length === 0 ? [""] : out;
 }
@@ -79,11 +144,12 @@ export function transcriptLines(
       time: timeOf(message.at),
     });
     for (const tool of message.tools ?? []) {
+      const duration = options.formatDuration(tool.durationMs);
       for (const title of tool.title.split("\n")) {
         lines.push({
           kind: "tool",
-          title,
-          duration: options.formatDuration(tool.durationMs),
+          title: fitToolTitle(title, duration, width),
+          duration,
         });
       }
     }
