@@ -47,8 +47,8 @@
                 <p class="cta-note">A built-in <strong>native</strong> harness works out of the box: just add a provider key. Or use your own <strong>Claude&nbsp;Code</strong>, <strong>Codex</strong>, or <strong>Pi</strong>. The Install Wizard sets it up for you.</p>
             </div>
             <ul class="hero-points">
-                <li><strong>Armors your harness</strong>: a security perimeter in front of Claude&nbsp;Code, Codex, or Pi: two-tier trust, a threat judge, and your keys on your hardware.</li>
-                <li><strong>Learns your world</strong>: local memory that compounds: your decisions, lessons, people, and preferences never reset between sessions.</li>
+                <li><strong>Armors your harness</strong>: a security perimeter in front of Claude&nbsp;Code, Codex, or Pi (two-tier trust, a threat judge, and your keys on your hardware).</li>
+                <li><strong>Learns your world</strong>: local memory that compounds, so your decisions, lessons, people, and preferences never reset between sessions.</li>
                 <li><strong>Zero context tax</strong>: the harness keeps its tools; your Phantom carries the context, so you stop re-explaining and it stops re-learning.</li>
             </ul>
         </section>
@@ -59,10 +59,10 @@
                     <span class="dot red"></span>
                     <span class="dot yellow"></span>
                     <span class="dot green"></span>
-                    <span class="title">phantombot run</span>
+                    <span class="title">phantombot settings</span>
                 </div>
                 <div class="terminal-body">
-                    <img src="assets/img/terminal-screenshot.png" alt="The Phantombot TUI, showing an agent turn streaming reasoning, tool calls and reply in the terminal" class="screenshot">
+                    <img src="assets/img/terminal-screenshot.png" alt="The Phantombot TUI settings menu and status panel" class="screenshot">
                 </div>
             </div>
         </section>
@@ -241,7 +241,7 @@
         <section class="why-firewall">
             <p class="section-eyebrow">Why phantombot &middot; not a naked harness</p>
             <h2>A firewall around your harness.</h2>
-            <p class="section-intro">A raw harness (Claude Code, Codex, or Pi on its own) is powerful and <em>exposed</em>. Whatever the model decides to do, it does, and everything it learns about you lives in the vendor's cloud. Phantombot wraps that same harness in the two things a bare CLI doesn't give you: <strong>a security perimeter in front of it, and a local-first vault around it.</strong> The model keeps all of its power: you stop handing your attack surface and your data to someone else's ecosystem.</p>
+            <p class="section-intro">A raw harness (Claude Code, Codex, or Pi on its own) is powerful and <em>exposed</em>. Whatever the model decides to do, it does, and everything it learns about you lives in the vendor's cloud. Phantombot wraps that same harness in the two things a bare CLI doesn't give you: <strong>a security perimeter in front of it, and a local-first vault around it.</strong> The model keeps all of its power; you stop handing your attack surface and your data to someone else's ecosystem.</p>
 
             <div class="why-grid">
                 <div class="why-card">
@@ -264,7 +264,7 @@
                         </svg>
                     </span>
                     <h3>Your data stays under your control</h3>
-                    <p>With a naked proprietary harness, your memory, secrets, and context are stored inside the vendor's ecosystem. Phantombot keeps that state on the machine <em>you</em> run it on: an <strong>encrypted per-persona vault</strong> (AES-256-GCM, keyed to your identity) and a <strong>local markdown&nbsp;+&nbsp;SQLite memory store</strong> on your own disk. Prompts still go to whichever provider you configure; but your <em>storage and secrets</em> never leave the box.</p>
+                    <p>With a naked proprietary harness, your memory, secrets, and context are stored inside the vendor's ecosystem. Phantombot keeps that state on the machine <em>you</em> run it on: an <strong>encrypted per-persona vault</strong> (AES-256-GCM, keyed to your identity) and a <strong>local markdown&nbsp;+&nbsp;SQLite memory store</strong> on your own disk. Prompts still go to whichever provider you configure, but your <em>storage and secrets</em> never leave the box.</p>
                 </div>
 
                 <div class="why-card">
@@ -324,7 +324,7 @@
         <section class="features-detailed">
             <div class="feature">
                 <h3>Open Knowledge Format memory</h3>
-                <p>Phantombot stores memory in the <a href="https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/">Open Knowledge Format</a>: Google Cloud's open, vendor-neutral standard for the knowledge AI agents consume: atomic markdown notes with structured frontmatter, linked into a concept graph. No lock-in, no proprietary blob; your Phantom's mind is portable, readable, and yours.</p>
+                <p>Phantombot stores memory in the <a href="https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/">Open Knowledge Format</a>, Google Cloud's open, vendor-neutral standard for the knowledge AI agents consume: atomic markdown notes with structured frontmatter, linked into a concept graph. No lock-in, no proprietary blob; your Phantom's mind is portable, readable, and yours.</p>
                 <p>Because the knowledge is <em>structured</em>, search is sharp out of the box: <strong>field-weighted BM25</strong> (a hit in a title or tag outranks one buried in prose), tag&nbsp;&amp; alias controlled vocabulary, and <strong>concept-graph expansion</strong> that walks the links to pull in related notes a bare keyword query would miss, all with zero API keys. Add a <strong>Gemini embeddings</strong> key and it upgrades to true <strong>hybrid semantic search</strong>: meaning-aware vector recall fused with lexical BM25 via reciprocal-rank fusion, so &ldquo;how do I pay tax&rdquo; finds your note titled &ldquo;VAT filing steps.&rdquo;</p>
             </div>
             <div class="feature">

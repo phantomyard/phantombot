@@ -111,14 +111,6 @@ h1 {
     letter-spacing: -2px;
 }
 
-.subtitle {
-    font-family: var(--font-sans);
-    font-size: 1.25rem;
-    color: #bbbbbb;
-    max-width: 600px;
-    margin-bottom: 0.5rem;
-}
-
 .hero-tagline {
     font-family: var(--font-mono);
     font-size: 1.3rem;
@@ -126,15 +118,6 @@ h1 {
     color: var(--muted);
     max-width: 620px;
     margin: -1.25rem auto 0.75rem;
-}
-
-.tagline {
-    font-family: var(--font-serif);
-    font-style: italic;
-    font-size: 1.4rem;
-    color: var(--muted);
-    max-width: 600px;
-    margin-bottom: 3rem;
 }
 
 .hero-points {
