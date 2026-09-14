@@ -32,6 +32,11 @@ const msg = (text: string, tools: string[] = []): ChatMessage => ({
   tools: tools.map((title) => ({ title, startedAt: 0 })),
 });
 
+/** A user turn: shown back verbatim, so it takes the raw-text wrap path. */
+const user = (text: string): ChatMessage => ({ role: "user", text, at: 0 });
+/** A failed turn: error text takes the same raw-text path, never markdown. */
+const failed = (error: string): ChatMessage => ({ role: "assistant", text: "", at: 0, error });
+
 const kinds = (lines: readonly TranscriptLine[]) => lines.map((l) => l.kind);
 /** The tool rows, narrowed — the width assertions below need title/duration. */
 const toolRows = (lines: readonly TranscriptLine[]) =>
@@ -141,6 +146,43 @@ describe("transcriptLines", () => {
       transcriptLines([msg("done", ["\u6f22".repeat(200)])], 80, options),
     );
     expect(toolWidth(row!)).toBeLessThanOrEqual(74);
+  });
+
+  /**
+   * phantombot#556, second half. `wrap` is the raw-text path — what the user
+   * typed, and error text — and it measured with `String.length` and sliced
+   * on code units. Wide glyphs therefore undercounted rows exactly the way
+   * unfitted tool titles did (the frame outgrows the window, the bottom rows
+   * overwrite each other and the prompt loses its caret), and the slice could
+   * cut a surrogate pair in half on the way.
+   */
+  test("a wide-glyph user line wraps by columns, not code units", () => {
+    // 100 ideographs = 200 columns, which is three rows of 74, not the two
+    // that 100 code units would suggest.
+    const rows = texts(transcriptLines([user("\u6f22".repeat(100))], 80, options));
+    expect(rows).toHaveLength(3);
+    for (const row of rows) expect(textWidth(row)).toBeLessThanOrEqual(74);
+  });
+
+  test("an error row is measured in columns too", () => {
+    // Errors take the same path and are the rows most likely to be on screen
+    // when the frame deforms, so they are pinned separately.
+    const rows = texts(transcriptLines([failed("\u6f22".repeat(100))], 80, options));
+    expect(rows.length).toBeGreaterThan(2);
+    for (const row of rows) expect(textWidth(row)).toBeLessThanOrEqual(74);
+  });
+
+  test("wrapping cuts between graphemes and drops nothing", () => {
+    // Cutting on code units splits a surrogate pair and draws mojibake; this
+    // is raw text, so every grapheme must also survive the wrap intact.
+    // The odd leading column matters: it puts the code-unit cut in the middle
+    // of a pair rather than neatly between two, which is how the old slice
+    // passed by luck on an even-aligned string.
+    const text = `a${"\u{1F600}".repeat(50)}`;
+    const rows = texts(transcriptLines([user(text)], 80, options));
+    expect(rows.join("")).toBe(text);
+    for (const row of rows) expect(row).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    for (const row of rows) expect(row).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
   });
 
   test("history without a timestamp is not stamped with the current time", () => {

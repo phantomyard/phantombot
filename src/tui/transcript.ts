@@ -21,7 +21,7 @@
  */
 
 import type { ChatMessage } from "./chatSession.ts";
-import { markdownLines, sliceToWidth, textWidth, type Span } from "./markdown.ts";
+import { graphemes, markdownLines, sliceToWidth, textWidth, type Span } from "./markdown.ts";
 
 export type TranscriptLine =
   | { kind: "header"; role: "user" | "assistant"; name: string; time: string }
@@ -75,15 +75,47 @@ function fitToolTitle(title: string, duration: string, width: number): string {
   return `${sliceToWidth(title, budget - 1)}${ELLIPSIS}`;
 }
 
-/** Hard-wrap one logical line to `width`, keeping at least one row. */
+/**
+ * Hard-wrap one logical line to `width` COLUMNS, keeping at least one row.
+ *
+ * Measured in terminal columns and cut between grapheme clusters, for the
+ * same reason tool titles are (phantombot#556): `String.length` counts a CJK
+ * ideograph or an emoji as one unit where the terminal draws two, so a line
+ * of wide glyphs measured one row here and drew two on screen. Those extra
+ * rows are not in the count the window is clipped to, which pushes the frame
+ * past the bottom of the terminal — the transcript's last rows overwrite each
+ * other and Ink's repaint math is left out by that many rows, leaving a
+ * caretless prompt strip that looks frozen until phantombot is restarted.
+ * Slicing on code units had a second failure of its own: it could cut a
+ * surrogate pair or a base+combining-mark in half and emit mojibake.
+ *
+ * This is the raw-text path (what the user typed, and error text), so it
+ * wraps rather than truncating: nothing may be dropped from either. A single
+ * grapheme wider than `width` gets a row to itself and overhangs — there is
+ * nowhere narrower to put it, and dropping it would be worse.
+ */
 function wrap(text: string, width: number): string[] {
   const out: string[] = [];
   for (const line of text.split("\n")) {
-    if (line.length <= width) {
+    if (textWidth(line) <= width) {
       out.push(line);
       continue;
     }
-    for (let i = 0; i < line.length; i += width) out.push(line.slice(i, i + width));
+    let row = "";
+    let used = 0;
+    for (const g of graphemes(line)) {
+      const w = textWidth(g);
+      // `row !== ""` keeps a too-wide grapheme on a row of its own instead of
+      // looping forever on a cut that can never fit.
+      if (used + w > width && row !== "") {
+        out.push(row);
+        row = "";
+        used = 0;
+      }
+      row += g;
+      used += w;
+    }
+    if (row !== "") out.push(row);
   }
   return out.length === 0 ? [""] : out;
 }

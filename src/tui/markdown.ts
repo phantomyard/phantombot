@@ -73,7 +73,7 @@ export function textWidth(text: string): number {
 }
 
 /** The grapheme clusters of a string: the smallest unit safe to cut between. */
-function graphemes(text: string): string[] {
+export function graphemes(text: string): string[] {
   const out: string[] = [];
   for (const { segment } of SEGMENTER.segment(text)) out.push(segment);
   return out;
