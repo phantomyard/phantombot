@@ -403,11 +403,16 @@ footer {
    ADDITIVE BLOCK: editor extensions, Pi routing, channels.
    Append-only. No rules above this line were modified.
    ============================================================ */
+.tagline-points,
 .editors,
 .pi-routing,
 .compounds,
 .phantomchat {
     margin-bottom: 8rem;
+}
+
+.tagline-points h2 {
+    margin-bottom: 2rem;
 }
 
 .section-eyebrow {
