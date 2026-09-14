@@ -21,10 +21,15 @@
  */
 
 import type { ChatMessage } from "./chatSession.ts";
-import { markdownLines, type Span } from "./markdown.ts";
+import { markdownLines, sliceToWidth, textWidth, type Span } from "./markdown.ts";
 
 export type TranscriptLine =
   | { kind: "header"; role: "user" | "assistant"; name: string; time: string }
+  /**
+   * A tool call: `\u203a <title>` on the left, its duration flushed right.
+   * The title is PRE-FITTED to the drawable width here (phantombot#556) —
+   * see `fitToolTitle`, and the renderer truncates as a backstop.
+   */
   | { kind: "tool"; title: string; duration: string }
   | { kind: "text"; text: string; error: boolean }
   /**
@@ -40,6 +45,34 @@ function timeOf(at: number): string {
   if (!at) return "";
   const d = new Date(at);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+const ELLIPSIS = "\u2026";
+
+/**
+ * A tool title cut to what the row can actually DRAW (phantombot#556).
+ *
+ * Every other row kind is fitted to `width` before it is counted; tool rows
+ * used to be pushed through raw, so a title longer than the window measured
+ * one row and drew two. The uncounted rows push the frame past the bottom of
+ * the window, Yoga shrinks the children to compensate, and the transcript's
+ * last rows overwrite each other — and Ink's cursor-up repaint math is left
+ * out by that many rows, which is what leaves a prompt strip with no caret and
+ * a TUI that looks frozen until it is restarted. Tool notes are capped at 160
+ * columns (`MAX_TOOL_NOTE_LEN`), so every terminal under ~166 columns hit it.
+ *
+ * The row draws `\u203a ` then the title, then the duration flushed right, all
+ * inside `width` (the same content width the text rows wrap to), so the title
+ * is charged for both of those. Truncated rather than wrapped: a tool call is
+ * a one-line note, and a second row of it would push the reply itself off the
+ * screen.
+ */
+function fitToolTitle(title: string, duration: string, width: number): string {
+  const budget = width - 2 - textWidth(duration);
+  if (budget <= 0) return "";
+  if (textWidth(title) <= budget) return title;
+  // The ellipsis costs a column of its own, so the content budget is short.
+  return `${sliceToWidth(title, budget - 1)}${ELLIPSIS}`;
 }
 
 /** Hard-wrap one logical line to `width`, keeping at least one row. */
@@ -79,11 +112,12 @@ export function transcriptLines(
       time: timeOf(message.at),
     });
     for (const tool of message.tools ?? []) {
+      const duration = options.formatDuration(tool.durationMs);
       for (const title of tool.title.split("\n")) {
         lines.push({
           kind: "tool",
-          title,
-          duration: options.formatDuration(tool.durationMs),
+          title: fitToolTitle(title, duration, width),
+          duration,
         });
       }
     }

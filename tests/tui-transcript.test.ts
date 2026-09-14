@@ -17,6 +17,7 @@ import {
   transcriptWindow,
   type TranscriptLine,
 } from "../src/tui/transcript.ts";
+import { textWidth } from "../src/tui/markdown.ts";
 import type { ChatMessage } from "../src/tui/chatSession.ts";
 
 const options = {
@@ -32,6 +33,12 @@ const msg = (text: string, tools: string[] = []): ChatMessage => ({
 });
 
 const kinds = (lines: readonly TranscriptLine[]) => lines.map((l) => l.kind);
+/** The tool rows, narrowed — the width assertions below need title/duration. */
+const toolRows = (lines: readonly TranscriptLine[]) =>
+  lines.filter((l): l is Extract<TranscriptLine, { kind: "tool" }> => l.kind === "tool");
+/** What `Line` actually DRAWS for a tool row: `\u203a ` + title + duration. */
+const toolWidth = (row: { title: string; duration: string }) =>
+  2 + textWidth(row.title) + textWidth(row.duration);
 /**
  * The plain text of a body row, whichever kind it is: a user message is a
  * `text` row and an assistant message is a `rich` (rendered markdown) one
@@ -63,6 +70,77 @@ describe("transcriptLines", () => {
   test("every tool call gets a row, one per line of its title", () => {
     const lines = transcriptLines([msg("done", ["one\ntwo", "b"])], 80, options);
     expect(lines.filter((l) => l.kind === "tool")).toHaveLength(3);
+  });
+
+  /**
+   * phantombot#556. Tool rows were counted as one row and DRAWN as
+   * `\u203a ` + title + duration, so a title wider than the window wrapped to
+   * two physical rows that nothing had budgeted for. The frame then came out
+   * taller than the terminal: Yoga shrank the children and the last transcript
+   * rows overwrote each other, and Ink's cursor-up repaint went out by the
+   * same number of rows — a prompt strip with no caret and a TUI that looked
+   * frozen until it was restarted. Tool notes are capped at 160 columns
+   * (`MAX_TOOL_NOTE_LEN`), so any terminal under ~166 columns reproduced it.
+   *
+   * The old test asserted the row COUNT and never the row WIDTH, which is
+   * exactly the gap that let this ship, so these pin the width.
+   */
+  test("a tool row never draws wider than the window", () => {
+    // A tool note is capped at 160 columns, so this is the row the TUI draws
+    // on a real terminal — at every width, including ones wider than the cap.
+    for (const columns of [40, 80, 100, 166, 200]) {
+      const width = Math.max(20, columns - 6);
+      const rows = toolRows(
+        transcriptLines([msg("done", [`Bash(${"x".repeat(160)})`])], columns, options),
+      );
+      expect(rows).toHaveLength(1);
+      expect(toolWidth(rows[0]!)).toBeLessThanOrEqual(width);
+    }
+  });
+
+  test("a truncated tool title is marked with an ellipsis, a short one is untouched", () => {
+    const [cut] = toolRows(transcriptLines([msg("done", ["y".repeat(200)])], 80, options));
+    expect(cut!.title.endsWith("\u2026")).toBe(true);
+    // Nothing is cut when it fits: truncating a title that already fits would
+    // be a regression of its own — the row is the only trace of the call.
+    const [kept] = toolRows(
+      transcriptLines([msg("done", ["Read(AGENTS.md)"])], 80, options),
+    );
+    expect(kept!.title).toBe("Read(AGENTS.md)");
+  });
+
+  test("the duration is charged to the title's budget", () => {
+    // A running call shows `\u2026` (one column) and a finished one its full
+    // duration, so the same title must be cut harder once the call lands.
+    // Measuring the title alone is how a row overflows only at the very end.
+    const [finished] = toolRows(
+      transcriptLines(
+        [
+          {
+            ...msg("done"),
+            tools: [{ title: "z".repeat(200), startedAt: 0, durationMs: 12345 }],
+          },
+        ],
+        80,
+        options,
+      ),
+    );
+    const [running] = toolRows(
+      transcriptLines([msg("done", ["z".repeat(200)])], 80, options),
+    );
+    expect(textWidth(finished!.title)).toBeLessThan(textWidth(running!.title));
+    expect(toolWidth(finished!)).toBeLessThanOrEqual(74);
+    expect(toolWidth(running!)).toBeLessThanOrEqual(74);
+  });
+
+  test("a wide-glyph tool title is measured in columns, not code units", () => {
+    // `.length` is wrong in both directions for real titles: a CJK ideograph
+    // is one code unit and two columns, so a title "fitted" by length comes
+    // out twice the window wide. Cuts land between grapheme clusters.
+    const [row] = toolRows(
+      transcriptLines([msg("done", ["\u6f22".repeat(200)])], 80, options),
+    );
+    expect(toolWidth(row!)).toBeLessThanOrEqual(74);
   });
 
   test("history without a timestamp is not stamped with the current time", () => {

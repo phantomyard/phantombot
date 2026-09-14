@@ -104,14 +104,20 @@ function Line(props: { line: TranscriptLine }): React.ReactElement {
     );
   }
   if (line.kind === "tool") {
+    // `wrap="truncate"` is the BACKSTOP, not the fit: `transcript.ts` already
+    // cut the title to the drawable width, and this guarantees that even if
+    // that arithmetic is ever wrong again the row cannot become two and take
+    // the frame's repaint math with it (phantombot#556).
     return (
       <Box paddingLeft={2}>
-        <Text color={theme.dim}>
+        <Text color={theme.dim} wrap="truncate">
           {"\u203a "}
           {line.title}
         </Text>
         <Box flexGrow={1} />
-        <Text color={theme.dim}>{line.duration}</Text>
+        <Text color={theme.dim} wrap="truncate">
+          {line.duration}
+        </Text>
       </Box>
     );
   }
