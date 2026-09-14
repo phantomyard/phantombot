@@ -119,6 +119,15 @@ h1 {
     margin-bottom: 0.5rem;
 }
 
+.hero-tagline {
+    font-family: var(--font-mono);
+    font-size: 1.3rem;
+    letter-spacing: -0.5px;
+    color: var(--muted);
+    max-width: 620px;
+    margin: -1.25rem auto 0.75rem;
+}
+
 .tagline {
     font-family: var(--font-serif);
     font-style: italic;
@@ -408,7 +417,7 @@ footer {
 }
 
 /* ============================================================
-   ADDITIVE BLOCK — editor extensions, Pi routing, channels.
+   ADDITIVE BLOCK: editor extensions, Pi routing, channels.
    Append-only. No rules above this line were modified.
    ============================================================ */
 .editors,
@@ -645,7 +654,7 @@ footer {
     transform: translateY(-1px);
 }
 
-/* Additive: Why phantombot — firewall section (issue #339) */
+/* Additive: Why phantombot: firewall section (issue #339) */
 .why-firewall {
     margin-bottom: 8rem;
 }
