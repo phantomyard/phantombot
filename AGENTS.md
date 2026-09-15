@@ -137,7 +137,7 @@ phantombot/
 │   │   ├── index.tsx         # startTui() + the --no-tui line REPL
 │   │   ├── App.tsx           # screen router; chat is home, ^s = this phantom's settings, ^p = the host table
 │   │   ├── mouse.ts          # SGR mouse mode, the stdin gate, hit-rect dispatch
-│   │   ├── chatSession.ts    # screen 0's turn pipeline (trusted; see the note in the file)
+│   │   ├── chatSession.ts    # screen 0's turn pipeline (trusted; see the note in the file). ChatMessage carries an ordered `parts` timeline (narration text runs + tool calls in arrival order) next to the legacy `text`/`tools` pair — the transcript renders from `parts` when present, so narration and tools keep chronological order and stay paragraph-separated
 │   │   ├── components/       # Frame, Selectable, Prompt, Confirm — no component knows the terminal width
 │   │   ├── screens/          # chat, wizard, dashboard, persona, keys, memory, voice, doctor, mcp, re-embed
 │   │   └── data/             # snapshot.ts (read-only state) + actions.ts (writes AND their consequences)

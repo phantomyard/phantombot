@@ -73,12 +73,31 @@ export interface ChatToolCall {
   durationMs?: number;
 }
 
+/**
+ * One entry of an assistant message's ordered timeline.
+ *
+ * Narration text runs and tool calls, in the order they actually happened.
+ * The flat `tools` + `text` model above loses that order at the data-model
+ * level (the renderer then draws every tool above the whole reply, and the
+ * narration runs jam into one block), so the streaming path records `parts`
+ * instead and the transcript walks them in order.
+ */
+export type ChatMessagePart =
+  | { kind: "text"; text: string }
+  | { kind: "tool"; title: string; startedAt: number; durationMs?: number };
+
 export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
   at: number;
   /** Assistant only: the tool calls made while producing this reply. */
   tools?: ChatToolCall[];
+  /**
+   * Assistant only: the ordered narration/tool timeline (see
+   * `ChatMessagePart`). History replayed from the memory store carries only
+   * `text` and renders via the legacy tools-then-text path.
+   */
+  parts?: ChatMessagePart[];
   /** Assistant only: set when the turn failed, so the UI can say so. */
   error?: string;
 }

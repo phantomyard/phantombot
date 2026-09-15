@@ -351,6 +351,11 @@ spinner, the step the phantom is on right now (`gh release view`, `thinking`,
 `writing the reply`), and a seconds counter. A long answer and a hung process
 should never look the same.
 
+The transcript keeps the turn's **chronological order**: narration the phantom
+writes between tool calls appears interleaved with those calls (each with its
+duration), and consecutive narration runs render as separate paragraphs — not
+every tool call stacked above the whole reply as one block.
+
 A conversation here is a real turn: same harness chain, same memory, same tools
 and the same journal as a message from any channel. The scrollback IS the
 conversation store, so closing the app and reopening it tomorrow continues the
