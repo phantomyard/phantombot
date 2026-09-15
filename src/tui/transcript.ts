@@ -143,16 +143,6 @@ export function transcriptLines(
       name: isUser ? "you" : options.personaName,
       time: timeOf(message.at),
     });
-    for (const tool of message.tools ?? []) {
-      const duration = options.formatDuration(tool.durationMs);
-      for (const title of tool.title.split("\n")) {
-        lines.push({
-          kind: "tool",
-          title: fitToolTitle(title, duration, width),
-          duration,
-        });
-      }
-    }
     if (message.error !== undefined) {
       // An error is not markdown and must not be reinterpreted as any: a
       // stack trace full of `*` would come out italicised and half-eaten.
@@ -166,7 +156,43 @@ export function transcriptLines(
       for (const row of wrap(message.text ?? "", width)) {
         lines.push({ kind: "text", text: row, error: false });
       }
+    } else if ((message.parts?.length ?? 0) > 0) {
+      // The ordered timeline: narration text runs and tool calls in the order
+      // they happened. A gap row between two consecutive text runs keeps
+      // separate narration sentences from jamming into one block; a tool row
+      // between two runs already separates them on its own.
+      let prevWasText = false;
+      for (const part of message.parts!) {
+        if (part.kind === "tool") {
+          const duration = options.formatDuration(part.durationMs);
+          for (const title of part.title.split("\n")) {
+            lines.push({
+              kind: "tool",
+              title: fitToolTitle(title, duration, width),
+              duration,
+            });
+          }
+          prevWasText = false;
+        } else {
+          if (prevWasText) lines.push({ kind: "gap" });
+          for (const row of markdownLines(part.text, width)) {
+            lines.push({ kind: "rich", spans: row.spans, indent: row.indent });
+          }
+          prevWasText = true;
+        }
+      }
     } else {
+      // Legacy shape (history replayed from the store): tools above the body.
+      for (const tool of message.tools ?? []) {
+        const duration = options.formatDuration(tool.durationMs);
+        for (const title of tool.title.split("\n")) {
+          lines.push({
+            kind: "tool",
+            title: fitToolTitle(title, duration, width),
+            duration,
+          });
+        }
+      }
       for (const row of markdownLines(message.text ?? "", width)) {
         lines.push({ kind: "rich", spans: row.spans, indent: row.indent });
       }

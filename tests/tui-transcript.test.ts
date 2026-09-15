@@ -18,7 +18,7 @@ import {
   type TranscriptLine,
 } from "../src/tui/transcript.ts";
 import { textWidth } from "../src/tui/markdown.ts";
-import type { ChatMessage } from "../src/tui/chatSession.ts";
+import type { ChatMessage, ChatMessagePart } from "../src/tui/chatSession.ts";
 
 const options = {
   personaName: "lab",
@@ -236,5 +236,88 @@ describe("transcriptWindow", () => {
     const view = transcriptWindow(lines, 100, 0);
     expect(view.lines).toHaveLength(lines.length);
     expect(view.maxOffset).toBe(0);
+  });
+});
+
+/**
+ * The ordered timeline (assistant `parts`).
+ *
+ * The old flat model — `tools[]` above the whole reply — destroyed the
+ * interleaving order at the data-model level, and narration runs jammed into
+ * one block. A streamed turn now records narration text runs and tool calls
+ * in the order they happened, and the transcript walks them in order.
+ */
+describe("transcriptLines with a parts timeline", () => {
+  const timeline = (parts: ChatMessagePart[]): ChatMessage => ({
+    role: "assistant",
+    text: "",
+    at: 0,
+    tools: [],
+    parts,
+  });
+
+  test("narration and tools render in the order they happened", () => {
+    const lines = transcriptLines(
+      [
+        timeline([
+          { kind: "text", text: "Looking now" },
+          { kind: "tool", title: "Bash(ls)", startedAt: 0, durationMs: 1500 },
+          { kind: "text", text: "Found it" },
+        ]),
+      ],
+      80,
+      options,
+    );
+    expect(kinds(lines)).toEqual(["header", "rich", "tool", "rich", "gap"]);
+    expect(texts(lines)).toEqual(["Looking now", "Found it"]);
+  });
+
+  test("consecutive narration runs get a gap row between them", () => {
+    const lines = transcriptLines(
+      [timeline([{ kind: "text", text: "one" }, { kind: "text", text: "two" }])],
+      80,
+      options,
+    );
+    expect(kinds(lines)).toEqual(["header", "rich", "gap", "rich", "gap"]);
+  });
+
+  test("a tool part carries its own duration", () => {
+    const lines = transcriptLines(
+      [
+        timeline([
+          { kind: "tool", title: "Bash(ls)", startedAt: 0, durationMs: 1500 },
+          { kind: "tool", title: "Read(x)", startedAt: 0 },
+        ]),
+      ],
+      80,
+      options,
+    );
+    expect(toolRows(lines).map((r) => r.duration)).toEqual(["1500ms", "…"]);
+  });
+
+  test("an error still overrides the timeline and stays raw", () => {
+    const lines = transcriptLines(
+      [
+        {
+          ...timeline([{ kind: "text", text: "**not markdown**" }]),
+          error: "boom",
+        },
+      ],
+      80,
+      options,
+    );
+    expect(kinds(lines)).toEqual(["header", "text", "gap"]);
+    expect(texts(lines)).toEqual(["boom"]);
+  });
+
+  test("history without parts still renders tools above the body", () => {
+    // Turns replayed from the memory store carry only `text` + `tools`; they
+    // must keep the legacy layout, not collapse to nothing.
+    expect(kinds(transcriptLines([msg("done", ["ls"])], 80, options))).toEqual([
+      "header",
+      "tool",
+      "rich",
+      "gap",
+    ]);
   });
 });

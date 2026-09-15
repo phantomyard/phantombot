@@ -54,7 +54,11 @@ import {
   promptState,
   type PromptState,
 } from "../promptBox.ts";
-import type { ChatMessage, ChatSession } from "../chatSession.ts";
+import type {
+  ChatMessage,
+  ChatMessagePart,
+  ChatSession,
+} from "../chatSession.ts";
 
 /**
  * Rows the chat chrome takes INSIDE the frame: header (1), header gap (1),
@@ -274,6 +278,7 @@ export function ChatScreen(props: {
         text: "",
         at: Date.now(),
         tools: [],
+        parts: [],
       };
       setMessages((prev) => [
         ...prev,
@@ -291,7 +296,23 @@ export function ChatScreen(props: {
         for await (const event of props.session.send(text, controller.signal)) {
           if (event.type === "text") {
             setActivity("writing the reply");
-            patch((m) => ({ ...m, text: m.text + event.text }));
+            patch((m) => {
+              // Ordered timeline: a text run continues the trailing text part,
+              // or opens a new one after a tool call — narration keeps its
+              // place in the order it happened instead of pooling above the
+              // whole reply.
+              const parts = [...(m.parts ?? [])];
+              const last = parts[parts.length - 1];
+              if (last?.kind === "text") {
+                parts[parts.length - 1] = {
+                  kind: "text",
+                  text: last.text + event.text,
+                };
+              } else {
+                parts.push({ kind: "text", text: event.text });
+              }
+              return { ...m, text: m.text + event.text, parts };
+            });
           } else if (event.type === "thinking") {
             // The harness is alive but silent. Say so rather than freezing the
             // label on whatever the last tool happened to be.
@@ -308,11 +329,16 @@ export function ChatScreen(props: {
             );
           } else if (event.type === "tool") {
             setActivity(event.title.split("\n")[0] ?? "working");
+            const startedAt = Date.now();
             patch((m) => ({
               ...m,
               tools: [
                 ...(m.tools ?? []),
-                { title: event.title, startedAt: Date.now() },
+                { title: event.title, startedAt },
+              ],
+              parts: [
+                ...(m.parts ?? []),
+                { kind: "tool", title: event.title, startedAt },
               ],
             }));
           } else if (event.type === "tool-done") {
@@ -324,10 +350,50 @@ export function ChatScreen(props: {
                   durationMs: event.ms,
                 };
               }
-              return { ...m, tools };
+              // `event.index` addresses the k-th TOOL call, not the k-th part
+              // — find the k-th tool entry of the timeline.
+              const parts = [...(m.parts ?? [])];
+              let k = -1;
+              for (let i = 0; i < parts.length; i++) {
+                const part = parts[i]!;
+                if (part.kind !== "tool") continue;
+                if (++k === event.index) {
+                  parts[i] = { ...part, durationMs: event.ms };
+                  break;
+                }
+              }
+              return { ...m, tools, parts };
             });
           } else if (event.type === "done") {
-            patch((m) => ({ ...m, text: event.text || m.text }));
+            patch((m) => {
+              const parts = m.parts ?? [];
+              const streamed = parts
+                .filter(
+                  (
+                    p,
+                  ): p is Extract<ChatMessagePart, { kind: "text" }> =>
+                    p.kind === "text",
+                )
+                .map((p) => p.text)
+                .join("");
+              let next = parts;
+              if (event.text && event.text !== streamed) {
+                // The terminal `done` carries the authoritative final text,
+                // which can cover only the harness that actually answered
+                // (chain fallback): replace the trailing text run after the
+                // last tool call and keep the earlier narration. When it
+                // matches what streamed, the timeline already IS the reply.
+                let cut = -1;
+                for (let i = parts.length - 1; i >= 0; i--) {
+                  if (parts[i]!.kind === "tool") {
+                    cut = i;
+                    break;
+                  }
+                }
+                next = [...parts.slice(0, cut + 1), { kind: "text", text: event.text }];
+              }
+              return { ...m, text: event.text || m.text, parts: next };
+            });
           } else if (event.type === "error") {
             patch((m) => ({ ...m, error: event.message }));
           }
@@ -340,7 +406,13 @@ export function ChatScreen(props: {
         // channel already renders this placeholder (`core/engine.ts`).
         patch((m) =>
           m.text === "" && m.error === undefined
-            ? { ...m, text: "(no reply)" }
+            ? {
+                ...m,
+                text: "(no reply)",
+                // The placeholder rides the timeline too, so a turn that
+                // called tools but said nothing still shows it under them.
+                parts: [...(m.parts ?? []), { kind: "text", text: "(no reply)" }],
+              }
             : m,
         );
       } finally {
