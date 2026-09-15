@@ -24,6 +24,8 @@
 #              else behave like `normal`. Lets a test make ONE configured
 #              model fail while the other succeeds — the coder-swap retry
 #              ladder / primary-fallback tests.
+#   ratelimit — exit 1 with provider rate-limit prose on stderr (the #559
+#              first-signal abort: the coder-swap ladder must NOT retry).
 
 mode="${FAKE_PI_MODE:-normal}"
 
@@ -105,6 +107,10 @@ case "$mode" in
     # harness stream, exactly like a bash/notify/vault side effect.
     printf '%s\n' '{"type":"tool_execution_start","toolName":"bash","args":{"command":"echo side-effect"}}'
     printf '%s\n' '{"type":"tool_execution_end","toolName":"bash","result":{}}'
+    exit 1
+    ;;
+  ratelimit)
+    echo "provider error: 429 rate_limit exceeded" >&2
     exit 1
     ;;
   error)

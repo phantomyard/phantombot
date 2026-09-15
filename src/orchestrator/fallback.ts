@@ -91,6 +91,15 @@ export async function* runWithFallback(
   const cooldown = options.cooldown ?? defaultStore;
   const alerter = options.alerter ?? defaultAlerter;
   const chainIds = chain.map((h) => h.id);
+  // Issue #559 transparency: the chain head is who the user "expects" to
+  // answer. When anyone else serves the turn, the done chunk gets stamped
+  // (fallbackFor/fallbackReason) so channels can tag the reply, and the
+  // switch is logged with from → to, reason, timestamp.
+  const headId = chain[0]!.id;
+  // Why the head didn't take the turn when it was skipped at snapshot time
+  // (cooldown or payload cap). Undefined once the head actually runs or
+  // fails — firstFailure then carries the reason.
+  let headSkipReason: string | undefined;
   // Remembers the first harness that failed this turn, so that if a LATER
   // harness answers we can tell the owner which one is broken and who is
   // covering for it. Only the first matters: that's the primary.
@@ -143,6 +152,12 @@ export async function* runWithFallback(
           cooldownRemainingMs: Math.max(0, status.untilMs - Date.now()),
         },
       );
+      if (harness.id === headId) {
+        headSkipReason = `primary in cooldown (${Math.max(
+          0,
+          Math.round((status.untilMs - Date.now()) / 1000),
+        )}s remaining)`;
+      }
       // Not the last harness: fall through silently. If somehow we're at
       // the last harness while still being cooled (shouldn't happen given
       // the allCooled escape hatch above, but defensive), yield a
@@ -173,6 +188,9 @@ export async function* runWithFallback(
             maxPayloadBytes: harness.maxPayloadBytes,
           },
         );
+        if (harness.id === headId) {
+          headSkipReason = `primary payload cap exceeded (${estimatedBytes} > ${harness.maxPayloadBytes} bytes)`;
+        }
         continue;
       }
       yield {
@@ -308,8 +326,10 @@ export async function* runWithFallback(
             // Cool the harness off — esp. fast for 4XX (the harness
             // detected an upstream auth/quota/capacity issue and we
             // don't want to keep slamming it). markFailure() handles
-            // the exponential backoff bookkeeping.
-            cooldown.markFailure(harness.id);
+            // the exponential backoff bookkeeping — or honors the
+            // provider's Retry-After when the harness surfaced one
+            // (issue #559).
+            cooldown.markFailure(harness.id, { retryAfterMs: chunk.retryAfterMs });
             alerter.noteFailure(harness.id, chunk.error, chunk.httpStatus);
             firstFailure ??= { harnessId: harness.id, error: chunk.error };
             recoverableError = true;
@@ -355,6 +375,25 @@ export async function* runWithFallback(
           chunk.type === "done" && carriedText.length > 0
             ? { ...chunk, finalText: carriedText + chunk.finalText }
             : chunk;
+        // Issue #559 transparency: a non-head harness serving a non-empty
+        // reply stamps WHO was supposed to answer and WHY they didn't, so
+        // channels can tag the visible reply. Empty-done fall-throughs are
+        // never stamped (they break before yield; and "(no reply)" needs
+        // no attribution).
+        const fallbackMeta =
+          emitted.type === "done" &&
+          emitted.finalText.length > 0 &&
+          harness.id !== headId
+            ? {
+                fallbackFor: headId,
+                fallbackReason:
+                  firstFailure?.error ?? headSkipReason ?? "primary unavailable",
+              }
+            : undefined;
+        const stamped: HarnessChunk =
+          fallbackMeta && emitted.type === "done"
+            ? { ...emitted, meta: { ...emitted.meta, ...fallbackMeta } }
+            : emitted;
         if (
           emitted.type === "done" &&
           emitted.finalText.length === 0 &&
@@ -396,7 +435,7 @@ export async function* runWithFallback(
         // something to resume FROM. Cheap: bounded narration plus capped tool
         // titles, dropped the moment the attempt ends any other way.
         partial.record(chunk);
-        yield emitted;
+        yield stamped;
         if (emitted.type === "done") {
           succeeded = true;
           if (emitted.finalText.length === 0) servedEmpty = true;
@@ -438,6 +477,21 @@ export async function* runWithFallback(
     }
 
     if (succeeded) {
+      // Issue #559: every provider switch is logged — from → to, reason,
+      // timestamp. A silent quality/price difference between primary and
+      // fallback is a trust bug; this is the operator-visible record.
+      if (harness.id !== headId) {
+        log.warn(
+          "orchestrator: provider switch — fallback served the turn",
+          {
+            from: headId,
+            to: harness.id,
+            reason:
+              firstFailure?.error ?? headSkipReason ?? "primary unavailable",
+            at: new Date().toISOString(),
+          },
+        );
+      }
       // A clean turn — even if the text was empty and we're on the last
       // harness, the CLI did its job. Clear any prior cooldown so the
       // next turn picks the chain back up at the top. This stays

@@ -124,12 +124,25 @@ export class CooldownStore {
    * Record a recoverable failure for `harnessId`. Increments the
    * consecutive-failure count and (re)arms the cooldown window with
    * jitter applied. Returns the resulting status (handy for logging).
+   *
+   * `retryAfterMs` (issue #559): when the provider explicitly said how
+   * long to wait (HTTP `Retry-After`), the window honors that value
+   * directly instead of the ladder — clamped to [1 ms, MAX_COOLDOWN_MS],
+   * NOT jittered (it is an explicit instruction, not a heuristic). The
+   * consecutive-failure count still increments so observability and the
+   * post-window re-failure lengthening keep working.
    */
-  markFailure(harnessId: string): CooldownStatus {
+  markFailure(
+    harnessId: string,
+    opts: { retryAfterMs?: number } = {},
+  ): CooldownStatus {
     const prev = this.state.get(harnessId);
     const failures = (prev?.consecutiveFailures ?? 0) + 1;
-    const base = baseCooldownForFailures(failures);
-    const jittered = applyJitter(base, this.random);
+    const retryAfterMs = opts.retryAfterMs;
+    const jittered =
+      retryAfterMs !== undefined && retryAfterMs > 0
+        ? Math.min(Math.max(Math.round(retryAfterMs), 1), MAX_COOLDOWN_MS)
+        : applyJitter(baseCooldownForFailures(failures), this.random);
     const untilMs = this.now() + jittered;
     const next: HarnessCooldownState = {
       consecutiveFailures: failures,

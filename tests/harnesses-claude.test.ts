@@ -191,6 +191,17 @@ describe("parseStreamJson api-error gate", () => {
     expect(c).toMatchObject({ type: "error", recoverable: true });
   });
 
+  test("rate_limit is terminal — the subprocess is killed, internal retry budget aborted (#559)", () => {
+    const c = parseStreamJson(errorEnvelope("rate_limit", "You've hit your session limit"));
+    expect(c).toMatchObject({ type: "error", recoverable: true, terminal: true });
+  });
+
+  test("other api-error statuses stay non-terminal — unchanged fall-through", () => {
+    const c = parseStreamJson(errorEnvelope("overloaded", "There's an issue with..."));
+    expect(c).toMatchObject({ type: "error", recoverable: true });
+    expect((c as { terminal?: boolean }).terminal).toBeUndefined();
+  });
+
   test("max_output_tokens is surfaced as real (truncated) assistant text", () => {
     const c = parseStreamJson(errorEnvelope("max_output_tokens", "a long partial answer"));
     expect(c).toEqual({ type: "text", text: "a long partial answer" });

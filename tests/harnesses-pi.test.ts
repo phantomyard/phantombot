@@ -993,6 +993,29 @@ describe("PiHarness coder-swap retry ladder", () => {
     expect(await loggedArgv()).toHaveLength(1);
   });
 
+  test("provider rate-limit aborts the ladder on the FIRST signal (#559)", async () => {
+    // `ratelimit` dies with "429 rate_limit" prose on stderr. The old gate
+    // read this as a generic provider death and retried the full coder-swap
+    // ladder against a provider that was refusing work — burning minutes
+    // before the orchestrator ever got the chance to fall through.
+    process.env.FAKE_PI_MODE = "ratelimit";
+    const chunks = await collect(
+      new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+      }).invoke(newRequest({ userMessage: PR_MSG })),
+    );
+    const error = chunks.find((c) => c.type === "error") as
+      | { type: "error"; recoverable?: boolean }
+      | undefined;
+    expect(error?.recoverable).toBe(true);
+    // ONE invocation — the first rate-limit signal aborted the remaining
+    // ladder budget. No second coder attempt, no primary fallback run.
+    expect(await loggedArgv()).toHaveLength(1);
+  });
+
   test("terminal error (exit 127) → exactly one attempt, no ladder (locks the non-retryable rule)", async () => {
     // notfound exits 127 → recoverable: false. A /stop, a missing binary, or
     // a policy tripwire must never be re-run on a second brain — this test
