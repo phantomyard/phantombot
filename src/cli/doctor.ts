@@ -916,18 +916,17 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const config = resolved.config;
   const persona = resolved.persona;
   const personaConfigs = new Map(input.personaConfigs ?? []);
-  // Names whose layer read already failed once in the pre-population loop —
-  // the pi-extension roster loop must not re-read (and re-warn) them.
-  const failedLoads = new Set<string>();
   if (!input.config) {
     const names = new Set(host.autostartPersonas ?? []);
     if (persona !== host.defaultPersona) names.add(persona);
+    // The ONE place non-default layers are loaded: the pi-extension roster
+    // walk below never re-reads, so a broken layer warns exactly once here
+    // and simply drops out of the reconcile (#566 review follow-up).
     for (const name of names) {
       if (name === host.defaultPersona || personaConfigs.has(name)) continue;
       try {
         personaConfigs.set(name, await loadConfig(name));
       } catch (e) {
-        failedLoads.add(name);
         log.warn("doctor: persona config load failed", {
           persona: name,
           error: (e as Error).message,
@@ -1160,35 +1159,40 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       if (seen.has(name)) continue;
       seen.add(name);
       if (name === host.defaultPersona) {
-        // `host` IS the default persona's layer on every reachable path: an
-        // unset-input host comes from plain loadConfig(), and with an injected
-        // config the invoking persona being the default means
-        // resolved.config === resolved.host. The old else-branch re-read the
-        // very file the host config was loaded from — gone.
+        // `host` stands in for the default persona's layer when this process
+        // actually holds it: with no injected config the host came from plain
+        // loadConfig() (the default's layer, #474), and with an injected
+        // config the caller declares which persona's layer `config` is by
+        // putting it in personaConfigs (run.ts passes the host config it
+        // loaded, so the startup doctor's map names the default). Keying this
+        // off the INVOKING persona — the old shape — dropped the default from
+        // the roster whenever a non-default persona invoked an
+        // injected-config doctor (#567).
         if (persona === name || !input.config) {
           layers.push(host);
         } else {
           const pc = personaConfigs.get(name);
           if (pc) {
             layers.push(pc);
+          } else {
+            // No default layer anywhere: the reconcile now runs on the
+            // remaining roster and can disagree with the concurrent
+            // rosterLayers walk. Say so instead of dropping silently.
+            log.warn(
+              "doctor: pi-extension roster has no layer for the default persona; reconcile may disagree with startup",
+              { persona: name },
+            );
           }
         }
-      } else if (failedLoads.has(name)) {
-        // The pre-population loop already tried this layer, failed, and
-        // warned once — do not read it (and warn) a second time.
       } else {
+        // Pre-population is the single load point for non-default roster
+        // names: a healthy layer sits in personaConfigs, a broken one was
+        // warned about once above and drops out here. An injected-config
+        // caller supplies the map itself — the old disk re-read fallback in
+        // this branch was unreachable (#566 review).
         const pc = personaConfigs.get(name);
         if (pc) {
           layers.push(pc);
-        } else if (!input.config) {
-          try {
-            layers.push(await loadConfig(name));
-          } catch (e) {
-            log.warn("doctor: persona layer load failed for pi extension", {
-              persona: name,
-              error: (e as Error).message,
-            });
-          }
         }
       }
     }

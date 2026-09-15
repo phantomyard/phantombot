@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDoctor } from "../src/cli/doctor.ts";
 import type { Config } from "../src/config.ts";
+import { setLogSink } from "../src/lib/logSink.ts";
 import { generateIdentity } from "../src/lib/nostrIdentity.ts";
 import { openVaultWithSecret } from "../src/lib/vault.ts";
 
@@ -2007,5 +2008,114 @@ describe("runDoctor pi extension — host-level desired state (multi-persona)", 
     });
     expect(code3).toBe(0);
     expect(out3.text).toContain("correctly absent");
+  });
+
+  test("non-default invoker with no default layer in the map warns instead of dropping silently (#567)", async () => {
+    // run.ts's pre-#567 shape: an injected config + a non-default alertPersona
+    // + a personaConfigs map that excludes the default (its listener fallbacks
+    // depend on that). The walk used to drop the default WITHOUT A TRACE and
+    // reconcile on an invoker-first roster that could fight the concurrent
+    // rosterLayers walk. Now: a named warn, and a deterministic (kai-first)
+    // reconcile over the remaining roster.
+    const warns: string[] = [];
+    const restore = setLogSink((line) => {
+      if (line.includes('"level":"warn"')) warns.push(line);
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config: kaiLayer as unknown as Config,
+      persona: "kai",
+      personaConfigs: new Map([
+        ["kai", kaiLayer as unknown as Config],
+        ["jake", jakeLayer as unknown as Config],
+      ]),
+      piExtensionAgentDir: agentDir,
+      out,
+      ...isolate,
+    });
+    restore();
+    expect(code).toBe(0);
+    expect(
+      warns.some((l) =>
+        l.includes(
+          "pi-extension roster has no layer for the default persona",
+        ),
+      ),
+    ).toBe(true);
+    // Deterministic degraded roster: kai's routing wins (first capable in the
+    // remaining roster) — pinned so a future refactor cannot make this
+    // path's outcome depend on map iteration order.
+    const extDir = join(agentDir, "extensions", "capability-routing");
+    expect(JSON.parse(await readFile(join(extDir, "routing.json"), "utf8"))).toEqual({
+      primaryModel: "glm-kai",
+      imageModel: "glm-kai",
+    });
+  });
+
+  test("a persona layer that fails to load warns ONCE, never again from the pi-extension roster", async () => {
+    // Robbie, #566 review: nothing pinned the pre-populated failedLoads set —
+    // removing it made the pi-extension roster loop re-read (and re-warn) the
+    // broken layer. On-disk host, no injected config: kai's persona file is
+    // invalid TOML, jake's is valid.
+    await writeFile(
+      join(workdir, "config.toml"),
+      `default_persona = "phantom"\nautostart_personas = ["kai", "jake"]\n`,
+      "utf8",
+    );
+    await mkdir(join(workdir, "personas", "kai"), { recursive: true });
+    await writeFile(
+      join(workdir, "personas", "kai", "config.toml"),
+      "not [valid toml",
+      "utf8",
+    );
+    await mkdir(join(workdir, "personas", "jake"), { recursive: true });
+    await writeFile(
+      join(workdir, "personas", "jake", "config.toml"),
+      `[harnesses.pi.routing]\nprovider = "openrouter"\nprimary_model = "gpt-jake"\nimage_model = "gpt-jake"\n`,
+      "utf8",
+    );
+    const savedEnv = ["PHANTOMBOT_CONFIG", "PHANTOMBOT_PERSONAS_DIR", "PHANTOMBOT_STATE", "PHANTOMBOT_PERSONA"].map(
+      (k) => [k, process.env[k]] as const,
+    );
+    process.env.PHANTOMBOT_CONFIG = join(workdir, "config.toml");
+    process.env.PHANTOMBOT_PERSONAS_DIR = join(workdir, "personas");
+    process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
+    delete process.env.PHANTOMBOT_PERSONA;
+    const warns: string[] = [];
+    const restore = setLogSink((line) => {
+      if (line.includes('"level":"warn"')) warns.push(line);
+    });
+    try {
+      const out = new CaptureStream();
+      const code = await runDoctor({
+        piExtensionAgentDir: agentDir,
+        out,
+        ...isolate,
+      });
+      expect(code).toBe(0);
+      const prepopulateWarns = warns.filter((l) =>
+        l.includes("doctor: persona config load failed"),
+      );
+      expect(prepopulateWarns.length).toBe(1);
+      expect(prepopulateWarns[0]).toContain("kai");
+      expect(
+        warns.some((l) =>
+          l.includes("persona layer load failed for pi extension"),
+        ),
+      ).toBe(false);
+      // Roster = phantom (host) + jake; kai dropped. phantom's layer has no
+      // pi routing, so jake's is the first capable one.
+      const extDir = join(agentDir, "extensions", "capability-routing");
+      expect(JSON.parse(await readFile(join(extDir, "routing.json"), "utf8"))).toEqual({
+        primaryModel: "gpt-jake",
+        imageModel: "gpt-jake",
+      });
+    } finally {
+      restore();
+      for (const [k, v] of savedEnv) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
   });
 });
