@@ -12,6 +12,7 @@ import {
   hasRoutableCapability,
   hostDesiredRouting,
   removeRoutingExtension,
+  rosterLayers,
   routingExtensionStatus,
 } from "../src/lib/piExtensionProvision.ts";
 import { PI_EXTENSION_FILES } from "../src/lib/piExtensionAssets.generated.ts";
@@ -353,5 +354,103 @@ describe("hostDesiredRouting", () => {
       imageModel: "glm-lena",
       provider: "openrouter",
     });
+  });
+});
+
+describe("rosterLayers", () => {
+  // Shapes mirror the real rig: the default persona's layer carries native
+  // INSTANCE routings, kai's carries a top-level routing table. Cast like the
+  // doctor suite does — the harnesses slice is all the code reads.
+  const defaultLayer = {
+    defaultPersona: "phantom",
+    autostartPersonas: ["kai", "jake"],
+    personaLayer: "phantom",
+    harnesses: {
+      chain: ["pi-primary", "pi-fallback"],
+      instances: {
+        "pi-primary": { type: "native", routing: { primaryModel: "glm-default", imageModel: "glm-default", provider: "openrouter" } },
+        "pi-fallback": { type: "native", routing: { primaryModel: "kimi-default", imageModel: "kimi-default", provider: "openrouter" } },
+      },
+    },
+  } as unknown as Parameters<typeof rosterLayers>[0];
+  const kaiLayer = {
+    defaultPersona: "phantom",
+    autostartPersonas: ["kai", "jake"],
+    personaLayer: "kai",
+    harnesses: {
+      chain: ["codex", "native"],
+      pi: { routing: { primaryModel: "glm-kai", imageModel: "glm-kai", provider: "openrouter" } },
+    },
+  } as unknown as Parameters<typeof rosterLayers>[0];
+  // Minimal layer the seam stubs return — cast, only `harnesses.chain` is read.
+  const bareLayer = { harnesses: { chain: ["claude"] } } as unknown as Pick<
+    Config,
+    "harnesses"
+  >;
+
+  test("production shape: the held layer leads, non-defaults come from the seam", async () => {
+    const loaded: string[] = [];
+    const layers = await rosterLayers(defaultLayer, async (name) => {
+      loaded.push(name);
+      return kaiLayer;
+    });
+    // Default persona first (its layer is `config` itself — never re-read),
+    // then autostart order.
+    expect(layers[0]).toBe(defaultLayer);
+    expect(loaded).toEqual(["kai", "jake"]);
+    expect(layers).toHaveLength(3);
+  });
+
+  test("REGRESSION (#565): an injected non-default layer never drops the default persona", async () => {
+    // The old inline walk skipped BOTH `personaLayer` and `defaultPersona`
+    // roster entries while leading with `config` — so with kai's layer
+    // injected, phantom (the default) silently vanished from the roster and
+    // kai's top-level routing would have won the stamp.
+    const loaded: string[] = [];
+    const layers = await rosterLayers(kaiLayer, async (name) => {
+      loaded.push(name);
+      if (name === "phantom") return defaultLayer;
+      return bareLayer;
+    });
+    expect(loaded).toContain("phantom");
+    expect(layers[0]).toBe(defaultLayer); // default leads, not the injection
+    expect(layers[1]).toBe(kaiLayer); // the injected layer serves its own persona
+  });
+
+  test("an unset personaLayer (hand-built fixture) is treated as the default's layer", async () => {
+    const loaded: string[] = [];
+    const noLayerMarker = {
+      ...defaultLayer,
+      personaLayer: undefined,
+    } as unknown as Parameters<typeof rosterLayers>[0];
+    const layers = await rosterLayers(noLayerMarker, async (name) => {
+      loaded.push(name);
+      return bareLayer;
+    });
+    expect(layers[0]).toBe(noLayerMarker);
+    expect(loaded).toEqual(["kai", "jake"]);
+  });
+
+  test("an unreadable persona drops out without throwing", async () => {
+    const layers = await rosterLayers(defaultLayer, async (name) => {
+      if (name === "kai") throw new Error("config.toml unreadable");
+      return bareLayer;
+    });
+    expect(layers[0]).toBe(defaultLayer);
+    expect(layers).toHaveLength(2); // phantom + jake; kai gone, no crash
+  });
+
+  test("duplicate roster entries are deduped", async () => {
+    const dup = {
+      ...defaultLayer,
+      autostartPersonas: ["phantom", "kai", "kai"],
+    } as unknown as Parameters<typeof rosterLayers>[0];
+    const loaded: string[] = [];
+    const layers = await rosterLayers(dup, async (name) => {
+      loaded.push(name);
+      return bareLayer;
+    });
+    expect(loaded).toEqual(["kai"]);
+    expect(layers).toHaveLength(2);
   });
 });

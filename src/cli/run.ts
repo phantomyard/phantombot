@@ -93,6 +93,7 @@ import { spawnNightlySweep } from "../lib/nightlyTrigger.ts";
 import {
   hostDesiredRouting,
   ensureRoutingExtension,
+  rosterLayers,
 } from "../lib/piExtensionProvision.ts";
 import { copyNativeKeysForServedPersonas } from "../lib/nativeKeyCopy.ts";
 import { loadState, saveState } from "../state.ts";
@@ -926,19 +927,10 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     // the dir is one per machine, so its desired state must be invoker-
     // independent. Per-turn reads stay persona-scoped via
     // PHANTOMBOT_ROUTING_JSON; the stamped sibling only feeds a bare `pi`.
+    // rosterLayers (issue #565) hardens the walk: the default persona's layer
+    // is never dropped, even when a non-default layer was injected.
     void (async () => {
-      const layers: Pick<Config, "harnesses">[] = [config];
-      for (const name of servedPersonasOf(config)) {
-        if (name === config.personaLayer || name === config.defaultPersona) {
-          continue; // this process's layer already leads the roster
-        }
-        try {
-          layers.push(await loadPersonaConfig(name));
-        } catch {
-          // A persona whose layer cannot be loaded drops out of the roster;
-          // the reconcile must not block startup on one unreadable persona.
-        }
-      }
+      const layers = await rosterLayers(config, loadPersonaConfig);
       return ensureRoutingExtension(hostDesiredRouting(layers));
     })().then(
       (r) => {
