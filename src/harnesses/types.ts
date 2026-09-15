@@ -225,6 +225,14 @@ export type HarnessChunk =
       error: string;
       recoverable: boolean;
       httpStatus?: number;
+      /**
+       * Provider-supplied `Retry-After`, in milliseconds, when the upstream
+       * explicitly said how long to wait (issue #559). When present the
+       * cooldown store honors it directly (bounded by MAX_COOLDOWN_MS)
+       * instead of the exponential ladder. Optional — most failure paths
+       * never see a Retry-After header (CLI stderr, synthetic envelopes).
+       */
+      retryAfterMs?: number;
       terminal?: true;
       /**
        * Why the kill coordinator killed the subprocess, when it was a kill

@@ -176,3 +176,45 @@ describe("CooldownStore — basic state machine", () => {
     expect(s.isCooledDown("pi").cooled).toBe(false);
   });
 });
+
+describe("CooldownStore — Retry-After (issue #559)", () => {
+  test("honors the provider's Retry-After exactly — no ladder, no jitter", () => {
+    let now = 0;
+    // random() would inject ±25% if it were consulted; a Retry-After window
+    // is an explicit instruction, not a heuristic, so it must survive raw.
+    const s = new CooldownStore(
+      () => 0.99,
+      () => now,
+    );
+    const r = s.markFailure("gemini", { retryAfterMs: 45_000 });
+    expect(r.cooled).toBe(true);
+    expect(r.consecutiveFailures).toBe(1);
+    expect(r.untilMs).toBe(45_000);
+  });
+
+  test("clamped to the 1h cap — a provider cannot cool us for a day", () => {
+    let now = 0;
+    const s = new CooldownStore(() => 0.5, () => now);
+    const r = s.markFailure("gemini", { retryAfterMs: 9_000_000 });
+    expect(r.untilMs).toBe(MAX_COOLDOWN_MS);
+  });
+
+  test("the failure count still increments — post-window re-failure lengthens", () => {
+    let now = 0;
+    const s = new CooldownStore(() => 0.5, () => now);
+    s.markFailure("gemini", { retryAfterMs: 60_000 });
+    now += 60_001; // expire the Retry-After window
+    expect(s.isCooledDown("gemini").cooled).toBe(false);
+    // No header this time → ladder, but from tier 2 (300s), not tier 1.
+    const r = s.markFailure("gemini");
+    expect(r.consecutiveFailures).toBe(2);
+    expect(r.untilMs - now).toBe(300_000);
+  });
+
+  test("zero/negative Retry-After falls back to the ladder, not a zero window", () => {
+    let now = 0;
+    const s = new CooldownStore(() => 0.5, () => now);
+    const r = s.markFailure("gemini", { retryAfterMs: 0 });
+    expect(r.untilMs - now).toBe(BASE_COOLDOWN_MS);
+  });
+});

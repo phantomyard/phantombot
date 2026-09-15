@@ -31,6 +31,7 @@
 import type { FileSink, Subprocess, SpawnOptions } from "bun";
 import { killProcessGroup } from "./processGroup.ts";
 import { log } from "./logger.ts";
+import { parseRetryAfterMs } from "./harnessAlert.ts";
 import { redactForLog } from "./redact.ts";
 import type { HarnessChunk, HarnessRequest } from "../harnesses/types.ts";
 import {
@@ -844,6 +845,13 @@ export async function* runHarnessProcess(
         lines: stderrRing,
       });
     }
+    const stderrText = stderrRing.join("\n");
+    // Issue #559 (review on #561): a provider that says how long to wait
+    // gets its window honored, not the jittered ladder. The stderr tail is
+    // the only place a CLI-subprocess harness surfaces the provider's
+    // Retry-After — claude's synthetic envelope and pi's exit code carry
+    // no structured hint of their own.
+    const retryAfterMs = parseRetryAfterMs(stderrText);
     yield {
       type: "error",
       error: `${harnessId} exited with code ${code}`,
@@ -852,6 +860,7 @@ export async function* runHarnessProcess(
       // orchestrator tries the next harness.
       recoverable: code !== 127,
       stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
     };
     return;
   }

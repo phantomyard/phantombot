@@ -103,7 +103,23 @@ const AUTH_MARKERS = [
   "unauthorized",
 ];
 
-const RATE_LIMIT_MARKERS = ["rate_limit", "quota", "resource_exhausted"];
+// Real provider prose varies widely (review on #561): a bare exit-code
+// death carries the status code or a spelled-out phrase, rarely the exact
+// snake_case token a synthetic envelope uses. Match the phrase forms too —
+// a miss here means the pi coder-swap ladder retries against a provider
+// that is refusing work, which is the exact bug #559 closes.
+const RATE_LIMIT_MARKERS = [
+  "rate_limit",
+  "rate limit",
+  "too many requests",
+  "quota",
+  "resource_exhausted",
+];
+
+/** Word-bounded bare status code: "429 Too Many Requests" carries no other
+ *  marker. Bounded so a number that merely CONTAINS 429 ("1429 tokens") or
+ *  an unrelated line number can't classify. */
+const RATE_LIMIT_429 = /\b429\b/;
 
 /**
  * Text `killCauseToErrorChunk` (src/lib/harnessRunner.ts) stamps when it
@@ -138,7 +154,12 @@ export function classifyFailure(
   if (httpStatus === 429) return "rate_limit";
   const text = error.toLowerCase();
   if (AUTH_MARKERS.some((m) => text.includes(m))) return "auth";
-  if (RATE_LIMIT_MARKERS.some((m) => text.includes(m))) return "rate_limit";
+  if (
+    RATE_LIMIT_MARKERS.some((m) => text.includes(m)) ||
+    RATE_LIMIT_429.test(text)
+  ) {
+    return "rate_limit";
+  }
   if (TIMEOUT_MARKERS.some((m) => text.includes(m))) return "timeout";
   if (EMPTY_MARKERS.some((m) => text.includes(m))) return "empty";
   return "other";
@@ -409,3 +430,43 @@ export class HarnessAlerter {
  * construct their own `new HarnessAlerter({ send })`.
  */
 export const harnessAlerter = new HarnessAlerter();
+
+/**
+ * Parse a provider Retry-After hint out of harness failure text (issue
+ * #559, review on #561: the field had no producer, so every rate limit
+ * took the jittered ladder and the hint plumbing was dead code).
+ *
+ * Providers expose the window in several shapes across stderr lines and
+ * error prose:
+ *
+ *   retry-after: 30          (HTTP header echo — bare number is SECONDS)
+ *   429 Too Many Requests — retry after 25s
+ *   Error: rate limit reached, retry in 2 minutes
+ *   try again in 90 seconds
+ *
+ * Returns milliseconds, or undefined when no hint is present. Units:
+ * `ms` is milliseconds, `m`/`min(ute)(s)` are minutes, everything else
+ * (including no unit — the HTTP convention) is seconds. Callers clamp:
+ * `CooldownStore.markFailure` bounds the value by MAX_COOLDOWN_MS.
+ */
+const RETRY_AFTER_PATTERNS = [
+  // The digit gap excludes '-': a negative number is not a hint, and letting
+  // the gap swallow the sign would read "-5" as "5".
+  /\bretry[-\s]after[^0-9-]{0,20}(\d+(?:\.\d+)?)\s*(ms|s|secs?|seconds?|m|mins?|minutes?)?\b/i,
+  /\bretry in[^0-9-]{0,20}(\d+(?:\.\d+)?)\s*(ms|s|secs?|seconds?|m|mins?|minutes?)?\b/i,
+  /\btry again in[^0-9-]{0,20}(\d+(?:\.\d+)?)\s*(ms|s|secs?|seconds?|m|mins?|minutes?)?\b/i,
+];
+
+export function parseRetryAfterMs(text: string): number | undefined {
+  for (const pattern of RETRY_AFTER_PATTERNS) {
+    const match = pattern.exec(text);
+    if (!match) continue;
+    const n = Number(match[1]);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const unit = match[2]?.toLowerCase() ?? "s";
+    const ms =
+      unit === "ms" ? n : unit.startsWith("m") ? n * 60_000 : n * 1000;
+    return Math.round(ms);
+  }
+  return undefined;
+}

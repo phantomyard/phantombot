@@ -1128,3 +1128,55 @@ describe("runHarnessProcess — tool timeout", () => {
     }
   });
 });
+
+describe("runHarnessProcess — Retry-After producer (issue #559, review on #561)", () => {
+  // The retryAfterMs field previously had NO producer — every rate limit
+  // took the jittered ladder. A CLI-subprocess harness surfaces the
+  // provider's window only via stderr, so the non-zero-exit error chunk
+  // must parse and stamp it.
+  const runFakeDeath = async (stderrLine: string): Promise<any[]> => {
+    const proc = spawnInNewSession(
+      ["sh", "-c", `echo ${JSON.stringify(stderrLine)} >&2; exit 1`],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    trackedPids.push(proc.pid!);
+    const chunks: any[] = [];
+    const generator = runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 10_000,
+        hardTimeoutMs: 10_000,
+        workingDir: process.cwd(),
+        persona: "test",
+        trusted: true,
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      parseEvent: () => undefined,
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
+    });
+    for await (const chunk of generator) {
+      chunks.push(chunk);
+    }
+    return chunks;
+  };
+
+  test("a provider Retry-After hint in stderr is stamped on the error chunk", async () => {
+    const chunks = await runFakeDeath(
+      "Error: 429 too many requests, retry after 25s",
+    );
+    const errorChunk = chunks.find((c) => c.type === "error");
+    expect(errorChunk).toBeDefined();
+    expect(errorChunk.recoverable).toBe(true);
+    expect(errorChunk.retryAfterMs).toBe(25_000);
+  });
+
+  test("no hint in stderr → no retryAfterMs stamp (ladder stays in charge)", async () => {
+    const chunks = await runFakeDeath("Rate limit exceeded, retry later");
+    const errorChunk = chunks.find((c) => c.type === "error");
+    expect(errorChunk).toBeDefined();
+    expect(errorChunk.retryAfterMs).toBeUndefined();
+  });
+});
