@@ -830,7 +830,20 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // Startup health check — read-only for the nightly (it repairs itself by
   // sweeping); still repairs drifted units/timers/connectors. Don't await.
   // Runs against the admin persona for the same reason as notify above.
-  runDoctor({ config, persona: alertPersona, personaConfigs, out, err }).then(
+  // #567: personaConfigs deliberately excludes the default persona (the
+  // `personaConfigs.get(...) ?? config` fallbacks above depend on that), but
+  // the doctor's pi-extension roster walks default-FIRST and, with an
+  // injected config, only takes the default's layer from this map. Hand it
+  // over explicitly: a non-default alertPersona would otherwise compute a
+  // default-less roster and fight the concurrent rosterLayers reconcile
+  // over the managed extension dir.
+  runDoctor({
+    config,
+    persona: alertPersona,
+    personaConfigs: new Map(personaConfigs).set(defaultPersona, config),
+    out,
+    err,
+  }).then(
     (code) => {
       if (code !== 0) log.info("run: startup doctor flagged an issue", { code });
     },
