@@ -637,6 +637,16 @@ export function parseStreamJson(parsed: unknown): ParseEventResult {
         type: "error",
         error: `claude api error: ${status}`,
         recoverable: true,
+        // Issue #559: a rate_limit envelope is the CLI giving up on the
+        // upstream (or announcing the session cap). Whatever retry budget
+        // remains INSIDE the claude subprocess — further backoff rounds,
+        // the --fallback-model opus→sonnet cascade — would only burn
+        // minutes against a provider that is not accepting work. Marking
+        // the chunk terminal makes the runner kill the subprocess now and
+        // suppress any further output, so the orchestrator advances to the
+        // next harness within seconds. Same fail-safe shape as the subagent
+        // tripwire: recoverable is unchanged, so fall-through is identical.
+        ...(status === "rate_limit" ? { terminal: true as const } : {}),
       };
     }
   }

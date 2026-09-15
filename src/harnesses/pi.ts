@@ -53,6 +53,7 @@ import {
 } from "../lib/piRouting.ts";
 import type { ParseEventResult } from "./reasoningReplay.ts";
 import { CODER_SWAP_MAX_ATTEMPTS, getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
+import { classifyFailure } from "../lib/harnessAlert.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
 import { reloadVaultForPersona } from "../lib/vault.ts";
@@ -528,7 +529,20 @@ export class PiHarness implements Harness {
           !failure.terminal &&
           !producedOutput &&
           !isHardCapError(failure.error) &&
-          !req.signal?.aborted;
+          !req.signal?.aborted &&
+          // Issue #559: a rate-limited provider is not going to accept work
+          // on the next swap attempt either. Retrying the ladder against a
+          // 429 just burns the coder-swap budget (and the wall clock) before
+          // the orchestrator ever gets the chance to fall through to the
+          // next harness — abort the internal ladder on the FIRST rate-limit
+          // signal and let the chain advance immediately. Provider deaths
+          // surface as a bare exit-code error plus a stderr tail, so the
+          // classification reads both (stderr carries the provider's
+          // "429 / rate limit / quota" prose).
+          classifyFailure(
+            [failure.error, ...(failure.stderrTail ?? [])].join("\n"),
+            failure.httpStatus,
+          ) !== "rate_limit";
         // Not retryable — surface the error exactly as the single-attempt
         // path always did: a policy violation, a /stop, a hard-cap kill (the
         // final timer must stay final), or a failure AFTER the attempt got

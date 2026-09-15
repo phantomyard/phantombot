@@ -128,6 +128,17 @@ export const PUBLISH_READBACK_SETTLE_MS = 750;
  */
 export const PUBLISH_READBACK_TIMEOUT_MS = 5000;
 
+/** Two independently verified relay copies are enough to call delivery confirmed. */
+export const PUBLISH_CONFIRM_QUORUM = 2;
+
+/**
+ * Warm-spare probe cadence. The channel's existing 15-second catch-up loop
+ * offers the opportunity, while this gate limits actual probes to roughly one
+ * per minute with ±25% jitter. Publish volume never enters this calculation.
+ */
+export const RELAY_HEALTH_PROBE_INTERVAL_MS = 60_000;
+export const RELAY_HEALTH_PROBE_JITTER = 0.25;
+
 /**
  * nostr-tools' `SimplePool.publish` does NOT reject when it can't reach a
  * relay: it RESOLVES that relay's promise with the string
@@ -442,11 +453,18 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    * and promoting it back later costs nothing. See relayHealth.ts.
    */
   readonly relayHealth: RelayHealthTracker;
+  /** Last event each relay independently proved it stores, used by probes. */
+  private readonly lastConfirmedEventByRelay = new Map<string, string>();
+  private nextRelayHealthProbeAt = 0;
+  private relayHealthProbeRunning = false;
+  private relayHealthProbeCursor = 0;
 
   constructor(
     private readonly ourSecretKey: Uint8Array,
     relays: string[],
     private readonly pool: RelayPool,
+    private readonly probeJitter: () => number = () =>
+      1 + (Math.random() * 2 - 1) * RELAY_HEALTH_PROBE_JITTER,
   ) {
     this.relays = [...relays];
     this.ourPubHex = getPublicKey(ourSecretKey);
@@ -552,6 +570,13 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
           // already torn down — nothing to do.
         }
         resolve(events);
+        // The catch-up poll owns cadence, so probe traffic cannot scale with
+        // publishes. Detached: health recovery never delays inbound delivery.
+        void this.probeQuarantinedRelay().catch((e) => {
+          log.debug("phantomchat: relay health probe failed", {
+            error: (e as Error).message,
+          });
+        });
       };
       // Resolve on EOSE (all relays replayed their match set) or the hard
       // timeout, whichever comes first.
@@ -758,19 +783,88 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       targets.map(async (relay) => {
         const found = await this.readBackOne(relay, event.id, timing?.timeoutMs);
         if (!found) missing.push(relay);
+        else this.lastConfirmedEventByRelay.set(relay, event.id);
         // Feed the quarantine tracker (issue #359). This is the ONLY health
         // signal in the system — derived from traffic we were already sending,
         // so relay health costs zero additional requests.
         this.relayHealth.record(relay, found);
       }),
     );
-    if (missing.length > 0) {
+    const confirmed = targets.length - missing.length;
+    if (confirmed >= PUBLISH_CONFIRM_QUORUM) {
+      log.info(`phantomchat: publish confirmed delivered via ${confirmed} relays`, {
+        eventId: event.id,
+        kind: event.kind,
+        confirmed,
+        relays: targets.length,
+      });
+    } else if (missing.length === 0) {
       log.warn(
-        "phantomchat: publish NOT confirmed stored — relay(s) dropped the event",
-        { eventId: event.id, kind: event.kind, missing, relays: targets.length },
+        `phantomchat: publish confirmed by ${confirmed} relay — below quorum`,
+        {
+          eventId: event.id,
+          kind: event.kind,
+          confirmed,
+          quorum: PUBLISH_CONFIRM_QUORUM,
+          relays: targets.length,
+        },
+      );
+    } else {
+      log.warn(
+        "phantomchat: publish NOT confirmed stored — relay quorum not met",
+        {
+          eventId: event.id,
+          kind: event.kind,
+          confirmed,
+          quorum: PUBLISH_CONFIRM_QUORUM,
+          missing,
+          relays: targets.length,
+        },
       );
     }
     return missing;
+  }
+
+  /**
+   * Probe at most one quarantined warm spare per jittered cadence window using
+   * an event that relay previously confirmed. Called by the fixed-rate inbound
+   * catch-up loop, never by publishWrap, so heavy send traffic creates no extra
+   * probes. Returns whether a query was attempted (test/diagnostic seam).
+   */
+  async probeQuarantinedRelay(now = Date.now()): Promise<boolean> {
+    if (this.closed || this.relayHealthProbeRunning) return false;
+    if (this.nextRelayHealthProbeAt === 0) {
+      this.nextRelayHealthProbeAt = now + Math.round(
+        RELAY_HEALTH_PROBE_INTERVAL_MS * this.probeJitter(),
+      );
+      return false;
+    }
+    if (now < this.nextRelayHealthProbeAt) return false;
+    this.nextRelayHealthProbeAt = now + Math.round(
+      RELAY_HEALTH_PROBE_INTERVAL_MS * this.probeJitter(),
+    );
+
+    const candidates = this.relayHealth.probeEligibleRelays(now).filter(
+      (relay) => this.lastConfirmedEventByRelay.has(relay),
+    );
+    if (candidates.length === 0) return false;
+    const relay = candidates[this.relayHealthProbeCursor % candidates.length]!;
+    this.relayHealthProbeCursor++;
+    const eventId = this.lastConfirmedEventByRelay.get(relay)!;
+    this.relayHealthProbeRunning = true;
+    try {
+      const found = await this.readBackOne(relay, eventId);
+      if (found) this.relayHealth.releaseFromProbe(relay, now);
+      else {
+        log.debug("phantomchat: quarantined relay probe missed", {
+          relay,
+          eventId,
+        });
+      }
+      return true;
+    } finally {
+      this.relayHealthProbeRunning = false;
+    }
   }
 
   /**

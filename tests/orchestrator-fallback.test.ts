@@ -813,3 +813,116 @@ describe("describeInvokeThrow", () => {
     expect(describeInvokeThrow("pi", { weird: true })).toContain("pi");
   });
 });
+
+describe("runWithFallback — rate-limit immediate flip (issue #559)", () => {
+  test("Retry-After on the error chunk drives the cooldown window", async () => {
+    let now = 1_000_000;
+    const store = new CooldownStore(() => 0.5, () => now);
+    const first = new FakeHarness("claude", [
+      { type: "error", error: "claude api error: rate_limit", recoverable: true, retryAfterMs: 60_000 },
+    ]);
+    const second = new FakeHarness("pi", [{ type: "done", finalText: "fallback answer" }]);
+    await collect(runWithFallback([first, second], newRequest(), { cooldown: store }));
+    const status = store.isCooledDown("claude");
+    expect(status.consecutiveFailures).toBe(1);
+    expect(status.untilMs).toBe(now + 60_000);
+  });
+
+  test("fallback serving the turn stamps done meta with who was expected and why", async () => {
+    const first = new FakeHarness("claude", [
+      { type: "error", error: "claude api error: rate_limit", recoverable: true },
+    ]);
+    const second = new FakeHarness("pi", [{ type: "done", finalText: "fallback answer" }]);
+    const chunks = await collect(runWithFallback([first, second], newRequest(), {
+      cooldown: new CooldownStore(),
+    }));
+    const done = chunks.at(-1) as { type: string; meta?: Record<string, unknown> };
+    expect(done.type).toBe("done");
+    expect(done.meta?.fallbackFor).toBe("claude");
+    expect(done.meta?.fallbackReason).toContain("rate_limit");
+  });
+
+  test("the head answering normally stamps nothing", async () => {
+    const first = new FakeHarness("claude", [{ type: "done", finalText: "primary answer" }]);
+    const chunks = await collect(runWithFallback([first], newRequest(), {
+      cooldown: new CooldownStore(),
+    }));
+    const done = chunks.at(-1) as { type: string; meta?: Record<string, unknown> };
+    expect(done.meta?.fallbackFor).toBeUndefined();
+    expect(done.meta?.fallbackReason).toBeUndefined();
+  });
+
+  test("head cooled at turn start → fallback serve carries the skip reason", async () => {
+    const store = new CooldownStore();
+    store.markFailure("claude"); // primary cooling from an earlier turn
+    const first = new FakeHarness("claude", [{ type: "done", finalText: "never" }]);
+    const second = new FakeHarness("pi", [{ type: "done", finalText: "fallback answer" }]);
+    const chunks = await collect(runWithFallback([first, second], newRequest(), {
+      cooldown: store,
+    }));
+    const done = chunks.at(-1) as { type: string; meta?: Record<string, unknown> };
+    expect(done.meta?.fallbackFor).toBe("claude");
+    expect(String(done.meta?.fallbackReason)).toContain("primary in cooldown");
+    expect(first.invocations).toBe(0);
+  });
+
+  test("every provider switch is logged with from → to, reason, timestamp", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      const first = new FakeHarness("claude", [
+        { type: "error", error: "claude api error: rate_limit", recoverable: true },
+      ]);
+      const second = new FakeHarness("pi", [{ type: "done", finalText: "fallback answer" }]);
+      await collect(runWithFallback([first, second], newRequest(), {
+        cooldown: new CooldownStore(),
+      }));
+      const switches = lines
+        .map((line) => JSON.parse(line))
+        .filter((entry) =>
+          entry.msg === "orchestrator: provider switch — fallback served the turn",
+        );
+      expect(switches).toHaveLength(1);
+      expect(switches[0]).toMatchObject({
+        from: "claude",
+        to: "pi",
+        reason: "claude api error: rate_limit",
+      });
+      expect(typeof switches[0].at).toBe("string");
+    } finally {
+      restore();
+    }
+  });
+
+  test("hysteresis: once flipped, the turn never goes back to the primary", async () => {
+    const first = new FakeHarness("claude", [
+      { type: "error", error: "claude api error: rate_limit", recoverable: true },
+      // If the orchestrator ping-ponged, this text would surface.
+      { type: "text", text: "late primary output" },
+      { type: "done", finalText: "late primary answer" },
+    ]);
+    const second = new FakeHarness("pi", [{ type: "done", finalText: "fallback answer" }]);
+    const chunks = await collect(runWithFallback([first, second], newRequest(), {
+      cooldown: new CooldownStore(),
+    }));
+    expect(first.invocations).toBe(1);
+    expect(second.invocations).toBe(1);
+    const done = chunks.at(-1) as { type: string; finalText?: string };
+    expect(done.finalText).toBe("fallback answer");
+  });
+
+  test("turn completes on the fallback while the primary is cooled mid-chain (AC2)", async () => {
+    // Primary fails recoverably; the failure's cooldown must not stop THIS
+    // turn from finishing on the next harness.
+    const first = new FakeHarness("claude", [
+      { type: "error", error: "claude api error: rate_limit", recoverable: true },
+    ]);
+    const second = new FakeHarness("pi", [{ type: "done", finalText: "pi saved the turn" }]);
+    const chunks = await collect(runWithFallback([first, second], newRequest(), {
+      cooldown: new CooldownStore(),
+    }));
+    const done = chunks.at(-1) as { type: string; finalText?: string };
+    expect(done.type).toBe("done");
+    expect(done.finalText).toBe("pi saved the turn");
+  });
+});

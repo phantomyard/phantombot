@@ -12,17 +12,16 @@
  * WHAT THIS DOES. Turn that existing read-back signal into a quarantine
  * decision. A relay that fails read-back READBACK_STRIKE_THRESHOLD times in a
  * row is quarantined from the PUBLISH set for an exponentially growing span
- * (base one hour, jittered). It keeps its READ subscription — see "reads are
- * never quarantined" below — so promoting it back costs nothing.
+ * (base three minutes, jittered). It keeps its READ subscription — see "reads
+ * are never quarantined" below — so promoting it back costs nothing.
  *
  * FOUR PROPERTIES THIS IS BUILT AROUND
  *
- * 1. NO POLLING, NO TIMERS. Health is a by-product of traffic we already
- *    generate: every publish already runs a read-back, so scoring is free.
- *    There is no health-check loop and not a single `setTimeout` in this file
- *    — quarantine expiry is evaluated lazily, by comparing `Date.now()` at the
- *    moment we next need a publish set. A pool that sends nothing burns
- *    literally zero cycles on health.
+ * 1. NO PUBLISH-DRIVEN PROBING, NO DEDICATED TIMER. Normal scoring is a
+ *    by-product of read-backs we already run. Early recovery borrows the fixed
+ *    inbound catch-up cadence to probe at most one warm spare per jittered
+ *    minute, so probe load is independent of message volume. Quarantine expiry
+ *    itself remains lazy and this file still owns no timer.
  *
  * 2. READS ARE NEVER QUARANTINED — so failover is instant. Quarantine applies
  *    ONLY to publish targets. The transport keeps its subscription open on
@@ -63,19 +62,20 @@ export const READBACK_STRIKE_THRESHOLD = 5;
 
 /**
  * First quarantine span. Doubles on each REPEAT offence (a relay that earns a
- * quarantine again after already serving one), capped at QUARANTINE_MAX_MS, so
- * a persistently dead relay is retried roughly twice a day instead of hourly,
- * while a relay that had one bad hour is back in rotation quickly.
+ * quarantine again after already serving one), capped at QUARANTINE_MAX_MS.
+ * Relays are diverse and transient slowness is common, so a false quarantine
+ * costs minutes of route diversity rather than hours.
  */
-export const QUARANTINE_BASE_MS = 60 * 60 * 1000; // 1 hour
-export const QUARANTINE_MAX_MS = 6 * 60 * 60 * 1000; // 6 hours
+export const QUARANTINE_BASE_MS = 3 * 60 * 1000; // 3 minutes
+export const QUARANTINE_MAX_MS = 15 * 60 * 1000; // 15 minutes
 
 /**
- * ±10% jitter on every quarantine span. Without it, a fleet that all saw the
+ * ±25% jitter on every quarantine span. Without it, a fleet that all saw the
  * same relay die at the same time un-quarantines it at the same instant and
- * stampedes it. The jitter is applied once, when the quarantine is set.
+ * stampedes it. This matches the connection-side bench jitter. The jitter is
+ * applied once, when the quarantine is set.
  */
-export const QUARANTINE_JITTER = 0.1;
+export const QUARANTINE_JITTER = 0.25;
 
 /**
  * Never publish to fewer than this many relays — see property 3 above. If
@@ -178,7 +178,8 @@ export function rankRelays(
  *
  * Lifecycle: `record()` is called once per relay per publish (from the
  * transport's existing read-back pass), `publishTargets()` is called once per
- * publish. Nothing else runs. No timers are created or held.
+ * publish, and the transport may call `releaseFromProbe()` from its independent
+ * catch-up cadence. No timers are created or held here.
  */
 export class RelayHealthTracker {
   private readonly health = new Map<string, RelayHealthRecord>();
@@ -332,6 +333,35 @@ export class RelayHealthTracker {
   /** True if `url` is currently serving a quarantine. */
   isQuarantined(url: string, now = Date.now()): boolean {
     return (this.health.get(url)?.quarantinedUntil ?? 0) > now;
+  }
+
+  /** Dropping relays eligible for a read-based recovery probe, health-ranked. */
+  probeEligibleRelays(now = Date.now()): string[] {
+    return rankRelays(this.relays, this.health).filter((url) => {
+      const r = this.health.get(url);
+      return r?.quarantineReason === "dropping" &&
+        r.quarantinedUntil > now;
+    });
+  }
+
+  /**
+   * Release a dropping relay whose independent warm-spare read probe
+   * succeeded. A read proves nothing about the publish-accept latency that
+   * caused a SLOW quarantine, so slow relays must serve their span.
+   */
+  releaseFromProbe(url: string, now = Date.now()): boolean {
+    const r = this.health.get(url);
+    if (
+      !r || r.quarantineReason !== "dropping" || r.quarantinedUntil <= now
+    ) return false;
+    r.quarantinedUntil = 0;
+    r.acceptSamples = 0;
+    this.announced.delete(url);
+    this.log.info("phantomchat: relay released from quarantine by probe", {
+      relay: url,
+      reason: r.quarantineReason,
+    });
+    return true;
   }
 
   /**
