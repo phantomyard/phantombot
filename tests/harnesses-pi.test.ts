@@ -877,6 +877,7 @@ describe("PiHarness coder-swap retry ladder", () => {
   afterEach(async () => {
     delete process.env.FAKE_PI_ARGV_LOG;
     delete process.env.FAKE_PI_FAIL_MODEL;
+    delete process.env.FAKE_PI_RATELIMIT_TEXT;
     await rm(logDir, { recursive: true, force: true });
   });
 
@@ -994,26 +995,43 @@ describe("PiHarness coder-swap retry ladder", () => {
   });
 
   test("provider rate-limit aborts the ladder on the FIRST signal (#559)", async () => {
-    // `ratelimit` dies with "429 rate_limit" prose on stderr. The old gate
-    // read this as a generic provider death and retried the full coder-swap
-    // ladder against a provider that was refusing work — burning minutes
-    // before the orchestrator ever got the chance to fall through.
-    process.env.FAKE_PI_MODE = "ratelimit";
-    const chunks = await collect(
-      new PiHarness({
-        bin: FAKE_PI,
-        mode: "native",
-        command: [FAKE_PI],
-        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
-      }).invoke(newRequest({ userMessage: PR_MSG })),
-    );
-    const error = chunks.find((c) => c.type === "error") as
-      | { type: "error"; recoverable?: boolean }
-      | undefined;
-    expect(error?.recoverable).toBe(true);
-    // ONE invocation — the first rate-limit signal aborted the remaining
-    // ladder budget. No second coder attempt, no primary fallback run.
-    expect(await loggedArgv()).toHaveLength(1);
+    // The old gate read a provider death as a generic failure and retried
+    // the full coder-swap ladder against a provider that was refusing work
+    // — burning minutes before the orchestrator ever got the chance to
+    // fall through.
+    //
+    // Review on #561: the classifier originally matched only the literal
+    // `rate_limit` token — the one form the fixture printed. Real provider
+    // wording varies, so this is parametrised over the forms a bare
+    // exit-code death actually carries (see lib-harnessAlert for the
+    // classifier matrix). Every variant must abort on the FIRST signal.
+    for (const stderr of [
+      "provider error: 429 rate_limit exceeded",
+      "429 Too Many Requests",
+      "Rate limit exceeded, retry later",
+      "Error: 429 rate limit reached for requests",
+    ]) {
+      // Fresh attempt log per variant — loggedArgv() reads a cumulative
+      // file, so each iteration must count its own invocations only.
+      await rm(argvLog, { force: true });
+      process.env.FAKE_PI_MODE = "ratelimit";
+      process.env.FAKE_PI_RATELIMIT_TEXT = stderr;
+      const chunks = await collect(
+        new PiHarness({
+          bin: FAKE_PI,
+          mode: "native",
+          command: [FAKE_PI],
+          routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+        }).invoke(newRequest({ userMessage: PR_MSG })),
+      );
+      const error = chunks.find((c) => c.type === "error") as
+        | { type: "error"; recoverable?: boolean }
+        | undefined;
+      expect(error?.recoverable).toBe(true);
+      // ONE invocation — the first rate-limit signal aborted the remaining
+      // ladder budget. No second coder attempt, no primary fallback run.
+      expect(await loggedArgv()).toHaveLength(1);
+    }
   });
 
   test("terminal error (exit 127) → exactly one attempt, no ladder (locks the non-retryable rule)", async () => {

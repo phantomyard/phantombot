@@ -11,6 +11,7 @@ import {
   classifyFailure,
   DEGRADE_AFTER_FAILURES,
   HarnessAlerter,
+  parseRetryAfterMs,
   REALERT_MS,
 } from "../src/lib/harnessAlert.ts";
 import { killCauseToErrorChunk } from "../src/lib/harnessRunner.ts";
@@ -63,6 +64,24 @@ describe("classifyFailure", () => {
 
   test("recognises rate limits", () => {
     expect(classifyFailure("claude api error: rate_limit")).toBe("rate_limit");
+  });
+
+  // Review on #561: real provider deaths carry prose, not the synthetic
+  // envelope's snake_case token — a bare exit-code stderr must classify as
+  // rate_limit or the pi ladder retries against a refusing provider.
+  test.each([
+    "pi exited with code 1\n429 Too Many Requests",
+    "pi exited with code 1\nRate limit exceeded, retry later",
+    "pi exited with code 1\nError: 429 rate limit reached for requests",
+    "pi exited with code 1\nprovider error: 429 rate_limit exceeded",
+    "pi exited with code 1\nError: 429 rate limit reached for requests\nmore stderr noise",
+  ])("recognises realistic provider rate-limit prose: %s", (text) => {
+    expect(classifyFailure(text)).toBe("rate_limit");
+  });
+
+  test("a bare 429 is word-bounded — a number containing it doesn't classify", () => {
+    expect(classifyFailure("processed 1429 tokens, then died")).toBe("other");
+    expect(classifyFailure("error at log line 4290")).toBe("other");
   });
 
   test("http status wins over text", () => {
@@ -417,5 +436,57 @@ describe("exhausted alert — stderr preview (issue #462)", () => {
     // The preview contains the truncated line (200 x's), not the full 300.
     expect(sent[0]).toContain("x".repeat(200));
     expect(sent[0]).not.toContain("x".repeat(201));
+  });
+});
+
+describe("parseRetryAfterMs (#559, review on #561: the hint needs a parser)", () => {
+  test("HTTP header echo — a bare number is seconds", () => {
+    expect(parseRetryAfterMs("retry-after: 30")).toBe(30_000);
+    expect(parseRetryAfterMs("Retry-After: 120")).toBe(120_000);
+  });
+
+  test("prose forms, all units", () => {
+    expect(parseRetryAfterMs("429 Too Many Requests — retry after 25s")).toBe(
+      25_000,
+    );
+    expect(
+      parseRetryAfterMs("Error: rate limit reached, retry in 2 minutes"),
+    ).toBe(120_000);
+    expect(parseRetryAfterMs("try again in 90 seconds")).toBe(90_000);
+    expect(parseRetryAfterMs("quota exceeded, retry after 3 mins")).toBe(
+      180_000,
+    );
+    expect(parseRetryAfterMs("retry in 500ms")).toBe(500);
+  });
+
+  test("finds the hint anywhere in multi-line stderr", () => {
+    expect(
+      parseRetryAfterMs(
+        "pi exited with code 1\nError: 429 rate limit reached\nretry-after: 60",
+      ),
+    ).toBe(60_000);
+  });
+
+  test("no hint → undefined (most failures carry none)", () => {
+    expect(parseRetryAfterMs("429 Too Many Requests")).toBeUndefined();
+    expect(parseRetryAfterMs("Rate limit exceeded, retry later")).toBeUndefined();
+    expect(parseRetryAfterMs("claude exited with code 1")).toBeUndefined();
+    expect(parseRetryAfterMs("")).toBeUndefined();
+  });
+
+  test("non-positive or garbage numbers are ignored", () => {
+    expect(parseRetryAfterMs("retry after 0s")).toBeUndefined();
+    expect(parseRetryAfterMs("retry-after: -5")).toBeUndefined();
+  });
+
+  test("the value flows through the runner's exit-code chunk (producer seam)", () => {
+    // Contract reminder: harnessRunner stamps parseRetryAfterMs(stderrRing)
+    // on the non-zero-exit error chunk; the orchestrator passes
+    // chunk.retryAfterMs into cooldown.markFailure, which honors it (tested
+    // in lib-cooldown and orchestrator-fallback). This test only pins the
+    // parser semantics the producer relies on.
+    const stderr = "Error: 429 too many requests, retry after 25s";
+    expect(classifyFailure(stderr)).toBe("rate_limit");
+    expect(parseRetryAfterMs(stderr)).toBe(25_000);
   });
 });

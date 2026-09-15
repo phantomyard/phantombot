@@ -110,7 +110,9 @@ case "$mode" in
     exit 1
     ;;
   ratelimit)
-    echo "provider error: 429 rate_limit exceeded" >&2
+    # FAKE_PI_RATELIMIT_TEXT overrides the stderr prose so tests can drive
+    # the classifier with real provider wording (review on #561).
+    echo "${FAKE_PI_RATELIMIT_TEXT:-provider error: 429 rate_limit exceeded}" >&2
     exit 1
     ;;
   error)

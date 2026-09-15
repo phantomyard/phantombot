@@ -12,12 +12,42 @@
  * Deliberately NOT appended to the voice path: the tag is visual metadata
  * and would be spoken aloud by TTS.
  *
+ * The reason is rendered COARSE (review on #561): group chats and peer
+ * conversations put this tag in front of third parties, and the raw
+ * harness error (paths, provider internals, request ids) has no business
+ * there. The coarse class is enough to know why the brain changed; the
+ * raw error stays in the switch log, where it belongs.
+ *
  * Contracted to return undefined for every "primary answered normally"
  * shape so callers can append unconditionally.
  */
 
-/** Cap on the embedded reason so a verbose harness error can't flood the tag. */
-const MAX_REASON_CHARS = 80;
+import { classifyFailure } from "../../lib/harnessAlert.ts";
+
+/**
+ * Map a raw fallback reason to a coarse, audience-safe class. The
+ * orchestrator's reasons are either a harness error (classified by the
+ * shared failure classifier) or one of its own skip stamps ("primary in
+ * cooldown (…)", "primary payload cap exceeded (…)"), so a handful of
+ * substring checks cover every producer.
+ */
+export function coarseFallbackReason(reason: string): string {
+  const r = reason.toLowerCase();
+  if (r.includes("cooldown")) return "cooldown";
+  if (r.includes("payload cap")) return "payload cap";
+  switch (classifyFailure(reason)) {
+    case "rate_limit":
+      return "rate limit";
+    case "auth":
+      return "auth failure";
+    case "timeout":
+      return "timeout";
+    case "empty":
+      return "no output";
+    default:
+      return "unavailable";
+  }
+}
 
 export function buildFallbackReplyTag(
   meta: Record<string, unknown> | undefined,
@@ -27,18 +57,26 @@ export function buildFallbackReplyTag(
   if (!servedBy || !fallbackFor || servedBy === fallbackFor) return undefined;
   const reason = readString(meta?.fallbackReason) ?? "primary unavailable";
   return `— answered by ${servedBy} fallback (${fallbackFor}: ${
-    reason.slice(0, MAX_REASON_CHARS)
+    coarseFallbackReason(reason)
   })`;
 }
 
-/** Append the tag to outgoing TEXT reply text (never the voice path). */
+/** Append the tag to outgoing TEXT reply text (never the voice path).
+ *
+ * Skipped when the outgoing text is empty: on the streaming transports
+ * that means the reply already went out as live final bubbles, and
+ * appending then would send a bubble whose ONLY content is metadata — a
+ * lone tag bubble is noise, not transparency (review on #561). The tag
+ * is never stamped on an empty reply anyway (the orchestrator only stamps
+ * `finalText.length > 0`), so nothing legitimate is lost.
+ */
 export function appendFallbackReplyTag(
   outText: string,
   meta: Record<string, unknown> | undefined,
 ): string {
   const tag = buildFallbackReplyTag(meta);
-  if (!tag) return outText;
-  return outText.length > 0 ? `${outText}\n\n${tag}` : tag;
+  if (!tag || outText.length === 0) return outText;
+  return `${outText}\n\n${tag}`;
 }
 
 function readString(v: unknown): string | undefined {
