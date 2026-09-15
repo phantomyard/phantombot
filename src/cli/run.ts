@@ -933,7 +933,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           continue; // this process's layer already leads the roster
         }
         try {
-          layers.push(await loadConfig(name));
+          layers.push(await loadPersonaConfig(name));
         } catch {
           // A persona whose layer cannot be loaded drops out of the roster;
           // the reconcile must not block startup on one unreadable persona.
