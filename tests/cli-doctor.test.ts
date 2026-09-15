@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1806,5 +1806,206 @@ describe("runDoctor — native harness keys", () => {
     });
     expect(out.text).toContain("native key (default chain, pi-primary): OK");
     expect(code).toBe(0);
+  });
+});
+
+describe("runDoctor pi extension — host-level desired state (multi-persona)", () => {
+  // Regression for the 2026-09-15 whack-a-mole: the managed extension dir is
+  // ONE per host, but doctor reconciled it against the INVOKING persona's
+  // layer. lena's layer (instances only, no top-level routing) wanted the dir
+  // absent, kai's and jake's (top-level routing with an image model) wanted it
+  // stamped — so every persona's doctor run flipped the last one's state.
+  // Now the desired state is computed across the served roster, so all three
+  // personas' doctor runs agree.
+
+  let workdir: string;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    workdir = await mkdtemp(join(tmpdir(), "phantombot-doctor-mp-"));
+    agentDir = join(workdir, "agent");
+    for (const layer of [phantomLayer, kaiLayer, jakeLayer]) {
+      layer.personasDir = join(workdir, "personas");
+      layer.memoryDbPath = join(workdir, "memory.sqlite");
+      layer.configPath = join(workdir, "config.toml");
+    }
+    for (const p of ["phantom", "kai", "jake"]) {
+      await mkdir(join(workdir, "personas", p, "memory"), { recursive: true });
+      await writeFile(
+        join(workdir, "personas", p, "memory", ".nightly-state.json"),
+        JSON.stringify({ last_run: new Date().toISOString(), last_status: "ok" }),
+      );
+    }
+  });
+
+  afterEach(async () => {
+    await rm(workdir, { recursive: true, force: true });
+  });
+
+  const isolate = {
+    checkSystemd: false as const,
+    checkTimers: false as const,
+    checkHarnesses: false as const,
+    checkEditorConnectors: false as const,
+  };
+
+  function routing(models: { primary: string; image: string }) {
+    // Loaded Config shape is camelCase (the TOML loader maps snake_case keys).
+    return {
+      primaryModel: models.primary,
+      provider: "openrouter",
+      imageModel: models.image,
+      codingModel: models.image,
+    };
+  }
+
+  // Default persona 'phantom': instances carry routings, no top-level table —
+  // the exact shape that made the OLD doctor read `undefined` and remove.
+  const phantomLayer = {
+    defaultPersona: "phantom",
+    autostartPersonas: ["kai", "jake"],
+    personasDir: "", // set per-test below (workdir)
+    memoryDbPath: "", // set per-test below (workdir)
+    configPath: "", // set per-test below (workdir)
+    harnesses: {
+      chain: ["pi-primary", "pi-fallback"],
+      instances: {
+        "pi-primary": { type: "native", routing: routing({ primary: "glm-default", image: "glm-default" }) },
+        "pi-fallback": { type: "native", routing: routing({ primary: "kimi-default", image: "kimi-default" }) },
+      },
+    },
+    channels: {},
+    embeddings: { provider: "none" },
+    voice: { provider: "none" },
+  };
+  const kaiLayer = {
+    ...phantomLayer,
+    harnesses: {
+      chain: ["codex", "native"],
+      pi: { routing: routing({ primary: "glm-kai", image: "glm-kai" }) },
+    },
+  };
+  const jakeLayer = {
+    ...phantomLayer,
+    harnesses: {
+      chain: ["pi-primary"],
+      pi: { routing: routing({ primary: "gpt-jake", image: "gpt-jake" }) },
+    },
+  };
+
+  test("all personas' doctor runs converge on the default persona's routing", async () => {
+    const extDir = join(agentDir, "extensions", "capability-routing");
+    const readRoutingJson = async () =>
+      JSON.parse(await readFile(join(extDir, "routing.json"), "utf8"));
+
+    // Run 1 — as kai (a non-default persona): stamps the dir with the DEFAULT
+    // persona's effective routing (roster order), not kai's own.
+    const out1 = new CaptureStream();
+    const code1 = await runDoctor({
+      config: kaiLayer as unknown as Config,
+      persona: "kai",
+      personaConfigs: new Map([
+        ["phantom", phantomLayer as unknown as Config],
+        ["kai", kaiLayer as unknown as Config],
+        ["jake", jakeLayer as unknown as Config],
+      ]),
+      piExtensionAgentDir: agentDir,
+      out: out1,
+      ...isolate,
+    });
+    expect(code1).toBe(0);
+    expect(out1.text).toContain("stamped managed capability-routing extension");
+    expect(await readRoutingJson()).toEqual({
+      primaryModel: "glm-default",
+      imageModel: "glm-default",
+    });
+
+    // Run 2 — as the DEFAULT persona: the OLD code read phantom's layer here,
+    // found no top-level routing, and REMOVED kai's stamp. It must now agree
+    // the dir is current.
+    const out2 = new CaptureStream();
+    const code2 = await runDoctor({
+      config: phantomLayer as unknown as Config,
+      personaConfigs: new Map([
+        ["kai", kaiLayer as unknown as Config],
+        ["jake", jakeLayer as unknown as Config],
+      ]),
+      piExtensionAgentDir: agentDir,
+      out: out2,
+      ...isolate,
+    });
+    expect(code2).toBe(0);
+    expect(out2.text).toContain("present and current");
+    expect(await readRoutingJson()).toEqual({
+      primaryModel: "glm-default",
+      imageModel: "glm-default",
+    });
+
+    // Run 3 — as jake: same convergence, no drift, no re-stamp.
+    const out3 = new CaptureStream();
+    const code3 = await runDoctor({
+      config: jakeLayer as unknown as Config,
+      persona: "jake",
+      personaConfigs: new Map([
+        ["phantom", phantomLayer as unknown as Config],
+        ["kai", kaiLayer as unknown as Config],
+        ["jake", jakeLayer as unknown as Config],
+      ]),
+      piExtensionAgentDir: agentDir,
+      out: out3,
+      ...isolate,
+    });
+    expect(code3).toBe(0);
+    expect(out3.text).toContain("present and current");
+  });
+
+  test("nobody capable → the dir is removed consistently, by any persona", async () => {
+    const extDir = join(agentDir, "extensions", "capability-routing");
+    // Pre-plant a stamped dir (a stale state from a previous config).
+    const staleLayer = {
+      ...phantomLayer,
+      harnesses: { chain: ["pi-old"], pi: { routing: routing({ primary: "old", image: "old" }) } },
+    };
+    const noCapableLayer = {
+      ...phantomLayer,
+      harnesses: { chain: ["claude"] },
+    };
+    const code1 = await runDoctor({
+      config: staleLayer as unknown as Config,
+      piExtensionAgentDir: agentDir,
+      out: new CaptureStream(),
+      ...isolate,
+    });
+    expect(code1).toBe(0);
+    expect(existsSync(extDir)).toBe(true);
+
+    // Now no persona has a routable capability — every doctor run wants the
+    // dir gone and reports it gone after the first repair.
+    const code2 = await runDoctor({
+      config: noCapableLayer as unknown as Config,
+      personaConfigs: new Map([
+        ["kai", noCapableLayer as unknown as Config],
+        ["jake", noCapableLayer as unknown as Config],
+      ]),
+      piExtensionAgentDir: agentDir,
+      out: new CaptureStream(),
+      ...isolate,
+    });
+    expect(code2).toBe(0);
+    expect(existsSync(extDir)).toBe(false);
+
+    const out3 = new CaptureStream();
+    const code3 = await runDoctor({
+      config: noCapableLayer as unknown as Config,
+      personaConfigs: new Map([
+        ["kai", noCapableLayer as unknown as Config],
+        ["jake", noCapableLayer as unknown as Config],
+      ]),
+      piExtensionAgentDir: agentDir,
+      out: out3,
+      ...isolate,
+    });
+    expect(code3).toBe(0);
+    expect(out3.text).toContain("correctly absent");
   });
 });

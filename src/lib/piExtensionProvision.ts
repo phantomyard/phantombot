@@ -408,3 +408,29 @@ export function effectiveNativeRouting(
   if (capable) return capable;
   return candidates.find((r) => routingIsConfigured(r));
 }
+
+/**
+ * HOST-level desired routing for the managed extension dir: ONE dir per
+ * machine, so the desired state must not depend on which persona asked.
+ * Reconciling per persona made multi-persona rigs fight over the dir — each
+ * persona's doctor stamped or removed it to match ITS OWN layer, and the last
+ * run always flipped the others' state (2026-09-15: lena removed, kai/jake
+ * re-stamped, oscillating on every doctor run).
+ *
+ * The rule: walk the served roster's config layers in a fixed order (default
+ * persona first, then autostart order — the caller's job to pass them that
+ * way) and take the FIRST capable routing (an image model); fall back to the
+ * first merely-configured one so the doctor still cleans up when nobody has
+ * an image model. Per-turn routing stays persona-scoped via
+ * PHANTOMBOT_ROUTING_JSON; this stamped sibling only feeds a bare `pi`.
+ */
+export function hostDesiredRouting(
+  layers: ReadonlyArray<Pick<Config, "harnesses">>,
+): PiRoutingConfig | undefined {
+  const candidates = layers
+    .map((layer) => effectiveNativeRouting(layer))
+    .filter((r): r is PiRoutingConfig => !!r);
+  const capable = candidates.find((r) => hasRoutableCapability(r));
+  if (capable) return capable;
+  return candidates.find((r) => routingIsConfigured(r));
+}
