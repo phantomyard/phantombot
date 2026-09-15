@@ -798,6 +798,17 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
         confirmed,
         relays: targets.length,
       });
+    } else if (missing.length === 0) {
+      log.warn(
+        `phantomchat: publish confirmed by ${confirmed} relay — below quorum`,
+        {
+          eventId: event.id,
+          kind: event.kind,
+          confirmed,
+          quorum: PUBLISH_CONFIRM_QUORUM,
+          relays: targets.length,
+        },
+      );
     } else {
       log.warn(
         "phantomchat: publish NOT confirmed stored — relay quorum not met",
@@ -833,8 +844,8 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       RELAY_HEALTH_PROBE_INTERVAL_MS * this.probeJitter(),
     );
 
-    const candidates = this.relayHealth.quarantinedRelays(now).filter((relay) =>
-      this.lastConfirmedEventByRelay.has(relay)
+    const candidates = this.relayHealth.probeEligibleRelays(now).filter(
+      (relay) => this.lastConfirmedEventByRelay.has(relay),
     );
     if (candidates.length === 0) return false;
     const relay = candidates[this.relayHealthProbeCursor % candidates.length]!;

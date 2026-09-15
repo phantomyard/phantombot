@@ -397,7 +397,7 @@ describe("cadence-owned warm-spare probe", () => {
     };
   }
 
-  test("a successful probe releases a slow quarantined relay early", async () => {
+  test("a successful probe releases a dropping relay early", async () => {
     const queries: string[] = [];
     const transport = new SimplePoolPhantomchatTransport(
       sk,
@@ -407,14 +407,7 @@ describe("cadence-owned warm-spare probe", () => {
     );
     await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
     const now = Date.now();
-    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
-      transport.relayHealth.recordAccept(
-        relays[3]!,
-        SLOW_RELAY_ACCEPT_MS * 2,
-        true,
-        now,
-      );
-    }
+    strikeOut(transport.relayHealth, relays[3]!, now);
     expect(transport.relayHealth.isQuarantined(relays[3]!, now)).toBe(true);
 
     expect(await transport.probeQuarantinedRelay(now)).toBe(false); // arms cadence
@@ -431,6 +424,34 @@ describe("cadence-owned warm-spare probe", () => {
     ).toBe(false);
   });
 
+  test("a read probe never releases a slow quarantine", async () => {
+    const queries: string[] = [];
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      relays,
+      probePool(queries),
+      () => 1,
+    );
+    await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
+    const slow = relays[3]!;
+    const now = Date.now();
+    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
+      transport.relayHealth.recordAccept(
+        slow,
+        SLOW_RELAY_ACCEPT_MS * 2,
+        true,
+        now,
+      );
+    }
+    const before = queries.filter((r) => r === slow).length;
+    await transport.probeQuarantinedRelay(now);
+    expect(await transport.probeQuarantinedRelay(
+      now + RELAY_HEALTH_PROBE_INTERVAL_MS,
+    )).toBe(false);
+    expect(queries.filter((r) => r === slow)).toHaveLength(before);
+    expect(transport.relayHealth.isQuarantined(slow, now)).toBe(true);
+  });
+
   test("publish volume never creates quarantined-relay probes", async () => {
     const queries: string[] = [];
     const transport = new SimplePoolPhantomchatTransport(
@@ -442,14 +463,7 @@ describe("cadence-owned warm-spare probe", () => {
     await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
     const quarantined = relays[3]!;
     const now = Date.now();
-    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
-      transport.relayHealth.recordAccept(
-        quarantined,
-        SLOW_RELAY_ACCEPT_MS * 2,
-        true,
-        now,
-      );
-    }
+    strikeOut(transport.relayHealth, quarantined, now);
     const before = queries.filter((r) => r === quarantined).length;
     for (let i = 0; i < 20; i++) await transport.publishWrap(event);
     await transport.flush();
@@ -471,14 +485,7 @@ describe("cadence-owned warm-spare probe", () => {
     await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
     const quarantined = relays[3]!;
     const now = Date.now();
-    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
-      transport.relayHealth.recordAccept(
-        quarantined,
-        SLOW_RELAY_ACCEPT_MS * 2,
-        true,
-        now,
-      );
-    }
+    strikeOut(transport.relayHealth, quarantined, now);
     const before = queries.filter((r) => r === quarantined).length;
     await transport.probeQuarantinedRelay(now);
     expect(await transport.probeQuarantinedRelay(
@@ -501,14 +508,7 @@ describe("cadence-owned warm-spare probe", () => {
     await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
     const quarantined = relays[3]!;
     const now = Date.now();
-    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
-      transport.relayHealth.recordAccept(
-        quarantined,
-        SLOW_RELAY_ACCEPT_MS * 2,
-        true,
-        now,
-      );
-    }
+    strikeOut(transport.relayHealth, quarantined, now);
 
     await transport.fetchGiftWrapsSince("pubkey", 0); // arm cadence
     await transport.fetchGiftWrapsSince("pubkey", 0); // due immediately
@@ -576,6 +576,28 @@ describe("publish confirmation quorum", () => {
       await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
       const row = lines.map((line) => JSON.parse(line)).find((x) =>
         x.msg === "phantomchat: publish NOT confirmed stored — relay quorum not met"
+      );
+      expect(row?.level).toBe("warn");
+      expect(row?.confirmed).toBe(1);
+      expect(row?.quorum).toBe(PUBLISH_CONFIRM_QUORUM);
+    } finally {
+      restore();
+    }
+  });
+
+  test("one configured relay logs stored-but-below-quorum truthfully", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      const transport = new SimplePoolPhantomchatTransport(
+        sk,
+        [relays[0]!],
+        pool(new Set([relays[0]!])),
+      );
+      expect(await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 }))
+        .toEqual([]);
+      const row = lines.map((line) => JSON.parse(line)).find((x) =>
+        x.msg === "phantomchat: publish confirmed by 1 relay — below quorum"
       );
       expect(row?.level).toBe("warn");
       expect(row?.confirmed).toBe(1);

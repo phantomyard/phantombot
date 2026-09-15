@@ -335,22 +335,25 @@ export class RelayHealthTracker {
     return (this.health.get(url)?.quarantinedUntil ?? 0) > now;
   }
 
-  /** Quarantined relays in deterministic health order, for cadence-owned probes. */
-  quarantinedRelays(now = Date.now()): string[] {
-    return rankRelays(this.relays, this.health).filter((url) =>
-      this.isQuarantined(url, now)
-    );
+  /** Dropping relays eligible for a read-based recovery probe, health-ranked. */
+  probeEligibleRelays(now = Date.now()): string[] {
+    return rankRelays(this.relays, this.health).filter((url) => {
+      const r = this.health.get(url);
+      return r?.quarantineReason === "dropping" &&
+        r.quarantinedUntil > now;
+    });
   }
 
   /**
-   * Release a relay whose independent warm-spare probe succeeded. Unlike a
-   * normal publish read-back this applies to both DROP and SLOW quarantines:
-   * the probe is deliberately outside the publish path and proves the warm
-   * socket can still serve a known stored event.
+   * Release a dropping relay whose independent warm-spare read probe
+   * succeeded. A read proves nothing about the publish-accept latency that
+   * caused a SLOW quarantine, so slow relays must serve their span.
    */
   releaseFromProbe(url: string, now = Date.now()): boolean {
     const r = this.health.get(url);
-    if (!r || r.quarantinedUntil <= now) return false;
+    if (
+      !r || r.quarantineReason !== "dropping" || r.quarantinedUntil <= now
+    ) return false;
     r.quarantinedUntil = 0;
     r.acceptSamples = 0;
     this.announced.delete(url);
