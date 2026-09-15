@@ -21,7 +21,7 @@ import {
   PI_EXTENSION_FILES,
 } from "./piExtensionAssets.generated.ts";
 import type { PiRoutingConfig } from "./piRouting.ts";
-import type { Config } from "../config.ts";
+import { servedPersonasOf, type Config } from "../config.ts";
 import { routingIsConfigured } from "./harnessReconcile.ts";
 import { nativeExtensionsDir } from "./nativeAgentDir.ts";
 
@@ -433,4 +433,48 @@ export function hostDesiredRouting(
   const capable = candidates.find((r) => hasRoutableCapability(r));
   if (capable) return capable;
   return candidates.find((r) => routingIsConfigured(r));
+}
+
+/**
+ * The startup roster's config layers, in the order hostDesiredRouting expects:
+ * default persona first, then autostart order (servedPersonasOf's order).
+ *
+ * Hardened out of run.ts's inline walk (issue #565). The old skip condition
+ * (`name === personaLayer || name === defaultPersona`) silently dropped the
+ * DEFAULT persona from the roster whenever a non-default layer was injected:
+ * its roster entry matched the skip, but `config` was not its layer, so
+ * nothing led the roster and a wrong layer could win the reconcile. Now the
+ * layer this process already holds is used only for the persona it was
+ * actually loaded for, and the default persona's layer is always loaded via
+ * the seam when `config` is not it. A persona whose layer cannot be read
+ * simply drops out — the reconcile must never block startup on one unreadable
+ * persona (same rule as doctor).
+ */
+export async function rosterLayers(
+  config: Pick<
+    Config,
+    "defaultPersona" | "autostartPersonas" | "personaLayer" | "harnesses"
+  >,
+  loadPersonaConfig: (name: string) => Promise<Pick<Config, "harnesses">>,
+): Promise<Array<Pick<Config, "harnesses">>> {
+  const layers: Array<Pick<Config, "harnesses">> = [];
+  const seen = new Set<string>();
+  for (const name of servedPersonasOf(config)) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    // `loadConfig()` with no persona loads the DEFAULT persona's layer, so an
+    // unset personaLayer means `config` IS the default's (the production
+    // shape; undefined otherwise only in hand-built fixtures).
+    const holdsThisLayer = (config.personaLayer ?? config.defaultPersona) === name;
+    if (holdsThisLayer) {
+      layers.push(config);
+      continue;
+    }
+    try {
+      layers.push(await loadPersonaConfig(name));
+    } catch {
+      // An unreadable persona drops out of the roster; never block startup.
+    }
+  }
+  return layers;
 }

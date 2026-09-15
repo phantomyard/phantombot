@@ -916,6 +916,9 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const config = resolved.config;
   const persona = resolved.persona;
   const personaConfigs = new Map(input.personaConfigs ?? []);
+  // Names whose layer read already failed once in the pre-population loop —
+  // the pi-extension roster loop must not re-read (and re-warn) them.
+  const failedLoads = new Set<string>();
   if (!input.config) {
     const names = new Set(host.autostartPersonas ?? []);
     if (persona !== host.defaultPersona) names.add(persona);
@@ -924,6 +927,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       try {
         personaConfigs.set(name, await loadConfig(name));
       } catch (e) {
+        failedLoads.add(name);
         log.warn("doctor: persona config load failed", {
           persona: name,
           error: (e as Error).message,
@@ -1156,23 +1160,22 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       if (seen.has(name)) continue;
       seen.add(name);
       if (name === host.defaultPersona) {
-        if (persona === name) {
-          layers.push(config);
+        // `host` IS the default persona's layer on every reachable path: an
+        // unset-input host comes from plain loadConfig(), and with an injected
+        // config the invoking persona being the default means
+        // resolved.config === resolved.host. The old else-branch re-read the
+        // very file the host config was loaded from — gone.
+        if (persona === name || !input.config) {
+          layers.push(host);
         } else {
           const pc = personaConfigs.get(name);
           if (pc) {
             layers.push(pc);
-          } else if (!input.config) {
-            try {
-              layers.push(await loadConfig(name));
-            } catch (e) {
-              log.warn("doctor: default persona layer load failed", {
-                persona: name,
-                error: (e as Error).message,
-              });
-            }
           }
         }
+      } else if (failedLoads.has(name)) {
+        // The pre-population loop already tried this layer, failed, and
+        // warned once — do not read it (and warn) a second time.
       } else {
         const pc = personaConfigs.get(name);
         if (pc) {
