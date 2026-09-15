@@ -91,7 +91,7 @@ import { VERSION } from "../version.ts";
 import { runDoctor } from "./doctor.ts";
 import { spawnNightlySweep } from "../lib/nightlyTrigger.ts";
 import {
-  effectiveNativeRouting,
+  hostDesiredRouting,
   ensureRoutingExtension,
 } from "../lib/piExtensionProvision.ts";
 import { copyNativeKeysForServedPersonas } from "../lib/nativeKeyCopy.ts";
@@ -918,12 +918,29 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   }
 
   if (isPhantombotBinary()) {
-    // The managed extension is stamped for the EFFECTIVE native routing: the
-    // top-level [harnesses.pi.routing] table OR a native instance's own
-    // routing (pi-primary/pi-fallback). Consulted at startup for the default
-    // persona — the stamped sibling is that persona's fallback; per-turn reads
-    // are persona-scoped via PHANTOMBOT_ROUTING_JSON.
-    ensureRoutingExtension(effectiveNativeRouting(config)).then(
+    // The managed extension is stamped for the HOST-level desired routing:
+    // the roster's layers (default persona first, then autostart order) are
+    // walked and the first capable routing wins — the same rule doctor uses.
+    // Computing it from THIS process's layer alone (the old behavior) made
+    // per-persona doctor runs fight the startup stamp on multi-persona rigs:
+    // the dir is one per machine, so its desired state must be invoker-
+    // independent. Per-turn reads stay persona-scoped via
+    // PHANTOMBOT_ROUTING_JSON; the stamped sibling only feeds a bare `pi`.
+    void (async () => {
+      const layers: Pick<Config, "harnesses">[] = [config];
+      for (const name of servedPersonasOf(config)) {
+        if (name === config.personaLayer || name === config.defaultPersona) {
+          continue; // this process's layer already leads the roster
+        }
+        try {
+          layers.push(await loadPersonaConfig(name));
+        } catch {
+          // A persona whose layer cannot be loaded drops out of the roster;
+          // the reconcile must not block startup on one unreadable persona.
+        }
+      }
+      return ensureRoutingExtension(hostDesiredRouting(layers));
+    })().then(
       (r) => {
         if (r.action !== "unchanged") {
           log.info("run: provisioned pi capability-routing extension", {

@@ -6,9 +6,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Config } from "../src/config.ts";
 import {
   ensureRoutingExtension,
   hasRoutableCapability,
+  hostDesiredRouting,
   removeRoutingExtension,
   routingExtensionStatus,
 } from "../src/lib/piExtensionProvision.ts";
@@ -284,5 +286,72 @@ describe("removeRoutingExtension", () => {
 
     const second = await removeRoutingExtension({ agentDir: agentDir(home) });
     expect(second.removed).toBe(false);
+  });
+});
+
+describe("hostDesiredRouting", () => {
+  // Layers only need the harnesses slice hostDesiredRouting reads; the full
+  // Config shape (claude/pi tables etc.) is irrelevant to routing resolution.
+  const layer = (harnesses: object) => ({ harnesses }) as Pick<
+    Config,
+    "harnesses"
+  >;
+  // Layer shapes mirror real per-persona config layers: lena's has only native
+  // INSTANCE routings (no top-level table), kai's has a top-level routing.
+  const lenaLayer = layer({
+    chain: ["pi-primary", "pi-fallback"],
+    instances: {
+      "pi-primary": { type: "native", routing: { primaryModel: "glm-lena", imageModel: "glm-lena", provider: "openrouter" } },
+      "pi-fallback": { type: "native", routing: { primaryModel: "kimi-lena", imageModel: "kimi-lena", provider: "openrouter" } },
+    },
+  });
+  const kaiLayer = layer({
+    chain: ["codex", "native"],
+    pi: { routing: { primaryModel: "glm-kai", imageModel: "glm-kai", provider: "openrouter" } },
+  });
+  const jakeLayer = layer({
+    chain: ["pi-primary"],
+    instances: { "pi-primary": { type: "native", routing: { primaryModel: "gpt-jake", imageModel: "gpt-jake" } } },
+  });
+
+  test("default persona first: lena's instance routing wins over kai's top-level", () => {
+    // The 2026-09-15 incident shape: lena's layer has no top-level routing
+    // table, kai's does. The host desired state must still be lena's — the
+    // roster order decides, not which layer happens to carry a top table.
+    expect(hostDesiredRouting([lenaLayer, kaiLayer, jakeLayer])).toEqual({
+      primaryModel: "glm-lena",
+      imageModel: "glm-lena",
+      provider: "openrouter",
+    });
+  });
+
+  test("roster order is the contract: reordering layers changes the winner", () => {
+    const kaiFirst = hostDesiredRouting([kaiLayer, lenaLayer]);
+    expect(kaiFirst).toEqual({ primaryModel: "glm-kai", imageModel: "glm-kai", provider: "openrouter" });
+    // Same layers, roster order flipped → different (but still deterministic)
+    // winner. Callers MUST pass default persona first.
+    expect(kaiFirst).not.toEqual(hostDesiredRouting([lenaLayer, kaiLayer]));
+  });
+
+  test("falls back to the first configured routing when nobody is capable", () => {
+    const codingOnly = layer({
+      chain: ["pi"],
+      pi: { routing: { primaryModel: "x", codingModel: "qwen" } },
+    });
+    expect(hostDesiredRouting([codingOnly])).toEqual({ primaryModel: "x", codingModel: "qwen" });
+  });
+
+  test("no candidates at all → undefined (doctor then wants the dir absent)", () => {
+    expect(hostDesiredRouting([layer({ chain: ["claude"] })])).toBeUndefined();
+    expect(hostDesiredRouting([])).toBeUndefined();
+  });
+
+  test("a layer that cannot be read is simply skipped by the caller", () => {
+    // kai's layer missing → jake's wins; no crash, still deterministic.
+    expect(hostDesiredRouting([lenaLayer, jakeLayer])).toEqual({
+      primaryModel: "glm-lena",
+      imageModel: "glm-lena",
+      provider: "openrouter",
+    });
   });
 });

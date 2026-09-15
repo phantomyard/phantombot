@@ -66,6 +66,7 @@ import {
 } from "../lib/nightly.ts";
 import {
   ensureRoutingExtension,
+  hostDesiredRouting,
   removeRoutingExtension,
   routingExtensionStatus,
 } from "../lib/piExtensionProvision.ts";
@@ -551,6 +552,14 @@ export interface RunDoctorInput {
   checkPiExtension?:
     | false
     | (() => Promise<DoctorReport["piExtension"] | undefined>);
+  /**
+   * Test seam for the REAL pi-extension reconcile path: an explicit agent dir
+   * to stamp into (instead of the host's real `~/.pi/agent/extensions`).
+   * Providing it also opens the binary gate below, so tests can drive the
+   * actual stamp/remove/drift logic against a temp dir. In production this is
+   * undefined and the gate applies as usual.
+   */
+  piExtensionAgentDir?: string;
   /**
    * Test seam for the ACP editor-connector reconcile. Pass `false` to skip.
    * Pass a function (it receives whether repair is enabled) to substitute a
@@ -1128,16 +1137,70 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     // explicitly skipped by a test
   } else if (input.checkPiExtension) {
     piExtensionReport = await input.checkPiExtension();
-  } else if (isPhantombotBinary()) {
-    const piRouting = config.harnesses?.pi?.routing;
-    const status = await routingExtensionStatus(piRouting);
+  } else if (input.piExtensionAgentDir !== undefined || isPhantombotBinary()) {
+    // The managed dir is HOST-level (one per machine), so the desired state is
+    // computed across the served roster's config layers — default persona
+    // first, then autostart order — NEVER from the invoking persona's layer
+    // alone. Per-persona reconciliation made multi-persona rigs fight over the
+    // dir: each persona's doctor stamped/removed it to match its own layer and
+    // the last run flipped everyone else's (2026-09-15 whack-a-mole). A
+    // persona whose layer cannot be loaded simply drops out of the roster —
+    // one unreadable persona must not block the reconcile.
+    const layers: Pick<Config, "harnesses">[] = [];
+    const roster = [
+      ...(host.defaultPersona ? [host.defaultPersona] : []),
+      ...(host.autostartPersonas ?? []),
+    ];
+    const seen = new Set<string>();
+    for (const name of roster) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      if (name === host.defaultPersona) {
+        if (persona === name) {
+          layers.push(config);
+        } else {
+          const pc = personaConfigs.get(name);
+          if (pc) {
+            layers.push(pc);
+          } else if (!input.config) {
+            try {
+              layers.push(await loadConfig(name));
+            } catch (e) {
+              log.warn("doctor: default persona layer load failed", {
+                persona: name,
+                error: (e as Error).message,
+              });
+            }
+          }
+        }
+      } else {
+        const pc = personaConfigs.get(name);
+        if (pc) {
+          layers.push(pc);
+        } else if (!input.config) {
+          try {
+            layers.push(await loadConfig(name));
+          } catch (e) {
+            log.warn("doctor: persona layer load failed for pi extension", {
+              persona: name,
+              error: (e as Error).message,
+            });
+          }
+        }
+      }
+    }
+    const piRouting = hostDesiredRouting(layers);
+    const provisionOpts = input.piExtensionAgentDir
+      ? { agentDir: input.piExtensionAgentDir }
+      : {};
+    const status = await routingExtensionStatus(piRouting, provisionOpts);
     let repaired = false;
     if (repair && status.drifted) {
       try {
         if (status.shouldExist) {
-          await ensureRoutingExtension(piRouting);
+          await ensureRoutingExtension(piRouting, provisionOpts);
         } else {
-          await removeRoutingExtension();
+          await removeRoutingExtension(provisionOpts);
         }
         repaired = true;
       } catch (e) {
