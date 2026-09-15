@@ -6,8 +6,9 @@
  * wraps, and redialling a failed peer.
  */
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
+import { log } from "../src/lib/logger.ts";
 import { P2PNode, type BridgePort, type PeerLike } from "../src/p2p/node.ts";
 import type { PeerConnectionOptions, PeerState } from "../src/p2p/peerConnection.ts";
 import type { ParsedEventFrame } from "../src/p2p/frame.ts";
@@ -387,12 +388,68 @@ describe("P2PNode delivery receipts (#542)", () => {
     expect(await pending).toBe(false);
   });
 
-  test("a rejected OK is not a delivery", async () => {
-    const { send, peerFor } = receiptNode(30);
+  test("a rejected OK is not a delivery, and settles well inside the window (phantomchat#142)", async () => {
+    // A window far longer than the test timeout: only an immediate settle passes.
+    const { send, peerFor } = receiptNode(60_000);
     const pending = send("w1");
     peerFor(peerHex)!.transition("connected");
+    const started = Date.now();
     peerFor(peerHex)!.deliver('["OK","w1",false,"blocked"]');
     expect(await pending).toBe(false);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  test("a rejection from a DIFFERENT peer does not settle the send", async () => {
+    const other = "d".repeat(64);
+    const { send, peerFor } = receiptNode(60_000);
+    const pending = send("w1");
+    peerFor(peerHex)!.transition("connected");
+    void send("x", other);
+    peerFor(other)!.transition("connected");
+    peerFor(other)!.deliver('["OK","w1",false,"blocked"]');
+    peerFor(peerHex)!.deliver('["OK","w1",true,"p2p"]');
+    expect(await pending).toBe(true);
+  });
+
+  test("a receipt that cannot be sent is logged with the wrap id prefix only (phantomchat#142)", () => {
+    const { send, peerFor } = receiptNode();
+    void send("w0");
+    const peer = peerFor(peerHex)!;
+    peer.transition("connected");
+    peer.sendReturns = false;
+    const lines: string[] = [];
+    const spy = spyOn(log, "debug").mockImplementation((msg: string) => {
+      lines.push(msg);
+    });
+    try {
+      peer.deliver(wrapTo(us, "e".repeat(64)));
+    } finally {
+      spy.mockRestore();
+    }
+    const receiptLines = lines.filter((l) => l.includes("could not send receipt"));
+    expect(receiptLines).toHaveLength(1);
+    expect(receiptLines[0]).toContain("eeeeeeee");
+    expect(receiptLines[0]).not.toContain("e".repeat(9));
+  });
+
+  test("a receipt send that throws is logged, never propagated", () => {
+    const { send, peerFor } = receiptNode();
+    void send("w0");
+    const peer = peerFor(peerHex)!;
+    peer.transition("connected");
+    peer.send = () => {
+      throw new Error("channel closing");
+    };
+    const lines: string[] = [];
+    const spy = spyOn(log, "debug").mockImplementation((msg: string) => {
+      lines.push(msg);
+    });
+    try {
+      expect(() => peer.deliver(wrapTo(us))).not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines.some((l) => l.includes("could not send receipt") && l.includes("channel closing"))).toBe(true);
   });
 
   test("a dropped peer releases its waiters immediately", async () => {

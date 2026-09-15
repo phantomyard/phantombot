@@ -306,9 +306,10 @@ export class P2PNode {
   private onPeerFrame(peerHex: string, frame: string): void {
     const ok = parseOkFrame(frame);
     if (ok) {
-      // A rejection (accepted=false) is not a delivery; let the window lapse —
-      // relays are already carrying the message.
-      if (ok.accepted) this.settleAck(this.ackKey(peerHex, ok.eventId), true);
+      // A rejection (accepted=false) is not a delivery, but it IS an answer:
+      // settle the waiter false straight away rather than holding the send for
+      // the whole ack window (phantomchat#142). Relays are already carrying it.
+      this.settleAck(this.ackKey(peerHex, ok.eventId), ok.accepted);
       return;
     }
     const delivered = this.bridge.broadcast(frame);
@@ -316,8 +317,17 @@ export class P2PNode {
     const parsed = parseEventFrame(frame);
     if (!parsed || parsed.recipientHex !== this.ourPubHex) return;
     const peer = this.peers.get(peerHex);
-    if (!peer?.send(buildOkFrame(parsed.wrap.id))) {
-      log.debug(`[p2p] could not send receipt to ${peerHex.slice(0, 8)}`);
+    // Wrap id prefix only — never payload content (phantomchat#142).
+    const idPrefix = String(parsed.wrap.id ?? "").slice(0, 8);
+    let sent = false;
+    let reason = peer ? "channel not open" : "no peer";
+    try {
+      sent = !!peer?.send(buildOkFrame(parsed.wrap.id));
+    } catch (err) {
+      reason = `send threw: ${(err as Error)?.message ?? String(err)}`;
+    }
+    if (!sent) {
+      log.debug(`[p2p] could not send receipt ${idPrefix} to ${peerHex.slice(0, 8)}: ${reason}`);
     }
   }
 
