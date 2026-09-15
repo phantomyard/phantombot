@@ -1321,6 +1321,15 @@ Relays come from a shared canonical list and can be edited by re-running the
 command. See the [PhantomChat repo](https://github.com/phantomyard/phantomchat)
 for the app itself and the wire-protocol details.
 
+Relay writes adapt without disconnecting reads. Five consecutive read-back
+misses or sustained slow accepts remove a relay from the write set for a
+jittered 3-minute cooldown, doubling to a 15-minute cap; the fixed floor of
+three write targets still wins. The 15-second inbound catch-up loop also offers
+one jittered warm-spare probe per minute, releasing a recovered relay early
+without scaling probes with message volume. A stored publish is confirmed once
+two target relays verify it independently; fewer than two remains a loud
+delivery warning, while every relay result continues to feed health scoring.
+
 ### Multiple bots in one group
 
 When several persona bots share a PhantomChat group, each one would otherwise

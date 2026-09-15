@@ -31,6 +31,7 @@ import {
 import {
   MIN_PUBLISH_RELAYS,
   QUARANTINE_BASE_MS,
+  QUARANTINE_JITTER,
   QUARANTINE_MAX_MS,
   READBACK_STRIKE_THRESHOLD,
   RelayHealthTracker,
@@ -41,11 +42,15 @@ import {
   type RelayHealthRecord,
 } from "../src/channels/phantomchat/relayHealth.ts";
 import {
+  PUBLISH_CONFIRM_QUORUM,
+  RELAY_HEALTH_PROBE_INTERVAL_MS,
+  RELAY_HEALTH_PROBE_JITTER,
   SimplePoolPhantomchatTransport,
   type NostrFilter,
   type RelayPool,
 } from "../src/channels/phantomchat/transport.ts";
 import type { NTNostrEvent } from "../src/lib/nostrCrypto.ts";
+import { setLogSink } from "../src/lib/logSink.ts";
 
 const quietLog = { info: () => {}, debug: () => {} };
 /** No jitter — deterministic spans in tests. */
@@ -150,6 +155,34 @@ describe("relay quarantine from read-back failures", () => {
       spans.add(span);
     }
     expect(spans.size).toBeGreaterThan(1);
+  });
+
+  test("jitter spans the full ±25% policy bounds", () => {
+    const now = 1_000;
+    const early = new RelayHealthTracker(
+      SEVEN,
+      quietLog,
+      () => 1 - QUARANTINE_JITTER,
+    );
+    const late = new RelayHealthTracker(
+      SEVEN,
+      quietLog,
+      () => 1 + QUARANTINE_JITTER,
+    );
+    strikeOut(early, SEVEN[0]!, now);
+    strikeOut(late, SEVEN[0]!, now);
+    expect(
+      early.isQuarantined(SEVEN[0]!, now + QUARANTINE_BASE_MS * 0.75 - 1),
+    ).toBe(true);
+    expect(
+      early.isQuarantined(SEVEN[0]!, now + QUARANTINE_BASE_MS * 0.75 + 1),
+    ).toBe(false);
+    expect(
+      late.isQuarantined(SEVEN[0]!, now + QUARANTINE_BASE_MS * 1.25 - 1),
+    ).toBe(true);
+    expect(
+      late.isQuarantined(SEVEN[0]!, now + QUARANTINE_BASE_MS * 1.25 + 1),
+    ).toBe(false);
   });
 });
 
@@ -329,6 +362,227 @@ describe("transport wiring", () => {
     // Every relay is now a dropper, yet `relays` (what we subscribe on) is
     // untouched — that's what makes promotion free, no reconnect required.
     expect(transport.relays.length).toBe(SEVEN.length);
+  });
+});
+
+describe("cadence-owned warm-spare probe", () => {
+  const sk = generateSecretKey();
+  const event = finalizeEvent(
+    { kind: 1059, created_at: 1, tags: [], content: "probe" },
+    sk,
+  ) as unknown as NTNostrEvent;
+  const relays = [
+    "wss://a.example",
+    "wss://b.example",
+    "wss://c.example",
+    "wss://d.example",
+  ];
+
+  function probePool(queries: string[]): RelayPool {
+    return {
+      subscribeMany(urls, filter: NostrFilter, params) {
+        const relay = urls[0]!;
+        if (filter.ids) {
+          queries.push(relay);
+          queueMicrotask(() => params.onevent(event));
+        } else {
+          queueMicrotask(() => params.oneose?.());
+        }
+        return { close() {} };
+      },
+      publish(urls) {
+        return urls.map(() => Promise.resolve("ok"));
+      },
+      close() {},
+    };
+  }
+
+  test("a successful probe releases a slow quarantined relay early", async () => {
+    const queries: string[] = [];
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      relays,
+      probePool(queries),
+      () => 1,
+    );
+    await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
+    const now = Date.now();
+    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
+      transport.relayHealth.recordAccept(
+        relays[3]!,
+        SLOW_RELAY_ACCEPT_MS * 2,
+        true,
+        now,
+      );
+    }
+    expect(transport.relayHealth.isQuarantined(relays[3]!, now)).toBe(true);
+
+    expect(await transport.probeQuarantinedRelay(now)).toBe(false); // arms cadence
+    expect(
+      await transport.probeQuarantinedRelay(
+        now + RELAY_HEALTH_PROBE_INTERVAL_MS,
+      ),
+    ).toBe(true);
+    expect(
+      transport.relayHealth.isQuarantined(
+        relays[3]!,
+        now + RELAY_HEALTH_PROBE_INTERVAL_MS,
+      ),
+    ).toBe(false);
+  });
+
+  test("publish volume never creates quarantined-relay probes", async () => {
+    const queries: string[] = [];
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      relays,
+      probePool(queries),
+      () => 1,
+    );
+    await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
+    const quarantined = relays[3]!;
+    const now = Date.now();
+    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
+      transport.relayHealth.recordAccept(
+        quarantined,
+        SLOW_RELAY_ACCEPT_MS * 2,
+        true,
+        now,
+      );
+    }
+    const before = queries.filter((r) => r === quarantined).length;
+    for (let i = 0; i < 20; i++) await transport.publishWrap(event);
+    await transport.flush();
+    expect(queries.filter((r) => r === quarantined)).toHaveLength(before);
+
+    await transport.probeQuarantinedRelay(now);
+    await transport.probeQuarantinedRelay(now + RELAY_HEALTH_PROBE_INTERVAL_MS);
+    expect(queries.filter((r) => r === quarantined)).toHaveLength(before + 1);
+  });
+
+  test("probe cadence applies the full jitter factor", async () => {
+    const queries: string[] = [];
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      relays,
+      probePool(queries),
+      () => 1 - RELAY_HEALTH_PROBE_JITTER,
+    );
+    await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
+    const quarantined = relays[3]!;
+    const now = Date.now();
+    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
+      transport.relayHealth.recordAccept(
+        quarantined,
+        SLOW_RELAY_ACCEPT_MS * 2,
+        true,
+        now,
+      );
+    }
+    const before = queries.filter((r) => r === quarantined).length;
+    await transport.probeQuarantinedRelay(now);
+    expect(await transport.probeQuarantinedRelay(
+      now + RELAY_HEALTH_PROBE_INTERVAL_MS * (1 - RELAY_HEALTH_PROBE_JITTER) - 1,
+    )).toBe(false);
+    expect(await transport.probeQuarantinedRelay(
+      now + RELAY_HEALTH_PROBE_INTERVAL_MS * (1 - RELAY_HEALTH_PROBE_JITTER),
+    )).toBe(true);
+    expect(queries.filter((r) => r === quarantined)).toHaveLength(before + 1);
+  });
+
+  test("the inbound catch-up path owns probe opportunities", async () => {
+    const queries: string[] = [];
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      relays,
+      probePool(queries),
+      () => 0,
+    );
+    await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
+    const quarantined = relays[3]!;
+    const now = Date.now();
+    for (let i = 0; i < SLOW_RELAY_MIN_SAMPLES; i++) {
+      transport.relayHealth.recordAccept(
+        quarantined,
+        SLOW_RELAY_ACCEPT_MS * 2,
+        true,
+        now,
+      );
+    }
+
+    await transport.fetchGiftWrapsSince("pubkey", 0); // arm cadence
+    await transport.fetchGiftWrapsSince("pubkey", 0); // due immediately
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(transport.relayHealth.isQuarantined(quarantined)).toBe(false);
+  });
+});
+
+describe("publish confirmation quorum", () => {
+  const sk = generateSecretKey();
+  const event = finalizeEvent(
+    { kind: 1059, created_at: 1, tags: [], content: "quorum" },
+    sk,
+  ) as unknown as NTNostrEvent;
+  const relays = ["wss://a.example", "wss://b.example", "wss://c.example"];
+
+  function pool(stored: Set<string>): RelayPool {
+    return {
+      subscribeMany(urls, filter: NostrFilter, params) {
+        const relay = urls[0]!;
+        if (filter.ids && stored.has(relay)) {
+          queueMicrotask(() => params.onevent(event));
+        } else {
+          queueMicrotask(() => params.oneose?.());
+        }
+        return { close() {} };
+      },
+      publish() {
+        return [];
+      },
+      close() {},
+    };
+  }
+
+  test("two verified copies log delivered even when another relay misses", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      const transport = new SimplePoolPhantomchatTransport(
+        sk,
+        relays,
+        pool(new Set(relays.slice(0, PUBLISH_CONFIRM_QUORUM))),
+      );
+      expect(await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 }))
+        .toEqual([relays[2]!]);
+      const row = lines.map((line) => JSON.parse(line)).find((x) =>
+        x.msg === "phantomchat: publish confirmed delivered via 2 relays"
+      );
+      expect(row?.level).toBe("info");
+      expect(row?.confirmed).toBe(2);
+    } finally {
+      restore();
+    }
+  });
+
+  test("one verified copy keeps the loud quorum warning", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      const transport = new SimplePoolPhantomchatTransport(
+        sk,
+        relays,
+        pool(new Set([relays[0]!])),
+      );
+      await transport.verifyStored(event, { settleMs: 0, timeoutMs: 50 });
+      const row = lines.map((line) => JSON.parse(line)).find((x) =>
+        x.msg === "phantomchat: publish NOT confirmed stored — relay quorum not met"
+      );
+      expect(row?.level).toBe("warn");
+      expect(row?.confirmed).toBe(1);
+      expect(row?.quorum).toBe(PUBLISH_CONFIRM_QUORUM);
+    } finally {
+      restore();
+    }
   });
 });
 
