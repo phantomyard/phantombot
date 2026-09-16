@@ -28,7 +28,7 @@ import {
   ELEVENLABS_DEFAULTS,
   ENV_KEY_FOR_PROVIDER,
   OPENAI_DEFAULTS,
-  OPENAI_VOICE_OPTIONS,
+  OPENAI_FALLBACK_VOICE_OPTIONS,
   type VoiceConfig,
   type VoiceProvider,
   validateElevenLabsKey,
@@ -159,8 +159,8 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
             label: "OpenAI",
             hint:
               existing.provider === "openai"
-                ? "current · 6 built-in voices · paid (API key required)"
-                : "6 built-in voices · paid (API key required)",
+                ? "current · paid (API key required)"
+                : "paid (API key required)",
           },
           {
             value: "azure_edge",
@@ -206,6 +206,8 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
             if (pr === "openai") return validateOpenAIKey(key);
             return { ok: true };
           },
+          openaiKeyForVoices:
+            process.env[ENV_KEY_FOR_PROVIDER.openai] ?? undefined,
         },
       );
 
@@ -265,7 +267,7 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
       {
         value: "openai",
         label: "OpenAI",
-        hint: "6 built-in voices, cheap, paid (API key required)",
+        hint: "paid (API key required)",
       },
       {
         value: "azure_edge",
@@ -414,7 +416,10 @@ async function runOpenAIFlow(
 
   const voice = await p.select<string>({
     message: "Voice",
-    options: OPENAI_VOICE_OPTIONS.map((v) => ({ value: v, label: v })),
+    options: OPENAI_FALLBACK_VOICE_OPTIONS.map((v) => ({
+      value: v,
+      label: v,
+    })),
     initialValue: cur.voice,
   });
   if (p.isCancel(voice)) {
@@ -424,8 +429,15 @@ async function runOpenAIFlow(
   const model = await p.select<string>({
     message: "Model",
     options: [
-      { value: "tts-1", label: "tts-1 (fast, lower quality)" },
-      { value: "tts-1-hd", label: "tts-1-hd (slower, higher quality)" },
+      {
+        value: "gpt-4o-mini-tts",
+        label: "gpt-4o-mini-tts (13 voices, promptable style)",
+      },
+      { value: "tts-1", label: "tts-1 (9 voices, fast, lower quality)" },
+      {
+        value: "tts-1-hd",
+        label: "tts-1-hd (9 voices, slower, higher quality)",
+      },
     ],
     initialValue: cur.model,
   });

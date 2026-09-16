@@ -16,7 +16,8 @@ import {
   AZURE_EDGE_VOICE_OPTIONS,
   ELEVENLABS_DEFAULTS,
   OPENAI_DEFAULTS,
-  OPENAI_VOICE_OPTIONS,
+  OPENAI_FALLBACK_VOICE_OPTIONS,
+  fetchOpenAIVoiceOptions,
   type VoiceConfig,
   type VoiceProvider,
 } from "../lib/voice.ts";
@@ -32,6 +33,16 @@ export interface VoiceFlowDeps {
     provider: VoiceProvider,
     key: string,
   ): Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * The OpenAI key to probe with — the stored one ("" → hasKey) or the one
+   * just typed in this flow. Undefined when neither exists.
+   */
+  openaiKeyForVoices?: string;
+  /** Live voice list for one model; [] means fall back. Injectable for tests. */
+  fetchVoiceOptions?: (
+    key: string,
+    model: string,
+  ) => Promise<string[]>;
 }
 
 export interface VoiceFlowResult {
@@ -91,9 +102,26 @@ export async function configureVoice(
 
   if (provider === "openai") {
     const cur = deps.existing?.openai ?? OPENAI_DEFAULTS;
+    // A key typed THIS flow wins over the stored one: the env may still hold
+    // the old key the user is replacing, and the probe must not fail (or show
+    // a stale list) because of it.
+    const probeKey = apiKey || deps.openaiKeyForVoices;
+    const fetchVoices = deps.fetchVoiceOptions ?? fetchOpenAIVoiceOptions;
+    // Model-scoped live list. The probe costs no quota (it is rejected
+    // before synthesis); an empty result means no key, offline, or an
+    // unparsed error — OPENAI_FALLBACK_VOICE_OPTIONS covers all three.
+    const live = probeKey
+      ? await fetchVoices(probeKey, cur.model)
+      : [];
+    const options = (live.length ? live : OPENAI_FALLBACK_VOICE_OPTIONS)
+      .slice()
+      .sort((a, b) => a.localeCompare(b));
+    const title = `Voice for ${persona}${
+      live.length ? "" : " (offline list — full set with a working key)"
+    }`;
     const voice = await q.choose({
-      title: `Voice for ${persona}`,
-      options: OPENAI_VOICE_OPTIONS.map((v) => ({
+      title,
+      options: options.map((v) => ({
         value: v,
         label: v,
         hint: v === cur.voice ? "current" : undefined,

@@ -2054,7 +2054,7 @@ function buildVoiceConfig(
       provider: "openai",
       sttTimeoutMs,
       openai: {
-        model: asString(o.model) ?? "tts-1",
+        model: asString(o.model) ?? "gpt-4o-mini-tts",
         voice: asString(o.voice) ?? "nova",
         speed: asNumber(o.speed) ?? 1.0,
       },

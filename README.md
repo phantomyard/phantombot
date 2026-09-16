@@ -1855,6 +1855,16 @@ Per-message modality overrides:
 
 If TTS is not configured, phantombot degrades to text.
 
+### OpenAI voice list
+
+The `phantombot voice` TUI and CLI fetch the OpenAI voice menu live from the
+speech endpoint (its validation error enumerates every voice the chosen model
+accepts), so new OpenAI voices appear without a phantombot release. The list
+is model-scoped: `gpt-4o-mini-tts` speaks 13 voices, `tts-1`/`tts-1-hd` only
+9. When the probe can't run (no key yet, offline), a built-in 13-voice
+fallback list is shown instead, and new personas default to
+`gpt-4o-mini-tts`.
+
 ## Reply Language
 
 Chat channels (Telegram and PhantomChat) state one deterministic rule to the
