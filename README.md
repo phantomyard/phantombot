@@ -787,6 +787,7 @@ autostart_personas = ["lena", "kai"]
 update_channel = "stable"
 
 harness_idle_timeout_s = 300
+harness_thinking_timeout_s = 600
 harness_tool_timeout_s = 1200
 harness_hard_timeout_s = 3600
 
@@ -812,6 +813,19 @@ Tool-cap failures do not replay the same operation on a fallback harness. The
 1200-second default is conservative: recent complete PhantomBot suites in the
 harness audit log took 114–132 seconds, leaving roughly 9× the observed high
 sample.
+
+Heartbeats are not progress. Model-only activity (thinking deltas, liveness
+pings) can defer the idle kill for at most `harness_thinking_timeout_s`
+(default 600s) after the last productive output: text, a tool starting or a
+tool result. A harness streaming nothing but heartbeats is killed at that point
+and the chain fails over, instead of holding "Thinking..." until the hard cap.
+
+When the orchestrator fails over (a recoverable error mid-stream, such as
+claude's `server_error`), the abandoned harness's whole process group is killed
+immediately, so it cannot keep running tools in parallel with the fallback.
+A turn stopped with `/stop` (or interrupted by a new message) still records the
+user's message in history, followed by any text already streamed and
+`[interrupted before reply]`, on both Telegram and PhantomChat.
 
 - **native** (recommended) runs the pi engine embedded in the phantombot
   binary through a hidden `phantombot __pi …` subprocess, with the routing in

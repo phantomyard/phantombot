@@ -86,6 +86,12 @@ export interface HarnessRequest {
   /** Per-tool wall-clock ceiling while the idle watchdog is suspended. */
   toolTimeoutMs?: number;
   /**
+   * Thinking budget: how long model-only activity (heartbeats, thinking
+   * deltas) may defer the idle kill with no productive output. Default
+   * DEFAULT_THINKING_TIMEOUT_MS (10 min) in lib/harnessRunner.ts.
+   */
+  thinkingTimeoutMs?: number;
+  /**
    * Startup timeout: kill the subprocess if it produces NO stdout at all
    * within this window. Distinct from idleTimeoutMs, which only bounds silence
    * AFTER output has begun — a subprocess that emits nothing still had to wait
@@ -244,7 +250,7 @@ export type HarnessChunk =
        * silently disabling the recovery. Omitted when the failure was not a
        * coordinator kill (spawn failure, non-zero exit, provider 4XX).
        */
-      killCause?: "timeout" | "idle" | "tool" | "startup" | "aborted" | "policy";
+      killCause?: "timeout" | "idle" | "tool" | "startup" | "aborted" | "policy" | "abandoned";
       /** True when an idle callback raced with an already-started tool. */
       toolInFlightAtKill?: true;
       /**

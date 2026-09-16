@@ -242,6 +242,7 @@ export interface RunReactionTurnInput {
   idleTimeoutMs: number;
   hardTimeoutMs?: number;
   toolTimeoutMs?: number;
+  thinkingTimeoutMs?: number;
   startupTimeoutMs?: number;
   promptCache?: import("../../config.ts").PromptCacheSettings;
   /**
@@ -296,6 +297,7 @@ export async function runReactionTurn(
       idleTimeoutMs: input.idleTimeoutMs,
       hardTimeoutMs: input.hardTimeoutMs,
       toolTimeoutMs: input.toolTimeoutMs,
+      thinkingTimeoutMs: input.thinkingTimeoutMs,
       startupTimeoutMs: input.startupTimeoutMs,
       promptCache: input.promptCache,
       signal: input.signal,

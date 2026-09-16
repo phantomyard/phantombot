@@ -389,7 +389,7 @@ function speakerLabel(turn: Turn): string {
  */
 export function makeExtractionComplete(
   harnesses: Harness[],
-  config: Pick<Config, "harnessIdleTimeoutMs" | "harnessHardTimeoutMs" | "harnessToolTimeoutMs">,
+  config: Pick<Config, "harnessIdleTimeoutMs" | "harnessHardTimeoutMs" | "harnessToolTimeoutMs" | "harnessThinkingTimeoutMs">,
   workingDir?: string,
 ): ExtractComplete | undefined {
   const harness = harnesses[0];
@@ -416,6 +416,7 @@ export function makeExtractionComplete(
       idleTimeoutMs: config.harnessIdleTimeoutMs,
       hardTimeoutMs: config.harnessHardTimeoutMs,
       toolTimeoutMs: config.harnessToolTimeoutMs,
+      thinkingTimeoutMs: config.harnessThinkingTimeoutMs,
       toolsMode: "none",
       // Persona-less, tool-less extraction NEVER needs MCP. Without this the
       // claude harness falls into the foreground branch, spawns the loopback

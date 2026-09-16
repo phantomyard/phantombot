@@ -84,6 +84,7 @@ const ENV_KEYS = [
   "PHANTOMBOT_DURABLE_FACTS_LEASE_MS",
   "PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS",
   "PHANTOMBOT_HARNESS_TOOL_TIMEOUT_MS",
+  "PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS",
   "PHANTOMBOT_STATE",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
@@ -215,6 +216,30 @@ describe("loadConfig — tool timeout", () => {
   test("environment milliseconds override TOML", async () => {
     process.env.PHANTOMBOT_HARNESS_TOOL_TIMEOUT_MS = "450000";
     expect((await loadConfig()).harnessToolTimeoutMs).toBe(450_000);
+  });
+});
+
+describe("loadConfig — thinking timeout", () => {
+  test("defaults to 10 minutes", async () => {
+    delete process.env.PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS;
+    expect((await loadConfig()).harnessThinkingTimeoutMs).toBe(600_000);
+  });
+
+  test("reads TOML seconds", async () => {
+    delete process.env.PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS;
+    const path = join(workdir, "config", "phantombot", "config.toml");
+    await mkdir(join(workdir, "config", "phantombot"), { recursive: true });
+    await writeFile(path, "harness_thinking_timeout_s = 900\n");
+    expect((await loadConfig()).harnessThinkingTimeoutMs).toBe(900_000);
+  });
+
+  test("environment milliseconds override TOML", async () => {
+    process.env.PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS = "120000";
+    try {
+      expect((await loadConfig()).harnessThinkingTimeoutMs).toBe(120_000);
+    } finally {
+      delete process.env.PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS;
+    }
   });
 });
 

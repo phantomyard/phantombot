@@ -93,6 +93,7 @@ import { inboxDir } from "../telegram/parse.ts";
 import { renderRelayMessage } from "./relayEnvelope.ts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { persistInterruptedTurn } from "../core/interrupted.ts";
 
 /**
  * Outcome of the auth gate for one inbound message (#400).
@@ -982,6 +983,7 @@ export async function runPhantomchatServer(
         idleTimeoutMs: input.config.harnessIdleTimeoutMs,
         hardTimeoutMs: input.config.harnessHardTimeoutMs,
         toolTimeoutMs: input.config.harnessToolTimeoutMs,
+        thinkingTimeoutMs: input.config.harnessThinkingTimeoutMs,
         startupTimeoutMs: input.config.harnessStartupTimeoutMs,
         promptCache: input.config.promptCache,
         signal: turnSignal,
@@ -1148,7 +1150,25 @@ export async function runPhantomchatServer(
     // If the turn was aborted (/stop or /reset), don't emit a trailing partial:
     // the command already sent its own confirmation and any streamed bubbles
     // stand on their own.
-    if (controller.signal.aborted) return;
+    if (controller.signal.aborted) {
+      // Keep the user's message in history even though the turn never
+      // finished (2026-09-16: a stopped "yes, apply it" vanished, so the next
+      // reply asked for approval of a change that had already run).
+      await persistInterruptedTurn({
+        memory: input.memory,
+        persona: input.persona,
+        conversation: conversationKey,
+        reason:
+          typeof controller.signal.reason === "string"
+            ? controller.signal.reason
+            : "aborted",
+        userMessage,
+        partialReply: streamedReply,
+        trusted: tier === "trusted",
+        channel: "phantomchat",
+      });
+      return;
+    }
 
     // The turn failed. We never show the raw diagnostic — it is English-only
     // and reads like a crash — so re-prompt the chain ONCE for a short,

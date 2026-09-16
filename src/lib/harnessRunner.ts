@@ -55,6 +55,7 @@ export type KillCause =
   | "startup"
   | "aborted"
   | "policy"
+  | "abandoned"
   | undefined;
 export type HarnessActivity = "model" | "tool" | "productive";
 export type ToolBoundary = { phase: "start" | "end"; id: string };
@@ -88,6 +89,17 @@ export interface KillCoordinatorOpts {
    * as it keeps arriving — the legacy behaviour). See touch() and issue #351.
    */
   toolTimeoutMs?: number;
+  /**
+   * Cap on how long MODEL activity alone (thinking deltas, payload-less
+   * heartbeats) may keep deferring the idle kill, measured from the last
+   * PRODUCTIVE output (text, tool start/result, done). Model activity extends
+   * the idle deadline to at most `lastProductiveAt + thinkingTimeoutMs`; it can
+   * never shorten a deadline already armed. Omit for the legacy behaviour
+   * where every heartbeat re-arms the full idle window forever — the shape
+   * that let a fallback harness sit on "Thinking..." for 40 minutes with
+   * neither the 5-min idle nor the 20-min tool timer firing (2026-09-16).
+   */
+  thinkingTimeoutMs?: number;
   /** External abort, e.g. user typed /stop. */
   signal?: AbortSignal;
   /** For log lines only. */
@@ -126,6 +138,15 @@ export interface KillCoordinator {
    * disposed.
    */
   terminate(): void;
+  /**
+   * Kill the process group because the CONSUMER stopped reading (the
+   * orchestrator failed over on a recoverable, non-terminal error chunk, or
+   * the caller broke out of the stream). A harness we are no longer listening
+   * to must not keep running: it would carry on executing tool calls in
+   * parallel with the fallback harness answering the same prompt. No-op if
+   * the process already exited, a cause is already set, or disposed.
+   */
+  abandon(): void;
   /** Why the process was killed, if it was. undefined = exited normally. */
   killCause(): KillCause;
 }
@@ -156,10 +177,19 @@ export function createKillCoordinator(
   };
 
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
-  const armIdle = (): void => {
+  let idleDeadline = 0;
+  // Last PRODUCTIVE output (or spawn). Model-only activity cannot push the
+  // idle deadline past lastProductiveAt + thinkingTimeoutMs.
+  let lastProductiveAt = Date.now();
+  const armIdleAt = (deadline: number): void => {
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => triggerKill("idle"), opts.idleTimeoutMs);
+    idleDeadline = deadline;
+    idleTimer = setTimeout(
+      () => triggerKill("idle"),
+      Math.max(0, deadline - Date.now()),
+    );
   };
+  const armIdle = (): void => armIdleAt(Date.now() + opts.idleTimeoutMs);
   armIdle();
   const hardTimer: ReturnType<typeof setTimeout> | undefined =
     opts.hardTimeoutMs === undefined
@@ -183,9 +213,22 @@ export function createKillCoordinator(
   }
 
   return {
-    touch(_activity: HarnessActivity = "productive"): void {
+    touch(activity: HarnessActivity = "productive"): void {
       if (cause || disposed) return;
       if (inFlightTools.size > 0) return;
+      if (activity === "model" && opts.thinkingTimeoutMs !== undefined) {
+        // Heartbeats prove the process is alive, not that it is getting
+        // anywhere. Extend the idle deadline only within the thinking budget,
+        // and never pull an already-armed deadline earlier.
+        const now = Date.now();
+        const target = Math.min(
+          now + opts.idleTimeoutMs,
+          lastProductiveAt + opts.thinkingTimeoutMs,
+        );
+        if (target > idleDeadline) armIdleAt(target);
+        return;
+      }
+      lastProductiveAt = Date.now();
       armIdle();
     },
     firstOutput(): void {
@@ -211,7 +254,11 @@ export function createKillCoordinator(
       if (!inFlightTools.has(id)) return;
       if (timer) clearTimeout(timer);
       inFlightTools.delete(id);
-      if (!cause && inFlightTools.size === 0) armIdle();
+      if (!cause && inFlightTools.size === 0) {
+        // A finished tool is productive output: it restarts the thinking budget.
+        lastProductiveAt = Date.now();
+        armIdle();
+      }
     },
     hasInFlightTools(): boolean {
       return inFlightTools.size > 0;
@@ -221,6 +268,12 @@ export function createKillCoordinator(
     },
     terminate(): void {
       triggerKill("policy");
+    },
+    abandon(): void {
+      if (cause || disposed) return;
+      const exitCode = (opts.proc as { exitCode?: number | null }).exitCode;
+      if (exitCode !== null && exitCode !== undefined) return;
+      triggerKill("abandoned");
     },
     async dispose(): Promise<void> {
       if (disposed) return;
@@ -284,7 +337,7 @@ export function killCauseToErrorChunk(
       type: "error";
       error: string;
       recoverable: boolean;
-      killCause?: "timeout" | "idle" | "tool" | "startup" | "aborted" | "policy";
+      killCause?: Exclude<KillCause, undefined>;
       toolInFlightAtKill?: true;
     }
   | undefined {
@@ -333,6 +386,16 @@ export function killCauseToErrorChunk(
     return {
       type: "error",
       error: `${harnessId} killed by policy tripwire`,
+      recoverable: true,
+      killCause: cause,
+    };
+  }
+  if (cause === "abandoned") {
+    // Normally unreachable: abandon() only fires once the consumer has
+    // stopped reading, so nobody sees this chunk. Kept for exhaustiveness.
+    return {
+      type: "error",
+      error: `${harnessId} abandoned by the orchestrator`,
       recoverable: true,
       killCause: cause,
     };
@@ -523,6 +586,16 @@ export function defaultToolTimeoutMs(
   );
 }
 
+/**
+ * Default thinking budget: how long model-only activity (heartbeats, thinking
+ * deltas) may keep a turn alive with no productive output. 10 minutes — long
+ * enough for genuine deep reasoning, short enough that a harness streaming
+ * nothing but liveness pings gets killed (and failed over) instead of holding
+ * "Thinking..." until the 60-min hard cap. Override: req.thinkingTimeoutMs /
+ * config harness_thinking_timeout_s.
+ */
+export const DEFAULT_THINKING_TIMEOUT_MS = 600_000;
+
 export const harnessDefaults = {
   defaultToolTimeoutMs,
 };
@@ -552,6 +625,7 @@ export async function* runHarnessProcess(
     hardTimeoutMs: req.hardTimeoutMs,
     startupTimeoutMs: req.startupTimeoutMs,
     toolTimeoutMs,
+    thinkingTimeoutMs: req.thinkingTimeoutMs ?? DEFAULT_THINKING_TIMEOUT_MS,
     signal: req.signal,
     harnessId,
   });
@@ -690,6 +764,14 @@ export async function* runHarnessProcess(
     }
   };
 
+  // Set once stdout reached EOF (or a policy tripwire already killed the
+  // group). If the finally below runs WITHOUT it, the consumer stopped
+  // reading early — the orchestrator failed over on a recoverable error chunk
+  // mid-stream (claude's `server_error`), or the caller broke out — and the
+  // subprocess must die with the stream. Otherwise it keeps executing tools in
+  // parallel with the fallback harness (2026-09-16: claude ran 78s after
+  // failover and applied the change the fallback was also applying).
+  let streamFinished = false;
   try {
     let readPromise: Promise<StdoutReadResult> | undefined;
     while (true) {
@@ -723,7 +805,10 @@ export async function* runHarnessProcess(
         readResult = await readPromise;
       }
       readPromise = undefined;
-      if (readResult.done) break;
+      if (readResult.done) {
+        streamFinished = true;
+        break;
+      }
       const chunk = readResult.value;
       // First stdout byte means the subprocess got past its startup/init
       // handshake and is alive — cancel the startup timer. Idempotent, so
@@ -776,6 +861,7 @@ export async function* runHarnessProcess(
     }
   } finally {
     clearTick();
+    if (!streamFinished && !terminalError) killer.abandon();
     await killer.dispose();
     // Match for-await semantics: breaking out (consumer stop, terminal error)
     // cancels the stream so a killed subprocess's pipe doesn't linger.

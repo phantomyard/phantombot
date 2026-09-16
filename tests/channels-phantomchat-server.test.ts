@@ -1441,6 +1441,37 @@ describe("phantomchat slash commands", () => {
     expect(replies.some((r) => r.startsWith("stopped (was running"))).toBe(true);
   }, 20_000);
 
+  test("/stop keeps the stopped user message in history (2026-09-16)", async () => {
+    // Before the fix PhantomChat dropped an aborted turn entirely: runTurn
+    // only persists on success, so a stopped "yes, apply it" vanished and the
+    // next reply asked for approval of a change that had already run.
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const conversation = `phantomchat:${getPublicKey(senderSk)}`;
+    const harness = new BlockingHarness("fake");
+    const srv = makeServer({
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+    });
+    srv.feed(senderSk, "yes, apply it to all 7");
+    await waitUntil(() => harness.inFlight, "the turn to be in flight");
+    srv.feed(senderSk, "/stop");
+    await waitUntil(
+      async () =>
+        (await memory.recentTurns("phantom", conversation, 50)).some(
+          (t) => t.role === "user" && t.text === "yes, apply it to all 7",
+        ),
+      "the stopped user message to be persisted",
+    );
+    await srv.stop();
+    const stored = await memory.recentTurns("phantom", conversation, 50);
+    expect(stored).toContainEqual({
+      role: "assistant",
+      text: "working\n\n[interrupted before reply]",
+    });
+  }, 20_000);
+
   test("/reset clears the conversation history", async () => {
     const senderSk = generateSecretKey();
     const botSk = generateSecretKey();

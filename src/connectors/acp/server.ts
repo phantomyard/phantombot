@@ -357,6 +357,7 @@ export async function runAcpServer(
           idleTimeoutMs: config.harnessIdleTimeoutMs,
           hardTimeoutMs: config.harnessHardTimeoutMs,
           toolTimeoutMs: config.harnessToolTimeoutMs,
+          thinkingTimeoutMs: config.harnessThinkingTimeoutMs,
           promptCache: config.promptCache,
           systemPromptSuffix,
           signal: abort.signal,

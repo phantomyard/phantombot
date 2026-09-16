@@ -52,6 +52,7 @@ export interface BridgeTurnInput {
   idleTimeoutMs: number;
   hardTimeoutMs?: number;
   toolTimeoutMs?: number;
+  thinkingTimeoutMs?: number;
   promptCache?: PromptCacheSettings;
   /** @-mentioned reference data, kept separate from the instruction. */
   systemPromptSuffix?: string;
@@ -114,6 +115,7 @@ export async function runBridgeTurn(
     idleTimeoutMs: input.idleTimeoutMs,
     hardTimeoutMs: input.hardTimeoutMs,
     toolTimeoutMs: input.toolTimeoutMs,
+    thinkingTimeoutMs: input.thinkingTimeoutMs,
     promptCache: input.promptCache,
     systemPromptSuffix: input.systemPromptSuffix,
     // Stream-first surface (Zed renders deltas live) → narrate before tools.
