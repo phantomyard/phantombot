@@ -138,22 +138,39 @@ describe("chat input", () => {
       instance.unmount();
     }
   });
-  test("a chunk that arrives while busy keeps its text in the box", async () => {
+  test("a chunk that arrives while busy interrupts the turn and is sent", async () => {
     // Ink coalesces back-to-back stdin writes into one chunk, so a fast
     // typist's second message can arrive as `hello\r` while the first turn
-    // is still in flight. The submit must be swallowed — but the TEXT was
-    // never typed one keystroke at a time, so dropping the chunk loses it
-    // (review of 19ff85a: the box stayed empty and "hello" was gone).
+    // is still in flight. It used to be swallowed and kept in the box (review
+    // of 19ff85a: never lose it). The TUI now follows every other channel: a
+    // prompt typed mid-turn interrupts the running turn and is then sent, so
+    // the text is still never lost.
     const sent: string[] = [];
-    const { stdin, stdout, instance } = await mount(recordingSession(sent));
+    const reasons: unknown[] = [];
+    const session: ChatSession = {
+      ...recordingSession(sent),
+      async *send(text: string, signal?: AbortSignal) {
+        sent.push(text);
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener(
+            "abort",
+            () => {
+              reasons.push(signal.reason);
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+      },
+    };
+    const { stdin, instance } = await mount(session);
     try {
       stdin.write("first\r"); // starts a turn; screen goes busy
       await sleep(150);
       stdin.write("hello\r"); // coalesced chunk, arrives while busy
       await sleep(150);
-      const frame = lastFrame(stdout.frames);
-      expect(sent).toEqual(["first"]); // correctly not submitted
-      expect(frame).toContain("hello"); // and not lost, either
+      expect(reasons).toEqual(["interrupt"]);
+      expect(sent).toEqual(["first", "hello"]);
     } finally {
       instance.unmount();
     }

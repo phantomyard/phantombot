@@ -3575,9 +3575,11 @@ describe("runTelegramServer slash commands", () => {
       role: "user",
       text: "kick off something slow",
     });
+    // The text already streamed before /stop is kept ahead of the marker so
+    // the next turn knows how far the reply got.
     expect(stored).toContainEqual({
       role: "assistant",
-      text: "[interrupted before reply]",
+      text: "thinking…\n\n[interrupted before reply]",
     });
     // /stop also leaves an agent-facing note (#301) so the next turn knows it
     // was stopped on purpose and must not resume the abandoned work.
@@ -3688,7 +3690,7 @@ describe("runTelegramServer slash commands", () => {
     const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
     expect(stored.map((t) => t.text)).toEqual([
       "kick off something slow",
-      "[interrupted before reply]",
+      "thinking…\n\n[interrupted before reply]",
       "actually do this instead",
       "second reply",
     ]);

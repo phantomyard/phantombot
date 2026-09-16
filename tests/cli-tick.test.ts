@@ -233,6 +233,7 @@ describe("runTick — normal task fire", () => {
       ...config,
       personaLayer: "lena",
       harnessIdleTimeoutMs: 4242,
+      harnessThinkingTimeoutMs: 4343,
     };
     const asked: string[] = [];
     const harness = new ScriptedHarness("h", [
@@ -261,6 +262,9 @@ describe("runTick — normal task fire", () => {
     expect(asked).toEqual(["lena"]);
     expect(seenConfigs).toEqual([4242]);
     expect(harness.lastRequest?.idleTimeoutMs).toBe(4242);
+    // PR #572: the thinking budget rides the same persona config; without it
+    // a scheduled wake silently ran on the runner's 600s default.
+    expect(harness.lastRequest?.thinkingTimeoutMs).toBe(4343);
   });
 
   test("background agent wake logs lifecycle and stream chunks without Telegram delivery", async () => {

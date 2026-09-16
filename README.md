@@ -787,6 +787,7 @@ autostart_personas = ["lena", "kai"]
 update_channel = "stable"
 
 harness_idle_timeout_s = 300
+harness_thinking_timeout_s = 600
 harness_tool_timeout_s = 1200
 harness_hard_timeout_s = 3600
 
@@ -812,6 +813,27 @@ Tool-cap failures do not replay the same operation on a fallback harness. The
 1200-second default is conservative: recent complete PhantomBot suites in the
 harness audit log took 114–132 seconds, leaving roughly 9× the observed high
 sample.
+
+Heartbeats are not progress. Model-only activity (thinking deltas, liveness
+pings) can keep a turn alive for at most
+`max(harness_idle_timeout_s, harness_thinking_timeout_s)` (default 600s) after
+the last productive output: text, a tool starting or a tool result. The idle
+timeout is a floor, so a thinking budget below it just means heartbeats buy no
+extra time; it never kills sooner than the idle timeout. A harness streaming nothing but heartbeats is killed at that point
+and the chain fails over, instead of holding "Thinking..." until the hard cap.
+
+When the orchestrator fails over (a recoverable error mid-stream, such as
+claude's `server_error`), the abandoned harness's whole process group is killed
+immediately (SIGKILL) and the fallback only starts once it has exited, so it
+cannot keep running tools in parallel with the fallback.
+A turn stopped with `/stop` (or interrupted by a new message) still records the
+user's message in history, followed by any text already streamed and
+`[interrupted before reply]`. This holds on Telegram, PhantomChat, the terminal
+UI (`^c` or `/stop`) and the editor extensions (the stop button).
+
+In the terminal UI, typing a new message while a turn is running interrupts it,
+the same as on Telegram and PhantomChat: the running turn stops and your new
+message is sent straight after.
 
 - **native** (recommended) runs the pi engine embedded in the phantombot
   binary through a hidden `phantombot __pi …` subprocess, with the routing in

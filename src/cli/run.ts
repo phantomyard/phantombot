@@ -1419,6 +1419,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
               idleTimeoutMs: config.harnessIdleTimeoutMs,
               hardTimeoutMs: config.harnessHardTimeoutMs,
               toolTimeoutMs: config.harnessToolTimeoutMs,
+              thinkingTimeoutMs: config.harnessThinkingTimeoutMs,
               startupTimeoutMs: config.harnessStartupTimeoutMs,
               signal: ac.signal,
             });

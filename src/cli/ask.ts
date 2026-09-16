@@ -174,6 +174,7 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       idleTimeoutMs: config.harnessIdleTimeoutMs,
       hardTimeoutMs: config.harnessHardTimeoutMs,
       toolTimeoutMs: config.harnessToolTimeoutMs,
+      thinkingTimeoutMs: config.harnessThinkingTimeoutMs,
       promptCache: config.promptCache,
       noHistory: !input.history,
       // Instinct layer: auto-retrieve relevant memory/kb, but only for

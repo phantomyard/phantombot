@@ -94,6 +94,7 @@ import {
   matchPersonaNames,
 } from "./routing.ts";
 import type { GroupChatState } from "./routing.ts";
+import { abortReasonString, persistInterruptedTurn } from "./interrupted.ts";
 import {
   captureNudgeForTurn,
   REPLY_LANGUAGE_INSTRUCTION,
@@ -101,18 +102,6 @@ import {
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
 } from "./prompts.ts";
-
-/**
- * Render an AbortSignal.reason as a short string for logging.
- * Callers pass plain strings ("stop", "reset", "interrupt"); the DOM
- * default for a parameterless abort() is a DOMException — fold it down
- * to its message so journalctl stays readable.
- */
-function abortReasonString(reason: unknown): string {
-  if (typeof reason === "string") return reason;
-  if (reason instanceof Error) return reason.message;
-  return "aborted";
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -512,6 +501,7 @@ export async function runTelegramServer(
           idleTimeoutMs: input.config.harnessIdleTimeoutMs,
           hardTimeoutMs: input.config.harnessHardTimeoutMs,
           toolTimeoutMs: input.config.harnessToolTimeoutMs,
+      thinkingTimeoutMs: input.config.harnessThinkingTimeoutMs,
           startupTimeoutMs: input.config.harnessStartupTimeoutMs,
           promptCache: input.config.promptCache,
           // Reaction from an allow-listed principal → trusted, so the memory
@@ -1311,6 +1301,7 @@ async function processChatMessage(
       idleTimeoutMs: input.config.harnessIdleTimeoutMs,
       hardTimeoutMs: input.config.harnessHardTimeoutMs,
       toolTimeoutMs: input.config.harnessToolTimeoutMs,
+      thinkingTimeoutMs: input.config.harnessThinkingTimeoutMs,
       startupTimeoutMs: input.config.harnessStartupTimeoutMs,
       promptCache: input.config.promptCache,
       signal: controller.signal,
@@ -1521,29 +1512,16 @@ async function processChatMessage(
     //                           watermark and would reappear immediately.
     //   - msg.text.length === 0 → voice message aborted before STT
     //                             completed; nothing meaningful to log.
-    if (reason !== "reset" && msg.text.length > 0) {
-      try {
-        await input.memory.appendTurnPair(
-          {
-            persona: input.persona,
-            conversation: `telegram:${msg.conversationId}`,
-            role: "user",
-            text: msg.text,
-          },
-          {
-            persona: input.persona,
-            conversation: `telegram:${msg.conversationId}`,
-            role: "assistant",
-            text: "[interrupted before reply]",
-          },
-        );
-      } catch (e) {
-        log.warn("telegram: failed to persist interrupted-pair", {
-          chatId: msg.conversationId,
-          error: (e as Error).message,
-        });
-      }
-    }
+    await persistInterruptedTurn({
+      memory: input.memory,
+      persona: input.persona,
+      conversation: conversationKey,
+      reason,
+      userMessage: msg.text,
+      partialReply: streamedReply,
+      trusted: ctx.principalAuthenticated === true,
+      channel: "telegram",
+    });
     return;
   }
 

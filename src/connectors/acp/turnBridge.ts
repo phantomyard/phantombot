@@ -31,6 +31,10 @@ import type { PromptCacheSettings } from "../../config.ts";
 import type { ToolCallDetail } from "../../harnesses/toolNote.ts";
 import type { MemoryStore } from "../../memory/store.ts";
 import { runTurn, type TurnInput } from "../../orchestrator/turn.ts";
+import {
+  abortReasonString,
+  persistInterruptedTurn,
+} from "../../channels/core/interrupted.ts";
 import type { ScreenVerdict } from "../../orchestrator/screen.ts";
 import type { AcpStopReason } from "./protocol.ts";
 
@@ -52,6 +56,7 @@ export interface BridgeTurnInput {
   idleTimeoutMs: number;
   hardTimeoutMs?: number;
   toolTimeoutMs?: number;
+  thinkingTimeoutMs?: number;
   promptCache?: PromptCacheSettings;
   /** @-mentioned reference data, kept separate from the instruction. */
   systemPromptSuffix?: string;
@@ -93,7 +98,10 @@ export interface BridgeSink {
  * with the ACP stop reason — never throws for harness-level failures:
  *   - `done`  → "end_turn"
  *   - `error` → emit the error text, "refusal"
- *   - abort   → "cancelled"
+ *   - abort   → "cancelled", after persisting the user's message as an
+ *               interrupted pair (core/interrupted.ts): runTurn only writes
+ *               history on success, so the editor's stop button, `/stop` and
+ *               a superseding prompt used to drop it.
  *
  * A thrown exception (persona load failure, memory write failure) propagates;
  * the caller maps it to a JSON-RPC error.
@@ -114,6 +122,7 @@ export async function runBridgeTurn(
     idleTimeoutMs: input.idleTimeoutMs,
     hardTimeoutMs: input.hardTimeoutMs,
     toolTimeoutMs: input.toolTimeoutMs,
+    thinkingTimeoutMs: input.thinkingTimeoutMs,
     promptCache: input.promptCache,
     systemPromptSuffix: input.systemPromptSuffix,
     // Stream-first surface (Zed renders deltas live) → narrate before tools.
@@ -129,22 +138,53 @@ export async function runBridgeTurn(
   };
 
   let sawError = false;
+  let streamed = "";
+  // runTurn writes history itself once it reports `done`; an abort after that
+  // must not add a second, "interrupted" copy.
+  let completed = false;
 
-  for await (const chunk of runTurn(turnInput) as AsyncGenerator<HarnessChunk>) {
-    if (chunk.type === "text") {
-      sink.text(chunk.text);
-    } else if (chunk.type === "progress") {
-      sink.progress(chunk.note, chunk.tool);
-    } else if (chunk.type === "replay") {
-      sink.replay(chunk.note);
-    } else if (chunk.type === "error") {
-      sawError = true;
-      sink.text(`\n[error] ${chunk.error}`);
+  const persistIfCancelled = async (): Promise<boolean> => {
+    if (!input.signal?.aborted || completed) return false;
+    await persistInterruptedTurn({
+      memory: input.memory,
+      persona: input.persona,
+      conversation: input.conversation,
+      reason: abortReasonString(input.signal.reason),
+      userMessage: input.userMessage,
+      partialReply: streamed,
+      trusted: true,
+      channel: "acp",
+    });
+    return true;
+  };
+
+  try {
+    for await (const chunk of runTurn(turnInput) as AsyncGenerator<HarnessChunk>) {
+      if (chunk.type === "text") {
+        streamed += chunk.text;
+        sink.text(chunk.text);
+      } else if (chunk.type === "progress") {
+        sink.progress(chunk.note, chunk.tool);
+      } else if (chunk.type === "replay") {
+        sink.replay(chunk.note);
+      } else if (chunk.type === "error") {
+        // A cancelled turn is not a failure; don't print its abort diagnostic.
+        if (input.signal?.aborted) continue;
+        sawError = true;
+        sink.text(`\n[error] ${chunk.error}`);
+      } else if (chunk.type === "done") {
+        completed = true;
+      }
+      // `heartbeat` needs no per-chunk action here; the loop ending is the
+      // turn's natural completion.
     }
-    // `done` / `heartbeat` need no per-chunk action here; the loop ending is
-    // the turn's natural completion.
+  } catch (e) {
+    // A throw caused by the cancel itself is a cancel, not a JSON-RPC error.
+    if (await persistIfCancelled()) return "cancelled";
+    throw e;
   }
 
+  if (await persistIfCancelled()) return "cancelled";
   if (input.signal?.aborted) return "cancelled";
   if (sawError) return "refusal";
   return "end_turn";

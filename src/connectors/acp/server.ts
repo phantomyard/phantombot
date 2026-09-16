@@ -357,6 +357,7 @@ export async function runAcpServer(
           idleTimeoutMs: config.harnessIdleTimeoutMs,
           hardTimeoutMs: config.harnessHardTimeoutMs,
           toolTimeoutMs: config.harnessToolTimeoutMs,
+          thinkingTimeoutMs: config.harnessThinkingTimeoutMs,
           promptCache: config.promptCache,
           systemPromptSuffix,
           signal: abort.signal,
@@ -420,7 +421,9 @@ export async function runAcpServer(
     const p = (params ?? {}) as { sessionId?: unknown };
     const sessionId = typeof p.sessionId === "string" ? p.sessionId : "";
     const session = sessions.get(sessionId);
-    session?.activeTurn?.controller.abort();
+    // Reason "stop": the editor's stop button is the same act as `/stop`, and
+    // the interrupted-turn writer keys off the reason (it skips only "reset").
+    session?.activeTurn?.controller.abort("stop");
   }
 
   /**

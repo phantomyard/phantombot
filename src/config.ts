@@ -724,6 +724,16 @@ export interface Config {
   /** Wall-clock ceiling for one in-flight tool; never exceeds the hard cap. */
   harnessToolTimeoutMs?: number;
   /**
+   * Thinking budget: how long model-only activity (heartbeats, thinking
+   * deltas) may keep a harness turn alive with no productive output (text,
+   * tool start/result). Past it the idle kill fires and the chain fails over.
+   * The effective cap is max(harnessIdleTimeoutMs, this): a value below the
+   * idle timeout never kills sooner than the idle timeout would.
+   * Default 600s. toml `harness_thinking_timeout_s`, env
+   * PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS.
+   */
+  harnessThinkingTimeoutMs?: number;
+  /**
    * Cap on time-to-first-output for a foreground harness turn. A subprocess
    * that emits nothing at all (classically `claude --print` wedged on its MCP
    * `initialize` handshake) would otherwise idle for the full
@@ -1441,6 +1451,15 @@ export async function loadConfig(persona?: string): Promise<Config> {
       60_000,
 
     harnessHardTimeoutMs,
+    // Thinking budget (2026-09-16 hang): heartbeats alone may defer the idle
+    // kill for at most this long after the last productive output. 10 min so
+    // genuine deep reasoning survives; a liveness-only stream does not.
+    harnessThinkingTimeoutMs:
+      asInt(process.env.PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS) ??
+      (asInt(toml.harness_thinking_timeout_s) !== undefined
+        ? asInt(toml.harness_thinking_timeout_s)! * 1000
+        : undefined) ??
+      600_000,
     harnessToolTimeoutMs: Math.min(
       harnessHardTimeoutMs,
       configuredHarnessToolTimeoutMs,

@@ -250,6 +250,14 @@ export function ChatScreen(props: {
     setScroll(next);
   }, []);
   const abortRef = useRef<AbortController | null>(null);
+  /**
+   * The submit in flight (including one still waiting for the turn it
+   * interrupted to unwind), and a generation counter so a message superseded
+   * while it waited is dropped, the same backlog flush Telegram and
+   * PhantomChat do on an interrupt.
+   */
+  const turnRef = useRef<Promise<void> | null>(null);
+  const genRef = useRef(0);
 
   // Reset the transcript when the session changes (^p switched phantom).
   useEffect(() => {
@@ -258,7 +266,7 @@ export function ChatScreen(props: {
     setScroll(0);
   }, [props.session]);
 
-  const submit = useCallback(
+  const runSubmit = useCallback(
     async (text: string) => {
       const controller = new AbortController();
       abortRef.current = controller;
@@ -404,24 +412,56 @@ export function ChatScreen(props: {
         // harness chain used to draw — the user reads it as "it answered and
         // the answer was blank" rather than "nothing answered". Every other
         // channel already renders this placeholder (`core/engine.ts`).
+        // A stopped or superseded turn says THAT, not "(no reply)": nothing
+        // failed to answer, the user ended it.
+        const placeholder = controller.signal.aborted
+          ? "(interrupted)"
+          : "(no reply)";
         patch((m) =>
           m.text === "" && m.error === undefined
             ? {
                 ...m,
-                text: "(no reply)",
+                text: placeholder,
                 // The placeholder rides the timeline too, so a turn that
                 // called tools but said nothing still shows it under them.
-                parts: [...(m.parts ?? []), { kind: "text", text: "(no reply)" }],
+                parts: [...(m.parts ?? []), { kind: "text", text: placeholder }],
               }
             : m,
         );
       } finally {
         setBusy(false);
         setBusySince(undefined);
-        abortRef.current = null;
+        if (abortRef.current === controller) abortRef.current = null;
       }
     },
     [props.session],
+  );
+
+  /**
+   * Send a prompt. A prompt typed WHILE a turn runs interrupts it, the same
+   * design every other channel follows ("type to interrupt"): the running
+   * turn is aborted with reason "interrupt" (its message is kept in history
+   * by the session, marked interrupted), and the new prompt starts once the
+   * old turn has unwound, so history lands in the order it was typed.
+   */
+  const submit = useCallback(
+    (text: string) => {
+      const previous = turnRef.current;
+      const gen = ++genRef.current;
+      abortRef.current?.abort("interrupt");
+      const run = (async () => {
+        if (previous) await previous.catch(() => {});
+        // Superseded by a newer prompt while waiting: drop it, as the other
+        // channels flush their backlog on interrupt.
+        if (gen !== genRef.current) return;
+        await runSubmit(text);
+      })();
+      turnRef.current = run;
+      void run.finally(() => {
+        if (turnRef.current === run) turnRef.current = null;
+      });
+    },
+    [runSubmit],
   );
 
   /**
@@ -469,9 +509,10 @@ export function ChatScreen(props: {
 
   useInput((char, key) => {
     // ^c interrupts the TURN. It never quits: losing an app mid-answer because
-    // you wanted the answer to stop is the wrong trade.
+    // you wanted the answer to stop is the wrong trade. Reason "stop", the
+    // same one `/stop` uses, so both are recorded identically.
     if (key.ctrl && char === "c") {
-      abortRef.current?.abort();
+      abortRef.current?.abort("stop");
       return;
     }
     if (key.ctrl && char === "q") {
@@ -517,9 +558,9 @@ export function ChatScreen(props: {
       const text = inputRef.current.text.trim();
       if (!text) return;
       // Commands are dispatched ahead of the harness, so they work WHILE a
-      // turn is in flight; ordinary prompts still wait their turn.
+      // turn is in flight; an ordinary prompt interrupts the running turn
+      // (see `submit`).
       const isCommand = commandName(text) !== undefined;
-      if (busy && !isCommand) return;
       setInputValue(promptState(""));
       if (isCommand) void runCommand(text);
       else void submit(text);
@@ -576,12 +617,8 @@ export function ChatScreen(props: {
         if (body !== undefined && !body.includes("\n") && atEnd) {
           const text = `${inputRef.current.text}${body}`.trim();
           const isCommand = commandName(text) !== undefined;
-          if (busy && !isCommand) {
-            // A turn in flight owns the harness; keep the text in the box
-            // exactly as the plain-Enter busy branch does.
-            setInputValue(insertAtCursor(inputRef.current, body));
-            return;
-          }
+          // Busy or not, this is a submit: a prompt typed during a turn
+          // interrupts it, exactly as the plain-Enter branch does.
           if (!text) return;
           setInputValue(promptState(""));
           if (isCommand) void runCommand(text);
@@ -615,7 +652,9 @@ export function ChatScreen(props: {
     input.text,
     input.cursor,
     Math.max(8, size.columns - 4),
-    { busy },
+    // The box stays LIVE during a turn (caret shown, text undimmed): typing
+    // a prompt mid-turn interrupts it, so what you are typing must be
+    // visible. The dim rules around it remain the "turn running" cue.
   );
   // Same for the key inspector: it borrows rows from the transcript, never
   // overflows the frame — one header + one per recorded chunk.
@@ -749,7 +788,7 @@ export function ChatScreen(props: {
                 <Text
                   key={j}
                   color={
-                    seg.tone === "dim" || busy
+                    seg.tone === "dim"
                       ? theme.dim
                       : seg.tone === "accent"
                         ? theme.accent
