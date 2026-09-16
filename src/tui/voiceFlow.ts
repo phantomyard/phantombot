@@ -16,8 +16,8 @@ import {
   AZURE_EDGE_VOICE_OPTIONS,
   ELEVENLABS_DEFAULTS,
   OPENAI_DEFAULTS,
-  OPENAI_FALLBACK_VOICE_OPTIONS,
   fetchOpenAIVoiceOptions,
+  openAIVoiceMenuOptions,
   type VoiceConfig,
   type VoiceProvider,
 } from "../lib/voice.ts";
@@ -109,13 +109,12 @@ export async function configureVoice(
     const fetchVoices = deps.fetchVoiceOptions ?? fetchOpenAIVoiceOptions;
     // Model-scoped live list. The probe costs no quota (it is rejected
     // before synthesis); an empty result means no key, offline, or an
-    // unparsed error — OPENAI_FALLBACK_VOICE_OPTIONS covers all three.
+    // unparsed error — and the fallback is FILTERED BY MODEL, so an offline
+    // tts-1 persona is never offered ballad/verse/marin/cedar.
     const live = probeKey
       ? await fetchVoices(probeKey, cur.model)
       : [];
-    const options = (live.length ? live : OPENAI_FALLBACK_VOICE_OPTIONS)
-      .slice()
-      .sort((a, b) => a.localeCompare(b));
+    const options = openAIVoiceMenuOptions(cur.model, live);
     const title = `Voice for ${persona}${
       live.length ? "" : " (offline list — full set with a working key)"
     }`;

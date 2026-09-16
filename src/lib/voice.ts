@@ -118,6 +118,38 @@ export const OPENAI_FALLBACK_VOICE_OPTIONS = [
   "verse",
 ] as const;
 
+/**
+ * Voices the legacy tts-1/-hd models REJECT — they arrived with
+ * gpt-4o-mini-tts (13 - 4 = the 9 voices tts-1 offers). A menu that offers
+ * `ballad` on a tts-1 persona persists an invalid pair that fails with
+ * HTTP 400 on the next TTS call.
+ */
+const GPT_4O_MINI_TTS_ONLY = ["ballad", "cedar", "marin", "verse"];
+
+/**
+ * The offline fallback for ONE model: the full set for gpt-4o-mini-tts and
+ * unknown models, minus the gpt-4o-mini-tts-only voices for the legacy
+ * tts-1/-hd pair. Only ever used when the live probe returned nothing.
+ */
+export function fallbackVoiceOptions(model: string): string[] {
+  const legacy = model === "tts-1" || model === "tts-1-hd";
+  return OPENAI_FALLBACK_VOICE_OPTIONS.filter(
+    (v) => !legacy || !GPT_4O_MINI_TTS_ONLY.includes(v),
+  );
+}
+
+/**
+ * The voice menu for ONE model: the live list when the probe returned one,
+ * otherwise the model-scoped fallback — sorted for a stable menu. Both the
+ * TUI flow and the CLI picker build their options with this, so an offline
+ * legacy-model persona can never be offered a voice its model rejects.
+ */
+export function openAIVoiceMenuOptions(model: string, live: string[]): string[] {
+  return (live.length ? live : fallbackVoiceOptions(model))
+    .slice()
+    .sort((a, b) => a.localeCompare(b));
+}
+
 export const OPENAI_DEFAULTS: OpenAIVoice = {
   model: "gpt-4o-mini-tts",
   voice: "nova",

@@ -113,6 +113,27 @@ describe("configureVoice — openai voice list", () => {
     );
   });
 
+  test("offline fallback on a legacy model is MODEL-SCOPED (regression)", async () => {
+    // Kai, PR #570 review: the unscoped fallback offered all 13 voices even
+    // on tts-1, where picking ballad persists an invalid pair that fails
+    // with HTTP 400 on the next TTS call.
+    const q = fakeQ("");
+    await configureVoice("phantom", "openai", q, deps({
+      hasKey: () => true,
+      existing: {
+        provider: "openai",
+        openai: { model: "tts-1", voice: "nova", speed: 1 },
+      },
+      fetchVoiceOptions: async () => [], // probe returns nothing (offline)
+    }));
+    const offered = q.chosen[q.chosen.length - 1]?.options.map((o) => o.value);
+    expect(offered).toHaveLength(9);
+    for (const gpt4oOnly of ["ballad", "cedar", "marin", "verse"]) {
+      expect(offered).not.toContain(gpt4oOnly);
+    }
+    expect(offered).toContain("nova");
+  });
+
   test("the current voice is offered with the current hint", async () => {
     const q = fakeQ();
     await configureVoice("phantom", "openai", q, deps({

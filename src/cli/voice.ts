@@ -28,9 +28,10 @@ import {
   ELEVENLABS_DEFAULTS,
   ENV_KEY_FOR_PROVIDER,
   OPENAI_DEFAULTS,
-  OPENAI_FALLBACK_VOICE_OPTIONS,
   type VoiceConfig,
   type VoiceProvider,
+  fetchOpenAIVoiceOptions,
+  openAIVoiceMenuOptions,
   validateElevenLabsKey,
   validateOpenAIKey,
 } from "../lib/voice.ts";
@@ -414,18 +415,10 @@ async function runOpenAIFlow(
   }
   spinner.stop(`key validated (${r.modelCount} models visible)`);
 
-  const voice = await p.select<string>({
-    message: "Voice",
-    options: OPENAI_FALLBACK_VOICE_OPTIONS.map((v) => ({
-      value: v,
-      label: v,
-    })),
-    initialValue: cur.voice,
-  });
-  if (p.isCancel(voice)) {
-    p.cancel("cancelled");
-    return 0;
-  }
+  // Model FIRST, then its voice menu: the OpenAI voice set is model-scoped
+  // (13 for gpt-4o-mini-tts, 9 for tts-1/-hd), so asking the voice before the
+  // model could persist an invalid pair. The probe costs no quota; the
+  // fallback (offline / unparsed error) is filtered by the chosen model.
   const model = await p.select<string>({
     message: "Model",
     options: [
@@ -442,6 +435,22 @@ async function runOpenAIFlow(
     initialValue: cur.model,
   });
   if (p.isCancel(model)) {
+    p.cancel("cancelled");
+    return 0;
+  }
+
+  spinner.start("fetching the voice list for this model…");
+  const live = await fetchOpenAIVoiceOptions(key as string, model as string);
+  spinner.stop(live.length ? `${live.length} voices` : "offline — using the built-in list");
+  const voice = await p.select<string>({
+    message: "Voice",
+    options: openAIVoiceMenuOptions(model as string, live).map((v) => ({
+      value: v,
+      label: v,
+    })),
+    initialValue: cur.voice,
+  });
+  if (p.isCancel(voice)) {
     p.cancel("cancelled");
     return 0;
   }

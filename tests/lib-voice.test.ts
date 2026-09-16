@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   fetchOpenAIVoiceOptions,
+  fallbackVoiceOptions,
+  openAIVoiceMenuOptions,
   parseOpenAIVoiceOptions,
   parseOpenClawVoice,
   validateElevenLabsKey,
@@ -176,5 +178,37 @@ describe("parseOpenClawVoice", () => {
     expect(parseOpenClawVoice({})).toBeUndefined();
     expect(parseOpenClawVoice({ tts: {} })).toBeUndefined();
     expect(parseOpenClawVoice({ talk: {} })).toBeUndefined();
+  });
+});
+
+describe("fallbackVoiceOptions / openAIVoiceMenuOptions", () => {
+  test("legacy models exclude the gpt-4o-mini-tts-only voices", () => {
+    for (const model of ["tts-1", "tts-1-hd"]) {
+      const options = fallbackVoiceOptions(model);
+      expect(options).toHaveLength(9);
+      for (const gpt4oOnly of ["ballad", "cedar", "marin", "verse"]) {
+        expect(options).not.toContain(gpt4oOnly);
+      }
+    }
+  });
+
+  test("gpt-4o-mini-tts and unknown models get the full set", () => {
+    expect(fallbackVoiceOptions("gpt-4o-mini-tts")).toHaveLength(13);
+    expect(fallbackVoiceOptions("some-future-model")).toHaveLength(13);
+  });
+
+  test("the menu prefers the live list and sorts it", () => {
+    expect(openAIVoiceMenuOptions("tts-1", ["shimmer", "alloy"])).toEqual([
+      "alloy",
+      "shimmer",
+    ]);
+  });
+
+  test("the menu falls back to the MODEL-SCOPED list (regression for the CLI path)", () => {
+    // Kai, PR #570 review: the CLI offered all 13 voices BEFORE the model
+    // choice, so ballad + tts-1 could be persisted even with a valid key.
+    const options = openAIVoiceMenuOptions("tts-1", []);
+    expect(options).toHaveLength(9);
+    expect(options).not.toContain("ballad");
   });
 });
