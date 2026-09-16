@@ -94,7 +94,10 @@ export interface KillCoordinatorOpts {
    * heartbeats) may keep deferring the idle kill, measured from the last
    * PRODUCTIVE output (text, tool start/result, done). Model activity extends
    * the idle deadline to at most `lastProductiveAt + thinkingTimeoutMs`; it can
-   * never shorten a deadline already armed. Omit for the legacy behaviour
+   * never shorten a deadline already armed. The idle window is a FLOOR, not
+   * something this budget overrides: a heartbeat-only stream dies at
+   * `lastProductiveAt + max(idleTimeoutMs, thinkingTimeoutMs)`, so a budget
+   * below the idle timeout simply means "heartbeats buy nothing extra". Omit for the legacy behaviour
    * where every heartbeat re-arms the full idle window forever — the shape
    * that let a fallback harness sit on "Thinking..." for 40 minutes with
    * neither the 5-min idle nor the 20-min tool timer firing (2026-09-16).

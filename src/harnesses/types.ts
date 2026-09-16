@@ -87,7 +87,9 @@ export interface HarnessRequest {
   toolTimeoutMs?: number;
   /**
    * Thinking budget: how long model-only activity (heartbeats, thinking
-   * deltas) may defer the idle kill with no productive output. Default
+   * deltas) may defer the idle kill with no productive output. Effective cap
+   * is max(idleTimeoutMs, thinkingTimeoutMs) after the last productive
+   * output; the idle window is a floor. Default
    * DEFAULT_THINKING_TIMEOUT_MS (10 min) in lib/harnessRunner.ts.
    */
   thinkingTimeoutMs?: number;

@@ -155,6 +155,20 @@ describe("resolvePersonaGreeting", () => {
     expect(harness.lastRequest?.persona).toBe("lena");
   });
 
+  test("forwards the configured thinking budget to the harness (PR #572)", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "Hi" },
+    ]);
+    await resolvePersonaGreeting({
+      agentDir,
+      persona: "lena",
+      harnesses: [harness],
+      idleTimeoutMs: 1000,
+      thinkingTimeoutMs: 4343,
+    });
+    expect(harness.lastRequest?.thinkingTimeoutMs).toBe(4343);
+  });
+
   test("falls back to plain Hello when the harness returns empty", async () => {
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "   " },

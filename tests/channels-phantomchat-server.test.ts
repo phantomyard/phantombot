@@ -2412,6 +2412,7 @@ describe("phantomchat relay tier — reactions", () => {
     allowedHex: string[];
     relayHex: string[];
     harness: Harness;
+    config?: Config;
   }): Promise<void> {
     const botSk = generateSecretKey();
     const botHex = getPublicKey(botSk);
@@ -2428,7 +2429,7 @@ describe("phantomchat relay tier — reactions", () => {
     });
     const ac = new AbortController();
     const serverPromise = runPhantomchatServer({
-      config: baseConfig(),
+      config: opts.config ?? baseConfig(),
       memory,
       harnesses: [opts.harness],
       agentDir,
@@ -2461,6 +2462,22 @@ describe("phantomchat relay tier — reactions", () => {
       harness,
     });
     expect(harness.invocations).toBe(1);
+  });
+
+  test("a reaction turn carries the configured thinking budget (PR #572)", async () => {
+    const reactorSk = generateSecretKey();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "noted" },
+    ]);
+    await feedReaction({
+      reactorSk,
+      allowedHex: [getPublicKey(reactorSk)],
+      relayHex: [],
+      harness,
+      config: { ...baseConfig(), harnessThinkingTimeoutMs: 4343 },
+    });
+    expect(harness.invocations).toBe(1);
+    expect(harness.lastRequest?.thinkingTimeoutMs).toBe(4343);
   });
 
   test("a relay npub's reaction runs NO turn", async () => {

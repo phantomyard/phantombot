@@ -727,6 +727,8 @@ export interface Config {
    * Thinking budget: how long model-only activity (heartbeats, thinking
    * deltas) may keep a harness turn alive with no productive output (text,
    * tool start/result). Past it the idle kill fires and the chain fails over.
+   * The effective cap is max(harnessIdleTimeoutMs, this): a value below the
+   * idle timeout never kills sooner than the idle timeout would.
    * Default 600s. toml `harness_thinking_timeout_s`, env
    * PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS.
    */

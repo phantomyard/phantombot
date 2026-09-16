@@ -207,8 +207,9 @@ describe("thinking budget: heartbeats cannot defer the idle kill forever", () =>
       stdin: "ignore", stdout: "pipe", stderr: "ignore",
     });
     trackedPids.push(proc.pid!);
-    // thinking budget (100ms) < idle (500ms): a heartbeat must not pull the
-    // idle deadline in to the thinking budget.
+    // thinking budget (100ms) < idle (500ms): documented contract is
+    // max(idle, thinking), so the idle window is the floor and a heartbeat
+    // must not pull the deadline in to the thinking budget.
     const killer = createKillCoordinator({
       proc, idleTimeoutMs: 500, thinkingTimeoutMs: 100, hardTimeoutMs: 10_000,
       harnessId: "test",

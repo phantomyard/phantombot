@@ -815,9 +815,11 @@ harness audit log took 114–132 seconds, leaving roughly 9× the observed high
 sample.
 
 Heartbeats are not progress. Model-only activity (thinking deltas, liveness
-pings) can defer the idle kill for at most `harness_thinking_timeout_s`
-(default 600s) after the last productive output: text, a tool starting or a
-tool result. A harness streaming nothing but heartbeats is killed at that point
+pings) can keep a turn alive for at most
+`max(harness_idle_timeout_s, harness_thinking_timeout_s)` (default 600s) after
+the last productive output: text, a tool starting or a tool result. The idle
+timeout is a floor, so a thinking budget below it just means heartbeats buy no
+extra time; it never kills sooner than the idle timeout. A harness streaming nothing but heartbeats is killed at that point
 and the chain fails over, instead of holding "Thinking..." until the hard cap.
 
 When the orchestrator fails over (a recoverable error mid-stream, such as
