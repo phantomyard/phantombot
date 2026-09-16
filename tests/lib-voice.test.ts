@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  fetchOpenAIVoiceOptions,
+  fallbackVoiceOptions,
+  openAIVoiceMenuOptions,
+  parseOpenAIVoiceOptions,
   parseOpenClawVoice,
   validateElevenLabsKey,
   validateOpenAIKey,
@@ -55,6 +59,84 @@ describe("validateOpenAIKey", () => {
   });
 });
 
+describe("parseOpenAIVoiceOptions", () => {
+  test("parses the gpt-4o-mini-tts error shape", () => {
+    const msg =
+      "Invalid value: 'not-a-voice'. Supported values are: 'alloy', 'echo', " +
+      "'fable', 'onyx', 'nova', 'shimmer', 'coral', 'verse', 'ballad', " +
+      "'ash', 'sage', 'marin', and 'cedar'.";
+    expect(parseOpenAIVoiceOptions(msg)).toEqual([
+      "alloy", "echo", "fable", "onyx", "nova", "shimmer",
+      "coral", "verse", "ballad", "ash", "sage", "marin", "cedar",
+    ]);
+  });
+
+  test("parses the tts-1 pydantic 'expected' shape", () => {
+    const msg =
+      `[{"type": "enum", "loc": ("body", "voice"), "msg": "Input should be ` +
+      `'nova', 'shimmer', 'echo', 'onyx', 'fable', 'alloy', 'ash', 'sage' ` +
+      `or 'coral'", "ctx": {"expected": "'nova', 'shimmer', 'echo', 'onyx', ` +
+      `'fable', 'alloy', 'ash', 'sage' or 'coral'"}}]`;
+    expect(parseOpenAIVoiceOptions(msg)).toEqual([
+      "nova", "shimmer", "echo", "onyx", "fable", "alloy",
+      "ash", "sage", "coral",
+    ]);
+  });
+
+  test("returns [] on unrelated errors", () => {
+    expect(parseOpenAIVoiceOptions("401 Unauthorized")).toEqual([]);
+    expect(parseOpenAIVoiceOptions("")).toEqual([]);
+  });
+});
+
+describe("fetchOpenAIVoiceOptions", () => {
+  test("enumerates voices from the speech-endpoint validation error", async () => {
+    let captured: { url: string; init: RequestInit } | undefined;
+    const fakeFetch = (async (url: string, init: RequestInit) => {
+      captured = { url, init };
+      return new Response(
+        JSON.stringify({
+          error: {
+            message:
+              "Invalid value: '__phantombot_probe__'. Supported values are: " +
+              "'nova', 'shimmer', 'echo', 'onyx', 'fable', 'alloy', 'ash', " +
+              "'sage' or 'coral'.",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    const r = await fetchOpenAIVoiceOptions("k", "tts-1", fakeFetch);
+    expect(r).toEqual([
+      "nova", "shimmer", "echo", "onyx", "fable", "alloy",
+      "ash", "sage", "coral",
+    ]);
+    const body = JSON.parse(String(captured?.init.body)) as Record<
+      string,
+      string
+    >;
+    expect(captured?.url).toContain("/v1/audio/speech");
+    expect(body.voice).toBe("__phantombot_probe__");
+  });
+
+  test("returns [] on 401", async () => {
+    const fakeFetch = (async () =>
+      new Response(JSON.stringify({ error: { message: "401" } }), {
+        status: 401,
+      })) as unknown as typeof fetch;
+    expect(await fetchOpenAIVoiceOptions("bad", "tts-1", fakeFetch)).toEqual(
+      [],
+    );
+  });
+
+  test("returns [] on network error", async () => {
+    const failing = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    expect(await fetchOpenAIVoiceOptions("k", "tts-1", failing)).toEqual([]);
+  });
+});
+
 describe("parseOpenClawVoice", () => {
   test("modern tts.elevenlabs layout", () => {
     const r = parseOpenClawVoice({
@@ -96,5 +178,37 @@ describe("parseOpenClawVoice", () => {
     expect(parseOpenClawVoice({})).toBeUndefined();
     expect(parseOpenClawVoice({ tts: {} })).toBeUndefined();
     expect(parseOpenClawVoice({ talk: {} })).toBeUndefined();
+  });
+});
+
+describe("fallbackVoiceOptions / openAIVoiceMenuOptions", () => {
+  test("legacy models exclude the gpt-4o-mini-tts-only voices", () => {
+    for (const model of ["tts-1", "tts-1-hd"]) {
+      const options = fallbackVoiceOptions(model);
+      expect(options).toHaveLength(9);
+      for (const gpt4oOnly of ["ballad", "cedar", "marin", "verse"]) {
+        expect(options).not.toContain(gpt4oOnly);
+      }
+    }
+  });
+
+  test("gpt-4o-mini-tts and unknown models get the full set", () => {
+    expect(fallbackVoiceOptions("gpt-4o-mini-tts")).toHaveLength(13);
+    expect(fallbackVoiceOptions("some-future-model")).toHaveLength(13);
+  });
+
+  test("the menu prefers the live list and sorts it", () => {
+    expect(openAIVoiceMenuOptions("tts-1", ["shimmer", "alloy"])).toEqual([
+      "alloy",
+      "shimmer",
+    ]);
+  });
+
+  test("the menu falls back to the MODEL-SCOPED list (regression for the CLI path)", () => {
+    // Kai, PR #570 review: the CLI offered all 13 voices BEFORE the model
+    // choice, so ballad + tts-1 could be persisted even with a valid key.
+    const options = openAIVoiceMenuOptions("tts-1", []);
+    expect(options).toHaveLength(9);
+    expect(options).not.toContain("ballad");
   });
 });

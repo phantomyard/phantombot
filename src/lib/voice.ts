@@ -3,7 +3,8 @@
  *
  * Three providers in v1:
  *   - elevenlabs:  premium, custom voices, paid (key required)
- *   - openai:      6 built-in voices, cheap, paid (key required)
+ *   - openai:      built-in voices (fetched live per model — 13 for
+ *                  gpt-4o-mini-tts), cheap, paid (key required)
  *   - azure_edge:  Microsoft's free Edge TTS endpoint (no key)
  *   - none:        TTS/STT disabled
  *
@@ -27,9 +28,9 @@ export interface ElevenLabsVoice {
 }
 
 export interface OpenAIVoice {
-  /** "tts-1" | "tts-1-hd" */
+  /** "tts-1" | "tts-1-hd" | "gpt-4o-mini-tts" */
   model: string;
-  /** "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer" */
+  /** any voice the chosen model accepts — see fetchOpenAIVoiceOptions() */
   voice: string;
   /** 0.25..4.0 */
   speed: number;
@@ -94,17 +95,63 @@ export const ELEVENLABS_DEFAULTS = {
   style: 0.8,
 };
 
-export const OPENAI_VOICE_OPTIONS = [
+/**
+ * Offline fallback for the voice pickers. The authoritative list is fetched
+ * live (fetchOpenAIVoiceOptions) because OpenAI's voice set is model-scoped
+ * and drifts without any release on our side: gpt-4o-mini-tts speaks 13
+ * voices, tts-1/-hd only 9 (no ballad/verse/marin/cedar). Kept in
+ * alphabetical order for a stable menu.
+ */
+export const OPENAI_FALLBACK_VOICE_OPTIONS = [
   "alloy",
+  "ash",
+  "ballad",
+  "cedar",
+  "coral",
   "echo",
   "fable",
-  "onyx",
+  "marin",
   "nova",
+  "onyx",
+  "sage",
   "shimmer",
+  "verse",
 ] as const;
 
+/**
+ * Voices the legacy tts-1/-hd models REJECT — they arrived with
+ * gpt-4o-mini-tts (13 - 4 = the 9 voices tts-1 offers). A menu that offers
+ * `ballad` on a tts-1 persona persists an invalid pair that fails with
+ * HTTP 400 on the next TTS call.
+ */
+const GPT_4O_MINI_TTS_ONLY = ["ballad", "cedar", "marin", "verse"];
+
+/**
+ * The offline fallback for ONE model: the full set for gpt-4o-mini-tts and
+ * unknown models, minus the gpt-4o-mini-tts-only voices for the legacy
+ * tts-1/-hd pair. Only ever used when the live probe returned nothing.
+ */
+export function fallbackVoiceOptions(model: string): string[] {
+  const legacy = model === "tts-1" || model === "tts-1-hd";
+  return OPENAI_FALLBACK_VOICE_OPTIONS.filter(
+    (v) => !legacy || !GPT_4O_MINI_TTS_ONLY.includes(v),
+  );
+}
+
+/**
+ * The voice menu for ONE model: the live list when the probe returned one,
+ * otherwise the model-scoped fallback — sorted for a stable menu. Both the
+ * TUI flow and the CLI picker build their options with this, so an offline
+ * legacy-model persona can never be offered a voice its model rejects.
+ */
+export function openAIVoiceMenuOptions(model: string, live: string[]): string[] {
+  return (live.length ? live : fallbackVoiceOptions(model))
+    .slice()
+    .sort((a, b) => a.localeCompare(b));
+}
+
 export const OPENAI_DEFAULTS: OpenAIVoice = {
-  model: "tts-1",
+  model: "gpt-4o-mini-tts",
   voice: "nova",
   speed: 1.0,
 };
@@ -165,6 +212,67 @@ export async function validateOpenAIKey(
     return { ok: true, modelCount: body.data?.length ?? 0 };
   } catch (e) {
     return { ok: false, error: `network: ${(e as Error).message}` };
+  }
+}
+
+/**
+ * Parse the voice list out of a speech-endpoint validation error. Two error
+ * shapes exist in the wild:
+ *   gpt-4o-mini-tts: "Invalid value: 'x'. Supported values are: 'alloy', … and 'cedar'."
+ *   tts-1/-hd:       a pydantic dump whose 'expected' field quotes the list
+ * Anything else (401, rate limit, unparsed wording) yields [], and the
+ * caller falls back to OPENAI_FALLBACK_VOICE_OPTIONS.
+ */
+export function parseOpenAIVoiceOptions(message: string): string[] {
+  const scope =
+    /Supported values are: (.+)$/i.exec(message)?.[1] ??
+    /"?expected"?\s*:\s*"(.+?)"/.exec(message)?.[1] ??
+    /Input should be (.+?)"/.exec(message)?.[1] ??
+    "";
+  const voices: string[] = [];
+  for (const m of scope.matchAll(/'([a-z][a-z0-9_-]*)'/g)) {
+    const v = m[1];
+    if (v && !voices.includes(v)) voices.push(v);
+  }
+  return voices;
+}
+
+/**
+ * The live OpenAI voice list for one model. There is no /v1/voices
+ * endpoint, but the speech endpoint's own validation error enumerates every
+ * voice the requested model accepts — so one deliberately-invalid probe
+ * returns the authoritative, model-scoped set. The request is rejected
+ * before any synthesis, so it costs no TTS quota. Returns [] whenever the
+ * list can't be read (offline, bad key, unparsed error shape); callers fall
+ * back to OPENAI_FALLBACK_VOICE_OPTIONS.
+ */
+export async function fetchOpenAIVoiceOptions(
+  apiKey: string,
+  model: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  try {
+    const res = await fetchImpl("https://api.openai.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        voice: "__phantombot_probe__",
+        input: ".",
+      }),
+      signal,
+    });
+    if (res.ok) return []; // probe voice accepted — can't enumerate; fall back
+    const body = (await res.json().catch(() => null)) as
+      | { error?: { message?: string } }
+      | null;
+    return parseOpenAIVoiceOptions(body?.error?.message ?? "");
+  } catch {
+    return [];
   }
 }
 

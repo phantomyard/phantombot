@@ -28,9 +28,10 @@ import {
   ELEVENLABS_DEFAULTS,
   ENV_KEY_FOR_PROVIDER,
   OPENAI_DEFAULTS,
-  OPENAI_VOICE_OPTIONS,
   type VoiceConfig,
   type VoiceProvider,
+  fetchOpenAIVoiceOptions,
+  openAIVoiceMenuOptions,
   validateElevenLabsKey,
   validateOpenAIKey,
 } from "../lib/voice.ts";
@@ -159,8 +160,8 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
             label: "OpenAI",
             hint:
               existing.provider === "openai"
-                ? "current · 6 built-in voices · paid (API key required)"
-                : "6 built-in voices · paid (API key required)",
+                ? "current · paid (API key required)"
+                : "paid (API key required)",
           },
           {
             value: "azure_edge",
@@ -206,6 +207,8 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
             if (pr === "openai") return validateOpenAIKey(key);
             return { ok: true };
           },
+          openaiKeyForVoices:
+            process.env[ENV_KEY_FOR_PROVIDER.openai] ?? undefined,
         },
       );
 
@@ -265,7 +268,7 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
       {
         value: "openai",
         label: "OpenAI",
-        hint: "6 built-in voices, cheap, paid (API key required)",
+        hint: "paid (API key required)",
       },
       {
         value: "azure_edge",
@@ -412,24 +415,42 @@ async function runOpenAIFlow(
   }
   spinner.stop(`key validated (${r.modelCount} models visible)`);
 
-  const voice = await p.select<string>({
-    message: "Voice",
-    options: OPENAI_VOICE_OPTIONS.map((v) => ({ value: v, label: v })),
-    initialValue: cur.voice,
-  });
-  if (p.isCancel(voice)) {
-    p.cancel("cancelled");
-    return 0;
-  }
+  // Model FIRST, then its voice menu: the OpenAI voice set is model-scoped
+  // (13 for gpt-4o-mini-tts, 9 for tts-1/-hd), so asking the voice before the
+  // model could persist an invalid pair. The probe costs no quota; the
+  // fallback (offline / unparsed error) is filtered by the chosen model.
   const model = await p.select<string>({
     message: "Model",
     options: [
-      { value: "tts-1", label: "tts-1 (fast, lower quality)" },
-      { value: "tts-1-hd", label: "tts-1-hd (slower, higher quality)" },
+      {
+        value: "gpt-4o-mini-tts",
+        label: "gpt-4o-mini-tts (13 voices, promptable style)",
+      },
+      { value: "tts-1", label: "tts-1 (9 voices, fast, lower quality)" },
+      {
+        value: "tts-1-hd",
+        label: "tts-1-hd (9 voices, slower, higher quality)",
+      },
     ],
     initialValue: cur.model,
   });
   if (p.isCancel(model)) {
+    p.cancel("cancelled");
+    return 0;
+  }
+
+  spinner.start("fetching the voice list for this model…");
+  const live = await fetchOpenAIVoiceOptions(key as string, model as string);
+  spinner.stop(live.length ? `${live.length} voices` : "offline — using the built-in list");
+  const voice = await p.select<string>({
+    message: "Voice",
+    options: openAIVoiceMenuOptions(model as string, live).map((v) => ({
+      value: v,
+      label: v,
+    })),
+    initialValue: cur.voice,
+  });
+  if (p.isCancel(voice)) {
     p.cancel("cancelled");
     return 0;
   }

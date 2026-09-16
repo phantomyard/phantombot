@@ -1420,8 +1420,8 @@ export function App(props: AppProps): React.ReactElement {
               label: "OpenAI",
               hint:
                 config.voice.provider === "openai"
-                  ? "current · 6 built-in voices · paid (API key required)"
-                  : "6 built-in voices · paid (API key required)",
+                  ? "current · paid (API key required)"
+                  : "paid (API key required)",
             },
             {
               value: "azure_edge",
@@ -1459,6 +1459,8 @@ export function App(props: AppProps): React.ReactElement {
               p === "openai"
                 ? validateOpenAIKey(key)
                 : validateElevenLabsKey(key),
+            openaiKeyForVoices:
+              process.env[ENV_KEY_FOR_PROVIDER.openai] ?? undefined,
           },
         );
         if (!chosen) return setNotice("voice unchanged");
