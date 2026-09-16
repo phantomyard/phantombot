@@ -94,7 +94,7 @@ import {
   matchPersonaNames,
 } from "./routing.ts";
 import type { GroupChatState } from "./routing.ts";
-import { persistInterruptedTurn } from "./interrupted.ts";
+import { abortReasonString, persistInterruptedTurn } from "./interrupted.ts";
 import {
   captureNudgeForTurn,
   REPLY_LANGUAGE_INSTRUCTION,
@@ -102,18 +102,6 @@ import {
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
 } from "./prompts.ts";
-
-/**
- * Render an AbortSignal.reason as a short string for logging.
- * Callers pass plain strings ("stop", "reset", "interrupt"); the DOM
- * default for a parameterless abort() is a DOMException — fold it down
- * to its message so journalctl stays readable.
- */
-function abortReasonString(reason: unknown): string {
-  if (typeof reason === "string") return reason;
-  if (reason instanceof Error) return reason.message;
-  return "aborted";
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

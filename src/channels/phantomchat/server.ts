@@ -93,7 +93,10 @@ import { inboxDir } from "../telegram/parse.ts";
 import { renderRelayMessage } from "./relayEnvelope.ts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { persistInterruptedTurn } from "../core/interrupted.ts";
+import {
+  abortReasonString,
+  persistInterruptedTurn,
+} from "../core/interrupted.ts";
 
 /**
  * Outcome of the auth gate for one inbound message (#400).
@@ -1158,10 +1161,7 @@ export async function runPhantomchatServer(
         memory: input.memory,
         persona: input.persona,
         conversation: conversationKey,
-        reason:
-          typeof controller.signal.reason === "string"
-            ? controller.signal.reason
-            : "aborted",
+        reason: abortReasonString(controller.signal.reason),
         userMessage,
         partialReply: streamedReply,
         trusted: tier === "trusted",

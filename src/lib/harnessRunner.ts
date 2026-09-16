@@ -146,10 +146,17 @@ export interface KillCoordinator {
    * orchestrator failed over on a recoverable, non-terminal error chunk, or
    * the caller broke out of the stream). A harness we are no longer listening
    * to must not keep running: it would carry on executing tool calls in
-   * parallel with the fallback harness answering the same prompt. No-op if
-   * the process already exited, a cause is already set, or disposed.
+   * parallel with the fallback harness answering the same prompt.
+   *
+   * SIGKILLs the group with NO grace (nobody reads its output any more, so
+   * there is nothing to shut down gracefully for) and RESOLVES only once the
+   * process has exited. The caller must await it before the stream closes:
+   * a fire-and-forget kill let a SIGTERM-ignoring primary keep running tools
+   * for the whole grace window while the fallback started (review of #572).
+   * If a kill is already under way for another cause, awaits that one.
+   * Resolves immediately if the process already exited or was disposed.
    */
-  abandon(): void;
+  abandon(): Promise<void>;
   /** Why the process was killed, if it was. undefined = exited normally. */
   killCause(): KillCause;
 }
@@ -165,8 +172,12 @@ export function createKillCoordinator(
     ReturnType<typeof setTimeout> | undefined
   >();
   let toolInFlightAtKill = false;
+  let killDone: Promise<void> | undefined;
 
-  const triggerKill = (newCause: Exclude<KillCause, undefined>): void => {
+  const triggerKill = (
+    newCause: Exclude<KillCause, undefined>,
+    killGraceMs: number = graceMs,
+  ): void => {
     if (cause || disposed) return;
     toolInFlightAtKill = inFlightTools.size > 0;
     cause = newCause;
@@ -174,9 +185,10 @@ export function createKillCoordinator(
       idleTimeoutMs: opts.idleTimeoutMs,
       hardTimeoutMs: opts.hardTimeoutMs ?? "disabled",
     });
-    // Fire-and-forget; the for-await over stdout will end naturally as
-    // the kernel closes the pipe after SIGKILL.
-    void killProcessGroup(opts.proc, graceMs);
+    // Fire-and-forget for timers and aborts; the for-await over stdout will
+    // end naturally as the kernel closes the pipe after SIGKILL. abandon()
+    // awaits the same promise instead.
+    killDone = killProcessGroup(opts.proc, killGraceMs).catch(() => {});
   };
 
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -272,11 +284,13 @@ export function createKillCoordinator(
     terminate(): void {
       triggerKill("policy");
     },
-    abandon(): void {
-      if (cause || disposed) return;
+    async abandon(): Promise<void> {
+      if (cause) return killDone;
+      if (disposed) return;
       const exitCode = (opts.proc as { exitCode?: number | null }).exitCode;
       if (exitCode !== null && exitCode !== undefined) return;
-      triggerKill("abandoned");
+      triggerKill("abandoned", 0);
+      await killDone;
     },
     async dispose(): Promise<void> {
       if (disposed) return;
@@ -864,7 +878,9 @@ export async function* runHarnessProcess(
     }
   } finally {
     clearTick();
-    if (!streamFinished && !terminalError) killer.abandon();
+    // AWAITED: the fallback harness must not start until the abandoned group
+    // is gone, or a SIGTERM-ignoring primary keeps acting in parallel.
+    if (!streamFinished && !terminalError) await killer.abandon();
     await killer.dispose();
     // Match for-await semantics: breaking out (consumer stop, terminal error)
     // cancels the stream so a killed subprocess's pipe doesn't linger.

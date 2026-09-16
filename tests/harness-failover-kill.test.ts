@@ -144,6 +144,49 @@ describe("failover kills the abandoned primary (2026-09-16)", () => {
     expect(existsSync(sideEffect)).toBe(false);
   });
 
+  test("a SIGTERM-ignoring primary is dead BEFORE the fallback starts", async () => {
+    // Kai's repro on #572: the kill was fire-and-forget with a 5s SIGTERM
+    // grace, so a primary that traps TERM ran its side effect while the
+    // fallback was already answering. Abandonment must SIGKILL and be awaited.
+    const dir = mkdtempSync(join(tmpdir(), "pb-failover-term-"));
+    dirs.push(dir);
+    const marker = join(dir, "marker");
+    const primary = new ScriptHarness(
+      "primary",
+      `trap '' TERM; echo '{"kind":"err"}'; sleep 0.5; touch '${marker}'; sleep 30`,
+    );
+    let primaryExitedAtFallbackStart: boolean | undefined;
+    const fallback: Harness = {
+      id: "fallback",
+      available: async () => true,
+      async *invoke(): AsyncGenerator<HarnessChunk> {
+        // Probe via `exited`, not exitCode: a SIGKILLed child reports
+        // exitCode null (Bun sets signalCode instead).
+        let exited = false;
+        void primary.proc!.exited.then(() => (exited = true));
+        await Promise.resolve();
+        await Promise.resolve();
+        primaryExitedAtFallbackStart = exited;
+        yield { type: "text", text: "fallback reply" };
+        yield { type: "done", finalText: "fallback reply", meta: {} };
+      },
+    };
+    const started = Date.now();
+    const chunks: HarnessChunk[] = [];
+    for await (const c of runWithFallback([primary, fallback], baseReq(), {
+      cooldown: new CooldownStore(),
+      alerter: new HarnessAlerter(),
+    })) {
+      chunks.push(c);
+    }
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "fallback reply" });
+    expect(primaryExitedAtFallbackStart).toBe(true);
+    // No 5s grace on abandonment: failover stays fast.
+    expect(Date.now() - started).toBeLessThan(2_000);
+    await sleep(1_000);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   test("a stream that runs to EOF is not abandoned (no spurious kill)", async () => {
     const primary = new ScriptHarness(
       "primary",

@@ -7,11 +7,24 @@
  * been asked. Telegram grew an inline fix for this; PhantomChat never did, so
  * on 2026-09-16 a stopped "yes, apply it to all 7" vanished and the next reply
  * asked whether the owner had meant to approve a change that had already run.
- * One helper now serves both channels so they cannot drift again.
+ * One helper now serves every interactive surface (Telegram, PhantomChat, the
+ * TUI and the ACP editor bridge) so they cannot drift again.
  */
 
 import { log } from "../../lib/logger.ts";
 import type { MemoryStore } from "../../memory/store.ts";
+
+/**
+ * Render an AbortSignal.reason as a short string.
+ * Callers pass plain strings ("stop", "reset", "interrupt"); the DOM default
+ * for a parameterless abort() is a DOMException, folded down to "aborted" /
+ * its message so logs stay readable and the "reset" skip still matches.
+ */
+export function abortReasonString(reason: unknown): string {
+  if (typeof reason === "string") return reason;
+  if (reason instanceof Error) return reason.message;
+  return "aborted";
+}
 
 export const INTERRUPTED_MARKER = "[interrupted before reply]";
 
@@ -27,7 +40,7 @@ export interface InterruptedTurnInput {
   partialReply?: string;
   /** Whether the sender was the authenticated principal. */
   trusted: boolean;
-  /** Log label, e.g. "telegram" / "phantomchat". */
+  /** Log label, e.g. "telegram" / "phantomchat" / "tui" / "acp". */
   channel: string;
 }
 

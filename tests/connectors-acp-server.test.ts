@@ -820,6 +820,22 @@ describe("ACP server — session/cancel", () => {
 
     const reply = captured.objects().find((o) => o.id === 2);
     expect(reply.result.stopReason).toBe("cancelled");
+
+    // The stop button must not lose the prompt: runTurn only writes history on
+    // success, so the bridge persists an interrupted pair (2026-09-16), with
+    // the text that had already streamed and no "[error]" for the abort.
+    const turns = await memory.recentTurns(
+      "phantom",
+      conversationForSessionId(sid, cwd),
+      10,
+    );
+    expect(turns.map((t) => [t.role, t.text])).toEqual([
+      ["user", "go"],
+      ["assistant", "starting...\n\n[interrupted before reply]"],
+    ]);
+    expect(
+      captured.lines.some((l) => l.includes("[error] stopped")),
+    ).toBe(false);
   });
 });
 

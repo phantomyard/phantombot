@@ -50,6 +50,10 @@ import type { Harness } from "../harnesses/types.ts";
 import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
+import {
+  abortReasonString,
+  persistInterruptedTurn,
+} from "../channels/core/interrupted.ts";
 import { makeRetriever } from "../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 import {
@@ -256,11 +260,41 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
     }
     const tools: ChatToolCall[] = [];
     let final = "";
+    // True once runTurn reported completion, which is also when it wrote the
+    // turn to history. An abort that lands after that must not write a second,
+    // "interrupted" copy of a turn that actually finished.
+    let completed = false;
     const controller = new AbortController();
     if (signal) {
-      if (signal.aborted) controller.abort();
-      else signal.addEventListener("abort", () => controller.abort(), { once: true });
+      // Forward the REASON too ("stop" / "interrupt" / "reset"): the
+      // interrupted-turn writer skips "reset", and a bare abort() would fold
+      // every cause into "aborted".
+      if (signal.aborted) controller.abort(signal.reason);
+      else
+        signal.addEventListener("abort", () => controller.abort(signal.reason), {
+          once: true,
+        });
     }
+    /**
+     * Keep the user's message when the turn is stopped (^c, `/stop`) or
+     * superseded by a new message. runTurn only writes history on success, so
+     * without this the terminal forgot what it had been asked, exactly the
+     * PhantomChat loss of 2026-09-16. Shared helper: see core/interrupted.ts.
+     */
+    const persistIfInterrupted = async (): Promise<boolean> => {
+      if (!controller.signal.aborted || completed) return false;
+      await persistInterruptedTurn({
+        memory,
+        persona,
+        conversation,
+        reason: abortReasonString(controller.signal.reason),
+        userMessage: text,
+        partialReply: final,
+        trusted: true,
+        channel: "tui",
+      });
+      return true;
+    };
     activeTurn = { controller, startTime: Date.now() };
     try {
       for await (const chunk of runTurn({
@@ -338,8 +372,12 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
             };
           }
           final = chunk.finalText;
+          completed = true;
           yield { type: "done", text: chunk.finalText };
         } else if (chunk.type === "error") {
+          // A stop is not a failure: the harness's "aborted" error chunk
+          // would otherwise paint a red error under a turn the user ended.
+          if (controller.signal.aborted) continue;
           // Surface EVERY error chunk that gets this far, `recoverable` or not.
           //
           // The flag describes what the ORCHESTRATOR may do about it, not
@@ -355,10 +393,14 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
           yield { type: "error", message: chunk.error };
         }
       }
+      if (await persistIfInterrupted()) {
+        yield { type: "done", text: final };
+      }
     } catch (e) {
-      // An aborted turn is the user pressing ^c (or typing /stop), not a
-      // failure to report as one.
+      // An aborted turn is the user pressing ^c (or typing /stop), or a new
+      // message superseding it, not a failure to report as one.
       if (controller.signal.aborted) {
+        await persistIfInterrupted();
         yield { type: "done", text: final };
         return;
       }

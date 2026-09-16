@@ -824,10 +824,16 @@ and the chain fails over, instead of holding "Thinking..." until the hard cap.
 
 When the orchestrator fails over (a recoverable error mid-stream, such as
 claude's `server_error`), the abandoned harness's whole process group is killed
-immediately, so it cannot keep running tools in parallel with the fallback.
+immediately (SIGKILL) and the fallback only starts once it has exited, so it
+cannot keep running tools in parallel with the fallback.
 A turn stopped with `/stop` (or interrupted by a new message) still records the
 user's message in history, followed by any text already streamed and
-`[interrupted before reply]`, on both Telegram and PhantomChat.
+`[interrupted before reply]`. This holds on Telegram, PhantomChat, the terminal
+UI (`^c` or `/stop`) and the editor extensions (the stop button).
+
+In the terminal UI, typing a new message while a turn is running interrupts it,
+the same as on Telegram and PhantomChat: the running turn stops and your new
+message is sent straight after.
 
 - **native** (recommended) runs the pi engine embedded in the phantombot
   binary through a hidden `phantombot __pi …` subprocess, with the routing in
