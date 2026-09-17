@@ -10,6 +10,7 @@
 #   nofinish — emit tool-narration text deltas then exit 0 WITHOUT turn_end
 #              (the #352 "stopped mid-turn" case: must fall through, not 'done')
 #   error    — exit 1
+#   signal   — write stderr, then terminate by SIGKILL
 #   notfound — exit 127
 #   hang     — sleep forever (for the timeout test)
 #   toolthenfail — run one tool (tool_execution_start → progress chunk), then
@@ -118,6 +119,10 @@ case "$mode" in
   error)
     echo "simulated pi error" >&2
     exit 1
+    ;;
+  signal)
+    echo "simulated pi signal failure" >&2
+    kill -KILL $$
     ;;
   notfound)
     exit 127

@@ -630,7 +630,15 @@ export async function probeNodeHeapLimitMb(): Promise<number | undefined> {
         "-e",
         "process.stdout.write(String(require('node:v8').getHeapStatistics().heap_size_limit / 1048576))",
       ],
-      { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: process.env },
+      {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "ignore",
+        env: process.env,
+        // This is warning-only startup telemetry. A wedged PATH shim must
+        // degrade to no warning rather than hold daemon startup indefinitely.
+        timeout: 2_000,
+      },
     );
     const stdout = await new Response(proc.stdout).text();
     if ((await proc.exited) !== 0) return undefined;

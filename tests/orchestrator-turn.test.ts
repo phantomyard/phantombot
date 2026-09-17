@@ -6,18 +6,21 @@
  * deterministically.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
+  DEFAULT_HISTORY_MAX_BYTES,
   DEFAULT_HISTORY_LIMIT,
   boundHistoryByBytes,
   runTurn,
 } from "../src/orchestrator/turn.ts";
+import { PiHarness } from "../src/harnesses/pi.ts";
 import { type MemoryStore, openMemoryStore } from "../src/memory/store.ts";
 import { MAX_DIGESTS_PER_TURN } from "../src/lib/turnDigest.ts";
 import { nightlyConversationKey } from "../src/lib/nightly.ts";
+import * as vault from "../src/lib/vault.ts";
 import type {
   Harness,
   HarnessChunk,
@@ -70,6 +73,8 @@ const baseInput = () => ({
   idleTimeoutMs: 1_000,
   hardTimeoutMs: 5_000,
 });
+
+const FAKE_PI = resolve(__dirname, "fixtures/fake-pi.sh");
 
 describe("runTurn — successful path", () => {
   test("history byte bound keeps the newest complete UTF-8 turns", () => {
@@ -251,6 +256,47 @@ describe("runTurn — successful path", () => {
       { role: "assistant", text: "earlier reply" },
     ]);
     expect(captured?.userMessage).toBe("now");
+  });
+
+  test("passes byte-bounded history to the harness", async () => {
+    const oversized = "x".repeat(DEFAULT_HISTORY_MAX_BYTES);
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "cli:default",
+      role: "user",
+      text: oversized,
+    });
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "cli:default",
+      role: "assistant",
+      text: "newest complete turn",
+    });
+
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "now",
+        harnesses: [harness],
+      }),
+    );
+
+    expect(captured?.history).toEqual([
+      { role: "assistant", text: "newest complete turn" },
+    ]);
+    expect(captured?.history).not.toContainEqual({
+      role: "user",
+      text: oversized,
+    });
   });
 
   test("system prompt includes the persona identity", async () => {
@@ -1028,6 +1074,77 @@ describe("runTurn — concurrent-turn awareness (issue #391)", () => {
     const snap = readRegistry({ now: new Date() });
     expect(snap.running).toHaveLength(0);
     expect(snap.recent).toHaveLength(1);
+  });
+
+  test("a failing Pi subprocess records exit status and stderr on the turn", async () => {
+    const priorMode = process.env.FAKE_PI_MODE;
+    process.env.FAKE_PI_MODE = "error";
+    const reload = spyOn(vault, "reloadVaultForPersona").mockResolvedValue(
+      undefined as never,
+    );
+    try {
+      const harness = new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+      });
+      const chunks = await collect(
+        runTurn({
+          ...baseInput(),
+          userMessage: "trigger a real child failure",
+          harnesses: [harness],
+        }),
+      );
+
+      expect(chunks.at(-1)).toMatchObject({
+        type: "error",
+        exitCode: 1,
+        stderrTail: ["simulated pi error"],
+      });
+      const { readRegistry } = await import("../src/lib/turnRegistry.ts");
+      expect(readRegistry({ now: new Date() }).recent[0]).toMatchObject({
+        status: "failed",
+        exit_code: 1,
+        stderr_tail: ["simulated pi error"],
+      });
+    } finally {
+      reload.mockRestore();
+      if (priorMode === undefined) delete process.env.FAKE_PI_MODE;
+      else process.env.FAKE_PI_MODE = priorMode;
+    }
+  });
+
+  test("a signalled Pi subprocess records the signal on the turn", async () => {
+    const priorMode = process.env.FAKE_PI_MODE;
+    process.env.FAKE_PI_MODE = "signal";
+    const reload = spyOn(vault, "reloadVaultForPersona").mockResolvedValue(
+      undefined as never,
+    );
+    try {
+      const harness = new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+      });
+      await collect(
+        runTurn({
+          ...baseInput(),
+          userMessage: "trigger a signalled child failure",
+          harnesses: [harness],
+        }),
+      );
+
+      const { readRegistry } = await import("../src/lib/turnRegistry.ts");
+      expect(readRegistry({ now: new Date() }).recent[0]).toMatchObject({
+        status: "failed",
+        signal: "SIGKILL",
+        stderr_tail: ["simulated pi signal failure"],
+      });
+    } finally {
+      reload.mockRestore();
+      if (priorMode === undefined) delete process.env.FAKE_PI_MODE;
+      else process.env.FAKE_PI_MODE = priorMode;
+    }
   });
 });
 
