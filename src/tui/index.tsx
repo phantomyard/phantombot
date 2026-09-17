@@ -181,6 +181,14 @@ export async function startTui(launch: LaunchFlags = {}): Promise<number> {
   // An unknown `--persona` is refused before the screen is taken over, like
   // any other bad argument — not turned into a wizard for a phantom the user
   // did not ask to create.
+  //
+  // Ordering, to be exact about it: a malformed flag is refused in index.ts
+  // BEFORE the credential bootstrap, but a well-formed name for a phantom that
+  // does not exist is only known to be unknown here, after it. That is safe
+  // rather than lucky — the bootstrap's vault read is open-existing-only and
+  // returns "no vault" for a missing persona dir (src/lib/vault.ts), and the
+  // tmp sweep returns on an unreadable dir, so neither provisions anything for
+  // a name we are about to reject.
   const unknownPersona = unknownLaunchPersona(launch, host.personas);
   if (unknownPersona !== undefined) {
     restoreLogs();

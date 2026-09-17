@@ -36,7 +36,8 @@
  * | launch flags, stdin and stdout TTYs     | open the TUI, seed/select         |
  * | launch flags, no TTY (piped, cron, CI)  | refuse: exit 2, point at `ask`    |
  * | launch flags with `--no-tui`            | refuse: exit 2, point at `ask`    |
- * | launch flag with a missing/empty value  | refuse: exit 2                    |
+ * | launch flag with a missing, empty, or   | refuse: exit 2                    |
+ * |   flag-like value                       |                                   |
  *
  * The TTY requirement IS the security model: a seeded prompt runs as a
  * TRUSTED turn because the human who launched it is watching it run. Headless
@@ -142,6 +143,14 @@ export function parseLaunchFlags(
     if (eq !== -1) value = arg.slice(eq + 1);
     else {
       value = args[i + 1];
+      // A detached value never swallows a following flag. Without this,
+      // `--prompt --no-tui hi` would seed the literal text "--no-tui" and the
+      // headless refusal would never fire — exactly the "runs a different
+      // prompt than the launcher thinks it sent" failure this parser refuses
+      // to have. `--prompt=--no-tui` is unaffected: an attached value is
+      // unambiguous, so a prompt really may start with dashes.
+      if (value !== undefined && value.startsWith("--"))
+        return { error: `${name} needs a value; '${value}' looks like a flag.` };
       i++;
     }
     const key = name === PROMPT_FLAG ? "prompt" : "persona";

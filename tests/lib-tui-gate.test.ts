@@ -150,6 +150,34 @@ describe("launch flags", () => {
     }
   });
 
+  test("a detached value never swallows the next flag", () => {
+    // The dangerous one: `--prompt --no-tui hi` used to parse as the prompt
+    // TEXT "--no-tui", leaving noTui false — so the headless refusal never
+    // fired and the TUI opened seeded with a turn nobody meant to send.
+    const swallowed = parseLaunchFlags(argv("--prompt", NO_TUI_FLAG, "hi"));
+    expect(swallowed && "error" in swallowed).toBe(true);
+    expect(bareInvocationMode(argv("--prompt", NO_TUI_FLAG, "hi"), tty(true, true))).toBe(
+      "refuse",
+    );
+    // …and the milder one: a flag eating a flag must refuse, not print usage.
+    for (const args of [
+      ["--prompt", "--persona", "kai"],
+      ["--persona", "--prompt", "hi"],
+    ]) {
+      const parsed = parseLaunchFlags(argv(...args));
+      expect(parsed && "error" in parsed).toBe(true);
+      expect(bareInvocationMode(argv(...args), tty(true, true))).toBe("refuse");
+      expect(launchRefusal(argv(...args))).toContain("looks like a flag");
+    }
+  });
+
+  test("an ATTACHED value may legitimately start with dashes", () => {
+    // `--prompt=…` is unambiguous, so a prompt about flags still works.
+    expect(parseLaunchFlags(argv("--prompt=--no-tui is the flag"))).toEqual({
+      prompt: "--no-tui is the flag",
+    });
+  });
+
   test("a repeated flag is an error, not last-wins", () => {
     // A launcher that builds argv badly must fail loudly rather than run a
     // different prompt than the one it believes it sent.
