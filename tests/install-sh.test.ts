@@ -8,7 +8,7 @@
  * not checking, so each step gets a test that the tick tracks reality.
  */
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,10 +25,17 @@ function fakeBin(dir: string, body: string): string {
 async function runInstaller(
   devBin: string,
   installDir: string,
+  home: string = mkdtempSync(join(tmpdir(), "pb-install-home-")),
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  // install.sh appends a PATH line to $HOME/.bashrc (or .zshrc). Every run
+  // gets its own HOME/SHELL/ZDOTDIR so a test can never write the developer's
+  // real rc file (it did, twice: 2026-09-11 and 2026-09-17).
   const proc = Bun.spawn(["sh", INSTALL_SH], {
     env: {
       ...process.env,
+      HOME: home,
+      ZDOTDIR: home,
+      SHELL: "/bin/bash",
       PHANTOMBOT_DEV_BIN: devBin,
       PHANTOMBOT_INSTALL_DIR: installDir,
       PHANTOMBOT_SKIP_TUI: "1",
@@ -98,6 +105,29 @@ describe("install.sh checklist", () => {
     expect(r.stdout).toContain("phantombot 9.9.9");
     expect(r.stdout).toContain("Installation completed successfully.");
     expect(r.exitCode).toBe(0);
+  });
+
+  test("PATH setup writes only the sandboxed HOME's rc file, once", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pb-install-rc-"));
+    const home = join(dir, "home");
+    mkdirSync(home);
+    const bin = fakeBin(dir, 'if [ "$1" = "--version" ]; then echo "phantombot 9.9.9"; fi\nexit 0');
+    const installDir = join(dir, "bin");
+
+    expect((await runInstaller(bin, installDir, home)).exitCode).toBe(0);
+    expect((await runInstaller(bin, installDir, home)).exitCode).toBe(0);
+
+    const rc = readFileSync(join(home, ".bashrc"), "utf8");
+    expect(rc.split("# added by phantombot installer").length - 1).toBe(1);
+    expect(rc).toContain(installDir);
+  });
+
+  test("the suite never runs with the developer's real HOME", () => {
+    // Preload (tests/testEnvIsolation.ts) swaps HOME for a throwaway dir.
+    const root = process.env.PHANTOMBOT_TEST_ISOLATION_ROOT ?? "";
+    expect(root).not.toBe("");
+    expect(process.env.HOME?.startsWith(root)).toBe(true);
+    expect(process.env.HOME).not.toBe(process.env.PHANTOMBOT_TEST_REAL_HOME);
   });
 
   test("PB_BIN is quoted at every call site", async () => {
