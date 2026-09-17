@@ -59,6 +59,7 @@ import {
 } from "../p2p/index.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
+import { warnLowPiHeapAtStartup } from "../harnesses/pi.ts";
 import {
   resolveHarnessBinsForConfig,
   type HarnessAvailability,
@@ -615,6 +616,15 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     );
     return 2;
   }
+
+  const heapProbeHarnesses = [
+    ...harnesses,
+    ...telegramListeners.flatMap((listener) => listener.harnesses),
+    ...[...personaConfigs.entries()].flatMap(([persona, personaConfig]) =>
+      buildHarnessChain(personaConfig, { write: () => true }, persona),
+    ),
+  ];
+  await warnLowPiHeapAtStartup(heapProbeHarnesses, err);
 
   const lockPath = input.lockPath ?? defaultLockPath();
   const lock = acquireRunLock(lockPath);

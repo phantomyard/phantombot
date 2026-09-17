@@ -264,6 +264,10 @@ export type HarnessChunk =
        * capped at 500 chars. See issue #462.
        */
       stderrTail?: string[];
+      /** Subprocess exit status when the failure came from a natural exit. */
+      exitCode?: number;
+      /** OS signal reported by the runtime (for example SIGABRT). */
+      signalCode?: string;
     };
 
 /**

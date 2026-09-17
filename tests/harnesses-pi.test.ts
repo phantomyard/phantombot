@@ -17,6 +17,8 @@ import {
   piActivity,
   piToolBoundary,
   renderPayload,
+  withMaxOldSpaceSize,
+  warnLowPiHeapAtStartup,
 } from "../src/harnesses/pi.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
@@ -55,6 +57,17 @@ async function collect(
 // ---------------------------------------------------------------------------
 
 describe("renderPayload (Pi)", () => {
+  test("configured old-space cap wins last without reparsing quoted options", () => {
+    expect(
+      withMaxOldSpaceSize(
+        '--require="./a path/hook.cjs" --max-old-space-size=1536',
+        2560,
+      ),
+    ).toBe(
+      '--require="./a path/hook.cjs" --max-old-space-size=1536 --max-old-space-size=2560',
+    );
+  });
+
   test("just the new message when history is empty", () => {
     expect(renderPayload(newRequest({ userMessage: "hello" }))).toBe("hello");
   });
@@ -72,6 +85,53 @@ describe("renderPayload (Pi)", () => {
     expect(out).toBe(
       "earlier\n\n<previous_response>\nprevious\n</previous_response>\n\nnow",
     );
+  });
+});
+
+describe("Pi heap budget", () => {
+  test("startup warns for a low host-Node default and deduplicates instances", async () => {
+    const writes: string[] = [];
+    let probes = 0;
+    const harnesses = [
+      new PiHarness({ bin: "pi", mode: "host", id: "pi-host" }),
+      new PiHarness({ bin: "pi", mode: "host", id: "pi-host" }),
+    ];
+
+    const warnings = await warnLowPiHeapAtStartup(
+      harnesses,
+      {
+        write: (text) => (
+          writes.push(
+            typeof text === "string" ? text : new TextDecoder().decode(text),
+          ),
+          true
+        ),
+      },
+      async () => (probes++, 1_700.5),
+    );
+
+    expect(warnings).toHaveLength(1);
+    expect(probes).toBe(1);
+    expect(writes.join("")).toContain("1701 MiB");
+    expect(writes.join("")).toContain("max_old_space_mb");
+  });
+
+  test("an explicit cap suppresses the default-runtime warning", async () => {
+    const writes: string[] = [];
+    const warnings = await warnLowPiHeapAtStartup(
+      [new PiHarness({ bin: "pi", mode: "host", maxOldSpaceMb: 2_560 })],
+      {
+        write: (text) => (
+          writes.push(
+            typeof text === "string" ? text : new TextDecoder().decode(text),
+          ),
+          true
+        ),
+      },
+      async () => 1_700.5,
+    );
+    expect(warnings).toEqual([]);
+    expect(writes).toEqual([]);
   });
 });
 
@@ -1115,13 +1175,59 @@ describe("PiHarness native vs pi-host (subprocess)", () => {
   const saved = {
     mode: process.env.FAKE_PI_MODE,
     key: process.env.PHANTOMBOT_PI_API_KEY,
+    nodeOptions: process.env.NODE_OPTIONS,
   };
   const restore = () => {
     if (saved.mode === undefined) delete process.env.FAKE_PI_MODE;
     else process.env.FAKE_PI_MODE = saved.mode;
     if (saved.key === undefined) delete process.env.PHANTOMBOT_PI_API_KEY;
     else process.env.PHANTOMBOT_PI_API_KEY = saved.key;
+    if (saved.nodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = saved.nodeOptions;
   };
+
+  test("pi-host receives the explicit old-space cap and preserves other Node options", async () => {
+    process.env.FAKE_PI_MODE = "env";
+    process.env.NODE_OPTIONS =
+      "--trace-warnings --max_old_space_size=1024";
+    try {
+      const out = argvOf(
+        await collect(
+          new PiHarness({
+            bin: FAKE_PI,
+            mode: "host",
+            maxOldSpaceMb: 2_560,
+          }).invoke(newRequest()),
+        ),
+      );
+      expect(out).toContain(
+        "nodeopts=--trace-warnings --max_old_space_size=1024 --max-old-space-size=2560",
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  test("native Pi leaves NODE_OPTIONS untouched", async () => {
+    process.env.FAKE_PI_MODE = "env";
+    process.env.NODE_OPTIONS = "--trace-warnings";
+    try {
+      const out = argvOf(
+        await collect(
+          new PiHarness({
+            bin: FAKE_PI,
+            mode: "native",
+            command: [FAKE_PI],
+            maxOldSpaceMb: 2_560,
+          }).invoke(newRequest()),
+        ),
+      );
+      expect(out).toContain("nodeopts=--trace-warnings");
+      expect(out).not.toContain("max-old-space-size");
+    } finally {
+      restore();
+    }
+  });
 
   test("pi-host: no --provider, --model or --api-key, even with routing and a key in the env", async () => {
     process.env.FAKE_PI_MODE = "argv";

@@ -778,6 +778,8 @@ export interface Config {
       type: PiEngineType | "pi";
       bin: string;
       routing?: import("./lib/piRouting.ts").PiRoutingConfig;
+      /** Explicit V8 old-space ceiling for this Pi instance. */
+      maxOldSpaceMb?: number;
     }>;
     claude: { bin: string; model: string; fallbackModel: string };
     pi: {
@@ -789,6 +791,11 @@ export interface Config {
        * config object still type-checks; nothing reads it. See warnPiMaxPayloadDeprecated.
        */
       maxPayloadBytes?: number;
+      /**
+       * Explicit V8 old-space ceiling passed through NODE_OPTIONS to Pi.
+       * Undefined preserves the runtime default; never derived from host RAM.
+       */
+      maxOldSpaceMb?: number;
       /**
        * Capability routing (distinct from the failover `chain`). When set, the
        * bundled Pi extension delegates vision/coding subtasks to specialist
@@ -1316,6 +1323,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
         : rawType,
       bin: asString(raw.bin) ?? asString(tomlPi.bin) ?? usablePersistedBin(state.harness_bins?.pi) ?? "pi",
       routing: resolveRouting(routing, {}),
+      maxOldSpaceMb: positiveInt(raw.max_old_space_mb),
     };
   }
   let telegramPersonas = buildTelegramPersonasConfig(tomlTelegram);
@@ -1510,6 +1518,13 @@ export async function loadConfig(persona?: string): Promise<Config> {
           usablePersistedBin(state.harness_bins?.pi) ??
           "pi",
         routing: piRouting,
+        maxOldSpaceMb:
+          positiveInt(
+            harnessEnv("PHANTOMBOT_PI_MAX_OLD_SPACE_MB", [
+              "pi",
+              "max_old_space_mb",
+            ]),
+          ) ?? positiveInt(tomlPi.max_old_space_mb),
       },
 
       codex: {
@@ -2101,6 +2116,11 @@ function asNumber(v: unknown): number | undefined {
     return Number.isFinite(n) ? n : undefined;
   }
   return undefined;
+}
+
+function positiveInt(v: unknown): number | undefined {
+  const n = asInt(v);
+  return n !== undefined && n > 0 ? n : undefined;
 }
 
 /**
