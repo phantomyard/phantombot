@@ -31,7 +31,16 @@ import { runMain, showUsage } from "citty";
 import { mainCommand } from "./cli/index.ts";
 import { loadConfig, personaDir } from "./config.ts";
 import { isReadOnlyInvocation } from "./lib/cliInvocation.ts";
-import { bareInvocationMode, currentTty } from "./lib/tuiGate.ts";
+import {
+  bareInvocationMode,
+  currentTty,
+  launchRefusal,
+  resolveLaunchPersona,
+  parseLaunchFlags,
+  type LaunchContext,
+  type LaunchFlags,
+  type LaunchPersona,
+} from "./lib/tuiGate.ts";
 import { cleanupPersonaTmpDir } from "./lib/harnessArgvFiles.ts";
 import { runComplete } from "./lib/completion.ts";
 import { log } from "./lib/logger.ts";
@@ -69,6 +78,33 @@ async function runPhantombotCli(): Promise<void> {
   // head` forever on a renderer nobody can see. See lib/tuiGate.ts.
   const bareMode = bareInvocationMode(process.argv, currentTty());
 
+  // `--prompt` / `--persona` that cannot open a watched TUI (issue #575): no
+  // terminal, `--no-tui`, or a malformed value. Refused BEFORE the credential
+  // bootstrap so an unattended caller touches nothing on disk, and never
+  // rerouted to `ask` — a seeded turn is trusted only because a human is
+  // watching it run.
+  if (bareMode === "refuse") {
+    process.stderr.write(`phantombot: ${launchRefusal(process.argv)}\n`);
+    process.exit(2);
+  }
+  const parsedLaunch = bareMode === "tui" ? parseLaunchFlags(process.argv) : null;
+  const launch: LaunchFlags =
+    parsedLaunch && !("error" in parsedLaunch) ? parsedLaunch : {};
+
+  // The routing environment as it is RIGHT NOW — before the credential
+  // bootstrap below can touch `process.env`. Which phantom this launch is for
+  // is decided from this snapshot and then carried, never re-read: the vault
+  // load in between is a mutation of the very environment the chain is
+  // resolved from, so a second resolution downstream is a different question
+  // with a different answer (see tuiGate.ts, issue #576). Vaults no longer
+  // carry routing names at all, which is the other half of the same fix — this
+  // snapshot is what makes the guarantee hold without relying on that.
+  const launchEnv: Record<string, string | undefined> = {
+    PHANTOMBOT_PERSONA: process.env.PHANTOMBOT_PERSONA,
+  };
+  /** Resolved before the vault is opened; undefined only if that never ran. */
+  let launchPersona: LaunchPersona | undefined;
+
   // Skip the credential bootstrap entirely for read-only invocations
   // (--help/--version/bare-and-unwatched) so they never mutate disk or provision
   // a persona. An interactive TUI is the one bare invocation that DOES need the
@@ -77,8 +113,18 @@ async function runPhantombotCli(): Promise<void> {
     try {
       const config = await loadConfig();
       await migratePlaintextToVault(config);
-      const activePersona = process.env.PHANTOMBOT_PERSONA || config.defaultPersona;
-      const activePersonaDir = personaDir(config, activePersona);
+      // Which phantom this launch is for — `--persona`, then the
+      // harness-injected PHANTOMBOT_PERSONA, then the configured default. The
+      // TUI is about to open a VAULT-BACKED conversation with this phantom, so
+      // the SAME resolved name has to pick the vault here and the chat screen
+      // in startTui; resolving the two from different rungs of the chain pairs
+      // one phantom's secrets with another's conversation (see tuiGate.ts).
+      launchPersona = resolveLaunchPersona(
+        launch,
+        launchEnv,
+        config.defaultPersona,
+      );
+      const activePersonaDir = personaDir(config, launchPersona.name);
       await loadVaultIntoEnv(activePersonaDir);
       // Aggressive startup sweep of the persona's tmp dir (issue #365): reap
       // harness/route residue older than 1h left by crashed/SIGKILL'd turns that
@@ -99,7 +145,8 @@ async function runPhantombotCli(): Promise<void> {
   }
   if (bareMode === "tui") {
     const { startTui } = await import("./tui/index.tsx");
-    process.exitCode = await startTui();
+    const context: LaunchContext = { persona: launchPersona, env: launchEnv };
+    process.exitCode = await startTui(launch, context);
   } else if (bareMode === "repl") {
     const { runRepl } = await import("./tui/index.tsx");
     process.exitCode = await runRepl();

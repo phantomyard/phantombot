@@ -27,7 +27,7 @@ import { logBuffer } from "./logBuffer.ts";
 import { setPromptHost } from "./prompts.ts";
 import { lendStdin } from "./stdinHandover.ts";
 import { setLogSink } from "../lib/logSink.ts";
-import { hostSnapshot } from "./snapshot.ts";
+import { hostSnapshot, type HostSnapshot } from "./snapshot.ts";
 import { openChat } from "./chatSession.ts";
 import type { WizardAnswers } from "./screens/Wizard.tsx";
 import {
@@ -52,6 +52,13 @@ import {
   writeAutostartPersonas,
 } from "../lib/personaDefault.ts";
 import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
+import { launchWorkingDir } from "../lib/launchCwd.ts";
+import {
+  launchOpeningTarget,
+  resolveLaunchPersona,
+  type LaunchContext,
+  type LaunchFlags,
+} from "../lib/tuiGate.ts";
 
 /**
  * Decide what the app opens on, in three tiers:
@@ -74,7 +81,7 @@ import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
  */
 export type OpeningScreen = "chat" | "configure" | "wizard";
 
-export async function resolveOpeningScreen(): Promise<{
+export async function resolveOpeningScreen(requested?: string): Promise<{
   screen: OpeningScreen;
   persona?: string;
   wizardStartAt?: WizardStep;
@@ -127,7 +134,15 @@ export async function resolveOpeningScreen(): Promise<{
       { error: String(err) },
     );
   }
-  let target = personas.find((p) => p.name === host.defaultPersona);
+  // A requested persona (issue #575) — `--persona <name>`, or the
+  // harness-injected PHANTOMBOT_PERSONA, as resolved by `launchOpeningTarget`
+  // — replaces the default-persona chain for this launch only. The caller has
+  // already checked it exists; nothing here heals or rewrites the configured
+  // default on its behalf.
+  let target = personas.find(
+    (p) => p.name === (requested ?? host.defaultPersona),
+  );
+  if (!target && requested !== undefined) return { screen: "wizard" };
   if (!target) {
     // Broken default — e.g. a stale state.json entry pointing at a persona
     // that no longer exists. The heal path owns broken defaults: heal ONCE
@@ -161,7 +176,77 @@ export async function resolveOpeningScreen(): Promise<{
   return { screen: "chat", persona: target.name };
 }
 
-export async function startTui(): Promise<number> {
+/** What a launch resolved to: a refusal, or the screen it opens and its seed. */
+export type LaunchOpening =
+  | { refusal: string }
+  | {
+      opening: Awaited<ReturnType<typeof resolveOpeningScreen>>;
+      startScreen: "configure" | undefined;
+      seed: { prompt?: string; notice?: string };
+    };
+
+/**
+ * Everything a launch decides BEFORE the screen is taken over: which phantom
+ * it is for, which screen that phantom opens on, and whether the prompt is
+ * seeded or dropped. Split out of `startTui` so it is testable against a real
+ * host on disk without rendering — the render half is what a terminal test
+ * cannot reach, and this is the half that carries the launch contract.
+ *
+ * The launch persona comes from the SAME chain the entrypoint used to pick the
+ * vault it decrypted: `--persona`, then the harness-injected
+ * PHANTOMBOT_PERSONA, then the configured default (lib/tuiGate.ts). Reading
+ * `launch.persona` here instead would send a seeded, TRUSTED turn to the
+ * default phantom while holding an env-named phantom's secrets.
+ *
+ * A named phantom that does not exist is refused, like any other bad input —
+ * not turned into a wizard for a phantom the user did not ask to create. A
+ * resolved DEFAULT that does not exist is NOT refused: that is the
+ * broken-default case `resolveOpeningScreen` heals.
+ *
+ * Ordering, to be exact about it: a malformed flag is refused in index.ts
+ * BEFORE the credential bootstrap, but a well-formed name for a phantom that
+ * does not exist is only known to be unknown here, after it. That is safe
+ * rather than lucky — the bootstrap's vault read is open-existing-only and
+ * returns "no vault" for a missing persona dir (src/lib/vault.ts), and the tmp
+ * sweep returns on an unreadable dir, so neither provisions anything for a
+ * name we are about to reject.
+ */
+export async function resolveLaunchOpening(
+  launch: LaunchFlags,
+  host: HostSnapshot,
+  context: LaunchContext = {},
+): Promise<LaunchOpening> {
+  // The entrypoint's own resolution, made BEFORE it decrypted a vault into
+  // `process.env` — carried here, not repeated. Repeating it is the bug this
+  // argument exists for: by the time the TUI starts, `process.env` has been
+  // mutated by the vault load the entrypoint performed, so re-reading
+  // PHANTOMBOT_PERSONA can answer with a name the entrypoint never saw and
+  // open a chat for a phantom whose secrets are not the ones loaded.
+  //
+  // The fallback resolves the same chain against `context.env` — the routing
+  // environment as it stood before the bootstrap — and is reached only when
+  // the bootstrap threw before resolving, i.e. before any vault was opened.
+  const persona =
+    context.persona ??
+    resolveLaunchPersona(
+      launch,
+      context.env ?? process.env,
+      host.defaultPersona,
+    );
+  const target = launchOpeningTarget(persona, { personas: host.personas });
+  if ("refusal" in target) return { refusal: target.refusal };
+  const opening = await resolveOpeningScreen(target.requested);
+  return {
+    opening,
+    startScreen: opening.screen === "configure" ? "configure" : undefined,
+    seed: seedForOpening(launch.prompt, opening.screen),
+  };
+}
+
+export async function startTui(
+  launch: LaunchFlags = {},
+  context: LaunchContext = {},
+): Promise<number> {
   // FIRST, before any awaited startup work: logs are CAPTURED, not printed —
   // stderr is the same terminal being drawn on, so every log line used to land
   // on top of the frame. Installed ahead of `hostSnapshot()` on purpose (#478):
@@ -170,8 +255,13 @@ export async function startTui(): Promise<number> {
   // of why the log pane opened empty.
   const restoreLogs = setLogSink((line) => logBuffer.push(line));
   const host = await hostSnapshot();
-  const opening = await resolveOpeningScreen();
-  const startScreen = opening.screen === "configure" ? "configure" : undefined;
+  const launched = await resolveLaunchOpening(launch, host, context);
+  if ("refusal" in launched) {
+    restoreLogs();
+    process.stderr.write(`phantombot: ${launched.refusal}\n`);
+    return 2;
+  }
+  const { opening, startScreen, seed } = launched;
 
   // A terminal app owns the window. The alternate screen buffer is what makes
   // this look like `htop` rather than like output pasted under a shell prompt,
@@ -188,6 +278,9 @@ export async function startTui(): Promise<number> {
       startPersona={opening.persona}
       startScreen={startScreen}
       wizardStartAt={opening.wizardStartAt}
+      seedPrompt={seed.prompt}
+      startNotice={seed.notice}
+      workingDir={launchWorkingDir()}
       onCreatePersona={async (answers: WizardAnswers) => {
         return await createPhantomFromWizard(answers);
       }}
@@ -275,6 +368,26 @@ export async function startTui(): Promise<number> {
   } finally {
     restore();
   }
+}
+
+/**
+ * What happens to `--prompt` given where the app opens (issue #575).
+ *
+ * Only a READY chat takes it. A fresh install (wizard) or a phantom with no
+ * brain (Configure) has nothing that could run the turn, and holding the prompt
+ * across a setup flow would fire it minutes later, after the user has stopped
+ * expecting it — so it is dropped, and the opening screen says so.
+ */
+export function seedForOpening(
+  prompt: string | undefined,
+  screen: OpeningScreen,
+): { prompt?: string; notice?: string } {
+  if (prompt === undefined) return {};
+  if (screen === "chat") return { prompt };
+  return {
+    notice:
+      "--prompt was not sent: finish setting up this phantom, then ask again.",
+  };
 }
 
 /**
@@ -420,7 +533,11 @@ export async function runRepl(
 ): Promise<number> {
   const config = await loadConfig();
   const persona = config.defaultPersona;
-  const chat = await openChat({ config, persona });
+  const chat = await openChat({
+    config,
+    persona,
+    workingDir: launchWorkingDir(),
+  });
   out.write(`phantombot — talking to ${persona}. Ctrl-D to exit.\n`);
   try {
     for await (const line of console) {

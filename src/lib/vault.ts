@@ -33,6 +33,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import {
   configOwnedEnvMirrorSetting,
   isConfigOwnedEnvMirror,
+  isRoutingEnvName,
   loadConfig,
   personaDir as resolvePersonaDir,
   type Config,
@@ -263,6 +264,8 @@ async function readAllVaultValues(
   const values = new Map<string, string>();
   const badKeys: string[] = [];
   const mirrors: string[] = [];
+  /** Routing names found in the vault — withheld, warned about, NOT deleted. */
+  const routing: string[] = [];
   /** Mirrors whose setting has a live config.toml home — safe to evict. */
   const superseded: { name: string; key: string; value: string; file: string }[] =
     [];
@@ -278,6 +281,19 @@ async function readAllVaultValues(
       // whether or not the eviction below ever succeeds.
       if (isConfigOwnedEnvMirror(name)) {
         mirrors.push(name);
+        continue;
+      }
+      // A routing name (#576) must never come OUT of a vault: the vault we are
+      // reading was chosen by the persona, so letting its own rows re-name the
+      // persona is circular. Injecting a vaulted PHANTOMBOT_PERSONA is what
+      // paired one phantom's decrypted secrets with another phantom's chat —
+      // the entrypoint resolved the launch against a clean env, and everything
+      // that re-read the chain afterwards saw the vault's answer instead.
+      // Withheld at READ time, like the mirrors above, so the guard holds for
+      // every persona and every per-turn reload. Not evicted: an existing row
+      // is inert once withheld, and deleting it is irreversible.
+      if (isRoutingEnvName(name)) {
+        routing.push(name);
         continue;
       }
       try {
@@ -337,6 +353,7 @@ async function readAllVaultValues(
     vault.close();
   }
   warnConfigOwnedEnvMirrors(superseded, orphaned, personaDirPath);
+  warnRoutingEnvNames(routing, personaDirPath);
   return { values, badKeys };
 }
 
@@ -358,6 +375,7 @@ const _warnedMirrorSets = new Set<string>();
 export function _resetVaultWarningsForTesting(): void {
   _warnedBadKeySets.clear();
   _warnedMirrorSets.clear();
+  _warnedRoutingSets.clear();
 }
 
 /** Warn once per process start about undecryptable vault rows. Never logs values. */
@@ -371,6 +389,34 @@ function warnBadVaultKeys(badKeys: string[]): void {
     `vault: ${sorted.length} undecryptable key${sorted.length === 1 ? "" : "s"} ` +
       `(${sorted.join(", ")}) — skipped; other secrets loaded normally`,
     { count: sorted.length, keys: sorted },
+  );
+}
+
+/** Per-persona signatures already warned about for vaulted routing names. */
+const _warnedRoutingSets = new Set<string>();
+
+/**
+ * Warn once per persona about routing names found in a vault.
+ *
+ * Named, not silent: the row is inert now, so an operator who put one there
+ * (or whose pre-#576 host migrated one in from `~/.env`) has to be told that
+ * the value is no longer choosing anything, and where the choice really lives.
+ */
+function warnRoutingEnvNames(
+  routing: readonly string[],
+  personaDirPath: string,
+): void {
+  if (routing.length === 0) return;
+  const sorted = [...routing].sort();
+  const signature = `${personaDirPath}\u0000${sorted.join(" ")}`;
+  if (_warnedRoutingSets.has(signature)) return;
+  _warnedRoutingSets.add(signature);
+  log.warn(
+    `vault: ignoring ${sorted.join(", ")} in this phantom's vault — a vault ` +
+      "cannot choose which phantom a process is (that comes from --persona, " +
+      "the environment phantombot was started in, or the configured default). " +
+      "The row is kept but never loaded.",
+    { keys: sorted, personaDir: personaDirPath },
   );
 }
 

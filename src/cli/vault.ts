@@ -18,6 +18,7 @@ import { defineCommand } from "citty";
 
 import {
   isConfigOwnedEnvMirror,
+  isRoutingEnvName,
   loadConfig,
   personaDir,
   resolvePersona,
@@ -127,6 +128,19 @@ export async function runVaultSet(input: VaultSetInput): Promise<number> {
         "and the vault is no longer read for it. Run `phantombot harness` " +
         "(or `/model` in chat) to set it, or edit [harnesses] in " +
         "config.toml directly.\n",
+    );
+    return 2;
+  }
+  // Refuse a routing name (#576) for the same reason and at the same moment:
+  // the vault is never read for it, so accepting it would print "saved" for a
+  // value that can never take effect. Which phantom a process is comes from
+  // `--persona`, the environment it was started in, or the configured default.
+  if (isRoutingEnvName(input.name)) {
+    err.write(
+      `${input.name} routes a process to a phantom, so a phantom's vault is ` +
+        "never read for it. Pass `--persona <name>`, set it in the " +
+        "environment phantombot starts in, or change the default with " +
+        "`phantombot persona`.\n",
     );
     return 2;
   }

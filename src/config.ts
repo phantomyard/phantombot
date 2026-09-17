@@ -2822,6 +2822,29 @@ export function isConfigOwnedEnvMirror(name: string): boolean {
 }
 
 /**
+ * Env names that decide WHICH PHANTOM a process is, rather than what that
+ * phantom knows. They are never readable from a vault, because reading them
+ * from one is circular: the vault we open is chosen by the persona, so a
+ * persona's own secrets must not be able to choose a different persona
+ * afterwards. A vaulted `PHANTOMBOT_PERSONA` did exactly that — the entrypoint
+ * decrypted phantom A's vault, the injected value then named phantom B, and
+ * anything resolving the chain later (the TUI's opening screen, a per-turn
+ * reload) targeted B while holding A's secrets.
+ *
+ * Routing is the CALLER's decision — a flag, the harness/systemd environment,
+ * or the configured default — and it is made before any vault is opened.
+ */
+export const ROUTING_ENV_NAMES: readonly string[] = [
+  "PHANTOMBOT_PERSONA",
+  "PHANTOMBOT_DEFAULT_PERSONA",
+];
+
+/** True when `name` routes a process to a phantom rather than configuring one. */
+export function isRoutingEnvName(name: string): boolean {
+  return ROUTING_ENV_NAMES.includes(name);
+}
+
+/**
  * What `config.toml` states for the setting a retired mirror was retired INTO,
  * or `undefined` when nothing states it.
  *

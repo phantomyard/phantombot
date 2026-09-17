@@ -78,6 +78,25 @@ describe("config.toml settings are refused by the vault CLI (#465)", () => {
     expect(vault.get("PHANTOMBOT_PRIMARY_MODEL")).toBeUndefined();
   });
 
+  test("a routing name is refused too, and stores nothing (#576)", async () => {
+    // A vault is chosen BY the persona, so a row that renames the persona is
+    // circular — the daemon withholds it on read, and accepting it here would
+    // print "saved" for a value that can never take effect.
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const code = await runVaultSet({
+      name: "PHANTOMBOT_PERSONA",
+      value: "lena",
+      vault,
+      out,
+      err,
+    });
+    expect(code).toBe(2);
+    expect(out.text).toBe("");
+    expect(err.text).toMatch(/--persona/);
+    expect(vault.get("PHANTOMBOT_PERSONA")).toBeUndefined();
+  });
+
   test("the per-persona suffixed form is refused too", async () => {
     const err = new CaptureStream();
     const code = await runVaultSet({

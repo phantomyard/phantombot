@@ -12,6 +12,11 @@ import {
   bareInvocationMode,
   currentTty,
   shouldOpenTui,
+  launchRefusal,
+  launchOpeningTarget,
+  resolveLaunchPersona,
+  parseLaunchFlags,
+  unknownLaunchPersona,
   NO_TUI_FLAG,
 } from "../src/lib/tuiGate.ts";
 import { isReadOnlyInvocation } from "../src/lib/cliInvocation.ts";
@@ -89,5 +94,230 @@ describe("currentTty", () => {
     expect(
       currentTty({ stdin: { isTTY: true }, stdout: { isTTY: true } }),
     ).toEqual({ stdin: true, stdout: true });
+  });
+});
+
+/**
+ * Launch flags (issue #575).
+ *
+ * `--prompt` seeds a TRUSTED turn, and the only thing that makes it trusted is
+ * that a human is sitting in front of the terminal watching it run. So the
+ * parser's job is not just "read a string": it must refuse every invocation
+ * where nobody is watching, and refuse LOUDLY rather than quietly degrading to
+ * the judge-screened `ask` path — a silent reroute would turn a refused
+ * unattended prompt into an accepted one.
+ */
+describe("launch flags", () => {
+  test("--prompt and --persona open the TUI when a human is watching", () => {
+    expect(parseLaunchFlags(argv("--prompt", "ship it"))).toEqual({
+      prompt: "ship it",
+    });
+    expect(parseLaunchFlags(argv("--prompt=ship it"))).toEqual({
+      prompt: "ship it",
+    });
+    expect(parseLaunchFlags(argv("--persona", "kai", "--prompt", "hi"))).toEqual(
+      { persona: "kai", prompt: "hi" },
+    );
+    expect(bareInvocationMode(argv("--prompt", "hi"), tty(true, true))).toBe(
+      "tui",
+    );
+    expect(bareInvocationMode(argv("--persona", "kai"), tty(true, true))).toBe(
+      "tui",
+    );
+  });
+
+  test("a prompt with no terminal is REFUSED, never quietly rerouted", () => {
+    // `phantombot --prompt … | cat`, cron, CI, a launcher with no TTY.
+    for (const t of [tty(false, true), tty(true, false), tty(false, false)]) {
+      expect(bareInvocationMode(argv("--prompt", "hi"), t)).toBe("refuse");
+    }
+    expect(launchRefusal(argv("--prompt", "hi"))).toContain("phantombot ask");
+  });
+
+  test("--no-tui cannot be combined with a prompt: headless must go via ask", () => {
+    expect(
+      bareInvocationMode(argv(NO_TUI_FLAG, "--prompt", "hi"), tty(true, true)),
+    ).toBe("refuse");
+    expect(launchRefusal(argv(NO_TUI_FLAG, "--prompt", "hi"))).toContain(
+      "phantombot ask",
+    );
+  });
+
+  test("a missing or empty value is an error, not an empty prompt", () => {
+    for (const args of [["--prompt"], ["--prompt", "   "], ["--prompt="]]) {
+      const parsed = parseLaunchFlags(argv(...args));
+      expect(parsed && "error" in parsed).toBe(true);
+      expect(bareInvocationMode(argv(...args), tty(true, true))).toBe("refuse");
+    }
+  });
+
+  test("a detached value never swallows the next flag", () => {
+    // The dangerous one: `--prompt --no-tui hi` used to parse as the prompt
+    // TEXT "--no-tui", leaving noTui false — so the headless refusal never
+    // fired and the TUI opened seeded with a turn nobody meant to send.
+    const swallowed = parseLaunchFlags(argv("--prompt", NO_TUI_FLAG, "hi"));
+    expect(swallowed && "error" in swallowed).toBe(true);
+    expect(bareInvocationMode(argv("--prompt", NO_TUI_FLAG, "hi"), tty(true, true))).toBe(
+      "refuse",
+    );
+    // …and the milder one: a flag eating a flag must refuse, not print usage.
+    for (const args of [
+      ["--prompt", "--persona", "kai"],
+      ["--persona", "--prompt", "hi"],
+    ]) {
+      const parsed = parseLaunchFlags(argv(...args));
+      expect(parsed && "error" in parsed).toBe(true);
+      expect(bareInvocationMode(argv(...args), tty(true, true))).toBe("refuse");
+      expect(launchRefusal(argv(...args))).toContain("looks like a flag");
+    }
+  });
+
+  test("an ATTACHED value may legitimately start with dashes", () => {
+    // `--prompt=…` is unambiguous, so a prompt about flags still works.
+    expect(parseLaunchFlags(argv("--prompt=--no-tui is the flag"))).toEqual({
+      prompt: "--no-tui is the flag",
+    });
+  });
+
+  test("a repeated flag is an error, not last-wins", () => {
+    // A launcher that builds argv badly must fail loudly rather than run a
+    // different prompt than the one it believes it sent.
+    const parsed = parseLaunchFlags(argv("--prompt", "a", "--prompt", "b"));
+    expect(parsed && "error" in parsed).toBe(true);
+  });
+
+  test("--persona is held to the persona-directory naming rule", () => {
+    // The value picks a directory under personas/ and the vault decrypted at
+    // startup, so a traversal must never reach the filesystem.
+    const parsed = parseLaunchFlags(argv("--persona", "../../etc"));
+    expect(parsed && "error" in parsed).toBe(true);
+    expect(bareInvocationMode(argv("--persona", "../../etc"), tty(true, true))).toBe(
+      "refuse",
+    );
+  });
+
+  test("launch flags never change a subcommand or an unknown flag", () => {
+    // The hard non-goal of #471, restated: these are BARE-invocation flags.
+    for (const args of [
+      ["ask", "--prompt", "hi"],
+      ["doctor", "--persona", "kai"],
+      ["--promptx", "hi"],
+      ["--help"],
+    ]) {
+      expect(parseLaunchFlags(argv(...args))).toBeNull();
+      expect(bareInvocationMode(argv(...args), tty(true, true))).toBe("usage");
+    }
+  });
+
+  test("a launch invocation is not read-only — it opens a vault-backed chat", () => {
+    expect(isReadOnlyInvocation(argv("--prompt", "hi"))).toBe(false);
+  });
+});
+
+describe("which persona a launch opens", () => {
+  const personas = [{ name: "lena" }, { name: "kai" }];
+
+  test("--persona wins over the injected env var and the configured default", () => {
+    // The TUI is about to open a VAULT-BACKED conversation with this persona:
+    // bootstrapping someone else's secrets leaves the chat with an empty env
+    // and no visible cause.
+    expect(
+      resolveLaunchPersona({ persona: "kai" }, { PHANTOMBOT_PERSONA: "lena" }, "robbie"),
+    ).toEqual({ name: "kai", source: "flag" });
+    expect(
+      resolveLaunchPersona({}, { PHANTOMBOT_PERSONA: "lena" }, "robbie"),
+    ).toEqual({ name: "lena", source: "env" });
+    expect(resolveLaunchPersona({}, {}, "robbie")).toEqual({
+      name: "robbie",
+      source: "default",
+    });
+    // An env var set to whitespace is not a choice.
+    expect(
+      resolveLaunchPersona({}, { PHANTOMBOT_PERSONA: "  " }, "robbie"),
+    ).toEqual({ name: "robbie", source: "default" });
+  });
+
+  test("an unknown --persona is a bad argument, not a reason to open the wizard", () => {
+    expect(
+      unknownLaunchPersona({ name: "kai", source: "flag" }, personas),
+    ).toBeUndefined();
+    const err = unknownLaunchPersona({ name: "kia", source: "flag" }, personas);
+    expect(err).toContain("kia");
+    expect(err).toContain("lena, kai");
+    expect(
+      unknownLaunchPersona({ name: "kia", source: "flag" }, []),
+    ).toContain("none yet");
+  });
+
+  test("an unknown PHANTOMBOT_PERSONA is refused too, and says which env var", () => {
+    // The entrypoint already resolved the vault from THIS name, so carrying on
+    // would open another phantom's chat with no secrets loaded at all.
+    const err = unknownLaunchPersona({ name: "kia", source: "env" }, personas);
+    expect(err).toContain("PHANTOMBOT_PERSONA");
+    expect(err).toContain("kia");
+  });
+
+  test("a configured default that does not exist is the heal path, not a refusal", () => {
+    // resolveOpeningScreen owns broken defaults (heal once, else wizard); a
+    // resolved default is not a user input to reject.
+    expect(
+      unknownLaunchPersona({ name: "ghost", source: "default" }, personas),
+    ).toBeUndefined();
+  });
+
+  // REGRESSION (review of #576): the vault was resolved from the full chain
+  // while the opening screen was resolved from the FLAG ALONE, so
+  // `PHANTOMBOT_PERSONA=lena` + default `robbie` decrypted Lena's vault and
+  // sent the trusted seed to Robbie. One resolver now feeds both.
+  describe("launchOpeningTarget — the vault and the chat must be the same phantom", () => {
+    const host = { defaultPersona: "robbie", personas: [...personas, { name: "robbie" }] };
+
+    /** The entrypoint's resolution, made against the pre-vault environment. */
+    const resolved = (
+      launch: Parameters<typeof resolveLaunchPersona>[0],
+      env: Record<string, string | undefined>,
+    ) => resolveLaunchPersona(launch, env, host.defaultPersona);
+
+    test("env persona and configured default differ: the ENV persona opens", () => {
+      const target = launchOpeningTarget(
+        resolved({ prompt: "hi" }, { PHANTOMBOT_PERSONA: "lena" }),
+        host,
+      );
+      expect(target).toEqual({
+        requested: "lena",
+        persona: { name: "lena", source: "env" },
+      });
+      // ...and it is the same name the entrypoint decrypted the vault for.
+      expect(
+        resolveLaunchPersona({ prompt: "hi" }, { PHANTOMBOT_PERSONA: "lena" }, "robbie").name,
+      ).toBe("lena");
+    });
+
+    test("the flag still beats the env var", () => {
+      expect(
+        launchOpeningTarget(
+          resolved({ persona: "kai" }, { PHANTOMBOT_PERSONA: "lena" }),
+          host,
+        ),
+      ).toEqual({ requested: "kai", persona: { name: "kai", source: "flag" } });
+    });
+
+    test("a plain launch requests nothing, so the default chain still runs", () => {
+      // `requested: undefined` is load-bearing: resolveOpeningScreen's legacy
+      // adoption and heal-if-broken paths only run when nothing was requested.
+      expect(launchOpeningTarget(resolved({}, {}), host)).toEqual({
+        requested: undefined,
+        persona: { name: "robbie", source: "default" },
+      });
+    });
+
+    test("an unknown name is a refusal, whichever rung it came from", () => {
+      expect(launchOpeningTarget(resolved({ persona: "kia" }, {}), host)).toEqual({
+        refusal: expect.stringContaining("no persona named 'kia'"),
+      });
+      expect(
+        launchOpeningTarget(resolved({}, { PHANTOMBOT_PERSONA: "kia" }), host),
+      ).toEqual({ refusal: expect.stringContaining("PHANTOMBOT_PERSONA") });
+    });
   });
 });

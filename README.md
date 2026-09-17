@@ -422,7 +422,26 @@ terminals. Everything else behaves exactly as it did before:
 | `phantombot` in a terminal | The app (chat, or the wizard) |
 | `phantombot` piped, redirected, in CI or from cron | Today's usage text; touches no disk |
 | `phantombot --no-tui` | The same conversation as a plain line-mode REPL |
+| `phantombot --prompt "…"` / `--persona <name>` in a terminal | The app, sending the prompt as the first chat turn / opening that phantom |
+| `phantombot --prompt "…"` piped, in CI, from cron, or with `--no-tui` | Refused (exit 2); use `phantombot ask` for headless turns |
 | `phantombot --help` / `--version` / any subcommand | Unchanged |
+
+### Launching with a prompt
+
+`phantombot --prompt "Review this project"` opens the app and sends the prompt
+as the first turn, exactly as if you had typed it — the same shape as
+`pi "$prompt"` or `claude -- "$prompt"`, and what desktop launchers such as
+Omarchy's default-agent picker use. `--persona <name>` opens a phantom other
+than the default (without it, the phantom is the one `PHANTOMBOT_PERSONA` names,
+then your configured default; naming one that does not exist is refused rather
+than opening someone else's chat). The turn is trusted because you are watching it run, which is
+why a prompt with no terminal is refused rather than run unattended.
+
+- **Not set up yet:** if the app opens on the setup wizard or on the phantom's
+  Configure screen, the prompt is dropped and a notice says so.
+- **Working folder:** chat turns run in the folder you launched from (home
+  when that folder is gone or unreadable). `phantombot ask` and the channels
+  keep working in your home folder.
 
 **Every existing command keeps its exact behaviour, flags and output.** The app
 is a new surface over the same operations, so scripts, runbooks and systemd
@@ -997,6 +1016,7 @@ Setup and channels:
 | `phantombot init` | Run the unified setup wizard |
 | `phantombot` (in a terminal) | Open the full-screen app: chat with the default phantom, or the setup wizard |
 | `phantombot --no-tui` | The same conversation as a plain line-mode REPL |
+| `phantombot [--persona <name>] [--prompt "<text>"]` (in a terminal) | Open the app on a phantom, sending the prompt as the first turn |
 | `phantombot persona [<name>] [--yes]` | Create, import, list, or explicitly switch the default persona |
 | `phantombot persona new <name> [--autostart] [--default]` | Create a persona non-interactively. Never becomes the default unless `--default` is passed |
 | `phantombot persona --import <dir> [--as <name>] [--no-telegram]` | Import a persona directory |
