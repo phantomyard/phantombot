@@ -371,6 +371,59 @@ describe("per-row resilience — one bad row never blanks the vault", () => {
   });
 });
 
+describe("routing names (#576) are never injected from a vault", () => {
+  test("a vaulted PHANTOMBOT_PERSONA is withheld, kept, and costs no secret", async () => {
+    // The bug this closes: the entrypoint decrypts the launch phantom's vault
+    // into process.env, so a row named PHANTOMBOT_PERSONA let phantom A's own
+    // secrets re-name the process phantom B. Everything that re-read the chain
+    // afterwards (the TUI's opening screen, a per-turn vault reload) then
+    // targeted B while holding A's secrets. A vault cannot choose the vault.
+    const dir = join(workdir, "p");
+    await mkdir(dir, { recursive: true });
+    const v = await openPersonaVault(dir);
+    v.set("PHANTOMBOT_PERSONA", "lena");
+    v.set("PHANTOMBOT_DEFAULT_PERSONA", "lena");
+    v.set("GITHUB_TOKEN", "a-real-secret");
+    v.close();
+
+    const env: NodeJS.ProcessEnv = { PHANTOMBOT_PERSONA: "robbie" };
+    const tracked = new Set<string>();
+    const { updated } = await loadVaultIntoEnv(dir, env, tracked);
+
+    // The caller's routing survives the load untouched.
+    expect(env.PHANTOMBOT_PERSONA).toBe("robbie");
+    expect(env.PHANTOMBOT_DEFAULT_PERSONA).toBeUndefined();
+    expect(updated).not.toContain("PHANTOMBOT_PERSONA");
+    expect(updated).not.toContain("PHANTOMBOT_DEFAULT_PERSONA");
+    expect(tracked.has("PHANTOMBOT_PERSONA")).toBe(false);
+
+    // By name, not a blanket refusal: the real secret beside it still loads.
+    expect(env.GITHUB_TOKEN).toBe("a-real-secret");
+
+    // Withheld, not evicted — deleting a row is irreversible and withholding
+    // already makes it inert.
+    const after = await openPersonaVault(dir);
+    const names = after.list();
+    after.close();
+    expect(names).toContain("PHANTOMBOT_PERSONA");
+  });
+
+  test("with no routing set, a vaulted routing name still injects nothing", async () => {
+    // The sharper case: an EMPTY slot is the one a vaulted value could fill
+    // without overwriting anything, which is exactly how it used to slip in.
+    const dir = join(workdir, "p");
+    await mkdir(dir, { recursive: true });
+    const v = await openPersonaVault(dir);
+    v.set("PHANTOMBOT_PERSONA", "lena");
+    v.close();
+
+    const env: NodeJS.ProcessEnv = {};
+    await loadVaultIntoEnv(dir, env, new Set<string>());
+
+    expect(env.PHANTOMBOT_PERSONA).toBeUndefined();
+  });
+});
+
 describe("retired config.toml mirrors (#452) are never injected", () => {
   // These cases resolve "does config.toml state this setting?", so the HOST's
   // real config file must never be in scope. Point PHANTOMBOT_CONFIG at a

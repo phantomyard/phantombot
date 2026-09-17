@@ -37,7 +37,9 @@ import {
   launchRefusal,
   resolveLaunchPersona,
   parseLaunchFlags,
+  type LaunchContext,
   type LaunchFlags,
+  type LaunchPersona,
 } from "./lib/tuiGate.ts";
 import { cleanupPersonaTmpDir } from "./lib/harnessArgvFiles.ts";
 import { runComplete } from "./lib/completion.ts";
@@ -89,6 +91,20 @@ async function runPhantombotCli(): Promise<void> {
   const launch: LaunchFlags =
     parsedLaunch && !("error" in parsedLaunch) ? parsedLaunch : {};
 
+  // The routing environment as it is RIGHT NOW — before the credential
+  // bootstrap below can touch `process.env`. Which phantom this launch is for
+  // is decided from this snapshot and then carried, never re-read: the vault
+  // load in between is a mutation of the very environment the chain is
+  // resolved from, so a second resolution downstream is a different question
+  // with a different answer (see tuiGate.ts, issue #576). Vaults no longer
+  // carry routing names at all, which is the other half of the same fix — this
+  // snapshot is what makes the guarantee hold without relying on that.
+  const launchEnv: Record<string, string | undefined> = {
+    PHANTOMBOT_PERSONA: process.env.PHANTOMBOT_PERSONA,
+  };
+  /** Resolved before the vault is opened; undefined only if that never ran. */
+  let launchPersona: LaunchPersona | undefined;
+
   // Skip the credential bootstrap entirely for read-only invocations
   // (--help/--version/bare-and-unwatched) so they never mutate disk or provision
   // a persona. An interactive TUI is the one bare invocation that DOES need the
@@ -103,12 +119,12 @@ async function runPhantombotCli(): Promise<void> {
       // the SAME resolved name has to pick the vault here and the chat screen
       // in startTui; resolving the two from different rungs of the chain pairs
       // one phantom's secrets with another's conversation (see tuiGate.ts).
-      const activePersona = resolveLaunchPersona(
+      launchPersona = resolveLaunchPersona(
         launch,
-        process.env,
+        launchEnv,
         config.defaultPersona,
-      ).name;
-      const activePersonaDir = personaDir(config, activePersona);
+      );
+      const activePersonaDir = personaDir(config, launchPersona.name);
       await loadVaultIntoEnv(activePersonaDir);
       // Aggressive startup sweep of the persona's tmp dir (issue #365): reap
       // harness/route residue older than 1h left by crashed/SIGKILL'd turns that
@@ -129,7 +145,8 @@ async function runPhantombotCli(): Promise<void> {
   }
   if (bareMode === "tui") {
     const { startTui } = await import("./tui/index.tsx");
-    process.exitCode = await startTui(launch);
+    const context: LaunchContext = { persona: launchPersona, env: launchEnv };
+    process.exitCode = await startTui(launch, context);
   } else if (bareMode === "repl") {
     const { runRepl } = await import("./tui/index.tsx");
     process.exitCode = await runRepl();

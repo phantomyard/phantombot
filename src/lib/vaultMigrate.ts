@@ -50,7 +50,12 @@ import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { type Config, isConfigOwnedEnvMirror, personaDir } from "../config.ts";
+import {
+  type Config,
+  isConfigOwnedEnvMirror,
+  isRoutingEnvName,
+  personaDir,
+} from "../config.ts";
 import { defaultEnvFilePath, loadEnvFile } from "./envFile.ts";
 import { log } from "./logger.ts";
 import { openPersonaVault, type Vault } from "./vault.ts";
@@ -182,15 +187,23 @@ function importableEntries(
   const kept: Array<[string, string]> = [];
   const dropped: string[] = [];
   for (const [name, value] of Object.entries(vars)) {
-    if (isConfigOwnedEnvMirror(name)) dropped.push(name);
+    // Routing names (#576) are dropped for a sharper reason than the mirrors:
+    // a plaintext `~/.env` on an upgraded host may well hold the
+    // PHANTOMBOT_PERSONA of whichever phantom the box mostly runs, and fanning
+    // that into EVERY persona's vault would give each of them a row naming
+    // some other phantom. They are not secrets and they are not per-phantom
+    // settings — they are the caller's choice of phantom.
+    if (isConfigOwnedEnvMirror(name) || isRoutingEnvName(name))
+      dropped.push(name);
     else kept.push([name, value]);
   }
   if (dropped.length > 0) {
     log.warn(
-      `vault-migrate: NOT importing retired config.toml mirrors from ${path} — ` +
-        "these are settings, not secrets, and importing them would override " +
-        "config.toml on every startup. Set them with `phantombot /model` or in " +
-        `config.toml: ${dropped.join(", ")}`,
+      `vault-migrate: NOT importing non-secret names from ${path} — retired ` +
+        "config.toml mirrors would override config.toml on every startup, and " +
+        "routing names would let a vault choose which phantom a process is. " +
+        "Set a model with `phantombot /model` or in config.toml; choose a " +
+        `phantom with --persona or the configured default: ${dropped.join(", ")}`,
     );
   }
   return kept;

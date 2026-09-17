@@ -127,6 +127,84 @@ describe("a launch opens the phantom whose vault it decrypted", () => {
     expect(opening.refusal).toContain("ghost");
   });
 
+  test("an env change AFTER the entrypoint resolved cannot re-aim the chat", async () => {
+    // REGRESSION (second review of #576): the launch persona was resolved
+    // twice across a MUTABLE environment. The entrypoint resolved it, then
+    // `loadVaultIntoEnv` injected the chosen phantom's vault into the same
+    // `process.env` the chain is read from, and `startTui` resolved it AGAIN
+    // against that mutated env — so a vaulted PHANTOMBOT_PERSONA opened one
+    // phantom's chat while holding another's secrets.
+    //
+    // Vaults no longer carry routing names (tests/vault.test.ts), so this
+    // drives the OTHER half of the fix: whatever mutates the environment
+    // between the two points, the chat opens the phantom the entrypoint
+    // decrypted, because that decision is CARRIED rather than recomputed.
+    const launchEnv = { PHANTOMBOT_PERSONA: process.env.PHANTOMBOT_PERSONA };
+    const config = await loadConfig();
+    const persona = resolveLaunchPersona(
+      { prompt: "hi" },
+      launchEnv,
+      config.defaultPersona,
+    );
+    expect(persona).toEqual({ name: "robbie", source: "default" });
+
+    // …the bootstrap mutates the env, as a vault load does.
+    process.env.PHANTOMBOT_PERSONA = "lena";
+
+    const launched = await resolveLaunchOpening(
+      { prompt: "hi" },
+      await hostSnapshot(),
+      { persona, env: launchEnv },
+    );
+
+    expect("refusal" in launched).toBe(false);
+    if ("refusal" in launched) return;
+    expect(launched.opening.persona).toBe("robbie");
+  });
+
+  test("no carried decision: the chain is read from the PRE-bootstrap env", async () => {
+    // The fallback exists for the one path that reaches the TUI without a
+    // resolution: the bootstrap threw before making one — which is also before
+    // it could load any vault. It resolves against the snapshot the entrypoint
+    // took, never against whatever the env has become since.
+    const launchEnv = { PHANTOMBOT_PERSONA: "lena" };
+    process.env.PHANTOMBOT_PERSONA = "robbie";
+
+    const launched = await resolveLaunchOpening(
+      { prompt: "hi" },
+      await hostSnapshot(),
+      { env: launchEnv },
+    );
+
+    expect("refusal" in launched).toBe(false);
+    if ("refusal" in launched) return;
+    expect(launched.opening.persona).toBe("lena");
+  });
+
+  test("startTui itself carries the entrypoint's decision", async () => {
+    // Through the real `startTui` entry, not just its decision half: a
+    // carried, unknown persona is refused with exit 2 even though the env now
+    // names an existing one, proving the argument is what it consults.
+    process.env.PHANTOMBOT_PERSONA = "lena";
+    const written: string[] = [];
+    const realWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((c: string) => {
+      written.push(String(c));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      expect(
+        await startTui(
+          { prompt: "hi" },
+          { persona: { name: "ghost", source: "flag" }, env: {} },
+        ),
+      ).toBe(2);
+    } finally {
+      process.stderr.write = realWrite;
+    }
+    expect(written.join("")).toContain("ghost");
+  });
+
   test("the refusal is what the real startTui does: exit 2, one line, no screen", async () => {
     // `startTui` itself, not just its decision half. It returns BEFORE the
     // full-screen renderer, so a refused launch never takes the terminal.

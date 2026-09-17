@@ -242,6 +242,28 @@ describe("retired config.toml mirrors are NOT imported (#452 review)", () => {
     expect(await readVault("robbie", "PHANTOMBOT_CLAUDE_BIN")).toBeUndefined();
   });
 
+  test("a routing name in the legacy file is dropped, not fanned out (#576)", async () => {
+    // A plaintext ~/.env on an upgraded host may well carry the
+    // PHANTOMBOT_PERSONA of whichever phantom the box mostly runs. The
+    // migration fans that file into EVERY persona's vault, so importing it
+    // would give each phantom a row naming some OTHER phantom — and a vaulted
+    // routing name is read back into process.env, where it re-aims the launch.
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await writeLegacyEnv(userEnv, {
+      PHANTOMBOT_PERSONA: "lena",
+      PHANTOMBOT_DEFAULT_PERSONA: "lena",
+      GITHUB_TOKEN: "ghp_real_secret",
+    });
+
+    await migratePlaintextToVault(cfg());
+
+    expect(await readVault("robbie", "PHANTOMBOT_PERSONA")).toBeUndefined();
+    expect(await readVault("robbie", "PHANTOMBOT_DEFAULT_PERSONA")).toBeUndefined();
+    expect(await readVault("kai", "PHANTOMBOT_PERSONA")).toBeUndefined();
+    // The real secret beside them still migrates: the drop is by name.
+    expect(await readVault("robbie", "GITHUB_TOKEN")).toBe("ghp_real_secret");
+  });
+
   test("the per-persona `_<PERSONA>` mirror variants are dropped too", async () => {
     await mkdir(join(personasDir, "kai"), { recursive: true });
     await writeLegacyEnv(userEnv, {

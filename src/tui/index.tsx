@@ -53,7 +53,12 @@ import {
 } from "../lib/personaDefault.ts";
 import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 import { launchWorkingDir } from "../lib/launchCwd.ts";
-import { launchOpeningTarget, type LaunchFlags } from "../lib/tuiGate.ts";
+import {
+  launchOpeningTarget,
+  resolveLaunchPersona,
+  type LaunchContext,
+  type LaunchFlags,
+} from "../lib/tuiGate.ts";
 
 /**
  * Decide what the app opens on, in three tiers:
@@ -209,11 +214,26 @@ export type LaunchOpening =
 export async function resolveLaunchOpening(
   launch: LaunchFlags,
   host: HostSnapshot,
+  context: LaunchContext = {},
 ): Promise<LaunchOpening> {
-  const target = launchOpeningTarget(launch, process.env, {
-    defaultPersona: host.defaultPersona,
-    personas: host.personas,
-  });
+  // The entrypoint's own resolution, made BEFORE it decrypted a vault into
+  // `process.env` — carried here, not repeated. Repeating it is the bug this
+  // argument exists for: by the time the TUI starts, `process.env` has been
+  // mutated by the vault load the entrypoint performed, so re-reading
+  // PHANTOMBOT_PERSONA can answer with a name the entrypoint never saw and
+  // open a chat for a phantom whose secrets are not the ones loaded.
+  //
+  // The fallback resolves the same chain against `context.env` — the routing
+  // environment as it stood before the bootstrap — and is reached only when
+  // the bootstrap threw before resolving, i.e. before any vault was opened.
+  const persona =
+    context.persona ??
+    resolveLaunchPersona(
+      launch,
+      context.env ?? process.env,
+      host.defaultPersona,
+    );
+  const target = launchOpeningTarget(persona, { personas: host.personas });
   if ("refusal" in target) return { refusal: target.refusal };
   const opening = await resolveOpeningScreen(target.requested);
   return {
@@ -223,7 +243,10 @@ export async function resolveLaunchOpening(
   };
 }
 
-export async function startTui(launch: LaunchFlags = {}): Promise<number> {
+export async function startTui(
+  launch: LaunchFlags = {},
+  context: LaunchContext = {},
+): Promise<number> {
   // FIRST, before any awaited startup work: logs are CAPTURED, not printed —
   // stderr is the same terminal being drawn on, so every log line used to land
   // on top of the frame. Installed ahead of `hostSnapshot()` on purpose (#478):
@@ -232,7 +255,7 @@ export async function startTui(launch: LaunchFlags = {}): Promise<number> {
   // of why the log pane opened empty.
   const restoreLogs = setLogSink((line) => logBuffer.push(line));
   const host = await hostSnapshot();
-  const launched = await resolveLaunchOpening(launch, host);
+  const launched = await resolveLaunchOpening(launch, host, context);
   if ("refusal" in launched) {
     restoreLogs();
     process.stderr.write(`phantombot: ${launched.refusal}\n`);

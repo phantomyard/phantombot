@@ -283,15 +283,37 @@ export type LaunchTarget =
     };
 
 /**
- * Resolve the launch persona and check it exists, in one place both the
- * entrypoint and the TUI can agree on.
+ * What the ENTRYPOINT already decided, carried to the TUI rather than worked
+ * out again there.
+ *
+ * `persona` is the resolution the entrypoint used to pick the vault it
+ * decrypted; `env` is the routing environment as it stood BEFORE that
+ * decryption. Both exist because the resolution and its inputs are separated
+ * by a mutation of `process.env`: `loadVaultIntoEnv` injects a persona's
+ * secrets into the same environment `PHANTOMBOT_PERSONA` is read from, so
+ * "resolve the chain again downstream" is not the same question the entrypoint
+ * asked. `persona` is absent only when the bootstrap threw before resolving —
+ * which is also before it could load any vault, so `env` is still pristine in
+ * exactly the case the fallback is used.
+ */
+export interface LaunchContext {
+  persona?: LaunchPersona;
+  env?: Record<string, string | undefined>;
+}
+
+/**
+ * Check the launch persona exists and say what it opens.
+ *
+ * Takes the ALREADY-RESOLVED persona rather than resolving it: the caller that
+ * opened the vault is the only one that can resolve it against the environment
+ * this launch actually started in, and taking `{ name, source }` here is what
+ * makes "the chat belongs to the phantom whose vault we hold" structural
+ * instead of a convention two call sites have to keep.
  */
 export function launchOpeningTarget(
-  launch: LaunchFlags,
-  env: Record<string, string | undefined>,
-  host: { defaultPersona: string; personas: readonly { name: string }[] },
+  persona: LaunchPersona,
+  host: { personas: readonly { name: string }[] },
 ): LaunchTarget {
-  const persona = resolveLaunchPersona(launch, env, host.defaultPersona);
   const unknown = unknownLaunchPersona(persona, host.personas);
   if (unknown !== undefined) return { refusal: unknown };
   return {

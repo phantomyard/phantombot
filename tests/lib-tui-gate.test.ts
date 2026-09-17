@@ -272,8 +272,17 @@ describe("which persona a launch opens", () => {
   describe("launchOpeningTarget — the vault and the chat must be the same phantom", () => {
     const host = { defaultPersona: "robbie", personas: [...personas, { name: "robbie" }] };
 
+    /** The entrypoint's resolution, made against the pre-vault environment. */
+    const resolved = (
+      launch: Parameters<typeof resolveLaunchPersona>[0],
+      env: Record<string, string | undefined>,
+    ) => resolveLaunchPersona(launch, env, host.defaultPersona);
+
     test("env persona and configured default differ: the ENV persona opens", () => {
-      const target = launchOpeningTarget({ prompt: "hi" }, { PHANTOMBOT_PERSONA: "lena" }, host);
+      const target = launchOpeningTarget(
+        resolved({ prompt: "hi" }, { PHANTOMBOT_PERSONA: "lena" }),
+        host,
+      );
       expect(target).toEqual({
         requested: "lena",
         persona: { name: "lena", source: "env" },
@@ -286,25 +295,28 @@ describe("which persona a launch opens", () => {
 
     test("the flag still beats the env var", () => {
       expect(
-        launchOpeningTarget({ persona: "kai" }, { PHANTOMBOT_PERSONA: "lena" }, host),
+        launchOpeningTarget(
+          resolved({ persona: "kai" }, { PHANTOMBOT_PERSONA: "lena" }),
+          host,
+        ),
       ).toEqual({ requested: "kai", persona: { name: "kai", source: "flag" } });
     });
 
     test("a plain launch requests nothing, so the default chain still runs", () => {
       // `requested: undefined` is load-bearing: resolveOpeningScreen's legacy
       // adoption and heal-if-broken paths only run when nothing was requested.
-      expect(launchOpeningTarget({}, {}, host)).toEqual({
+      expect(launchOpeningTarget(resolved({}, {}), host)).toEqual({
         requested: undefined,
         persona: { name: "robbie", source: "default" },
       });
     });
 
     test("an unknown name is a refusal, whichever rung it came from", () => {
-      expect(launchOpeningTarget({ persona: "kia" }, {}, host)).toEqual({
+      expect(launchOpeningTarget(resolved({ persona: "kia" }, {}), host)).toEqual({
         refusal: expect.stringContaining("no persona named 'kia'"),
       });
       expect(
-        launchOpeningTarget({}, { PHANTOMBOT_PERSONA: "kia" }, host),
+        launchOpeningTarget(resolved({}, { PHANTOMBOT_PERSONA: "kia" }), host),
       ).toEqual({ refusal: expect.stringContaining("PHANTOMBOT_PERSONA") });
     });
   });
