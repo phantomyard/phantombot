@@ -10,7 +10,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_HISTORY_LIMIT, runTurn } from "../src/orchestrator/turn.ts";
+import {
+  DEFAULT_HISTORY_LIMIT,
+  boundHistoryByBytes,
+  runTurn,
+} from "../src/orchestrator/turn.ts";
 import { type MemoryStore, openMemoryStore } from "../src/memory/store.ts";
 import { MAX_DIGESTS_PER_TURN } from "../src/lib/turnDigest.ts";
 import { nightlyConversationKey } from "../src/lib/nightly.ts";
@@ -68,6 +72,24 @@ const baseInput = () => ({
 });
 
 describe("runTurn — successful path", () => {
+  test("history byte bound keeps the newest complete UTF-8 turns", () => {
+    const bounded = boundHistoryByBytes(
+      [
+        { role: "user", text: "old" },
+        { role: "assistant", text: "€€" },
+        { role: "user", text: "new" },
+      ],
+      9,
+    );
+
+    expect(bounded.loadedBytes).toBe(12);
+    expect(bounded.includedBytes).toBe(9);
+    expect(bounded.history).toEqual([
+      { role: "assistant", text: "€€" },
+      { role: "user", text: "new" },
+    ]);
+  });
+
   test("streams chunks and persists user + assistant turns", async () => {
     const harness = new ScriptedHarness("fake", [
       { type: "text", text: "hi " },
@@ -350,7 +372,7 @@ describe("runTurn — successful path", () => {
 });
 
 describe("runTurn — failure path", () => {
-  test("when the harness emits a terminal error, nothing is persisted", async () => {
+  test("a terminal harness failure preserves the prompt and recovery marker", async () => {
     const harness = new ScriptedHarness("fake", [
       {
         type: "error",
@@ -369,7 +391,35 @@ describe("runTurn — failure path", () => {
 
     expect(chunks.map((c) => c.type)).toEqual(["error"]);
     const stored = await memory.recentTurns("phantom", "cli:default", 10);
-    expect(stored).toEqual([]);
+    expect(stored).toEqual([
+      { role: "user", text: "hi" },
+      {
+        role: "assistant",
+        text:
+          "[Turn failed before a reply completed: boom. Verify what, if anything, was completed before retrying this request.]",
+      },
+    ]);
+  });
+
+  test("an operator abort is not duplicated into history", async () => {
+    const harness = new ScriptedHarness("fake", [
+      {
+        type: "error",
+        error: "stopped",
+        recoverable: false,
+        killCause: "aborted",
+      },
+    ]);
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "stop this",
+        harnesses: [harness],
+      }),
+    );
+
+    expect(await memory.recentTurns("phantom", "cli:default", 10)).toEqual([]);
   });
 });
 
@@ -434,7 +484,7 @@ describe("runTurn — purge-after-ruling (trusted success)", () => {
     expect(purgeCalls).toEqual([]);
   });
 
-  test("a FAILED trusted turn does NOT purge (nothing was persisted to rule on)", async () => {
+  test("a FAILED trusted turn preserves quarantine for a later ruling", async () => {
     const { store, purgeCalls } = spyStore(memory);
     const harness = new ScriptedHarness("fake", [
       { type: "error", error: "boom", recoverable: false },

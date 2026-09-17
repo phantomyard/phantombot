@@ -1477,6 +1477,7 @@ chain = ["pi-primary", "pi-fallback"]
 
 [harnesses.instances.pi-primary]
 type = "pi"
+max_old_space_mb = 2304
 
 [harnesses.instances.pi-primary.routing]
 provider = "openrouter"
@@ -1497,9 +1498,27 @@ primary_model = "gemini-2.5-pro"
       provider: "openrouter",
       primaryModel: "anthropic/claude-sonnet-4",
     });
+    expect(c.harnesses.instances?.["pi-primary"]?.maxOldSpaceMb).toBe(2304);
     expect(c.harnesses.instances?.["pi-fallback"]?.routing).toMatchObject({
       provider: "google",
       primaryModel: "gemini-2.5-pro",
     });
+  });
+
+  test("parses the shared Pi old-space ceiling", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[harnesses]
+chain = ["pi-host"]
+
+[harnesses.pi]
+max_old_space_mb = 2560
+`,
+      "utf8",
+    );
+
+    expect((await loadConfig()).harnesses.pi.maxOldSpaceMb).toBe(2560);
   });
 });

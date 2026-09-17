@@ -72,6 +72,7 @@ export function buildHarness(config: Config, id: string): Harness | undefined {
     routing: slot.routing,
     id,
     mode: engine === "native" ? "native" : "host",
+    maxOldSpaceMb: instance?.maxOldSpaceMb ?? config.harnesses.pi.maxOldSpaceMb,
     ...(instance ? { apiKeyEnv: piInstanceSecretName(id) } : {}),
   });
 }

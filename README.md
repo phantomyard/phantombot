@@ -826,6 +826,18 @@ When the orchestrator fails over (a recoverable error mid-stream, such as
 claude's `server_error`), the abandoned harness's whole process group is killed
 immediately (SIGKILL) and the fallback only starts once it has exited, so it
 cannot keep running tools in parallel with the fallback.
+A turn sends at most 128 KiB of canonical conversation history to a harness,
+keeping the newest complete messages and logging both the loaded and included
+byte counts. The 30-row limit remains a second ceiling; retrieval and durable
+facts are separate bounded prompt sections.
+
+If the whole chain fails, phantombot preserves the user's prompt plus a recovery
+marker in conversation history instead of silently dropping the request. The
+turn registry record under `$XDG_STATE_HOME/phantombot/turns/` also retains the
+structured exit code/signal and the redacted last 20 stderr lines for two hours.
+Operator stops and host-shutdown interruptions keep their existing dedicated
+handling and are not duplicated by this failure record.
+
 A turn stopped with `/stop` (or interrupted by a new message) still records the
 user's message in history, followed by any text already streamed and
 `[interrupted before reply]`. This holds on Telegram, PhantomChat, the terminal
@@ -843,7 +855,20 @@ message is sent straight after.
 - **pi-host** runs the host's own `pi`. Phantombot passes it no provider,
   model or API key — configure it by running `pi`, exactly like claude and
   codex. `doctor` warns when a configured pi-host's binary is missing and never
-  switches it for you.
+  switches it for you. Node's default V8 heap can be too small on low-memory
+  hosts; daemon startup warns when it probes below 2048 MiB. Set an explicit,
+  host-safe ceiling without changing the service environment globally:
+
+  ```toml
+  [harnesses.pi]
+  max_old_space_mb = 2560
+  ```
+
+  `PHANTOMBOT_PI_MAX_OLD_SPACE_MB` is the environment override. Named Pi
+  instances may set `max_old_space_mb` in their own instance table. Phantombot
+  appends the explicit cap to the Pi child's `NODE_OPTIONS`; Node's last flag
+  wins, so inherited options (including quoted values) remain intact. It never derives or raises this value
+  from `MemAvailable`: the operator chooses the memory/swap tradeoff.
 - **Upgrading from the old single `pi` id** is automatic and needs nothing
   from you. At startup a legacy `pi` is read as `native` when
   `[harnesses.pi.routing]` configures a provider or model, otherwise as
@@ -1995,7 +2020,9 @@ never blocks a turn and never queues one behind another. It buys two things:
 
 Entries are best-effort cleaned up when a turn ends. A crashed turn leaves one
 behind, so an entry only counts as live if its recorded pid is still the same
-process *and* it is under an hour old; stale entries are pruned on read.
+process *and* it is under an hour old; stale entries are pruned on read. A
+finished record stays available for two hours. Failed records include the safe
+terminal error, subprocess exit code/signal, and redacted bounded stderr tail.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

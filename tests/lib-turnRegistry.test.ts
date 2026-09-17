@@ -100,6 +100,30 @@ describe("turn registry — register / release round trip", () => {
     expect(snap.recent[0]?.finished_at).toBeTruthy();
   });
 
+  test("release persists structured failure diagnostics and stderr", () => {
+    const handle = registerTurn({
+      persona: "robbie",
+      conversation: "telegram:1",
+      origin: "channel",
+    });
+    handle.release({
+      status: "failed",
+      error: "pi exited with code 134 (SIGABRT)",
+      exitCode: 134,
+      signalCode: "SIGABRT",
+      stderrTail: ["heap limit reached", "native stack trace"],
+    });
+
+    expect(readRegistry({ now: new Date() }).recent[0]).toMatchObject({
+      id: handle.id,
+      status: "failed",
+      error: "pi exited with code 134 (SIGABRT)",
+      exit_code: 134,
+      signal: "SIGABRT",
+      stderr_tail: ["heap limit reached", "native stack trace"],
+    });
+  });
+
   test("release is idempotent", () => {
     const handle = registerTurn({
       persona: "robbie",

@@ -1281,7 +1281,7 @@ describe("runTelegramServer dispatch", () => {
     });
   });
 
-  test("on unrecoverable harness error: never shows the raw diagnostic, does not persist", async () => {
+  test("on unrecoverable harness error: hides the raw diagnostic and preserves the failed prompt", async () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
@@ -1307,7 +1307,14 @@ describe("runTelegramServer dispatch", () => {
     expect(
       transport.sent.some((s) => /boom|error|timed out/i.test(s.text)),
     ).toBe(false);
-    expect(await memory.recentTurns("phantom", "telegram:1001", 10)).toEqual([]);
+    expect(await memory.recentTurns("phantom", "telegram:1001", 10)).toEqual([
+      { role: "user", text: "hi" },
+      {
+        role: "assistant",
+        text:
+          "[Turn failed before a reply completed: boom. Verify what, if anything, was completed before retrying this request.]",
+      },
+    ]);
   });
 
   test("on harness failure: surfaces a language-matched recovery reply, not the raw error", async () => {
@@ -1359,9 +1366,16 @@ describe("runTelegramServer dispatch", () => {
     expect(transport.sent.some((s) => /timed out|error:/i.test(s.text))).toBe(
       false,
     );
-    // A failed-but-recovered turn still leaves no history (the original
-    // question went unanswered, so the user can retry cleanly).
-    expect(await memory.recentTurns("phantom", "telegram:1001", 10)).toEqual([]);
+    // The recovery reply is channel-only, but the original prompt and failure
+    // marker remain durable so a retry can account for uncertain side effects.
+    expect(await memory.recentTurns("phantom", "telegram:1001", 10)).toEqual([
+      { role: "user", text: "hola, ¿cómo estás?" },
+      {
+        role: "assistant",
+        text:
+          "[Turn failed before a reply completed: flaky timed out after 300000ms. Verify what, if anything, was completed before retrying this request.]",
+      },
+    ]);
   });
 });
 

@@ -77,6 +77,9 @@ import {
   ENV_PHANTOMBOT_PI_COMMAND,
 } from "../lib/embeddedPi.ts";
 import { nativeAgentEnv } from "../lib/nativeAgentDir.ts";
+import type { WriteSink } from "../lib/io.ts";
+
+export const EXPECTED_PI_HEAP_MB = 2_048;
 
 export interface PiHarnessConfig {
   /**
@@ -118,6 +121,8 @@ export interface PiHarnessConfig {
   /** Runtime identity and vault key for a named Pi instance. */
   id?: string;
   apiKeyEnv?: string;
+  /** Explicit V8 old-space ceiling; never inferred from host memory. */
+  maxOldSpaceMb?: number;
   /**
    * Narration-decay replay config (issue #551). Omitted = defaults
    * (DEFAULT_REASONING_REPLAY); tests pass short windows. Present = on.
@@ -168,6 +173,27 @@ export class PiHarness implements Harness {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Startup diagnostic for host Pi. Native Pi runs inside phantombot's Bun
+   * runtime, while pi-host is a Node CLI and inherits Node's V8 ceiling.
+   * An explicit maxOldSpaceMb is operator intent and needs no probe.
+   */
+  async heapBudgetWarning(
+    probe: () => Promise<number | undefined> = probeNodeHeapLimitMb,
+  ): Promise<string | undefined> {
+    if (this.config.mode !== "host" || this.config.maxOldSpaceMb !== undefined) {
+      return undefined;
+    }
+    const actual = await probe();
+    if (actual === undefined || actual >= EXPECTED_PI_HEAP_MB) return undefined;
+    return (
+      `${this.id}: Node's default V8 heap is ${Math.round(actual)} MiB, below ` +
+      `the ${EXPECTED_PI_HEAP_MB} MiB Pi workload floor; set ` +
+      "[harnesses.pi] max_old_space_mb (or PHANTOMBOT_PI_MAX_OLD_SPACE_MB) " +
+      "to an explicit value that fits this host"
+    );
   }
 
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
@@ -378,6 +404,15 @@ export class PiHarness implements Harness {
     // withPersonaEnv returns a fresh copy with turn context and non-interactive defaults;
     // the spread guarantees we can freely assign child-specific vars without mutating parent state.
     const childEnv = { ...withPersonaEnv(process.env, req.persona, req.conversation, req.turnId) };
+    if (
+      this.config.mode === "host" &&
+      this.config.maxOldSpaceMb !== undefined
+    ) {
+      childEnv.NODE_OPTIONS = withMaxOldSpaceSize(
+        childEnv.NODE_OPTIONS,
+        this.config.maxOldSpaceMb,
+      );
+    }
     childEnv[ENV_PI_PROVIDER] = provider ?? "";
     childEnv[ENV_PI_API_KEY] = piApiKey ?? "";
     // Point the extension at THIS persona's delegate models (phantombot#441).
@@ -585,6 +620,57 @@ export class PiHarness implements Harness {
       await temp.cleanup();
     }
   }
+}
+
+export async function probeNodeHeapLimitMb(): Promise<number | undefined> {
+  try {
+    const proc = Bun.spawn(
+      [
+        "node",
+        "-e",
+        "process.stdout.write(String(require('node:v8').getHeapStatistics().heap_size_limit / 1048576))",
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: process.env },
+    );
+    const stdout = await new Response(proc.stdout).text();
+    if ((await proc.exited) !== 0) return undefined;
+    const value = Number(stdout.trim());
+    return Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Emit each distinct low-heap startup warning once. */
+export async function warnLowPiHeapAtStartup(
+  harnesses: readonly Harness[],
+  err: WriteSink,
+  probe?: () => Promise<number | undefined>,
+): Promise<string[]> {
+  const warnings = new Set<string>();
+  let probeResult: Promise<number | undefined> | undefined;
+  const sharedProbe = () =>
+    (probeResult ??= (probe ?? probeNodeHeapLimitMb)());
+  for (const harness of harnesses) {
+    if (!(harness instanceof PiHarness)) continue;
+    const warning = await harness.heapBudgetWarning(sharedProbe);
+    if (warning) warnings.add(warning);
+  }
+  for (const warning of warnings) {
+    log.warn("run: low Pi heap ceiling", { warning });
+    err.write(`warning: ${warning}\n`);
+  }
+  return [...warnings];
+}
+
+/** Append the explicit cap; Node uses the final repeated flag, preserving quoted options. */
+export function withMaxOldSpaceSize(
+  nodeOptions: string | undefined,
+  maxOldSpaceMb: number,
+): string {
+  const inherited = nodeOptions?.trim();
+  const cap = `--max-old-space-size=${maxOldSpaceMb}`;
+  return inherited ? `${inherited} ${cap}` : cap;
 }
 
 /**
