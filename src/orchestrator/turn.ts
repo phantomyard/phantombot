@@ -8,9 +8,11 @@
  *   3. Builds the system prompt via persona/builder.
  *   4. Runs the harness chain via orchestrator/fallback, streaming chunks
  *      out to the caller as they arrive.
- *   5. On success — and only on success — persists the user turn followed
- *      by the assistant turn to memory. A failed turn leaves no trace,
- *      so the user can retry without polluting history with half-turns.
+ *   5. On success, persists the user turn followed by the assistant turn.
+ *      On terminal harness failure, persists the user turn plus a recovery
+ *      marker so the request and uncertain side effects are not forgotten.
+ *      Intentional cancellation stays owned by the channel adapter, which
+ *      may persist its partial text and interruption marker instead.
  *
  * runTurn is an async generator of HarnessChunk. The caller iterates,
  * surfaces text/progress to wherever (stdout, REPL, future channel
@@ -68,6 +70,37 @@ import {
 } from "./promptCache.ts";
 
 export const DEFAULT_HISTORY_LIMIT = 30;
+/** Maximum UTF-8 bytes of canonical conversation history sent to a harness. */
+export const DEFAULT_HISTORY_MAX_BYTES = 128_000;
+const FAILURE_REASON_MAX_CHARS = 500;
+
+function failureReasonForHistory(error: string): string {
+  return (
+    error.replace(/\s+/g, " ").trim().slice(0, FAILURE_REASON_MAX_CHARS) ||
+    "unknown harness failure"
+  );
+}
+
+export function boundHistoryByBytes(
+  history: Array<{ role: "user" | "assistant"; text: string }>,
+  maxBytes: number,
+): {
+  history: Array<{ role: "user" | "assistant"; text: string }>;
+  loadedBytes: number;
+  includedBytes: number;
+} {
+  const sizes = history.map((turn) => Buffer.byteLength(turn.text, "utf8"));
+  const loadedBytes = sizes.reduce((sum, size) => sum + size, 0);
+  let includedBytes = 0;
+  let first = history.length;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const size = sizes[i]!;
+    if (includedBytes + size > maxBytes) break;
+    includedBytes += size;
+    first = i;
+  }
+  return { history: history.slice(first), loadedBytes, includedBytes };
+}
 
 export interface TurnInput {
   /** Persona name — used for memory scoping and log clarity. */
@@ -350,10 +383,35 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     conversation: input.conversation,
     origin: input.origin ?? "channel",
   });
+  let outcome: import("../lib/turnRegistry.ts").TurnOutcome = {
+    status: "failed",
+    error: "turn ended without a completion marker",
+  };
   try {
-    yield* runTurnBody(input, handle.id);
+    for await (const chunk of runTurnBody(input, handle.id)) {
+      if (chunk.type === "error") {
+        outcome = {
+          status: "failed",
+          error: chunk.error,
+          exitCode: chunk.exitCode,
+          signalCode: chunk.signalCode,
+          stderrTail: chunk.stderrTail,
+        };
+      }
+      if (chunk.type === "done") outcome = { status: "succeeded" };
+      yield chunk;
+    }
+  } catch (error) {
+    outcome = {
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error),
+    };
+    throw error;
   } finally {
-    handle.release();
+    if (outcome.status === "failed" && input.signal?.aborted) {
+      outcome = { status: "cancelled" };
+    }
+    handle.release(outcome);
   }
 }
 
@@ -372,13 +430,30 @@ async function* runTurnBody(
   );
   const persona = await loadPersona(input.agentDir);
 
-  const history = input.noHistory
+  const loadedHistory = input.noHistory
     ? []
     : await input.memory.recentTurns(
         input.persona,
         input.conversation,
         input.historyLimit ?? DEFAULT_HISTORY_LIMIT,
       );
+  const bounded = boundHistoryByBytes(loadedHistory, DEFAULT_HISTORY_MAX_BYTES);
+  const history = bounded.history;
+  log.debug("turn: history byte budget", {
+    turnId,
+    maxBytes: DEFAULT_HISTORY_MAX_BYTES,
+    loadedBytes: bounded.loadedBytes,
+    includedBytes: bounded.includedBytes,
+    loadedTurns: loadedHistory.length,
+    includedTurns: history.length,
+  });
+  if (history.length < loadedHistory.length) {
+    log.info("turn: history truncated to byte budget", {
+      turnId,
+      maxBytes: DEFAULT_HISTORY_MAX_BYTES,
+      droppedTurns: loadedHistory.length - history.length,
+    });
+  }
 
   // Threat screen — runs BEFORE retrieval (Blocker B). For an UNTRUSTED turn,
   // the tool-less judge sees the content first; only a `pass` lets the turn go
@@ -682,6 +757,7 @@ async function* runTurnBody(
 
   let finalText = "";
   let succeeded = false;
+  let terminalError: Extract<HarnessChunk, { type: "error" }> | undefined;
 
   // Tool-call audit (#282): default-on, writes to `<agentDir>/audit/<date>.log`.
   // Every runTurn caller (Telegram, phantomchat, ask, tick, nightly, ACP) gets
@@ -770,6 +846,7 @@ async function* runTurnBody(
         finalText = chunk.finalText;
         succeeded = true;
       }
+      if (chunk.type === "error") terminalError = chunk;
       yield chunk;
     }
   } finally {
@@ -869,6 +946,38 @@ async function* runTurnBody(
           // Out-of-band extraction must never surface to the user.
         });
     }
+  }
+
+  if (
+    !succeeded &&
+    terminalError &&
+    !input.noHistory &&
+    !input.signal?.aborted &&
+    terminalError.killCause !== "aborted" &&
+    !terminalError.error.includes("host shutting down")
+  ) {
+    const failureReason = failureReasonForHistory(terminalError.error);
+    await input.memory.appendTurnPair(
+      {
+        persona: input.persona,
+        conversation: input.conversation,
+        role: "user",
+        text: input.userMessage,
+        source:
+          input.userSource ?? (input.trusted === true ? "principal" : "other"),
+        origin,
+      },
+      {
+        persona: input.persona,
+        conversation: input.conversation,
+        role: "assistant",
+        text:
+          `[Turn failed before a reply completed: ${failureReason}. ` +
+          "Verify what, if anything, was completed before retrying this request.]",
+        source: input.assistantSource ?? "unverified",
+        origin,
+      },
+    );
   }
 
   if (epochPlan) {

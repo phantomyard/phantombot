@@ -938,6 +938,8 @@ export async function* runHarnessProcess(
         type: "error",
         error: `${harnessId} terminated by ${signalCode ?? "SIGTERM"} (host shutting down)`,
         recoverable: false,
+        exitCode: code,
+        ...(signalCode ? { signalCode } : {}),
         stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
       };
       return;
@@ -959,11 +961,13 @@ export async function* runHarnessProcess(
     const retryAfterMs = parseRetryAfterMs(stderrText);
     yield {
       type: "error",
-      error: `${harnessId} exited with code ${code}`,
+      error: `${harnessId} exited with code ${code}${signalCode ? ` (${signalCode})` : ""}`,
       // 127 = command not found — terminal. Anything else (rate limits,
       // network blips, transient model errors) is recoverable so the
       // orchestrator tries the next harness.
       recoverable: code !== 127,
+      exitCode: code,
+      ...(signalCode ? { signalCode } : {}),
       stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
       ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
     };

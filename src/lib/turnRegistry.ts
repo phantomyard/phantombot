@@ -136,12 +136,30 @@ export interface TurnRecord {
   started_at: string;
   /** ISO timestamp; absent while the turn is still running. */
   finished_at?: string;
+  /** Terminal outcome. Older records omit it. */
+  status?: "succeeded" | "failed" | "cancelled";
+  /** Safe one-line terminal error, when status is failed. */
+  error?: string;
+  /** Harness subprocess status, when available. */
+  exit_code?: number;
+  /** Harness subprocess signal, when available. */
+  signal?: string;
+  /** Redacted, bounded stderr tail retained for post-mortem inspection. */
+  stderr_tail?: string[];
+}
+
+export interface TurnOutcome {
+  status: "succeeded" | "failed" | "cancelled";
+  error?: string;
+  exitCode?: number;
+  signalCode?: string;
+  stderrTail?: string[];
 }
 
 export interface TurnHandle {
   id: string;
   /** Mark the turn finished. Idempotent, never throws. */
-  release: () => void;
+  release: (outcome?: TurnOutcome) => void;
 }
 
 /**
@@ -239,14 +257,37 @@ export function registerTurn(
   let released = false;
   return {
     id,
-    release: () => {
+    release: (outcome) => {
       if (released) return;
       released = true;
       try {
         // Rewrite rather than unlink: a just-finished turn is still evidence
         // the principal is mid-conversation, and INTERACTIVE_COOLDOWN_MS needs
         // that evidence to survive the turn it describes.
-        writeRecord(dir, { ...record, finished_at: new Date().toISOString() });
+        writeRecord(dir, {
+          ...record,
+          finished_at: new Date().toISOString(),
+          ...(outcome
+            ? {
+                status: outcome.status,
+                ...(outcome.error
+                  ? {
+                      error: outcome.error
+                        .replace(/\s+/g, " ")
+                        .trim()
+                        .slice(0, 1_000),
+                    }
+                  : {}),
+                ...(outcome.exitCode !== undefined
+                  ? { exit_code: outcome.exitCode }
+                  : {}),
+                ...(outcome.signalCode ? { signal: outcome.signalCode } : {}),
+                ...(outcome.stderrTail?.length
+                  ? { stderr_tail: outcome.stderrTail.slice(-20) }
+                  : {}),
+              }
+            : {}),
+        });
       } catch (e) {
         log.debug("turnRegistry: release failed", {
           error: (e as Error).message,

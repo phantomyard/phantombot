@@ -758,6 +758,7 @@ describe("runHarnessProcess — stderr capture (issue #462)", () => {
     const err = chunks.find((c) => c.type === "error");
     expect(err).toBeDefined();
     expect(err.error).toContain("exited with code 1");
+    expect(err.exitCode).toBe(1);
     expect(Array.isArray(err.stderrTail)).toBe(true);
     expect(err.stderrTail).toContain("error: something broke");
     expect(err.stderrTail).toContain("error: more details");
