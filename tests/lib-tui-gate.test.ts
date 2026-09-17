@@ -13,7 +13,8 @@ import {
   currentTty,
   shouldOpenTui,
   launchRefusal,
-  launchVaultPersona,
+  launchOpeningTarget,
+  resolveLaunchPersona,
   parseLaunchFlags,
   unknownLaunchPersona,
   NO_TUI_FLAG,
@@ -214,26 +215,97 @@ describe("launch flags", () => {
 });
 
 describe("which persona a launch opens", () => {
+  const personas = [{ name: "lena" }, { name: "kai" }];
+
   test("--persona wins over the injected env var and the configured default", () => {
     // The TUI is about to open a VAULT-BACKED conversation with this persona:
     // bootstrapping someone else's secrets leaves the chat with an empty env
     // and no visible cause.
     expect(
-      launchVaultPersona({ persona: "kai" }, { PHANTOMBOT_PERSONA: "lena" }, "robbie"),
-    ).toBe("kai");
-    expect(launchVaultPersona({}, { PHANTOMBOT_PERSONA: "lena" }, "robbie")).toBe(
-      "lena",
-    );
-    expect(launchVaultPersona({}, {}, "robbie")).toBe("robbie");
+      resolveLaunchPersona({ persona: "kai" }, { PHANTOMBOT_PERSONA: "lena" }, "robbie"),
+    ).toEqual({ name: "kai", source: "flag" });
+    expect(
+      resolveLaunchPersona({}, { PHANTOMBOT_PERSONA: "lena" }, "robbie"),
+    ).toEqual({ name: "lena", source: "env" });
+    expect(resolveLaunchPersona({}, {}, "robbie")).toEqual({
+      name: "robbie",
+      source: "default",
+    });
+    // An env var set to whitespace is not a choice.
+    expect(
+      resolveLaunchPersona({}, { PHANTOMBOT_PERSONA: "  " }, "robbie"),
+    ).toEqual({ name: "robbie", source: "default" });
   });
 
   test("an unknown --persona is a bad argument, not a reason to open the wizard", () => {
-    const personas = [{ name: "lena" }, { name: "kai" }];
-    expect(unknownLaunchPersona({ persona: "kai" }, personas)).toBeUndefined();
-    expect(unknownLaunchPersona({}, personas)).toBeUndefined();
-    const err = unknownLaunchPersona({ persona: "kia" }, personas);
+    expect(
+      unknownLaunchPersona({ name: "kai", source: "flag" }, personas),
+    ).toBeUndefined();
+    const err = unknownLaunchPersona({ name: "kia", source: "flag" }, personas);
     expect(err).toContain("kia");
     expect(err).toContain("lena, kai");
-    expect(unknownLaunchPersona({ persona: "kia" }, [])).toContain("none yet");
+    expect(
+      unknownLaunchPersona({ name: "kia", source: "flag" }, []),
+    ).toContain("none yet");
+  });
+
+  test("an unknown PHANTOMBOT_PERSONA is refused too, and says which env var", () => {
+    // The entrypoint already resolved the vault from THIS name, so carrying on
+    // would open another phantom's chat with no secrets loaded at all.
+    const err = unknownLaunchPersona({ name: "kia", source: "env" }, personas);
+    expect(err).toContain("PHANTOMBOT_PERSONA");
+    expect(err).toContain("kia");
+  });
+
+  test("a configured default that does not exist is the heal path, not a refusal", () => {
+    // resolveOpeningScreen owns broken defaults (heal once, else wizard); a
+    // resolved default is not a user input to reject.
+    expect(
+      unknownLaunchPersona({ name: "ghost", source: "default" }, personas),
+    ).toBeUndefined();
+  });
+
+  // REGRESSION (review of #576): the vault was resolved from the full chain
+  // while the opening screen was resolved from the FLAG ALONE, so
+  // `PHANTOMBOT_PERSONA=lena` + default `robbie` decrypted Lena's vault and
+  // sent the trusted seed to Robbie. One resolver now feeds both.
+  describe("launchOpeningTarget — the vault and the chat must be the same phantom", () => {
+    const host = { defaultPersona: "robbie", personas: [...personas, { name: "robbie" }] };
+
+    test("env persona and configured default differ: the ENV persona opens", () => {
+      const target = launchOpeningTarget({ prompt: "hi" }, { PHANTOMBOT_PERSONA: "lena" }, host);
+      expect(target).toEqual({
+        requested: "lena",
+        persona: { name: "lena", source: "env" },
+      });
+      // ...and it is the same name the entrypoint decrypted the vault for.
+      expect(
+        resolveLaunchPersona({ prompt: "hi" }, { PHANTOMBOT_PERSONA: "lena" }, "robbie").name,
+      ).toBe("lena");
+    });
+
+    test("the flag still beats the env var", () => {
+      expect(
+        launchOpeningTarget({ persona: "kai" }, { PHANTOMBOT_PERSONA: "lena" }, host),
+      ).toEqual({ requested: "kai", persona: { name: "kai", source: "flag" } });
+    });
+
+    test("a plain launch requests nothing, so the default chain still runs", () => {
+      // `requested: undefined` is load-bearing: resolveOpeningScreen's legacy
+      // adoption and heal-if-broken paths only run when nothing was requested.
+      expect(launchOpeningTarget({}, {}, host)).toEqual({
+        requested: undefined,
+        persona: { name: "robbie", source: "default" },
+      });
+    });
+
+    test("an unknown name is a refusal, whichever rung it came from", () => {
+      expect(launchOpeningTarget({ persona: "kia" }, {}, host)).toEqual({
+        refusal: expect.stringContaining("no persona named 'kia'"),
+      });
+      expect(
+        launchOpeningTarget({}, { PHANTOMBOT_PERSONA: "kia" }, host),
+      ).toEqual({ refusal: expect.stringContaining("PHANTOMBOT_PERSONA") });
+    });
   });
 });

@@ -432,7 +432,9 @@ terminals. Everything else behaves exactly as it did before:
 as the first turn, exactly as if you had typed it — the same shape as
 `pi "$prompt"` or `claude -- "$prompt"`, and what desktop launchers such as
 Omarchy's default-agent picker use. `--persona <name>` opens a phantom other
-than the default. The turn is trusted because you are watching it run, which is
+than the default (without it, the phantom is the one `PHANTOMBOT_PERSONA` names,
+then your configured default; naming one that does not exist is refused rather
+than opening someone else's chat). The turn is trusted because you are watching it run, which is
 why a prompt with no terminal is refused rather than run unattended.
 
 - **Not set up yet:** if the app opens on the setup wizard or on the phantom's

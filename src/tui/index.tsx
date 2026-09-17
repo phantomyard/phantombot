@@ -27,7 +27,7 @@ import { logBuffer } from "./logBuffer.ts";
 import { setPromptHost } from "./prompts.ts";
 import { lendStdin } from "./stdinHandover.ts";
 import { setLogSink } from "../lib/logSink.ts";
-import { hostSnapshot } from "./snapshot.ts";
+import { hostSnapshot, type HostSnapshot } from "./snapshot.ts";
 import { openChat } from "./chatSession.ts";
 import type { WizardAnswers } from "./screens/Wizard.tsx";
 import {
@@ -53,7 +53,7 @@ import {
 } from "../lib/personaDefault.ts";
 import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 import { launchWorkingDir } from "../lib/launchCwd.ts";
-import { unknownLaunchPersona, type LaunchFlags } from "../lib/tuiGate.ts";
+import { launchOpeningTarget, type LaunchFlags } from "../lib/tuiGate.ts";
 
 /**
  * Decide what the app opens on, in three tiers:
@@ -129,9 +129,11 @@ export async function resolveOpeningScreen(requested?: string): Promise<{
       { error: String(err) },
     );
   }
-  // `--persona <name>` (issue #575) replaces the default-persona chain for
-  // this launch only. The caller has already checked it exists; nothing here
-  // heals or rewrites the configured default on its behalf.
+  // A requested persona (issue #575) — `--persona <name>`, or the
+  // harness-injected PHANTOMBOT_PERSONA, as resolved by `launchOpeningTarget`
+  // — replaces the default-persona chain for this launch only. The caller has
+  // already checked it exists; nothing here heals or rewrites the configured
+  // default on its behalf.
   let target = personas.find(
     (p) => p.name === (requested ?? host.defaultPersona),
   );
@@ -169,6 +171,58 @@ export async function resolveOpeningScreen(requested?: string): Promise<{
   return { screen: "chat", persona: target.name };
 }
 
+/** What a launch resolved to: a refusal, or the screen it opens and its seed. */
+export type LaunchOpening =
+  | { refusal: string }
+  | {
+      opening: Awaited<ReturnType<typeof resolveOpeningScreen>>;
+      startScreen: "configure" | undefined;
+      seed: { prompt?: string; notice?: string };
+    };
+
+/**
+ * Everything a launch decides BEFORE the screen is taken over: which phantom
+ * it is for, which screen that phantom opens on, and whether the prompt is
+ * seeded or dropped. Split out of `startTui` so it is testable against a real
+ * host on disk without rendering — the render half is what a terminal test
+ * cannot reach, and this is the half that carries the launch contract.
+ *
+ * The launch persona comes from the SAME chain the entrypoint used to pick the
+ * vault it decrypted: `--persona`, then the harness-injected
+ * PHANTOMBOT_PERSONA, then the configured default (lib/tuiGate.ts). Reading
+ * `launch.persona` here instead would send a seeded, TRUSTED turn to the
+ * default phantom while holding an env-named phantom's secrets.
+ *
+ * A named phantom that does not exist is refused, like any other bad input —
+ * not turned into a wizard for a phantom the user did not ask to create. A
+ * resolved DEFAULT that does not exist is NOT refused: that is the
+ * broken-default case `resolveOpeningScreen` heals.
+ *
+ * Ordering, to be exact about it: a malformed flag is refused in index.ts
+ * BEFORE the credential bootstrap, but a well-formed name for a phantom that
+ * does not exist is only known to be unknown here, after it. That is safe
+ * rather than lucky — the bootstrap's vault read is open-existing-only and
+ * returns "no vault" for a missing persona dir (src/lib/vault.ts), and the tmp
+ * sweep returns on an unreadable dir, so neither provisions anything for a
+ * name we are about to reject.
+ */
+export async function resolveLaunchOpening(
+  launch: LaunchFlags,
+  host: HostSnapshot,
+): Promise<LaunchOpening> {
+  const target = launchOpeningTarget(launch, process.env, {
+    defaultPersona: host.defaultPersona,
+    personas: host.personas,
+  });
+  if ("refusal" in target) return { refusal: target.refusal };
+  const opening = await resolveOpeningScreen(target.requested);
+  return {
+    opening,
+    startScreen: opening.screen === "configure" ? "configure" : undefined,
+    seed: seedForOpening(launch.prompt, opening.screen),
+  };
+}
+
 export async function startTui(launch: LaunchFlags = {}): Promise<number> {
   // FIRST, before any awaited startup work: logs are CAPTURED, not printed —
   // stderr is the same terminal being drawn on, so every log line used to land
@@ -178,26 +232,13 @@ export async function startTui(launch: LaunchFlags = {}): Promise<number> {
   // of why the log pane opened empty.
   const restoreLogs = setLogSink((line) => logBuffer.push(line));
   const host = await hostSnapshot();
-  // An unknown `--persona` is refused before the screen is taken over, like
-  // any other bad argument — not turned into a wizard for a phantom the user
-  // did not ask to create.
-  //
-  // Ordering, to be exact about it: a malformed flag is refused in index.ts
-  // BEFORE the credential bootstrap, but a well-formed name for a phantom that
-  // does not exist is only known to be unknown here, after it. That is safe
-  // rather than lucky — the bootstrap's vault read is open-existing-only and
-  // returns "no vault" for a missing persona dir (src/lib/vault.ts), and the
-  // tmp sweep returns on an unreadable dir, so neither provisions anything for
-  // a name we are about to reject.
-  const unknownPersona = unknownLaunchPersona(launch, host.personas);
-  if (unknownPersona !== undefined) {
+  const launched = await resolveLaunchOpening(launch, host);
+  if ("refusal" in launched) {
     restoreLogs();
-    process.stderr.write(`phantombot: ${unknownPersona}\n`);
+    process.stderr.write(`phantombot: ${launched.refusal}\n`);
     return 2;
   }
-  const opening = await resolveOpeningScreen(launch.persona);
-  const startScreen = opening.screen === "configure" ? "configure" : undefined;
-  const seed = seedForOpening(launch.prompt, opening.screen);
+  const { opening, startScreen, seed } = launched;
 
   // A terminal app owns the window. The alternate screen buffer is what makes
   // this look like `htop` rather than like output pasted under a shell prompt,

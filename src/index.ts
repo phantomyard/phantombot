@@ -35,7 +35,7 @@ import {
   bareInvocationMode,
   currentTty,
   launchRefusal,
-  launchVaultPersona,
+  resolveLaunchPersona,
   parseLaunchFlags,
   type LaunchFlags,
 } from "./lib/tuiGate.ts";
@@ -97,12 +97,17 @@ async function runPhantombotCli(): Promise<void> {
     try {
       const config = await loadConfig();
       await migratePlaintextToVault(config);
-      // `--persona` picks whose vault backs the TUI it is about to open.
-      const activePersona = launchVaultPersona(
+      // Which phantom this launch is for — `--persona`, then the
+      // harness-injected PHANTOMBOT_PERSONA, then the configured default. The
+      // TUI is about to open a VAULT-BACKED conversation with this phantom, so
+      // the SAME resolved name has to pick the vault here and the chat screen
+      // in startTui; resolving the two from different rungs of the chain pairs
+      // one phantom's secrets with another's conversation (see tuiGate.ts).
+      const activePersona = resolveLaunchPersona(
         launch,
         process.env,
         config.defaultPersona,
-      );
+      ).name;
       const activePersonaDir = personaDir(config, activePersona);
       await loadVaultIntoEnv(activePersonaDir);
       // Aggressive startup sweep of the persona's tmp dir (issue #365): reap

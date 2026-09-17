@@ -38,6 +38,8 @@
  * | launch flags with `--no-tui`            | refuse: exit 2, point at `ask`    |
  * | launch flag with a missing, empty, or   | refuse: exit 2                    |
  * |   flag-like value                       |                                   |
+ * | a named phantom that does not exist     | refuse: exit 2                    |
+ * |   (`--persona` or PHANTOMBOT_PERSONA)   |                                   |
  *
  * The TTY requirement IS the security model: a seeded prompt runs as a
  * TRUSTED turn because the human who launched it is watching it run. Headless
@@ -194,35 +196,106 @@ export function currentTty(
   };
 }
 
-/**
- * Whose vault the entrypoint decrypts for a launch, in the same precedence the
- * rest of the CLI uses with one flag added in front: `--persona` beats the
- * harness-injected env var, which beats the configured default. The TUI is
- * about to open a vault-backed conversation with THIS persona, so bootstrapping
- * someone else's secrets would leave the chat with a silently empty env.
- */
-export function launchVaultPersona(
-  launch: LaunchFlags,
-  env: Record<string, string | undefined>,
-  defaultPersona: string,
-): string {
-  return launch.persona || env.PHANTOMBOT_PERSONA || defaultPersona;
+
+/** Where a launch's persona name came from — the three rungs of the chain. */
+export type LaunchPersonaSource = "flag" | "env" | "default";
+
+export interface LaunchPersona {
+  /** The persona this launch is for. */
+  name: string;
+  /** Which rung of the chain supplied it. */
+  source: LaunchPersonaSource;
 }
 
 /**
- * The message for a `--persona` naming a phantom that does not exist, or
- * `undefined` when it does (or when no persona was named).
+ * WHICH PHANTOM A LAUNCH IS FOR — resolved ONCE, here, and then used for
+ * everything downstream: the vault the entrypoint decrypts, the
+ * unknown-persona check, and the screen the TUI opens.
  *
- * An unknown name is a bad ARGUMENT: it is refused before the screen is taken
- * over, rather than being treated as "nothing is set up" and opening the wizard
- * to create a phantom the user never asked for.
+ * Precedence is the same chain the rest of the CLI uses (`resolvePersona` in
+ * config.ts) with one flag added in front: `--persona` beats the
+ * harness-injected `PHANTOMBOT_PERSONA`, which beats the configured default
+ * (state.json, then config.toml — `loadConfig` has already collapsed those two
+ * into `defaultPersona`).
+ *
+ * Resolving it once is the whole point. Resolving the vault from the full chain
+ * but the chat screen from the FLAG ALONE pairs one phantom's decrypted secrets
+ * with another phantom's conversation: with `PHANTOMBOT_PERSONA=lena` and the
+ * default `robbie`, `phantombot --prompt "…"` would decrypt Lena's vault and
+ * then send the trusted seed to Robbie. The `source` rides along because the
+ * three rungs do NOT fail the same way — see `launchOpeningTarget`.
+ */
+export function resolveLaunchPersona(
+  launch: LaunchFlags,
+  env: Record<string, string | undefined>,
+  defaultPersona: string,
+): LaunchPersona {
+  if (launch.persona) return { name: launch.persona, source: "flag" };
+  const fromEnv = env.PHANTOMBOT_PERSONA?.trim();
+  if (fromEnv) return { name: fromEnv, source: "env" };
+  return { name: defaultPersona, source: "default" };
+}
+
+/**
+ * The message for a launch persona that does not exist on this host, or
+ * `undefined` when it does.
+ *
+ * The three rungs of the chain fail differently, and that difference is
+ * deliberate:
+ *
+ *   - `--persona kia` is a bad ARGUMENT. Refuse it before the screen is taken
+ *     over, rather than treating it as "nothing is set up" and opening the
+ *     wizard to create a phantom the user never asked for.
+ *   - `PHANTOMBOT_PERSONA=kia` is a bad ENVIRONMENT, and refusing is still the
+ *     honest answer: the entrypoint has already resolved the vault from this
+ *     same name, so carrying on would open some other phantom's chat with no
+ *     secrets loaded at all. Every other persona-aware command likewise targets
+ *     the env name rather than silently substituting the default.
+ *   - the configured DEFAULT naming a missing persona is not a bad input at
+ *     all: it is the broken-default case that `resolveOpeningScreen` already
+ *     owns (heal once, else wizard), so it is not refused here.
  */
 export function unknownLaunchPersona(
-  launch: LaunchFlags,
+  persona: LaunchPersona,
   personas: readonly { name: string }[],
 ): string | undefined {
-  if (launch.persona === undefined) return undefined;
-  if (personas.some((p) => p.name === launch.persona)) return undefined;
+  if (persona.source === "default") return undefined;
+  if (personas.some((p) => p.name === persona.name)) return undefined;
   const known = personas.map((p) => p.name).join(", ") || "none yet";
-  return `no persona named '${launch.persona}' (personas: ${known}).`;
+  if (persona.source === "flag")
+    return `no persona named '${persona.name}' (personas: ${known}).`;
+  return `PHANTOMBOT_PERSONA names '${persona.name}', which does not exist (personas: ${known}).`;
+}
+
+/** What a launch opens: a refusal, or the persona to hand the opening screen. */
+export type LaunchTarget =
+  | { refusal: string }
+  | {
+      /**
+       * Passed to `resolveOpeningScreen` as its `requested` persona.
+       * `undefined` when the name came from the configured default, so the
+       * default-persona chain (legacy adoption, heal-if-broken) stays exactly
+       * as it is for a bare launch — a resolved default is not a request.
+       */
+      requested: string | undefined;
+      /** The resolved persona this launch is for, whatever the rung. */
+      persona: LaunchPersona;
+    };
+
+/**
+ * Resolve the launch persona and check it exists, in one place both the
+ * entrypoint and the TUI can agree on.
+ */
+export function launchOpeningTarget(
+  launch: LaunchFlags,
+  env: Record<string, string | undefined>,
+  host: { defaultPersona: string; personas: readonly { name: string }[] },
+): LaunchTarget {
+  const persona = resolveLaunchPersona(launch, env, host.defaultPersona);
+  const unknown = unknownLaunchPersona(persona, host.personas);
+  if (unknown !== undefined) return { refusal: unknown };
+  return {
+    requested: persona.source === "default" ? undefined : persona.name,
+    persona,
+  };
 }
