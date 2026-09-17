@@ -237,6 +237,12 @@ export async function runEmbeddedPi(args: string[]): Promise<void> {
   // Pi reads process.argv in places besides the args it is handed; make it
   // look exactly like `pi <args>`.
   process.argv.splice(2, process.argv.length - 2, ...args);
+  // Image support: photon's WASM path is baked to the build machine, so serve
+  // it from the binary before pi can try to load it (see embeddedPhoton.ts).
+  if (isCompiledBinary()) {
+    const { installEmbeddedPhotonWasm } = await import("./embeddedPhoton.ts");
+    installEmbeddedPhotonWasm();
+  }
   const { setupCli } = await import(
     "../../node_modules/@earendil-works/pi-coding-agent/dist/cli/setup.js"
   );
