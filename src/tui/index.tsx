@@ -52,6 +52,8 @@ import {
   writeAutostartPersonas,
 } from "../lib/personaDefault.ts";
 import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
+import { launchWorkingDir } from "../lib/launchCwd.ts";
+import { unknownLaunchPersona, type LaunchFlags } from "../lib/tuiGate.ts";
 
 /**
  * Decide what the app opens on, in three tiers:
@@ -74,7 +76,7 @@ import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
  */
 export type OpeningScreen = "chat" | "configure" | "wizard";
 
-export async function resolveOpeningScreen(): Promise<{
+export async function resolveOpeningScreen(requested?: string): Promise<{
   screen: OpeningScreen;
   persona?: string;
   wizardStartAt?: WizardStep;
@@ -127,7 +129,13 @@ export async function resolveOpeningScreen(): Promise<{
       { error: String(err) },
     );
   }
-  let target = personas.find((p) => p.name === host.defaultPersona);
+  // `--persona <name>` (issue #575) replaces the default-persona chain for
+  // this launch only. The caller has already checked it exists; nothing here
+  // heals or rewrites the configured default on its behalf.
+  let target = personas.find(
+    (p) => p.name === (requested ?? host.defaultPersona),
+  );
+  if (!target && requested !== undefined) return { screen: "wizard" };
   if (!target) {
     // Broken default — e.g. a stale state.json entry pointing at a persona
     // that no longer exists. The heal path owns broken defaults: heal ONCE
@@ -161,7 +169,7 @@ export async function resolveOpeningScreen(): Promise<{
   return { screen: "chat", persona: target.name };
 }
 
-export async function startTui(): Promise<number> {
+export async function startTui(launch: LaunchFlags = {}): Promise<number> {
   // FIRST, before any awaited startup work: logs are CAPTURED, not printed —
   // stderr is the same terminal being drawn on, so every log line used to land
   // on top of the frame. Installed ahead of `hostSnapshot()` on purpose (#478):
@@ -170,8 +178,18 @@ export async function startTui(): Promise<number> {
   // of why the log pane opened empty.
   const restoreLogs = setLogSink((line) => logBuffer.push(line));
   const host = await hostSnapshot();
-  const opening = await resolveOpeningScreen();
+  // An unknown `--persona` is refused before the screen is taken over, like
+  // any other bad argument — not turned into a wizard for a phantom the user
+  // did not ask to create.
+  const unknownPersona = unknownLaunchPersona(launch, host.personas);
+  if (unknownPersona !== undefined) {
+    restoreLogs();
+    process.stderr.write(`phantombot: ${unknownPersona}\n`);
+    return 2;
+  }
+  const opening = await resolveOpeningScreen(launch.persona);
   const startScreen = opening.screen === "configure" ? "configure" : undefined;
+  const seed = seedForOpening(launch.prompt, opening.screen);
 
   // A terminal app owns the window. The alternate screen buffer is what makes
   // this look like `htop` rather than like output pasted under a shell prompt,
@@ -188,6 +206,9 @@ export async function startTui(): Promise<number> {
       startPersona={opening.persona}
       startScreen={startScreen}
       wizardStartAt={opening.wizardStartAt}
+      seedPrompt={seed.prompt}
+      startNotice={seed.notice}
+      workingDir={launchWorkingDir()}
       onCreatePersona={async (answers: WizardAnswers) => {
         return await createPhantomFromWizard(answers);
       }}
@@ -275,6 +296,26 @@ export async function startTui(): Promise<number> {
   } finally {
     restore();
   }
+}
+
+/**
+ * What happens to `--prompt` given where the app opens (issue #575).
+ *
+ * Only a READY chat takes it. A fresh install (wizard) or a phantom with no
+ * brain (Configure) has nothing that could run the turn, and holding the prompt
+ * across a setup flow would fire it minutes later, after the user has stopped
+ * expecting it — so it is dropped, and the opening screen says so.
+ */
+export function seedForOpening(
+  prompt: string | undefined,
+  screen: OpeningScreen,
+): { prompt?: string; notice?: string } {
+  if (prompt === undefined) return {};
+  if (screen === "chat") return { prompt };
+  return {
+    notice:
+      "--prompt was not sent: finish setting up this phantom, then ask again.",
+  };
 }
 
 /**
@@ -420,7 +461,11 @@ export async function runRepl(
 ): Promise<number> {
   const config = await loadConfig();
   const persona = config.defaultPersona;
-  const chat = await openChat({ config, persona });
+  const chat = await openChat({
+    config,
+    persona,
+    workingDir: launchWorkingDir(),
+  });
   out.write(`phantombot — talking to ${persona}. Ctrl-D to exit.\n`);
   try {
     for await (const line of console) {

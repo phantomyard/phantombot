@@ -105,6 +105,17 @@ export interface AppProps {
   startScreen?: "chat" | "configure";
   /** Where the wizard resumes, when it is the opening screen. */
   wizardStartAt?: WizardStep;
+  /**
+   * `phantombot --prompt` (issue #575): sent ONCE as the first turn of the
+   * `startPersona` chat, exactly as if typed. Never replayed on a remount or
+   * handed to a different persona. The caller only sets it when the app opens
+   * straight into a ready chat — otherwise the prompt is dropped.
+   */
+  seedPrompt?: string;
+  /** Directory chat turns run in (the launch cwd, issue #575). */
+  workingDir?: string;
+  /** A notice shown on the opening screen (e.g. "your --prompt was not sent"). */
+  startNotice?: string;
   onCreatePersona: (
     answers: WizardAnswers,
   ) => Promise<void | { created: boolean }>;
@@ -130,6 +141,7 @@ export interface AppProps {
   openSession?: (input: {
     config: Config;
     persona: string;
+    workingDir?: string;
   }) => Promise<ChatSession>;
   /**
    * Seam for tests, same reason as `openSession`: the settings screen runs
@@ -213,7 +225,13 @@ export function App(props: AppProps): React.ReactElement {
   // Bumped whenever settings-affecting writes happen, so the reading refreshes
   // instead of describing the config as it was before the edit.
   const [detailNonce, setDetailNonce] = useState(0);
-  const [notice, setNotice] = useState<string | undefined>();
+  const [notice, setNotice] = useState<string | undefined>(props.startNotice);
+  /**
+   * The launch prompt, until it is sent. A ref, not state: consuming it must
+   * not re-render, and it must survive the chat screen unmounting on `^s` so
+   * coming back never sends it a second time.
+   */
+  const seedRef = useRef<string | undefined>(props.seedPrompt);
   const [editorPath, setEditorPath] = useState<string | null>(null);
   /**
    * True while a `@clack` prompt owns the terminal.
@@ -384,6 +402,7 @@ export function App(props: AppProps): React.ReactElement {
       const chat = await (props.openSession ?? openChat)({
         config,
         persona: personaName,
+        workingDir: props.workingDir,
         // Harness stderr into the log pane, not onto the frame. This is the
         // other half of the log-sink fix: the logger is redirected globally,
         // but a harness subprocess writes to whatever stream it was handed.
@@ -1967,6 +1986,15 @@ export function App(props: AppProps): React.ReactElement {
           // sections are one level in from it.
           onSettings={() => go("dashboard")}
           onQuit={exit}
+          // Only the persona the launch named gets the launch prompt: a user
+          // who reached settings before the session opened and switched
+          // phantom must not have it delivered to someone else.
+          seedPrompt={
+            session.persona === props.startPersona ? seedRef.current : undefined
+          }
+          onSeedSent={() => {
+            seedRef.current = undefined;
+          }}
         />
       );
     }

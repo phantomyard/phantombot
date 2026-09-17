@@ -31,7 +31,14 @@ import { runMain, showUsage } from "citty";
 import { mainCommand } from "./cli/index.ts";
 import { loadConfig, personaDir } from "./config.ts";
 import { isReadOnlyInvocation } from "./lib/cliInvocation.ts";
-import { bareInvocationMode, currentTty } from "./lib/tuiGate.ts";
+import {
+  bareInvocationMode,
+  currentTty,
+  launchRefusal,
+  launchVaultPersona,
+  parseLaunchFlags,
+  type LaunchFlags,
+} from "./lib/tuiGate.ts";
 import { cleanupPersonaTmpDir } from "./lib/harnessArgvFiles.ts";
 import { runComplete } from "./lib/completion.ts";
 import { log } from "./lib/logger.ts";
@@ -69,6 +76,19 @@ async function runPhantombotCli(): Promise<void> {
   // head` forever on a renderer nobody can see. See lib/tuiGate.ts.
   const bareMode = bareInvocationMode(process.argv, currentTty());
 
+  // `--prompt` / `--persona` that cannot open a watched TUI (issue #575): no
+  // terminal, `--no-tui`, or a malformed value. Refused BEFORE the credential
+  // bootstrap so an unattended caller touches nothing on disk, and never
+  // rerouted to `ask` — a seeded turn is trusted only because a human is
+  // watching it run.
+  if (bareMode === "refuse") {
+    process.stderr.write(`phantombot: ${launchRefusal(process.argv)}\n`);
+    process.exit(2);
+  }
+  const parsedLaunch = bareMode === "tui" ? parseLaunchFlags(process.argv) : null;
+  const launch: LaunchFlags =
+    parsedLaunch && !("error" in parsedLaunch) ? parsedLaunch : {};
+
   // Skip the credential bootstrap entirely for read-only invocations
   // (--help/--version/bare-and-unwatched) so they never mutate disk or provision
   // a persona. An interactive TUI is the one bare invocation that DOES need the
@@ -77,7 +97,12 @@ async function runPhantombotCli(): Promise<void> {
     try {
       const config = await loadConfig();
       await migratePlaintextToVault(config);
-      const activePersona = process.env.PHANTOMBOT_PERSONA || config.defaultPersona;
+      // `--persona` picks whose vault backs the TUI it is about to open.
+      const activePersona = launchVaultPersona(
+        launch,
+        process.env,
+        config.defaultPersona,
+      );
       const activePersonaDir = personaDir(config, activePersona);
       await loadVaultIntoEnv(activePersonaDir);
       // Aggressive startup sweep of the persona's tmp dir (issue #365): reap
@@ -99,7 +124,7 @@ async function runPhantombotCli(): Promise<void> {
   }
   if (bareMode === "tui") {
     const { startTui } = await import("./tui/index.tsx");
-    process.exitCode = await startTui();
+    process.exitCode = await startTui(launch);
   } else if (bareMode === "repl") {
     const { runRepl } = await import("./tui/index.tsx");
     process.exitCode = await runRepl();

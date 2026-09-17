@@ -184,6 +184,12 @@ export interface OpenChatInput {
    * passes the log buffer here; the REPL and tests can pass anything.
    */
   stderr?: { write(chunk: string): void };
+  /**
+   * The directory turns run in. Interactive launches pass the launch cwd (see
+   * lib/launchCwd.ts, issue #575); anything that leaves it unset keeps the
+   * home directory.
+   */
+  workingDir?: string;
   /** Test seams. */
   memory?: MemoryStore;
   harnesses?: Harness[];
@@ -302,9 +308,9 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
         conversation,
         userMessage: text,
         agentDir,
-        // Same cwd choice as `ask`: the owner asks for work on repos all over
-        // their home dir.
-        workingDir: homedir(),
+        // The directory the TUI was launched from (issue #575), resolved once
+        // at startup; home when the caller did not say.
+        workingDir: input.workingDir ?? homedir(),
         harnesses: harnesses!,
         memory,
         idleTimeoutMs: config.harnessIdleTimeoutMs,

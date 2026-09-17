@@ -204,6 +204,13 @@ export function ChatScreen(props: {
   statusColor?: string;
   onSettings: () => void;
   onQuit: () => void;
+  /**
+   * Sent once on mount as if typed and submitted (`phantombot --prompt`,
+   * issue #575). A slash command runs as a command, like a typed one.
+   */
+  seedPrompt?: string;
+  /** Called the moment the seed is taken, so the owner never offers it again. */
+  onSeedSent?: () => void;
 }): React.ReactElement {
   const [messages, setMessages] = useState<ChatMessage[]>(
     props.session.history,
@@ -506,6 +513,22 @@ export function ChatScreen(props: {
     },
     [props.session],
   );
+
+  // The launch prompt (issue #575). Taken exactly once per mount, and the
+  // owner is told immediately, so a remount (^s then esc) never resends it.
+  // Dispatched through the same split as Enter, so it is indistinguishable from
+  // the user typing it: trusted because the human who launched it is watching.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current || props.seedPrompt === undefined) return;
+    seededRef.current = true;
+    props.onSeedSent?.();
+    const text = props.seedPrompt.trim();
+    if (!text) return;
+    if (commandName(text) !== undefined) void runCommand(text);
+    else submit(text);
+    // Mount-only by design; see above.
+  }, []);
 
   useInput((char, key) => {
     // ^c interrupts the TURN. It never quits: losing an app mid-answer because
