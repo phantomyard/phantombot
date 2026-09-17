@@ -65,6 +65,24 @@ const isolationRoot = mkdtempSync(join(tmpdir(), "phantombot-test-isolation-"));
 process.env.PHANTOMBOT_TEST_ISOLATION_ROOT = isolationRoot;
 process.env.XDG_DATA_HOME ??= join(isolationRoot, "xdg-data");
 
+/**
+ * HOME isolation (2026-09-11 and again 2026-09-17). tests/install-sh.test.ts
+ * spawned install.sh with the developer's real HOME, and install.sh appends
+ * `# added by phantombot installer` + a /tmp PATH line to $HOME/.bashrc on
+ * every run — 48 blocks on the owner's laptop the first time, 12 more the
+ * second, and a stale pb-install-ok stub on PATH shadowed the real binary.
+ * Any child process (shell script, git, installer) resolves ~ from $HOME, so
+ * the suite gets a throwaway home unconditionally. Unlike XDG_DATA_HOME this
+ * is `=`, not `??=`: HOME is always set, and respecting it is the bug.
+ * The real home stays readable as PHANTOMBOT_TEST_REAL_HOME for guard tests.
+ */
+import { mkdirSync } from "node:fs";
+process.env.PHANTOMBOT_TEST_REAL_HOME ??= process.env.HOME ?? "";
+const isolatedHome = join(isolationRoot, "home");
+mkdirSync(isolatedHome, { recursive: true });
+process.env.HOME = isolatedHome;
+process.env.ZDOTDIR = isolatedHome;
+
 // The suite already leaks fixture dirs; this one cleans up after itself.
 process.on("exit", () => {
   try {
