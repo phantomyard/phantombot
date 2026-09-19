@@ -42,6 +42,7 @@
  * straight back on screen.
  */
 
+import { toolTransmitsContent } from "../harnesses/toolNote.ts";
 import type { HarnessChunk } from "../harnesses/types.ts";
 import { detectLanguage, expectedLanguageOf } from "./languageGate.ts";
 import { log } from "./logger.ts";
@@ -137,6 +138,15 @@ export function isNarrationBlock(block: string): boolean {
  */
 export const NARRATION_IDLE_RELEASE_MS = 500;
 
+/**
+ * How long teardown waits for the source's own cleanup before giving up.
+ *
+ * Short on purpose: this is a courtesy, not a guarantee. A source that is
+ * answering closes well inside it; a source that is stalled never will, and
+ * the consumer that is trying to abort must not be held behind it.
+ */
+export const TEARDOWN_GRACE_MS = 50;
+
 export interface NarrationStreamGate {
   /**
    * Feed one upstream chunk; returns the chunks to emit downstream, in order.
@@ -202,23 +212,38 @@ export function createNarrationStreamGate(
 
   /**
    * A tool call followed the held text. Drop it ONLY if the whole pre-boundary
-   * block is shaped like narration AND is confidently in the wrong language.
+   * block is shaped like narration AND is confidently in the wrong language
+   * AND the tool that follows is not one that SENDS text.
    *
-   * WHOLE BLOCK, not line by line, and this is the load-bearing decision in
-   * the file. The tool-boundary rule cannot tell narration from a reply body
-   * that happens to precede a tool call — and the single most likely body of
-   * that shape is exactly the legitimate foreign-language case: a draft the
-   * principal asked for in someone else's language, written out and then sent
-   * by the next tool call. (The reply-language rule explicitly carves that
-   * out: "text you compose FOR a third party is still written in that party's
-   * language".) A draft is long and multi-line; narration is one short plain
-   * sentence, by the prompt's own instruction. Requiring the block to be a
-   * single narration-shaped line is what keeps a draft out of the gate.
+   * The tool-boundary rule cannot, on its own, tell narration from a reply
+   * body that happens to precede a tool call — and the single most likely
+   * body of that shape is exactly the legitimate foreign-language case: a
+   * draft the principal asked for in someone else's language, written out and
+   * then sent by the next tool call. (The reply-language rule explicitly
+   * carves that out: "text you compose FOR a third party is still written in
+   * that party's language".) So TWO independent signals have to agree before
+   * anything is dropped:
+   *
+   *   1. SHAPE — narration is a short burst of plain one-line sentences; a
+   *      draft has a paragraph break, markdown, or length. Judged on the
+   *      whole block since the last boundary, never on the held tail alone.
+   *   2. THE TOOL — a boundary whose tool transmits content to a third party
+   *      (mail, chat, SMS, a post) makes the text in front of it PAYLOAD far
+   *      more often than narration, and the failure there is the worst one
+   *      this file can produce: the tool args still carry the draft, so the
+   *      message goes out while the principal's copy of it is deleted from
+   *      both the stream and `finalText` — a send they cannot see.
+   *
+   * Shape alone is not enough, and cannot be made enough: at narration length
+   * a one-line Dutch draft ("Hartelijk dank voor de update.") and a one-line
+   * Dutch narration leak are the same object. That is exactly why the tool is
+   * consulted as a second, independent signal rather than by sharpening the
+   * shape test further.
    *
    * Dropping narration costs nothing. Dropping an answer costs the user their
    * answer. When the two cannot be told apart, the block is emitted.
    */
-  const resolveAtToolBoundary = (): string => {
+  const resolveAtToolBoundary = (tool?: { name?: string }): string => {
     const block = hold + pending;
     hold = "";
     pending = "";
@@ -226,6 +251,18 @@ export function createNarrationStreamGate(
     const wasNarration = isNarrationBlock(sinceBoundary);
     sinceBoundary = "";
     if (!wasNarration) return block;
+    if (toolTransmitsContent(tool?.name)) {
+      // The next thing this turn does is SEND. Whatever is held is the
+      // principal's only view of what went out; never eat it.
+      if (block.trim()) {
+        log.debug("narration: kept a held block in front of a sending tool", {
+          expected: expected.code,
+          tool: tool?.name,
+          chars: block.length,
+        });
+      }
+      return block;
+    }
     const kept: string[] = [];
     for (const line of block.split("\n")) {
       const actual = line.trim() ? mismatchOf(line) : undefined;
@@ -330,10 +367,18 @@ export function createNarrationStreamGate(
         case "text":
           return onText(chunk.text);
         case "progress": {
-          // A tool call. Everything still buffered was pre-tool narration —
-          // and it MUST be flushed before the boundary reaches the channel,
-          // because the channels classify narration by exactly this boundary.
-          return [...textChunk(resolveAtToolBoundary()), chunk];
+          // Only a progress chunk that CARRIES a tool is a tool call. The
+          // runner also emits `progress` for any non-JSON line a harness
+          // writes to stdout (raw stderr liveness), with no `tool` — treating
+          // that as a boundary would let an unrelated log line delete the
+          // text in front of it. Those are liveness, like a heartbeat: the
+          // hold survives them.
+          if (!chunk.tool) return [chunk];
+          // A real tool call. Everything still buffered was pre-tool
+          // narration — and it MUST be flushed before the boundary reaches
+          // the channel, because the channels classify narration by exactly
+          // this boundary.
+          return [...textChunk(resolveAtToolBoundary(chunk.tool)), chunk];
         }
         case "done": {
           const flushed = release();
@@ -370,9 +415,14 @@ export async function* gateNarrationStream(
   const gate = createNarrationStreamGate(userMessage);
   const it = source[Symbol.asyncIterator]();
   const IDLE = Symbol("idle");
+  // The pull we are currently waiting on. After an idle release this can
+  // still be outstanding when the consumer walks away — the teardown below
+  // needs to know that.
+  let outstanding: Promise<IteratorResult<HarnessChunk>> | undefined;
   try {
     for (;;) {
       const next = it.next();
+      outstanding = next;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const idle = new Promise<typeof IDLE>((resolve) => {
         timer = setTimeout(() => resolve(IDLE), idleMs);
@@ -386,13 +436,42 @@ export async function* gateNarrationStream(
       }
       const result = await next;
       if (timer) clearTimeout(timer);
+      outstanding = undefined;
       if (result.done) break;
       yield* gate.push(result.value);
     }
   } finally {
-    // A consumer that breaks out mid-turn (an abort, a /stop) must not take
-    // buffered text with it — the interrupted-pair record is built from what
-    // was streamed.
-    await it.return?.();
+    // Ask the source to clean up — but NEVER block this generator's own
+    // teardown on it.
+    //
+    // An async generator serialises its queue: `return()` runs only after the
+    // `next()` ahead of it settles. After an idle release that `next()` is by
+    // definition outstanding on a source that is not answering, so awaiting
+    // `return()` here waits on the stalled harness — forever. That is the
+    // precise path this file's idle release exists to rescue, and it would
+    // wedge every consumer that breaks mid-stall: /stop, an abort, the
+    // interrupted-pair teardown. A `finally` that can hang is worse than no
+    // cleanup at all.
+    //
+    // So: fire `return()`, wait only briefly for it, and let a stalled source
+    // be reclaimed with the turn. Swallow both rejections explicitly —
+    // abandoning a pull whose promise later rejects is an unhandled rejection
+    // that crashes the process in Bun.
+    outstanding?.catch(() => undefined);
+    const closed = it.return?.();
+    if (closed) {
+      const settled = closed.then(
+        () => undefined,
+        () => undefined,
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const grace = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, TEARDOWN_GRACE_MS);
+        // Don't hold the event loop open for a window we usually don't need.
+        (timer as unknown as { unref?: () => void }).unref?.();
+      });
+      await Promise.race([settled, grace]);
+      if (timer) clearTimeout(timer);
+    }
   }
 }

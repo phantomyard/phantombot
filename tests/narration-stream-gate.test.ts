@@ -15,7 +15,16 @@ function run(userMessage: string, chunks: HarnessChunk[]): HarnessChunk[] {
 }
 
 const text = (t: string): HarnessChunk => ({ type: "text", text: t });
-const progress = (note = "Bash"): HarnessChunk => ({ type: "progress", note });
+/**
+ * A tool-call boundary. Real harnesses always attach `tool` to a tool call
+ * (claude.ts/codex.ts/pi.ts all build it via buildToolCall); a progress chunk
+ * WITHOUT one is raw stdout liveness, which is a separate case tested below.
+ */
+const progress = (name = "Bash"): HarnessChunk => ({
+  type: "progress",
+  note: `tool: ${name}`,
+  tool: { title: `tool: ${name}`, name, kind: "other", locations: [] },
+});
 const done = (finalText: string): HarnessChunk => ({ type: "done", finalText });
 
 /** All emitted text, concatenated — what the surface actually renders. */
@@ -214,6 +223,67 @@ describe("narration stream gate — a draft is not narration (#580)", () => {
   });
 });
 
+describe("the tool is the second signal (Kai + Lena, #587 review)", () => {
+  // Both reviewers independently reproduced this and blocked on it. At
+  // narration length, shape cannot separate a one-line Dutch DRAFT from a
+  // one-line Dutch narration leak — and getting it wrong here is the worst
+  // failure the gate can produce: the tool args still carry the draft, so the
+  // message is sent while the principal's only copy of it is deleted.
+  const DRAFT_ASK = "Send Jeffrey a short Dutch reply thanking him for the update.";
+  const DRAFT = "Hartelijk dank voor de update. Ik kom morgen langs.";
+
+  test("a short one-line foreign draft survives a sending tool", () => {
+    const out = run(DRAFT_ASK, [
+      text(DRAFT),
+      progress("send_message"),
+      done(DRAFT),
+    ]);
+    expect(rendered(out)).toBe(DRAFT);
+    // And it must still be in finalText: a redacted finalText is a blind send.
+    expect(finalOf(out)).toBe(DRAFT);
+  });
+
+  test("a multi-line draft with no paragraph break survives too", () => {
+    // Lena's doc nit: the shape guard rejects any block <=400 chars with no
+    // BLANK line, so an ordinary letter with single newlines was in the drop
+    // zone as well.
+    const letter =
+      "Dank je wel voor het toesturen van de jaarstukken.\n" +
+      "Ik kijk er dit weekend naar en laat het je maandag weten.";
+    const out = run(DRAFT_ASK, [text(letter), progress("gmail_send_email"), done(letter)]);
+    expect(rendered(out)).toBe(letter);
+    expect(finalOf(out)).toBe(letter);
+  });
+
+  test("the sending-tool carve-out matches wrappers, not just bare names", () => {
+    for (const name of ["mcp__gmail__send_email", "Slack-Post-Message", "notify"]) {
+      const out = run(DRAFT_ASK, [text(DRAFT), progress(name), done(DRAFT)]);
+      expect(rendered(out)).toBe(DRAFT);
+    }
+  });
+
+  test("but a NON-sending tool still gates the same leak", () => {
+    // The carve-out must not become a blanket amnesty: the #580 leak shape in
+    // front of an ordinary tool is still dropped.
+    const out = run(EN, [
+      text("Miro la nota del contrato de energía."),
+      progress("Read"),
+      done("Miro la nota del contrato de energía."),
+    ]);
+    expect(rendered(out)).toBe("");
+  });
+
+  test("raw stdout liveness is not a tool call and cannot drop anything", () => {
+    // harnessRunner emits `progress` with NO `tool` for any non-JSON stdout
+    // line. Treating that as a boundary let an unrelated log line delete the
+    // text in front of it.
+    const noisy: HarnessChunk = { type: "progress", note: "npm WARN deprecated" };
+    const out = run(DRAFT_ASK, [text(DRAFT), noisy, done(DRAFT)]);
+    expect(rendered(out)).toBe(DRAFT);
+    expect(finalOf(out)).toBe(DRAFT);
+  });
+});
+
 describe("gateNarrationStream — a quiet stream is never held open", () => {
   /** A source that yields `first`, then stalls until `release` is called. */
   function stalling(first: HarnessChunk) {
@@ -266,5 +336,33 @@ describe("gateNarrationStream — a quiet stream is never held open", () => {
       if (c.type === "text") out += c.text;
     }
     expect(out).toBe("");
+  });
+
+  test("teardown after an idle release does not wait on the stalled source", async () => {
+    // Kai + Lena, #587: an async generator serialises its queue, so
+    // `it.return()` sits behind the `next()` the idle release left
+    // outstanding. Awaiting it in the `finally` wedged /stop and every other
+    // mid-stall abort — both reviewers reproduced it as a hang.
+    let pulls = 0;
+    async function* stalled(): AsyncGenerator<HarnessChunk> {
+      pulls++;
+      yield text("Buscando la nota del contrato de energía.");
+      pulls++;
+      await new Promise<void>(() => {}); // never resolves
+      yield done("x");
+    }
+    const it = gateNarrationStream(stalled(), EN, 20);
+    const first = await it.next();
+    expect(first.done).toBe(false);
+
+    const started = Date.now();
+    // This is the assertion: it must RESOLVE, and promptly.
+    const closed = await Promise.race([
+      it.return(undefined as never).then(() => "returned" as const),
+      new Promise<"hung">((r) => setTimeout(() => r("hung"), 1_000)),
+    ]);
+    expect(closed).toBe("returned");
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(pulls).toBe(2);
   });
 });

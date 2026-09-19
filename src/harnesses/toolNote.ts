@@ -76,6 +76,14 @@ export interface ToolLocation {
 export interface ToolCallDetail {
   /** Single-line, length-capped title — identical to `buildToolNote(...)`. */
   title: string;
+  /**
+   * The tool's own name as the harness reported it (collapsed, not
+   * normalised), when it reported one at all. `title` is presentational and
+   * ambiguous — `"tool: bash"` and `"Bash: git status"` put the name on
+   * opposite sides of the colon — so any consumer that needs to REASON about
+   * which tool ran reads this instead of parsing the title.
+   */
+  name?: string;
   /** ACP ToolKind, used for the panel icon. */
   kind: ToolKind;
   /** File paths to surface as clickable links. Empty for non-file tools. */
@@ -250,6 +258,48 @@ function normaliseName(name: string): string {
 }
 
 /**
+ * Tools that TRANSMIT text to someone other than the principal: mail, chat,
+ * SMS, a post, a push notification.
+ *
+ * These matter to the narration gate (#580). Text written immediately before
+ * such a call is far more likely to be the PAYLOAD — a draft the principal
+ * asked for in the recipient's language — than narration about the call, and
+ * the reply-language rule explicitly protects that draft ("text you compose
+ * FOR a third party is still written in that party's language"). Matched as
+ * substrings of the normalised name so the many wrappers around one verb
+ * (`send_message`, `mcp__gmail__send_email`, `slack_post_message`) all hit.
+ *
+ * Deliberately narrow: each entry costs the gate a real boundary, so this is
+ * a list of verbs that SEND, not of tools that merely touch the outside world
+ * (`fetch`, `search` and friends stay gated).
+ */
+const TRANSMIT_NAME_PARTS = [
+  "send",
+  "mail",
+  "message",
+  "notify",
+  "post",
+  "reply",
+  "sms",
+  "tweet",
+  "publish",
+  "broadcast"
+] as const;
+
+/**
+ * Does this tool transmit user-visible content to a third party?
+ *
+ * Returns false when the name is missing: an unnamed tool is not evidence of
+ * a send, and defaulting to true here would silently disable the gate for any
+ * harness that fails to report names.
+ */
+export function toolTransmitsContent(name: string | undefined): boolean {
+  if (!name) return false;
+  const n = normaliseName(name);
+  return TRANSMIT_NAME_PARTS.some((part) => n.includes(part));
+}
+
+/**
  * Map a tool to its ACP `kind`. Prefers the tool NAME (Read→read, Bash→execute)
  * and falls back to input FIELD names when the name is unknown/absent, mirroring
  * how {@link buildToolNote} extracts detail. Defaults to `other`.
@@ -307,6 +357,7 @@ export function buildToolCall(
   const name = typeof toolName === "string" ? collapse(toolName) : "";
   return {
     title: buildToolNote(toolName, input),
+    ...(name ? { name } : {}),
     kind: classifyKind(name, input),
     locations: extractLocations(input)
   };
