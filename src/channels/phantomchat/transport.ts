@@ -15,6 +15,7 @@
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
 import { log } from "../../lib/logger.ts";
+import { bumpCounters } from "../../lib/persistedCounters.ts";
 import type { ChannelTransport } from "../core/types.ts";
 import type { NTNostrEvent } from "../../lib/nostrCrypto.ts";
 import {
@@ -815,6 +816,10 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       originalEventId,
       attempts: delays.length,
     });
+    // Feed 2 of #585: the give-up count is the only queryable signal that a
+    // reply was genuinely lost — relay quarantine is already fed via
+    // verifyStored, so only the number was missing.
+    bumpCounters({ [`delivery.lost.${label}`]: 1 });
   }
 
   /**
