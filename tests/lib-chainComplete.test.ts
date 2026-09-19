@@ -369,6 +369,43 @@ describe("completeOverChain failure diagnostics (#595)", () => {
     }
   });
 
+  test("the exhaustion line names SKIPPED and EMPTY harnesses too", async () => {
+    // A chain can come up empty without a single throw: benched harnesses
+    // plus one that answered nothing. If only thrown failures were recorded,
+    // the judge's fail-open would leave no line at all here.
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    const cooldown = new CooldownStore();
+    cooldown.markFailure("codex");
+    try {
+      await expect(
+        completeOverChain(
+          [fake("codex"), fake("pi"), fake("claude")],
+          async (h) => {
+            if (h.id === "pi") return "";
+            throw new HarnessCompletionError(
+              errChunk({ error: "claude exited with code 1" }),
+            );
+          },
+          { ...LABEL, cooldown },
+        ),
+      ).rejects.toThrow("claude exited with code 1");
+      const exhausted = lines
+        .map((l) => JSON.parse(l))
+        .filter((l) => l.msg === "test: no harness completed — chain exhausted");
+      expect(exhausted).toHaveLength(1);
+      // Only two harnesses were actually invoked; all three are accounted for.
+      expect(exhausted[0].attempted).toBe(2);
+      expect(exhausted[0].causes).toEqual([
+        { harnessId: "codex", cause: "cooldown_skipped" },
+        { harnessId: "pi", cause: "empty_completion" },
+        { harnessId: "claude", cause: "other" },
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
   test("an ABORTED chain logs no exhaustion line — nobody declined", async () => {
     const lines: string[] = [];
     const restore = setLogSink((line) => lines.push(line));

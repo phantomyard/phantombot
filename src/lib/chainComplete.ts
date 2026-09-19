@@ -112,7 +112,14 @@ export async function completeOverChain(
   const causes: { harnessId: string; cause: string }[] = [];
   for (const [i, harness] of harnesses.entries()) {
     if (options.signal?.aborted) break;
-    if (cooled.has(harness.id)) continue;
+    if (cooled.has(harness.id)) {
+      // Not a failure, but it IS a reason this harness contributed nothing.
+      // Left out, an exhaustion line reads as a two-harness outage when the
+      // third was simply benched — and a chain that never ran anything at all
+      // would log nothing whatsoever.
+      causes.push({ harnessId: harness.id, cause: "cooldown_skipped" });
+      continue;
+    }
     attempted++;
     try {
       const text = await attempt(harness);
@@ -123,6 +130,7 @@ export async function completeOverChain(
           harnessId: harness.id,
         });
         lastError = new Error(`${harness.id} returned an empty completion`);
+        causes.push({ harnessId: harness.id, cause: "empty_completion" });
         continue;
       }
       cooldown.markSuccess(harness.id);
@@ -169,9 +177,11 @@ export async function completeOverChain(
 
   // Nothing answered. For durable facts that is a dropped batch; for the
   // threat judge it is a FAIL-OPEN — every untrusted input for the length of
-  // the outage goes unscreened. Either way it deserves a record naming what
-  // each harness died of, because a chain-wide quota window and a chain-wide
-  // misconfiguration look identical from the one rethrown error.
+  // the outage goes unscreened. Either way it deserves a record naming why
+  // EVERY harness contributed nothing — failed (with its classified cause),
+  // skipped for cooldown, or answered empty — because a chain-wide quota
+  // window and a chain-wide misconfiguration look identical from the one
+  // rethrown error.
   if (!options.signal?.aborted && causes.length > 0) {
     log.error(`${options.label}: no harness completed — chain exhausted`, {
       attempted,
