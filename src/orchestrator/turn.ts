@@ -59,6 +59,7 @@ import { loadPersona } from "../persona/loader.ts";
 import { buildDailyRecall } from "../lib/dailyRecall.ts";
 import { isNightlyConversation } from "../lib/nightly.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
+import { gateNarrationStream } from "../lib/narrationStreamGate.ts";
 import type { ToolCallDetail } from "../harnesses/toolNote.ts";
 import type { MemoryStore, TurnOrigin } from "../memory/store.ts";
 import { DEFAULT_PROMPT_CACHE, type FactSource, type PromptCacheSettings } from "../config.ts";
@@ -821,7 +822,13 @@ async function* runTurnBody(
   };
 
   try {
-    for await (const chunk of runWithFallback(
+    // #580 (second half): withhold pre-tool narration that is confidently in
+    // a language the user did not write in. Applied HERE, above every
+    // consumer, so ACP, the TUI and `ask` are covered as well as the two chat
+    // channels — they stream text straight through and had no gate at all.
+    // Only for turns that asked for narration: `toolNarration` is opt-in, and
+    // a turn without it emits none, so there is nothing to gate.
+    const upstream = runWithFallback(
       input.harnesses,
       {
         systemPrompt,
@@ -850,7 +857,12 @@ async function* runTurnBody(
         signal: input.signal,
       },
       { onToolCall: toolSink },
-    )) {
+    );
+    const stream =
+      input.toolNarration === true
+        ? gateNarrationStream(upstream, input.userMessage)
+        : upstream;
+    for await (const chunk of stream) {
       if (chunk.type === "text") finalText += chunk.text;
       if (chunk.type === "done") {
         // The done chunk carries the authoritative finalText — prefer it
