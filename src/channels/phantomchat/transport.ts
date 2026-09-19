@@ -771,6 +771,10 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
         });
         return;
       }
+      // rewrap() is async (fresh ephemeral key + AES). A close() during it must
+      // not be followed by relay work: publishing into a closed pool re-opens
+      // sockets after teardown.
+      if (this.closed) return;
 
       const targets = this.relayHealth.publishTargets();
       log.info("phantomchat: retrying undelivered wrap", {
@@ -782,6 +786,13 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
         relays: targets.length,
       });
       await Promise.all(this.publishToTargets(fresh, targets));
+      // Same again on the other side of publish settlement, before the
+      // read-back arms its settle timer and re-queries every relay. Today
+      // verifyStored() re-checks `closed` on entry too, so this line is
+      // belt-and-braces — it keeps the ladder correct on its own terms rather
+      // than relying on a callee's internal guard, which is the kind of
+      // dependency that breaks silently when the callee is refactored.
+      if (this.closed) return;
       const missing = await this.verifyStored(
         fresh,
         this.testTiming.readback,

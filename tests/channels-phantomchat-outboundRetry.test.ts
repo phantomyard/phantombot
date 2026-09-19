@@ -209,3 +209,83 @@ describe("outbound delivery retry (#542)", () => {
     expect(published.length).toBe(1);
   });
 });
+
+/**
+ * Teardown is only safe if the ladder re-checks `closed` at every await inside
+ * an attempt, not just around its sleep. These two close mid-ATTEMPT — the
+ * timer has already fired — and prove nothing further reaches the relays.
+ */
+describe("close() during an in-flight retry attempt", () => {
+  test("a close while re-wrapping starts no publish", async () => {
+    const sender = generateSecretKey();
+    const { pool, published } = fakePool(() => false);
+    const t = transportFor(sender, pool);
+
+    // Drive the ladder directly so the close lands inside rewrap(), which is
+    // otherwise a few unobservable milliseconds of crypto.
+    const rewrap = async (): Promise<NTNostrEvent> => {
+      const { event } = await wrapV2(sender, getPublicKey(sender), "hello");
+      t.close();
+      return event;
+    };
+    await (
+      t as unknown as {
+        retryOutbound(
+          rewrap: () => Promise<NTNostrEvent>,
+          originalEventId: string,
+          label: string,
+        ): Promise<void>;
+      }
+    ).retryOutbound(rewrap, "original-id", "dm");
+
+    await settle(60);
+    expect(published.length).toBe(0);
+  });
+
+  test("a close while the publish settles starts no read-back", async () => {
+    const sender = generateSecretKey();
+    const published: NTNostrEvent[] = [];
+    const subscribedIds: string[] = [];
+    let releasePublish: (() => void) | undefined;
+    const pool = {
+      subscribeMany(
+        _relays: string[],
+        filter: NostrFilter,
+        params: { onevent: (e: NTNostrEvent) => void; oneose?: () => void },
+      ) {
+        if (filter.ids?.[0]) subscribedIds.push(filter.ids[0]);
+        queueMicrotask(() => params.oneose?.());
+        return { close() {} };
+      },
+      publish(relays: string[], event: NTNostrEvent) {
+        published.push(event);
+        if (published.length === 1)
+          return relays.map(() => Promise.resolve("ok"));
+        // The retry publish hangs until we close, so close lands between
+        // publish settlement and read-back.
+        return relays.map(
+          () =>
+            new Promise<string>((resolve) => {
+              releasePublish = () => resolve("ok");
+            }),
+        );
+      },
+      close() {},
+    };
+    const t = transportFor(sender, pool);
+
+    await t.sendMessage(getPublicKey(generateSecretKey()), "hello");
+    await until(() => published.length >= 2, "the retry publish");
+    const readBacksBefore = subscribedIds.length;
+
+    t.close();
+    releasePublish?.();
+    await settle(80);
+
+    // The retry's own event id was never read back: no relay query, no settle
+    // timer, nothing holding the pool open after close().
+    expect(subscribedIds.length).toBe(readBacksBefore);
+    expect(subscribedIds).not.toContain(published[1]!.id);
+    expect(published.length).toBe(2);
+  });
+});
