@@ -1030,3 +1030,113 @@ describe("rememberServed", () => {
     expect(rememberServed(history, "c", "claude")).toBe(true);
   });
 });
+
+/**
+ * The fall-through log line is the ONLY external evidence that the quota
+ * handling from #591 ran. Before #592 it carried `error` + `httpStatus` only,
+ * so a rate limit and a crash logged identical text — which is how a working
+ * fix got diagnosed as broken from the journal alone.
+ */
+describe("recoverable fall-through diagnostics", () => {
+  const fallThroughLines = (lines: string[]) =>
+    lines
+      .map((line) => JSON.parse(line))
+      .filter(
+        (line) =>
+          line.msg === "orchestrator: harness recoverable error, falling through",
+      );
+
+  test("logs the classified cause, not just the opaque exit line", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      const first = new FakeHarness("codex", [
+        {
+          type: "error",
+          error: "codex exited with code 1",
+          recoverable: true,
+          stderrTail: ["ERROR: You've hit your usage limit."],
+        },
+      ]);
+      const second = new FakeHarness("pi", [
+        { type: "done", finalText: "fallback answer" },
+      ]);
+      await collect(
+        runWithFallback([first, second], newRequest(), {
+          cooldown: new CooldownStore(),
+        }),
+      );
+      const logged = fallThroughLines(lines);
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).toMatchObject({
+        harnessId: "codex",
+        cause: "rate_limit",
+        nextHarnessId: "pi",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  test("a crash with the SAME error line is distinguishable from a quota", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      const first = new FakeHarness("codex", [
+        {
+          type: "error",
+          error: "codex exited with code 1",
+          recoverable: true,
+          stderrTail: ["thread 'main' panicked at src/main.rs:12"],
+        },
+      ]);
+      const second = new FakeHarness("pi", [
+        { type: "done", finalText: "fallback answer" },
+      ]);
+      await collect(
+        runWithFallback([first, second], newRequest(), {
+          cooldown: new CooldownStore(),
+        }),
+      );
+      const logged = fallThroughLines(lines);
+      expect(logged).toHaveLength(1);
+      // Same `error` string as the quota case above — only `cause` separates
+      // them, which is exactly the point of the field.
+      expect(logged[0].error).toBe("codex exited with code 1");
+      expect(logged[0].cause).toBe("other");
+    } finally {
+      restore();
+    }
+  });
+
+  test("reports the cooldown window the failure actually produced", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      const first = new FakeHarness("codex", [
+        {
+          type: "error",
+          error: "codex exited with code 1",
+          recoverable: true,
+          retryAfterMs: 4 * 60 * 60 * 1000,
+          stderrTail: ["ERROR: You've hit your usage limit."],
+        },
+      ]);
+      const second = new FakeHarness("pi", [
+        { type: "done", finalText: "fallback answer" },
+      ]);
+      const cooldown = new CooldownStore();
+      await collect(runWithFallback([first, second], newRequest(), { cooldown }));
+      const logged = fallThroughLines(lines);
+      expect(logged[0].retryAfterMs).toBe(4 * 60 * 60 * 1000);
+      // Not merely present: it must match the window the store really holds,
+      // so the journal cannot claim a bench the process is not honouring.
+      expect(logged[0].cooldownUntilMs).toBe(
+        cooldown.isCooledDown("codex").untilMs,
+      );
+      expect(logged[0].cooldownUntilMs).toBeGreaterThan(Date.now());
+    } finally {
+      restore();
+    }
+  });
+});

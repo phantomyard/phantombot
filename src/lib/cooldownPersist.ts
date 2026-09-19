@@ -80,20 +80,67 @@ export async function loadCooldownState(
  * is fire-and-forget: we never await it and we never let it reject. Losing a
  * write costs one re-probe after a restart; blocking a turn on a disk write
  * would cost the user their reply.
+ *
+ * Fire-and-forget is NOT the same as unordered, though, and the first cut of
+ * this file conflated the two. `writeFileAtomic` is write-temp-then-rename;
+ * two saves in flight at once are two temp files racing to rename over the
+ * same path, and the rename order is not the call order. Two rapid failures
+ * — which is precisely what a chain fall-through produces, one markFailure
+ * per harness — could therefore leave the EARLIER snapshot on disk and lose
+ * the later window. Self-healing after one extra probe, but silent and
+ * genuinely wrong.
+ *
+ * So: serialise. Each save chains onto the previous one's settlement, and
+ * because only the newest snapshot has any value, a save that arrives while
+ * another is in flight simply REPLACES any queued-but-unwritten snapshot
+ * rather than queueing behind it. A burst of N saves costs at most two
+ * writes, and the last one always wins.
  */
 export function fileCooldownPersistence(
   path: string = cooldownPath(),
 ): CooldownPersistence {
+  // The tail of the write chain. Never rejects (every link catches), so a
+  // failed write cannot poison the ones after it.
+  let tail: Promise<void> = Promise.resolve();
+  // Newest snapshot not yet handed to a write. `undefined` = nothing pending.
+  let pending: string | undefined;
+  let draining = false;
+
+  const drain = (): void => {
+    if (draining) return;
+    draining = true;
+    tail = tail.then(async () => {
+      try {
+        while (pending !== undefined) {
+          const body = pending;
+          pending = undefined;
+          try {
+            await writeFileAtomic(path, body);
+          } catch (e) {
+            log.debug("cooldown: failed to persist state", {
+              path,
+              error: (e as Error).message,
+            });
+          }
+        }
+      } finally {
+        draining = false;
+      }
+    });
+  };
+
   return {
     save(entries) {
-      void writeFileAtomic(path, JSON.stringify(entries, null, 2) + "\n").catch(
-        (e: Error) => {
-          log.debug("cooldown: failed to persist state", {
-            path,
-            error: e.message,
-          });
-        },
-      );
+      pending = JSON.stringify(entries, null, 2) + "\n";
+      drain();
+    },
+    /**
+     * Test/shutdown hook: resolve once every queued write has settled. Nothing
+     * on the turn path awaits this — it exists so a test can assert on the
+     * file without polling, and so a future graceful shutdown can flush.
+     */
+    settled(): Promise<void> {
+      return tail;
     },
   };
 }
