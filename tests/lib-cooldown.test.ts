@@ -11,6 +11,7 @@ import {
   BASE_COOLDOWN_MS,
   CooldownStore,
   JITTER_RATIO,
+  MAX_EXPLICIT_COOLDOWN_MS,
   MAX_COOLDOWN_MS,
 } from "../src/lib/cooldown.ts";
 
@@ -192,11 +193,29 @@ describe("CooldownStore — Retry-After (issue #559)", () => {
     expect(r.untilMs).toBe(45_000);
   });
 
-  test("clamped to the 1h cap — a provider cannot cool us for a day", () => {
+  test("an EXPLICIT hint may exceed the ladder cap — a quota window is hours", () => {
     let now = 0;
     const s = new CooldownStore(() => 0.5, () => now);
-    const r = s.markFailure("gemini", { retryAfterMs: 9_000_000 });
-    expect(r.untilMs).toBe(MAX_COOLDOWN_MS);
+    // Four hours: the shape of a subscription quota ("try again at 8:58 PM"
+    // on a 16:58 failure). Clamping that to the ladder's 1h would re-probe a
+    // window we have been told is closed, three more times, for nothing.
+    const r = s.markFailure("codex", { retryAfterMs: 4 * 3_600_000 });
+    expect(r.untilMs).toBe(4 * 3_600_000);
+    expect(r.untilMs).toBeGreaterThan(MAX_COOLDOWN_MS);
+  });
+
+  test("clamped to the 6h explicit cap — a provider cannot cool us for a day", () => {
+    let now = 0;
+    const s = new CooldownStore(() => 0.5, () => now);
+    const r = s.markFailure("gemini", { retryAfterMs: 86_400_000 });
+    expect(r.untilMs).toBe(MAX_EXPLICIT_COOLDOWN_MS);
+  });
+
+  test("the LADDER is still capped at 1h — a guess never buys hours", () => {
+    let now = 0;
+    const s = new CooldownStore(() => 0.5, () => now);
+    for (let i = 0; i < 12; i++) s.markFailure("gemini");
+    expect(s.isCooledDown("gemini").untilMs).toBe(MAX_COOLDOWN_MS);
   });
 
   test("the failure count still increments — post-window re-failure lengthens", () => {
@@ -216,5 +235,65 @@ describe("CooldownStore — Retry-After (issue #559)", () => {
     const s = new CooldownStore(() => 0.5, () => now);
     const r = s.markFailure("gemini", { retryAfterMs: 0 });
     expect(r.untilMs - now).toBe(BASE_COOLDOWN_MS);
+  });
+});
+
+describe("persistence (hydrate/snapshot)", () => {
+  test("adopts a window that is still open", () => {
+    let now = 1_000_000;
+    const s = new CooldownStore(() => 0.5, () => now);
+    s.hydrate({ codex: { consecutiveFailures: 3, cooldownUntilMs: now + 60_000 } });
+    const status = s.isCooledDown("codex");
+    expect(status.cooled).toBe(true);
+    expect(status.consecutiveFailures).toBe(3);
+  });
+
+  test("DROPS an expired window — a box down for a day comes up clean", () => {
+    let now = 1_000_000;
+    const s = new CooldownStore(() => 0.5, () => now);
+    s.hydrate({ codex: { consecutiveFailures: 3, cooldownUntilMs: now - 1 } });
+    expect(s.isCooledDown("codex").cooled).toBe(false);
+    expect(s.isCooledDown("codex").consecutiveFailures).toBe(0);
+  });
+
+  test("ignores malformed entries rather than throwing", () => {
+    const s = new CooldownStore(() => 0.5, () => 0);
+    s.hydrate({
+      codex: { cooldownUntilMs: "soon" } as never,
+      pi: null as never,
+    });
+    expect(s.snapshot()).toEqual({});
+  });
+
+  test("writes through on failure and on success", () => {
+    let now = 0;
+    const writes: Record<string, unknown>[] = [];
+    const s = new CooldownStore(() => 0.5, () => now);
+    s.hydrate({}, { save: (e) => void writes.push(e) });
+    s.markFailure("codex", { retryAfterMs: 60_000 });
+    expect(writes.at(-1)).toEqual({
+      codex: { consecutiveFailures: 1, cooldownUntilMs: 60_000 },
+    });
+    s.markSuccess("codex");
+    expect(writes.at(-1)).toEqual({});
+  });
+
+  test("a success for an UNKNOWN harness writes nothing", () => {
+    const writes: unknown[] = [];
+    const s = new CooldownStore(() => 0.5, () => 0);
+    s.hydrate({}, { save: (e) => void writes.push(e) });
+    s.markSuccess("never-failed");
+    expect(writes).toHaveLength(0);
+  });
+
+  test("a persistence sink that throws cannot break a turn", () => {
+    const s = new CooldownStore(() => 0.5, () => 0);
+    s.hydrate({}, {
+      save() {
+        throw new Error("disk full");
+      },
+    });
+    expect(() => s.markFailure("codex")).not.toThrow();
+    expect(s.isCooledDown("codex").cooled).toBe(true);
   });
 });

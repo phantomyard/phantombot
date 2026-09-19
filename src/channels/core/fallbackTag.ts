@@ -35,7 +35,12 @@ export function coarseFallbackReason(reason: string): string {
   const r = reason.toLowerCase();
   if (r.includes("cooldown")) return "cooldown";
   if (r.includes("payload cap")) return "payload cap";
-  switch (classifyFailure(reason)) {
+  return coarseCause(classifyFailure(reason));
+}
+
+/** Audience-safe rendering of an already-classified cause. */
+export function coarseCause(cause: string): string {
+  switch (cause) {
     case "rate_limit":
       return "rate limit";
     case "auth":
@@ -55,10 +60,19 @@ export function buildFallbackReplyTag(
   const servedBy = readString(meta?.harnessId);
   const fallbackFor = readString(meta?.fallbackFor);
   if (!servedBy || !fallbackFor || servedBy === fallbackFor) return undefined;
-  const reason = readString(meta?.fallbackReason) ?? "primary unavailable";
-  return `— answered by ${servedBy} fallback (${fallbackFor}: ${
-    coarseFallbackReason(reason)
-  })`;
+  // Prefer the cause the ORCHESTRATOR classified. It had the dying harness's
+  // stderr in hand; all that survives into `fallbackReason` is the exit line
+  // ("codex exited with code 1"), which names no cause, so re-deriving the
+  // class here rendered every subprocess death — rate limits included — as
+  // the catch-all "unavailable". The reason string stays as the fallback for
+  // skip stamps (cooldown, payload cap) and for older stamped metadata.
+  const cause = readString(meta?.fallbackCause);
+  const coarse = cause
+    ? coarseCause(cause)
+    : coarseFallbackReason(
+        readString(meta?.fallbackReason) ?? "primary unavailable",
+      );
+  return `— answered by ${servedBy} fallback (${fallbackFor}: ${coarse})`;
 }
 
 /** Append the tag to outgoing TEXT reply text (never the voice path).

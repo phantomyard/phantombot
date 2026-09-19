@@ -128,3 +128,52 @@ describe("appendFallbackReplyTag (#559)", () => {
     expect(out).toBe("");
   });
 });
+
+describe("the CAUSE the orchestrator classified wins over the reason string", () => {
+  // The whole reason this exists: a CLI harness dies with "codex exited with
+  // code 1". Re-classifying that string here yields `other` → "unavailable",
+  // so a rate limit was reported to the user as an unexplained outage. The
+  // orchestrator had the stderr tail and knew better; it now stamps what it
+  // knew.
+  test("an uninformative exit line + a stamped cause renders the cause", () => {
+    expect(
+      buildFallbackReplyTag({
+        harnessId: "pi",
+        fallbackFor: "codex",
+        fallbackReason: "codex exited with code 1",
+        fallbackCause: "rate_limit",
+      }),
+    ).toContain("rate limit");
+  });
+
+  test("without the stamp the same line degrades to 'unavailable'", () => {
+    expect(
+      buildFallbackReplyTag({
+        harnessId: "pi",
+        fallbackFor: "codex",
+        fallbackReason: "codex exited with code 1",
+      }),
+    ).toContain("unavailable");
+  });
+
+  test("a skip stamp still reads from the reason (no cause to stamp)", () => {
+    expect(
+      buildFallbackReplyTag({
+        harnessId: "pi",
+        fallbackFor: "codex",
+        fallbackReason: "primary in cooldown (240s remaining)",
+      }),
+    ).toContain("cooldown");
+  });
+
+  test("an unknown cause value degrades safely rather than leaking it", () => {
+    const tag = buildFallbackReplyTag({
+      harnessId: "pi",
+      fallbackFor: "codex",
+      fallbackReason: "codex exited with code 1",
+      fallbackCause: "something_new",
+    })!;
+    expect(tag).toContain("unavailable");
+    expect(tag).not.toContain("something_new");
+  });
+});

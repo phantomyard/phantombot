@@ -67,6 +67,11 @@ import {
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { harnessAlerter } from "../lib/harnessAlert.ts";
+import { cooldownStore } from "../lib/cooldown.ts";
+import {
+  fileCooldownPersistence,
+  loadCooldownState,
+} from "../lib/cooldownPersist.ts";
 import { runNotify } from "./notify.ts";
 import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
 import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
@@ -756,6 +761,12 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // needed most.
   const alertPersona =
     adminListener?.persona ?? phantomchatPersonas[0]?.persona ?? defaultPersona;
+  // Re-adopt any cooldown window that is still open (see lib/cooldown.ts).
+  // `phantombot update` restarts the service, so without this a restart inside
+  // a provider's quota window re-probes a harness we have been TOLD is closed,
+  // and the user pays a guaranteed-failed round-trip for it.
+  cooldownStore.hydrate(await loadCooldownState(), fileCooldownPersistence());
+
   harnessAlerter.configure({
     host: hostname(),
     send: async (message: string) => {

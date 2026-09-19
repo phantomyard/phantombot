@@ -5,13 +5,25 @@ import { join } from "node:path";
 import {
   JUDGE_NARROWING,
   judgeThreat,
+  makeChainJudgeComplete,
   makeHarnessJudgeComplete,
   parseVerdict,
-  pickJudgeHarness,
   THREAT_THRESHOLD,
   type CompleteFn,
 } from "../src/lib/threatJudge.ts";
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
+import { CooldownStore } from "../src/lib/cooldown.ts";
+
+/** A fake harness that dies the way a CLI subprocess dies: an error chunk. */
+function failingHarness(id: string, error: string): Harness {
+  return {
+    id,
+    available: async () => true,
+    async *invoke(): AsyncGenerator<HarnessChunk> {
+      yield { type: "error", error, recoverable: true };
+    },
+  };
+}
 
 /** A fake harness that records the request it was invoked with. */
 function recordingHarness(id: string, reply: string): {
@@ -220,18 +232,62 @@ describe("JUDGE_NARROWING", () => {
   });
 });
 
-describe("pickJudgeHarness", () => {
-  it("returns the PRIMARY harness (chain[0]) regardless of id — never assumes claude", () => {
-    const { harness: gemini } = recordingHarness("gemini", "x");
-    const { harness: pi } = recordingHarness("pi", "x");
+describe("makeChainJudgeComplete", () => {
+  const cfg = { harnessIdleTimeoutMs: 1000, harnessHardTimeoutMs: 2000 };
+
+  it("uses the PRIMARY harness regardless of id — never assumes claude", async () => {
+    const { harness: gemini } = recordingHarness("gemini", "from-gemini");
+    const { harness: pi } = recordingHarness("pi", "from-pi");
     // A gemini-only / pi-first chain (user never installed claude) still
-    // yields a judge — the primary. This is the whole point of Andrew's fix.
-    expect(pickJudgeHarness([gemini, pi])?.id).toBe("gemini");
-    expect(pickJudgeHarness([pi])?.id).toBe("pi");
+    // yields a judge. This is the whole point of Andrew's original fix.
+    expect(await makeChainJudgeComplete([gemini, pi], cfg)!("s", "u")).toBe(
+      "from-gemini",
+    );
+    expect(await makeChainJudgeComplete([pi], cfg)!("s", "u")).toBe("from-pi");
   });
 
   it("returns undefined only for an empty chain", () => {
-    expect(pickJudgeHarness([])).toBeUndefined();
+    expect(makeChainJudgeComplete([], cfg)).toBeUndefined();
+  });
+
+  it("FALLS OVER to the next harness when the primary fails", async () => {
+    // The bug this closes: the judge ran on chain[0] alone, so a primary out
+    // of quota took the screener down — and the screener fails OPEN, which
+    // silently disables screening of every untrusted input.
+    const { harness: pi } = recordingHarness("pi", "from-pi");
+    const complete = makeChainJudgeComplete(
+      [failingHarness("codex", "codex exited with code 1"), pi],
+      cfg,
+      undefined,
+      new CooldownStore(),
+    )!;
+    expect(await complete("s", "u")).toBe("from-pi");
+  });
+
+  it("SKIPS a harness that is already in cooldown", async () => {
+    const cooldown = new CooldownStore();
+    cooldown.markFailure("codex");
+    const codex = failingHarness("codex", "must not be invoked");
+    const { harness: pi } = recordingHarness("pi", "from-pi");
+    let codexInvoked = false;
+    const watched: Harness = {
+      ...codex,
+      async *invoke(req: HarnessRequest) {
+        codexInvoked = true;
+        yield* codex.invoke(req);
+      },
+    };
+    const complete = makeChainJudgeComplete([watched, pi], cfg, undefined, cooldown)!;
+    expect(await complete("s", "u")).toBe("from-pi");
+    expect(codexInvoked).toBe(false);
+  });
+
+  it("still screens when EVERY harness is cooled — never silently fails open", async () => {
+    const cooldown = new CooldownStore();
+    cooldown.markFailure("pi");
+    const { harness: pi } = recordingHarness("pi", "from-pi");
+    const complete = makeChainJudgeComplete([pi], cfg, undefined, cooldown)!;
+    expect(await complete("s", "u")).toBe("from-pi");
   });
 });
 

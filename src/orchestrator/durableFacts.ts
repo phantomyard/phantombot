@@ -43,6 +43,8 @@ import type {
 } from "../config.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import { log } from "../lib/logger.ts";
+import { completeOverChain } from "../lib/chainComplete.ts";
+import type { CooldownStore } from "../lib/cooldown.ts";
 import type {
   DurableFact,
   FactPruneCutoffs,
@@ -391,13 +393,25 @@ export function makeExtractionComplete(
   harnesses: Harness[],
   config: Pick<Config, "harnessIdleTimeoutMs" | "harnessHardTimeoutMs" | "harnessToolTimeoutMs" | "harnessThinkingTimeoutMs">,
   workingDir?: string,
+  cooldown?: CooldownStore,
 ): ExtractComplete | undefined {
-  const harness = harnesses[0];
-  if (!harness) return undefined;
+  if (harnesses.length === 0) return undefined;
   // Floor at the running user's home so the spawn never inherits an
   // inaccessible ambient cwd (→ EACCES). Same reasoning as the judge.
   const cwd = workingDir ?? homedir();
-  return async (systemPrompt, userMessage, signal) => {
+  return (systemPrompt, userMessage, signal) =>
+    completeOverChain(
+      harnesses,
+      (harness) => runExtraction(harness, systemPrompt, userMessage, signal),
+      { label: "durable-facts", cooldown, signal },
+    );
+
+  async function runExtraction(
+    harness: Harness,
+    systemPrompt: string,
+    userMessage: string,
+    signal: AbortSignal | undefined,
+  ): Promise<string> {
     const chunks: string[] = [];
     for await (const chunk of harness.invoke({
       systemPrompt,

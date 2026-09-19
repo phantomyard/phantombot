@@ -92,6 +92,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
+import { completeOverChain } from "./chainComplete.ts";
+import type { CooldownStore } from "./cooldown.ts";
 
 /** At or above this score, escalate to the principal. */
 export const THREAT_THRESHOLD = 80;
@@ -407,22 +409,6 @@ function clamp(n: number, lo: number, hi: number): number {
 }
 
 /**
- * The judge runs on the turn's PRIMARY harness — chain[0], whichever binary
- * the user configured. We deliberately do NOT look for a specific harness id
- * (the earlier cut hard-coded "claude", which silently disabled screening for
- * anyone who installed only pi/codex — exactly the assumption Andrew
- * flagged). Every supported harness can run a capability-restricted completion
- * (toolsMode "none"), so the primary is always a valid judge.
- *
- * Returns undefined only when the chain is EMPTY (no harness at all) — in
- * which case the turn couldn't run anyway, and the screener fails open. Tests
- * that inject a fake single-harness chain therefore screen on that fake.
- */
-export function pickJudgeHarness(harnesses: Harness[]): Harness | undefined {
-  return harnesses[0];
-}
-
-/**
  * Build the tool-less completion transport from a harness. Invokes it in
  * `toolsMode: "none"` (each harness maps that to its native capability-
  * restriction flag) with no persona — a capability-restricted classifier —
@@ -489,23 +475,39 @@ export function makeHarnessJudgeComplete(
 }
 
 /**
- * Convenience: build the judge transport from a turn's harness chain + config,
- * or undefined only if the chain is empty. `config` is accepted for symmetry /
- * future model selection; only the timeouts are read today. `workingDir` is the
- * accessible cwd the judge spawns in (see makeHarnessJudgeComplete) — pass the
- * persona's own dir; it is floored at homedir() if omitted.
+ * Build the judge transport from a turn's harness chain + config, or undefined
+ * only if the chain is EMPTY.
+ *
+ * The judge runs over the WHOLE chain, not just its head. It used to take
+ * `chain[0]` and stop there, which meant a primary that was out of quota took
+ * the screener down with it — and the screener fails OPEN, so an exhausted
+ * subscription silently disabled the perimeter that stands in front of every
+ * untrusted input. Every supported harness can run a capability-restricted
+ * completion (toolsMode "none"), so every harness in the chain is a valid
+ * judge and there is no reason to prefer a dead one.
+ *
+ * `config` is accepted for symmetry / future model selection; only the
+ * timeouts are read today. `workingDir` is the accessible cwd the judge spawns
+ * in (see makeHarnessJudgeComplete) — pass the persona's own dir; it is
+ * floored at homedir() if omitted.
  */
 export function makeChainJudgeComplete(
   harnesses: Harness[],
   config: Pick<Config, "harnessIdleTimeoutMs" | "harnessHardTimeoutMs">,
   workingDir?: string,
+  cooldown?: CooldownStore,
 ): CompleteFn | undefined {
-  const harness = pickJudgeHarness(harnesses);
-  if (!harness) return undefined;
-  return makeHarnessJudgeComplete(
-    harness,
-    config.harnessIdleTimeoutMs,
-    config.harnessHardTimeoutMs,
-    workingDir,
-  );
+  if (harnesses.length === 0) return undefined;
+  return (systemPrompt, userMessage, signal) =>
+    completeOverChain(
+      harnesses,
+      (harness) =>
+        makeHarnessJudgeComplete(
+          harness,
+          config.harnessIdleTimeoutMs,
+          config.harnessHardTimeoutMs,
+          workingDir,
+        )(systemPrompt, userMessage, signal),
+      { label: "threat-judge", cooldown, signal },
+    );
 }
