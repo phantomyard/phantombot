@@ -1,10 +1,20 @@
-import { describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { HarnessChunk } from "../src/harnesses/types.ts";
 import {
   createNarrationStreamGate,
   gateNarrationStream,
 } from "../src/lib/narrationStreamGate.ts";
+import { readCounters } from "../src/lib/persistedCounters.ts";
 
 /** Feed a chunk script through the gate and collect what it emits. */
 function run(userMessage: string, chunks: HarnessChunk[]): HarnessChunk[] {
@@ -410,5 +420,77 @@ describe("gateNarrationStream — a quiet stream is never held open", () => {
     expect(closed).toBe("returned");
     expect(Date.now() - started).toBeLessThan(500);
     expect(pulls).toBe(2);
+  });
+});
+
+describe("narration stream gate — the #585 counters", () => {
+  // The counter store is a real file keyed off XDG_STATE_HOME; give this
+  // block its own sandbox so the assertions are self-contained. bun runs
+  // the tests of a file in order, so the env swap is safe here.
+  const prevState = process.env.XDG_STATE_HOME;
+  let workdir = "";
+  beforeEach(() => {
+    workdir = mkdtempSync(join(tmpdir(), "gate-counters-"));
+    process.env.XDG_STATE_HOME = workdir;
+  });
+  afterAll(() => {
+    if (prevState === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = prevState;
+    if (workdir) rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test("a drop is counted per (expected, actual) pair", async () => {
+    run(EN, [text("Miro la nota del contrato de energía."), progress()]);
+    expect(await readCounters()).toEqual({ "narration.drop.en.es": 1 });
+  });
+
+  test("multiple drops in one boundary are one batched bump", async () => {
+    run(EN, [
+      text("Miro la nota del contrato.\nBuscando la nota ahora."),
+      progress(),
+    ]);
+    expect(await readCounters()).toEqual({ "narration.drop.en.es": 2 });
+  });
+
+  test("a sending-tool keep is counted, not just logged", async () => {
+    const DRAFT_ASK =
+      "Send Jeffrey a short Dutch reply thanking him for the update.";
+    run(DRAFT_ASK, [
+      text("Hartelijk dank voor de update. Ik kom morgen langs."),
+      progress("send_message"),
+    ]);
+    expect(await readCounters()).toEqual({ "narration.sending-keep.en": 1 });
+  });
+
+  test("a shape rejection (long foreign block, non-send tool) is counted", async () => {
+    const long =
+      "Su contrato de energía comienza el veinte de septiembre. ".repeat(10);
+    run(EN, [text(long), progress()]);
+    expect(await readCounters()).toEqual({
+      "narration.shape-rejection.en": 1,
+    });
+  });
+
+  test("a clean turn bumps nothing", async () => {
+    run(EN, [text("The supply starts on 20-09, checking now."), progress()]);
+    expect(await readCounters()).toEqual({});
+  });
+
+  test("an idle release of held wrong-language text is counted", async () => {
+    // A source that yields one wrong-language line, then stalls — the
+    // idle race flushes the hold, and that escape hatch is counted.
+    let unblock: () => void = () => {};
+    const gate = new Promise<void>((r) => (unblock = r));
+    async function* src(): AsyncGenerator<HarnessChunk> {
+      yield text("Buscando la nota del contrato de energía.");
+      await gate;
+      yield { type: "done", finalText: "x" } as HarnessChunk;
+    }
+    const it = gateNarrationStream(src(), EN, 20);
+    const first = await it.next();
+    expect(first.done).toBe(false);
+    unblock();
+    for await (const _ of it) void _;
+    expect(await readCounters()).toEqual({ "narration.idle-release.en": 1 });
   });
 });
