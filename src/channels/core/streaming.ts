@@ -19,7 +19,10 @@
 
 import type { TelegramStreamingSettings } from "../../config.ts";
 import type { StreamSegmenterOptions } from "../streamSegmenter.ts";
-import { detectLanguage } from "../../lib/languageGate.ts";
+import {
+  detectLanguage,
+  expectedLanguageOf,
+} from "../../lib/languageGate.ts";
 import { log } from "../../lib/logger.ts";
 
 /**
@@ -130,7 +133,7 @@ export function createNarrationController(
   // change mid-turn, and `undefined` here (too short / unscoreable) must mean
   // "gate off for this turn" rather than "re-guess on the next bubble".
   const expected = opts.expectedLanguageSource
-    ? detectLanguage(opts.expectedLanguageSource)
+    ? expectedLanguageOf(opts.expectedLanguageSource)
     : undefined;
 
   /**

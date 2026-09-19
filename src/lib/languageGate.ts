@@ -52,6 +52,25 @@ const MIN_EXCLUSIVE_HITS = 2;
 const MIN_WINNER_SHARE = 0.75;
 /** Share of letters one non-Latin script must hold to decide by script alone. */
 const MIN_SCRIPT_SHARE = 0.6;
+/**
+ * Prose words of the user's message that decide the EXPECTED language.
+ *
+ * The two sides of the comparison fail differently, and the expected side is
+ * the dangerous one. An unreadable narration line is simply sent (the gate
+ * declines to act); an expected side read WRONG makes the gate act confidently
+ * against every correct narration line in the turn. The common shape that
+ * breaks it is a short question followed by a long paste in another language —
+ * "de build is kapot, wat betekent dit?" plus three lines of English log
+ * scores `en` at high confidence and then eats the Dutch narration.
+ *
+ * A user's own words are almost always at the START and quoted material
+ * follows, so `expectedLanguageOf` reads the opening paragraph first and only
+ * falls back to this many words of the whole message when the opening is too
+ * short to score. It is a heuristic, not a proof: a message that opens with a
+ * long quote and asks its question underneath is still mis-scored. The cost of
+ * being wrong stays one cosmetic narration line, logged at info.
+ */
+const EXPECTED_HEAD_WORDS = 40;
 
 /**
  * Non-Latin scripts, keyed by the code we report. Detecting at SCRIPT level is
@@ -247,9 +266,10 @@ function stripNonProse(text: string): string {
     .replace(/\d+/g, " ");
 }
 
-function tokenize(text: string): string[] {
+/** Tokenize text that has ALREADY been through `stripNonProse`. */
+function tokenize(prose: string): string[] {
   return (
-    stripNonProse(text)
+    prose
       .toLowerCase()
       .match(/[\p{L}]+(?:['’][\p{L}]+)?/gu) ?? []
   ).map((w) => w.replace(/’/g, "'"));
@@ -260,8 +280,20 @@ function tokenize(text: string): string[] {
  * which is the common case for short interstitials ("ok", "Checking…") and is
  * exactly the intended behaviour. Never throws.
  */
-export function detectLanguage(text: string): LanguageGuess | undefined {
-  const prose = stripNonProse(text);
+export function detectLanguage(
+  text: string,
+  opts?: {
+    /**
+     * Score only the first N prose words. Used for the EXPECTED side — see
+     * `EXPECTED_HEAD_WORDS`. Unset (the candidate side) scores everything.
+     */
+    headWords?: number;
+  },
+): LanguageGuess | undefined {
+  let prose = stripNonProse(text);
+  if (opts?.headWords !== undefined) {
+    prose = prose.split(/\s+/).filter(Boolean).slice(0, opts.headWords).join(" ");
+  }
 
   let latin = 0;
   const scriptCounts = new Map<string, number>();
@@ -288,7 +320,7 @@ export function detectLanguage(text: string): LanguageGuess | undefined {
   // sentence quoting a Chinese name. Refuse rather than score the remainder.
   if (scriptCounts.size > 0) return undefined;
 
-  const tokens = tokenize(text);
+  const tokens = tokenize(prose);
   if (tokens.length < MIN_TOKENS) return undefined;
 
   const hits = new Map<string, number>();
@@ -315,6 +347,30 @@ export function detectLanguage(text: string): LanguageGuess | undefined {
 }
 
 /**
+ * The language a turn's narration must be in, read from the user's message.
+ *
+ * Separate from `detectLanguage` so no caller can accidentally score the
+ * expected side the same way it scores a candidate: this side is head-capped,
+ * because it decides for the whole turn.
+ */
+export function expectedLanguageOf(
+  userMessage: string,
+): LanguageGuess | undefined {
+  // The user's own words first. A message that asks a question and then pastes
+  // something is by far the common shape, and the paste is usually both longer
+  // and in another language — so reading the whole message lets the quoted
+  // material outvote the question it is attached to.
+  const opening = userMessage.split(/\n\s*\n/, 1)[0] ?? "";
+  const fromOpening = detectLanguage(opening, {
+    headWords: EXPECTED_HEAD_WORDS,
+  });
+  if (fromOpening) return fromOpening;
+  // The opening was too short or too mixed to score (a bare "Hi Robbie," a
+  // one-word reply). Fall back to the head of the whole message.
+  return detectLanguage(userMessage, { headWords: EXPECTED_HEAD_WORDS });
+}
+
+/**
  * Should a narration line in `candidate` be withheld from a user who wrote in
  * `expected`?
  *
@@ -327,7 +383,7 @@ export function shouldWithholdNarration(
   expectedSource: string,
   candidate: string,
 ): boolean {
-  const expected = detectLanguage(expectedSource);
+  const expected = expectedLanguageOf(expectedSource);
   if (!expected) return false;
   const actual = detectLanguage(candidate);
   if (!actual) return false;

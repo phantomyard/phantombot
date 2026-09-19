@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   detectLanguage,
+  expectedLanguageOf,
   languageMarkerOwner,
   shouldWithholdNarration,
 } from "../src/lib/languageGate";
@@ -176,5 +177,50 @@ describe("shouldWithholdNarration", () => {
         "Opening the jaarnota now and pulling the total for you",
       ),
     ).toBe(false);
+  });
+});
+
+describe("expectedLanguageOf (#583 review)", () => {
+  // The two sides fail differently. An unreadable narration line is simply
+  // sent; an expected side read WRONG makes the gate act confidently against
+  // every correct narration line in the turn. So the expected side reads the
+  // user's own words first, not the material they pasted underneath.
+  const DUTCH_QUESTION_WITH_ENGLISH_PASTE = [
+    "de build is kapot, wat betekent dit?",
+    "",
+    "Error: the module could not be resolved because the import path does not",
+    "exist in this workspace and the build step therefore could not continue",
+    "with the rest of the compilation for these files.",
+  ].join("\n");
+
+  test("a long quoted paste does not outvote the question it is attached to", () => {
+    // Scored whole, the English paste wins and Dutch narration gets eaten.
+    expect(detectLanguage(DUTCH_QUESTION_WITH_ENGLISH_PASTE)?.code).toBe("en");
+    // Scored as the user's message, the Dutch question decides.
+    expect(expectedLanguageOf(DUTCH_QUESTION_WITH_ENGLISH_PASTE)?.code).toBe("nl");
+    expect(
+      shouldWithholdNarration(
+        DUTCH_QUESTION_WITH_ENGLISH_PASTE,
+        "Ik kijk even in het bestand voor je",
+      ),
+    ).toBe(false);
+  });
+
+  test("falls back to the whole message when the opening cannot be scored", () => {
+    const greeting = [
+      "Hi Robbie,",
+      "",
+      "Can you check the energy contract note and tell me what the total is?",
+    ].join("\n");
+    expect(expectedLanguageOf(greeting)?.code).toBe("en");
+  });
+
+  test("still catches the leak when there is no paste at all", () => {
+    expect(
+      shouldWithholdNarration(
+        "Robbie, can you have a read of the energy contract note you made yesterday?",
+        "Buscando la nota del contrato de energía.",
+      ),
+    ).toBe(true);
   });
 });
