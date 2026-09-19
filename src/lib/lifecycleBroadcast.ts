@@ -33,11 +33,22 @@
  *     user asked for.
  *
  * The "we're back" half needs to survive the restart, so the pre-restart step
- * records WHICH personas it warned in a small marker file next to the existing
+ * records WHO to tell in a small marker file next to the existing
  * `.pending-update.json`. Startup reads it, tells exactly those personas the
  * process is back, and deletes it. Persona NAMES only — never tokens or chat
  * ids: the accounts are re-resolved from config on the other side, so this
  * file is not a secret and a stale copy cannot leak one.
+ *
+ * Marker semantics (reworked in the restart-notify fix): the marker is
+ * written BEFORE any heads-up send, and `personas` lists everyone who gets
+ * the back-online line — the warned others AND, for /restart, the origin
+ * persona itself (its post-restart confirmation, mirroring how
+ * `.pending-update.json` confirms an update in the chat that typed it). The
+ * pre-restart heads-up is best-effort; THIS marker is the authoritative
+ * notification path, so a heads-up that never makes it out before SIGTERM
+ * costs nothing. For /update the origin persona is NOT listed: its own
+ * post-restart confirmation already comes from the pending-update marker, and
+ * a second "back online" in the same chat is noise.
  *
  * Why not reuse `.pending-update.json`? Because `/restart` writes no such
  * marker (there is no version to confirm) and its personas deserve the same
@@ -390,9 +401,12 @@ export const PENDING_LIFECYCLE_MAX_AGE_MS = 60 * 60 * 1000;
 export interface PendingLifecycle {
   /** "/update" or "/restart". Rendered in the back-online line. */
   command: string;
-  /** Persona that issued it; excluded from the back-online fan-out too. */
+  /** Persona that issued it. */
   originPersona: string;
-  /** Personas actually warned. Names only — accounts are re-resolved. */
+  /** Personas to notify on return: the warned others plus — for /restart —
+   *  the origin persona itself (its post-restart confirmation). Markers
+   *  written before this rework list only the warned others; for those the
+   *  origin stays silent, which was the old (lossy) behavior anyway. */
   personas: string[];
   writtenAt: string;
 }
@@ -454,15 +468,23 @@ export interface NotifyLifecycleBackInput {
 }
 
 export type NotifyLifecycleBackStatus =
-  "no_marker" | "stale" | "no_recipients" | "notified";
+  "no_marker" | "stale" | "no_recipients" | "notified" | "send_failed";
 
 /**
- * Startup half of the broadcast: tell the personas we warned that the process
- * is answering again, then delete the record.
+ * Startup half of the broadcast: tell the personas in the marker that the
+ * process is answering again, then — usually — delete the record.
  *
- * The record is cleared in EVERY terminal case, including a failed send. A
- * "back online" line that retries on the next restart is noise about an event
- * the user already lived through.
+ * The record is cleared when anything was sent. On a TOTAL send failure
+ * (every recipient failed — typically relays not reachable yet this early in
+ * boot) the marker is LEFT in place so the next restart retries: a back-online
+ * line lost to a transient relay outage is exactly the failure this module
+ * exists to prevent. The 1h staleness window bounds how long a dead marker can
+ * keep retrying.
+ *
+ * The origin persona is NOT excluded here: markers written by the reworked
+ * announce deliberately include it (post-restart confirmation in the chat
+ * that typed the command), and old markers simply don't name it — same
+ * lossy behavior as before for those.
  */
 export async function notifyLifecycleBackIfPending(
   input: NotifyLifecycleBackInput,
@@ -481,7 +503,6 @@ export async function notifyLifecycleBackIfPending(
     config: input.config,
     runningPersonas: input.runningPersonas,
     accounts: input.accounts,
-    excludePersona: marker.originPersona,
     only: marker.personas,
   });
   if (recipients.length === 0) {
@@ -489,12 +510,26 @@ export async function notifyLifecycleBackIfPending(
     return { status: "no_recipients" };
   }
 
-  const { sent } = await sendLifecycleBroadcast({
+  const { sent, failed } = await sendLifecycleBroadcast({
     recipients,
     message: backOnlineMessage(marker.command, input.currentVersion),
     createTransport: input.createTransport,
     sendPhantomchat: input.sendPhantomchat,
   });
+  // Total failure → keep the marker so the next restart retries (see docstring).
+  // Partial success still clears: re-sending to the ones that got through is
+  // worse noise than a missed copy.
+  if (sent === 0 && failed > 0) {
+    log.warn(
+      "lifecycleBroadcast: back-online notify failed for every recipient; marker kept for retry",
+      {
+        command: marker.command,
+        originPersona: marker.originPersona,
+        failed,
+      },
+    );
+    return { status: "send_failed", sent: 0 };
+  }
   await clearPendingLifecycle(input.path);
   log.info("lifecycleBroadcast: back-online notified", {
     command: marker.command,

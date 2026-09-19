@@ -980,7 +980,126 @@ describe("lifecycle commands: single-flight, not owned (#439, #519)", () => {
       const record = JSON.parse(await readFile(pendingLifecyclePath, "utf8"));
       expect(record.command).toBe("/restart");
       expect(record.originPersona).toBe("lena");
-      expect(record.personas.sort()).toEqual(["kai", "robbie"]);
+      // /restart lists the origin too: its post-restart "back online" line is
+      // the confirmation, mirroring the pending-update marker for /update.
+      expect(record.personas.sort()).toEqual(["kai", "lena", "robbie"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the marker is written before any send, and a hanging send cannot delay the restart", async () => {
+    // The race: a slow PhantomChat one-shot must never hold the restart (or
+    // the marker) hostage. The marker goes down FIRST; the heads-up is raced
+    // against a short bound and whatever is still in flight dies with us.
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-cmd-lifecycle-"));
+    const pendingLifecyclePath = join(dir, ".pending-lifecycle.json");
+    try {
+      let restartCalled = false;
+      let markerSeenBySend: string | undefined;
+      const serviceControl = {
+        isActive: async () => true,
+        restart: async () => {
+          restartCalled = true;
+          return { ok: true };
+        },
+      } as unknown as ServiceControl;
+
+      const acct = (token: string) => ({
+        token,
+        pollTimeoutS: 30,
+        allowedUserIds: [1],
+        personaNames: [],
+      });
+
+      const r = await handleSlashCommand(
+        "/restart",
+        ctx({
+          persona: "lena",
+          runningPersonas: ["lena", "kai"],
+          serviceControl,
+          pendingLifecyclePath,
+          createTelegramTransport: () =>
+            ({
+              // Never resolves — the old code awaited this before writing
+              // the marker, losing the back-online notify entirely.
+              async sendMessage() {
+                // Pins the ordering: the marker must already exist while this
+                // send is still in flight — a send-first ordering loses the
+                // back-online notify if the process is killed mid-announce.
+                // Captured, not asserted, here: sendLifecycleBroadcast
+                // swallows send throws, so an in-flight expect would die
+                // silently. The assertion lives below, outside the swallow.
+                try {
+                  markerSeenBySend = await readFile(pendingLifecyclePath, "utf8");
+                } catch {
+                  // No marker yet = send-first ordering = caught below.
+                }
+                await new Promise(() => {});
+              },
+            }) as any,
+          config: multiPersonaConfig({
+            channels: {
+              telegram: acct("tok-robbie"),
+              telegramPersonas: { kai: acct("tok-kai") },
+            },
+          }),
+        }),
+      );
+      await r!.afterSend!();
+
+      // Restart happened despite the hanging send...
+      expect(restartCalled).toBe(true);
+      // ...and the marker was written BEFORE the sends, so the post-restart
+      // back-online fan-out (including the origin persona) still has work.
+      const record = JSON.parse(await readFile(pendingLifecyclePath, "utf8"));
+      expect(record.command).toBe("/restart");
+      expect(record.personas.sort()).toEqual(["kai", "lena"]);
+      // Ordering pin, observed mid-flight by the send itself (see above).
+      expect(markerSeenBySend).toBeTruthy();
+      const seenBySend = JSON.parse(markerSeenBySend!);
+      expect(seenBySend.command).toBe("/restart");
+      expect(seenBySend.personas.sort()).toEqual(["kai", "lena"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a single-persona /restart still records the origin for its post-restart confirmation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-cmd-lifecycle-"));
+    const pendingLifecyclePath = join(dir, ".pending-lifecycle.json");
+    try {
+      const serviceControl = {
+        isActive: async () => true,
+        restart: async () => ({ ok: true }),
+      } as unknown as ServiceControl;
+      const acct = (token: string) => ({
+        token,
+        pollTimeoutS: 30,
+        allowedUserIds: [1],
+        personaNames: [],
+      });
+      const r = await handleSlashCommand(
+        "/restart",
+        ctx({
+          persona: "lena",
+          runningPersonas: ["lena"],
+          serviceControl,
+          pendingLifecyclePath,
+          createTelegramTransport: () =>
+            ({
+              async sendMessage() {},
+            }) as any,
+          config: multiPersonaConfig({
+            channels: { telegram: acct("tok-lena") },
+          }),
+        }),
+      );
+      await r!.afterSend!();
+      const record = JSON.parse(await readFile(pendingLifecyclePath, "utf8"));
+      // Single-persona /restart: nobody else to warn, but the origin still
+      // gets its post-restart confirmation.
+      expect(record.personas).toEqual(["lena"]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
