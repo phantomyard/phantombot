@@ -43,7 +43,10 @@ import type {
 } from "../config.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import { log } from "../lib/logger.ts";
-import { completeOverChain } from "../lib/chainComplete.ts";
+import {
+  completeOverChain,
+  HarnessCompletionError,
+} from "../lib/chainComplete.ts";
 import type { CooldownStore } from "../lib/cooldown.ts";
 import type {
   DurableFact,
@@ -446,7 +449,11 @@ export function makeExtractionComplete(
       else if (c.type === "done") {
         if (c.finalText) return c.finalText;
       } else if (c.type === "error") {
-        throw new Error(c.error);
+        // Carry the WHOLE chunk, not just its message: stderrTail is what
+        // classifies a CLI failure at all, and retryAfterMs is the provider's
+        // own deadline. Flattening to `new Error(c.error)` made every failure
+        // on this path classify `other` and cool on the generic ladder (#595).
+        throw new HarnessCompletionError(c);
       }
     }
     return chunks.join("");

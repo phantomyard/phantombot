@@ -29,9 +29,49 @@
  *     clean and produced no text, which is a model flake, not ill health.
  */
 
-import type { Harness } from "../harnesses/types.ts";
+import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import { type CooldownStore, cooldownStore as defaultStore } from "./cooldown.ts";
+import { classifyFailure } from "./harnessAlert.ts";
 import { log } from "./logger.ts";
+
+/**
+ * A harness error chunk, preserved as a throwable.
+ *
+ * `attempt` callbacks consume a chunk stream and can only signal failure by
+ * throwing, and both production callers used to flatten the chunk to
+ * `new Error(chunk.error)`. That threw away the three fields this module
+ * actually needs (#595):
+ *
+ *   - `stderrTail`, which is what #591 taught `classifyFailure` to read. A CLI
+ *     harness dies with "codex exited with code 1" and says WHY on stderr, so
+ *     without the tail every failure classifies `other`.
+ *   - `retryAfterMs`, the window the provider itself asked for — already
+ *     parsed by the runner out of "try again at 8:58 PM". Dropping it means
+ *     a four-hour quota gets benched by the ~150 s ladder and re-probed all
+ *     afternoon.
+ *   - `httpStatus`, the least ambiguous signal there is when present.
+ *
+ * It matters MORE here than in the orchestrator, because on an untrusted turn
+ * the threat judge runs FIRST: whatever cooldown it stamps is the one
+ * `fallback.ts` then sees, and a harness already cooled is skipped without
+ * ever being classified. A blind window here silently pre-empts the sighted
+ * one downstream.
+ */
+export class HarnessCompletionError extends Error {
+  readonly httpStatus: number | undefined;
+  readonly stderrTail: string[] | undefined;
+  readonly retryAfterMs: number | undefined;
+  readonly recoverable: boolean;
+
+  constructor(chunk: Extract<HarnessChunk, { type: "error" }>) {
+    super(chunk.error);
+    this.name = "HarnessCompletionError";
+    this.httpStatus = chunk.httpStatus;
+    this.stderrTail = chunk.stderrTail;
+    this.retryAfterMs = chunk.retryAfterMs;
+    this.recoverable = chunk.recoverable;
+  }
+}
 
 export interface ChainCompleteOptions {
   /** Which feature is calling, for the logs ("durable-facts", "threat-judge"). */
@@ -69,7 +109,8 @@ export async function completeOverChain(
 
   let lastError: unknown;
   let attempted = 0;
-  for (const harness of harnesses) {
+  const causes: { harnessId: string; cause: string }[] = [];
+  for (const [i, harness] of harnesses.entries()) {
     if (options.signal?.aborted) break;
     if (cooled.has(harness.id)) continue;
     attempted++;
@@ -91,13 +132,51 @@ export async function completeOverChain(
       // harness for it would bench a healthy binary because a turn was
       // cancelled, and there is no point trying the next one either.
       if (options.signal?.aborted) throw e;
-      cooldown.markFailure(harness.id);
+      // Classify BEFORE cooling, on the same evidence the orchestrator uses.
+      // A bare Error still works (tests, and any caller that has not been
+      // taught to carry the chunk) — it just classifies on the message alone,
+      // exactly as this path always did.
+      const detail = e instanceof HarnessCompletionError ? e : undefined;
+      const message = e instanceof Error ? e.message : String(e);
+      const cause = classifyFailure(
+        message,
+        detail?.httpStatus,
+        detail?.stderrTail,
+      );
+      // Honour the provider's own deadline when it gave one. Unlike the
+      // ladder, this window is an instruction, and it is the reason a quota
+      // that resets in four hours stops being re-probed every few minutes.
+      const status = cooldown.markFailure(harness.id, {
+        retryAfterMs: detail?.retryAfterMs,
+      });
       lastError = e;
+      causes.push({ harnessId: harness.id, cause });
+      // Log AFTER markFailure so the line reports the window it really
+      // produced — "which harness, why, and how long is it benched" is the
+      // whole question at 3am, and until #595 this line answered only the
+      // first third of it.
       log.warn(`${options.label}: harness failed — falling through`, {
         harnessId: harness.id,
-        error: (e as Error).message,
+        error: message,
+        httpStatus: detail?.httpStatus,
+        cause,
+        retryAfterMs: detail?.retryAfterMs,
+        cooldownUntilMs: status.untilMs,
+        nextHarnessId: nextEligibleId(harnesses, i, cooled),
       });
     }
+  }
+
+  // Nothing answered. For durable facts that is a dropped batch; for the
+  // threat judge it is a FAIL-OPEN — every untrusted input for the length of
+  // the outage goes unscreened. Either way it deserves a record naming what
+  // each harness died of, because a chain-wide quota window and a chain-wide
+  // misconfiguration look identical from the one rethrown error.
+  if (!options.signal?.aborted && causes.length > 0) {
+    log.error(`${options.label}: no harness completed — chain exhausted`, {
+      attempted,
+      causes,
+    });
   }
 
   throw lastError instanceof Error
@@ -105,4 +184,22 @@ export async function completeOverChain(
     : new Error(
         `${options.label}: no harness produced a completion (tried ${attempted})`,
       );
+}
+
+/**
+ * The harness this chain will actually try next — the next one that is not
+ * being skipped for cooldown, not merely `harnesses[i + 1]`. An operator
+ * reading the fall-through line wants to know where the work went; naming a
+ * harness that is itself benched would send them to the wrong journal.
+ */
+function nextEligibleId(
+  harnesses: Harness[],
+  from: number,
+  cooled: ReadonlySet<string>,
+): string | undefined {
+  for (let j = from + 1; j < harnesses.length; j++) {
+    const h = harnesses[j]!;
+    if (!cooled.has(h.id)) return h.id;
+  }
+  return undefined;
 }

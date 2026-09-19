@@ -13,6 +13,7 @@ import {
 } from "../src/lib/threatJudge.ts";
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { CooldownStore } from "../src/lib/cooldown.ts";
+import { HarnessCompletionError } from "../src/lib/chainComplete.ts";
 
 /** A fake harness that dies the way a CLI subprocess dies: an error chunk. */
 function failingHarness(id: string, error: string): Harness {
@@ -332,6 +333,42 @@ describe("makeHarnessJudgeComplete", () => {
     const floored = recordingHarness("codex", '{"score": 1, "reason": "", "question": ""}');
     await makeHarnessJudgeComplete(floored.harness, 1000, 2000)("s", "u");
     expect(floored.seen.req?.tmpBaseDir).toBe(join(homedir(), "tmp"));
+  });
+
+  it("carries stderr and the provider deadline out with the error (#595)", async () => {
+    // The judge runs BEFORE the orchestrator on an untrusted turn, so the
+    // cooldown it stamps is the one fallback.ts inherits. Flattening the
+    // chunk to `new Error(chunk.error)` threw away the only evidence that
+    // classifies a CLI failure at all — every quota looked like `other` and
+    // got the generic ~150 s ladder instead of the four-hour window the
+    // provider named.
+    const harness: Harness = {
+      id: "codex",
+      available: async () => true,
+      async *invoke(): AsyncGenerator<HarnessChunk> {
+        yield {
+          type: "error",
+          error: "codex exited with code 1",
+          recoverable: true,
+          httpStatus: 429,
+          retryAfterMs: 14_400_000,
+          stderrTail: ["ERROR: You've hit your usage limit."],
+        };
+      },
+    };
+    const err = await makeHarnessJudgeComplete(harness, 1000, 2000)(
+      "sys",
+      "user",
+    ).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(HarnessCompletionError);
+    const detail = err as HarnessCompletionError;
+    expect(detail.message).toBe("codex exited with code 1");
+    expect(detail.httpStatus).toBe(429);
+    expect(detail.retryAfterMs).toBe(14_400_000);
+    expect(detail.stderrTail).toEqual(["ERROR: You've hit your usage limit."]);
   });
 
   it("propagates a harness error chunk as a thrown error (screener fails open)", async () => {
