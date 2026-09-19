@@ -71,7 +71,6 @@ import {
   resolveOutgoingSuffix,
   segmenterOptionsFor,
 } from "../core/streaming.ts";
-import { appendFallbackReplyTag } from "../core/fallbackTag.ts";
 import type { ServiceControl } from "../../lib/systemd.ts";
 import type { NostrProfileMeta, PhantomchatTransport } from "./transport.ts";
 import { sttSupport, synthesize, transcribe, ttsSupported } from "../../lib/audio.ts";
@@ -796,8 +795,6 @@ export async function runPhantomchatServer(
     let finalCandidateSentChars = 0;
     let finalReply: string | undefined;
     let requestedReplyMode: ReplyModeRequest | undefined;
-    // Done-chunk meta, kept for the fallback attribution tag (#559).
-    let doneMeta: Record<string, unknown> | undefined;
     // Set when the turn fails — either an `error` chunk from the harness chain
     // or a throw out of the stream. NEVER shown raw; it drives the recovery
     // reply below, exactly as in core/engine.ts. Before this existed a failed
@@ -1104,7 +1101,6 @@ export async function runPhantomchatServer(
         if (chunk.type === "done") {
           finalReply = chunk.finalText;
           requestedReplyMode = normalizeReplyModeRequest(chunk.meta?.replyMode);
-          doneMeta = chunk.meta;
         }
         // The harness chain gave up. Telegram sets the same flag here; without
         // it phantomchat dropped the chunk and fell out of the loop as if the
@@ -1223,11 +1219,6 @@ export async function runPhantomchatServer(
         consumedReplyChars,
       );
     }
-    // Issue #559: a turn served by a fallback harness is tagged so the user
-    // can see which model actually answered. Text path only — the voice path
-    // synthesizes from fullReply, so the tag is never spoken.
-    outText = appendFallbackReplyTag(outText, doneMeta);
-
     // Persist a model-requested reply-mode change (via meta.replyMode) for
     // future turns, mirroring core/engine.ts.
     if (!msg.groupId) {

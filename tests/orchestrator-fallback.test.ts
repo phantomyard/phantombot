@@ -9,7 +9,6 @@ import { describe, expect, test } from "bun:test";
 import {
   describeInvokeThrow,
   estimatePayloadBytes,
-  rememberServed,
   runWithFallback,
 } from "../src/orchestrator/fallback.ts";
 import { CooldownStore } from "../src/lib/cooldown.ts";
@@ -829,7 +828,7 @@ describe("runWithFallback — rate-limit immediate flip (issue #559)", () => {
     expect(status.untilMs).toBe(now + 60_000);
   });
 
-  test("fallback serving the turn stamps done meta with who was expected and why", async () => {
+  test("fallback serving stays invisible while returning the answer unchanged", async () => {
     const first = new FakeHarness("claude", [
       { type: "error", error: "claude api error: rate_limit", recoverable: true },
     ]);
@@ -839,8 +838,9 @@ describe("runWithFallback — rate-limit immediate flip (issue #559)", () => {
     }));
     const done = chunks.at(-1) as { type: string; meta?: Record<string, unknown> };
     expect(done.type).toBe("done");
-    expect(done.meta?.fallbackFor).toBe("claude");
-    expect(done.meta?.fallbackReason).toContain("rate_limit");
+    expect(done).toMatchObject({ finalText: "fallback answer" });
+    expect(done.meta?.fallbackFor).toBeUndefined();
+    expect(done.meta?.fallbackReason).toBeUndefined();
   });
 
   test("the head answering normally stamps nothing", async () => {
@@ -853,7 +853,7 @@ describe("runWithFallback — rate-limit immediate flip (issue #559)", () => {
     expect(done.meta?.fallbackReason).toBeUndefined();
   });
 
-  test("head cooled at turn start → fallback serve carries the skip reason", async () => {
+  test("head cooled at turn start → fallback answer stays unannotated", async () => {
     const store = new CooldownStore();
     store.markFailure("claude"); // primary cooling from an earlier turn
     const first = new FakeHarness("claude", [{ type: "done", finalText: "never" }]);
@@ -862,8 +862,9 @@ describe("runWithFallback — rate-limit immediate flip (issue #559)", () => {
       cooldown: store,
     }));
     const done = chunks.at(-1) as { type: string; meta?: Record<string, unknown> };
-    expect(done.meta?.fallbackFor).toBe("claude");
-    expect(String(done.meta?.fallbackReason)).toContain("primary in cooldown");
+    expect(done).toMatchObject({ finalText: "fallback answer" });
+    expect(done.meta?.fallbackFor).toBeUndefined();
+    expect(done.meta?.fallbackReason).toBeUndefined();
     expect(first.invocations).toBe(0);
   });
 
@@ -925,109 +926,6 @@ describe("runWithFallback — rate-limit immediate flip (issue #559)", () => {
     const done = chunks.at(-1) as { type: string; finalText?: string };
     expect(done.type).toBe("done");
     expect(done.finalText).toBe("pi saved the turn");
-  });
-});
-
-describe("the tag announces the SWITCH, not the state", () => {
-  const CONV = "telegram:42";
-
-  function rateLimited(id: string) {
-    return new FakeHarness(id, [
-      { type: "error", error: `${id} api error: rate_limit`, recoverable: true },
-    ]);
-  }
-
-  async function serve(
-    history: Map<string, string>,
-    conversation: string | undefined,
-    chain: FakeHarness[],
-  ) {
-    const chunks = await collect(
-      runWithFallback(chain, newRequest({ conversation }), {
-        cooldown: new CooldownStore(),
-        servedHistory: history,
-      }),
-    );
-    const done = chunks.at(-1) as { meta?: Record<string, unknown> };
-    return done.meta?.fallbackFor as string | undefined;
-  }
-
-  test("tags the first fallback reply and then SHUTS UP", async () => {
-    // A quota window is hours long. Tagging every reply for an afternoon
-    // teaches the user nothing after the first one and repeats the notice in
-    // front of third parties in group chats.
-    const history = new Map<string, string>();
-    const chain = () => [
-      rateLimited("claude"),
-      new FakeHarness("pi", [{ type: "done", finalText: "answer" }]),
-    ];
-    expect(await serve(history, CONV, chain())).toBe("claude");
-    expect(await serve(history, CONV, chain())).toBeUndefined();
-    expect(await serve(history, CONV, chain())).toBeUndefined();
-  });
-
-  test("a DIFFERENT conversation gets its own first-time tag", async () => {
-    const history = new Map<string, string>();
-    const chain = () => [
-      rateLimited("claude"),
-      new FakeHarness("pi", [{ type: "done", finalText: "answer" }]),
-    ];
-    expect(await serve(history, CONV, chain())).toBe("claude");
-    expect(await serve(history, "telegram:99", chain())).toBe("claude");
-  });
-
-  test("recovering to the primary and failing again RE-tags", async () => {
-    // The brain changed twice, so it is news twice. Tracking only "did a
-    // fallback serve" would stay silent on the second failover.
-    const history = new Map<string, string>();
-    expect(
-      await serve(history, CONV, [
-        rateLimited("claude"),
-        new FakeHarness("pi", [{ type: "done", finalText: "answer" }]),
-      ]),
-    ).toBe("claude");
-    // primary healthy again — no tag, and the history moves back to claude
-    expect(
-      await serve(history, CONV, [
-        new FakeHarness("claude", [{ type: "done", finalText: "answer" }]),
-      ]),
-    ).toBeUndefined();
-    expect(
-      await serve(history, CONV, [
-        rateLimited("claude"),
-        new FakeHarness("pi", [{ type: "done", finalText: "answer" }]),
-      ]),
-    ).toBe("claude");
-  });
-
-  test("a caller with NO conversation key tags every time", async () => {
-    // One-shot `ask` has no previous reply for a tag to be redundant against.
-    const history = new Map<string, string>();
-    const chain = () => [
-      rateLimited("claude"),
-      new FakeHarness("pi", [{ type: "done", finalText: "answer" }]),
-    ];
-    expect(await serve(history, undefined, chain())).toBe("claude");
-    expect(await serve(history, undefined, chain())).toBe("claude");
-    expect(history.size).toBe(0);
-  });
-});
-
-describe("rememberServed", () => {
-  test("bounds the map — an old conversation is evicted, not leaked", () => {
-    const history = new Map<string, string>();
-    for (let i = 0; i < 600; i++) rememberServed(history, `c${i}`, "pi");
-    expect(history.size).toBeLessThanOrEqual(500);
-    // The eviction is oldest-first, so the newest keys survive.
-    expect(history.has("c599")).toBe(true);
-    expect(history.has("c0")).toBe(false);
-  });
-
-  test("reports whether the serving harness actually changed", () => {
-    const history = new Map<string, string>();
-    expect(rememberServed(history, "c", "pi")).toBe(true);
-    expect(rememberServed(history, "c", "pi")).toBe(false);
-    expect(rememberServed(history, "c", "claude")).toBe(true);
   });
 });
 

@@ -41,7 +41,6 @@ import { type CooldownStore, cooldownStore as defaultStore } from "../lib/cooldo
 import {
   classifyFailure,
   type HarnessAlerter,
-  type HarnessFailureCause,
   harnessAlerter as defaultAlerter,
 } from "../lib/harnessAlert.ts";
 import { log } from "../lib/logger.ts";
@@ -52,44 +51,6 @@ import {
   PartialAttempt,
   shouldResume,
 } from "./resume.ts";
-
-/**
- * Who last served each conversation. Drives the "announce the SWITCH, not the
- * state" rule for the fallback reply tag.
- *
- * A quota window is hours long, so tagging every fallback-served reply appends
- * "answered by X fallback (...)" to every message for an entire afternoon.
- * That is drama, not transparency: the user learns nothing after the first
- * one, and the tag goes out in front of third parties in group chats each
- * time. The brain CHANGING is news; the brain STAYING changed is not.
- *
- * Process-local and bounded — losing it across a restart costs exactly one
- * redundant tag, which is the safe direction to fail.
- */
-const MAX_SERVED_HISTORY = 500;
-
-export function rememberServed(
-  history: Map<string, string>,
-  conversation: string,
-  harnessId: string,
-): boolean {
-  const changed = history.get(conversation) !== harnessId;
-  if (changed && history.size >= MAX_SERVED_HISTORY) {
-    // Map iterates in insertion order: the oldest key is the coldest
-    // conversation. Evicting it can only cause a redundant tag later.
-    const oldest = history.keys().next();
-    if (!oldest.done) history.delete(oldest.value);
-  }
-  history.set(conversation, harnessId);
-  return changed;
-}
-
-const servedHistory = new Map<string, string>();
-
-/** Test seam: forget who served what. */
-export function resetServedHistory(): void {
-  servedHistory.clear();
-}
 
 export interface RunWithFallbackOptions {
   /**
@@ -112,11 +73,6 @@ export interface RunWithFallbackOptions {
    * paths alert nobody unless they inject their own.
    */
   alerter?: HarnessAlerter;
-  /**
-   * Who last served each conversation. Defaults to the process-wide map; tests
-   * inject a fresh one to avoid cross-test bleed.
-   */
-  servedHistory?: Map<string, string>;
 }
 
 export async function* runWithFallback(
@@ -135,17 +91,9 @@ export async function* runWithFallback(
 
   const cooldown = options.cooldown ?? defaultStore;
   const alerter = options.alerter ?? defaultAlerter;
-  const served = options.servedHistory ?? servedHistory;
-  // Callers with no conversation key (one-shot `ask`, degraded paths) have no
-  // "previous reply" for a tag to be redundant against, so they always tag.
-  // Bucketing them together instead would make the FIRST such call tag and
-  // silently un-tag every later one, which is the wrong way round.
-  const servedKey = req.conversation;
   const chainIds = chain.map((h) => h.id);
-  // Issue #559 transparency: the chain head is who the user "expects" to
-  // answer. When anyone else serves the turn, the done chunk gets stamped
-  // (fallbackFor/fallbackReason) so channels can tag the reply, and the
-  // switch is logged with from → to, reason, timestamp.
+  // The chain head is the preferred harness. Provider switches stay invisible
+  // to every user surface and are recorded in the structured log below.
   const headId = chain[0]!.id;
   // Why the head didn't take the turn when it was skipped at snapshot time
   // (cooldown or payload cap). Undefined once the head actually runs or
@@ -154,9 +102,7 @@ export async function* runWithFallback(
   // Remembers the first harness that failed this turn, so that if a LATER
   // harness answers we can tell the owner which one is broken and who is
   // covering for it. Only the first matters: that's the primary.
-  let firstFailure:
-    | { harnessId: string; error: string; cause?: HarnessFailureCause }
-    | undefined;
+  let firstFailure: { harnessId: string; error: string } | undefined;
   const priorKillHarness = new Map<string, string>();
   const repeatedKillCausesLogged = new Set<string>();
   const estimatedBytes = estimatePayloadBytes(req);
@@ -414,17 +360,9 @@ export async function* runWithFallback(
               chunk.httpStatus,
               chunk.stderrTail,
             );
-            // Classify HERE, while the stderr tail is still in hand. The
-            // error line a CLI harness dies with is "codex exited with code 1"
-            // — it names no cause at all, and it is the only thing that
-            // survives into the done chunk's fallbackReason. Re-classifying it
-            // downstream (channels/core/fallbackTag.ts) therefore rendered
-            // every subprocess death as "unavailable", including the rate
-            // limits this whole path exists to handle.
             firstFailure ??= {
               harnessId: harness.id,
               error: chunk.error,
-              cause,
             };
             recoverableError = true;
             break;
@@ -474,38 +412,6 @@ export async function* runWithFallback(
           chunk.type === "done" && carriedText.length > 0
             ? { ...chunk, finalText: carriedText + chunk.finalText }
             : chunk;
-        // Issue #559 transparency: a non-head harness serving a non-empty
-        // reply stamps WHO was supposed to answer and WHY they didn't, so
-        // channels can tag the visible reply. Empty-done fall-throughs are
-        // never stamped (they break before yield; and "(no reply)" needs
-        // no attribution).
-        // Record who is serving BEFORE deciding to tag: the tag announces a
-        // change of brain, so it fires only on the turn the answer actually
-        // moves. Recorded for the head too, so moving BACK to the primary and
-        // failing over again later is a fresh switch, and tags again.
-        const switched =
-          emitted.type === "done" && emitted.finalText.length > 0
-            ? servedKey === undefined ||
-              rememberServed(served, servedKey, harness.id)
-            : false;
-        const fallbackMeta =
-          emitted.type === "done" &&
-          emitted.finalText.length > 0 &&
-          harness.id !== headId &&
-          switched
-            ? {
-                fallbackFor: headId,
-                fallbackReason:
-                  firstFailure?.error ?? headSkipReason ?? "primary unavailable",
-                ...(firstFailure?.cause
-                  ? { fallbackCause: firstFailure.cause }
-                  : {}),
-              }
-            : undefined;
-        const stamped: HarnessChunk =
-          fallbackMeta && emitted.type === "done"
-            ? { ...emitted, meta: { ...emitted.meta, ...fallbackMeta } }
-            : emitted;
         if (
           emitted.type === "done" &&
           emitted.finalText.length === 0 &&
@@ -547,7 +453,7 @@ export async function* runWithFallback(
         // something to resume FROM. Cheap: bounded narration plus capped tool
         // titles, dropped the moment the attempt ends any other way.
         partial.record(chunk);
-        yield stamped;
+        yield emitted;
         if (emitted.type === "done") {
           succeeded = true;
           if (emitted.finalText.length === 0) servedEmpty = true;
@@ -589,9 +495,9 @@ export async function* runWithFallback(
     }
 
     if (succeeded) {
-      // Issue #559: every provider switch is logged — from → to, reason,
-      // timestamp. A silent quality/price difference between primary and
-      // fallback is a trust bug; this is the operator-visible record.
+      // Every provider switch is logged with from → to, reason and timestamp.
+      // This is operator telemetry only: failover must remain invisible on
+      // chat, ACP and TUI surfaces.
       if (harness.id !== headId) {
         log.warn(
           "orchestrator: provider switch — fallback served the turn",
