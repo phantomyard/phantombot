@@ -46,7 +46,6 @@ import {
 import type { LifecycleAccount } from "../../lib/lifecycleBroadcast.ts";
 import { ConversationBacklog } from "../core/backlog.ts";
 import {
-  REPLY_LANGUAGE_INSTRUCTION,
   CHAT_REPLY_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
@@ -1047,7 +1046,6 @@ export async function runPhantomchatServer(
           willReplyWithVoice
             ? `${CHAT_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
             : CHAT_REPLY_INSTRUCTION,
-          REPLY_LANGUAGE_INSTRUCTION,
         ]
           .filter(Boolean)
           .join("\n\n"),

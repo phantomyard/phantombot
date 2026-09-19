@@ -4239,13 +4239,29 @@ describe("reply-language overlay", () => {
   // conversation is in", it re-opened a question the reply-language rule had
   // just closed — by inference over turn content, which is the pollution
   // source. The two blocks must agree.
-  test("the narration overlay does not re-delegate language to inference", async () => {
+  test("the narration overlay does not talk about language at all", async () => {
     const prompt = await runWith(
       "Robbie, can you check whether the invoice was paid yesterday?",
       done(),
     );
     expect(prompt).toContain("Narration before tool calls");
     expect(prompt).not.toContain("whatever language the conversation");
-    expect(prompt).toContain("Narrate in the language of the user's LATEST");
+    // #580: the narration block no longer restates the rule, and the rule
+    // now sits after it — so the freshest language text the model reads is
+    // the single canonical copy, not a restatement naming one language.
+    const narration = prompt.slice(prompt.indexOf("# Narration before tool"));
+    const block = narration.slice(0, narration.indexOf("# Reply language"));
+    expect(block).not.toMatch(/language/i);
+    expect(prompt.indexOf("# Reply language")).toBeGreaterThan(
+      prompt.indexOf("# Narration before tool"),
+    );
+  });
+
+  test("the rule appears exactly once now that the channel suffix dropped it", async () => {
+    const prompt = await runWith(
+      "Robbie, can you check whether the invoice was paid yesterday?",
+      done(),
+    );
+    expect(prompt.split("# Reply language").length - 1).toBe(1);
   });
 });

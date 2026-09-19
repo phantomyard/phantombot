@@ -52,6 +52,7 @@ import {
   buildSystemPrompt,
   CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION,
   PRE_TOOL_NARRATION_INSTRUCTION,
+  REPLY_LANGUAGE_INSTRUCTION,
 } from "../persona/builder.ts";
 import { buildTurnContext } from "../persona/turnContext.ts";
 import { loadPersona } from "../persona/loader.ts";
@@ -611,9 +612,19 @@ async function* runTurnBody(
   //      in this deterministic overlay order without displacing the
   //      channel's own framing. Absent (and free) whenever nothing else is
   //      running, which is the overwhelming majority of turns.
-  //   3. PRE_TOOL_NARRATION_INSTRUCTION — opt-in via toolNarration, added LAST
-  //      to preserve the deterministic existing overlay order. Placement is a
-  //      formatting/layout choice and carries no trust or security meaning.
+  //   3. PRE_TOOL_NARRATION_INSTRUCTION — opt-in via toolNarration.
+  //   4. REPLY_LANGUAGE_INSTRUCTION — unconditional, and LAST (#580).
+  //      Placement carries no trust or security meaning, but it does carry
+  //      recency: whatever sits last is the freshest instruction the model
+  //      reads. That slot used to hold the narration block, whose own
+  //      language paragraph named one concrete language — and every
+  //      measured leak was a narration line in that language while the
+  //      reply body stayed correct. The language rule now owns the slot,
+  //      is the ONLY copy of itself in the prompt (it previously lived in
+  //      the Telegram and phantomchat suffixes, so ACP and the TUI got no
+  //      language rule at all), and is unconditional for the same reason
+  //      #548 made it unconditional: the classifier it replaced went
+  //      silent on exactly the languages that drifted most.
   const overlays: string[] = [];
   if (input.systemPromptSuffix) overlays.push(input.systemPromptSuffix);
 
@@ -701,6 +712,7 @@ async function* runTurnBody(
     });
   }
   if (input.toolNarration) overlays.push(PRE_TOOL_NARRATION_INSTRUCTION);
+  overlays.push(REPLY_LANGUAGE_INSTRUCTION);
   let systemPrompt =
     overlays.length > 0
       ? baseSystemPrompt + "\n\n" + overlays.join("\n\n")
