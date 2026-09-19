@@ -376,9 +376,9 @@ export async function* runWithFallback(
             // BYTE-IDENTICAL journal lines. There was no way, from outside
             // the process, to tell whether the rate-limit handling added in
             // #591 had fired at all; diagnosing it meant re-running the
-            // harness by hand and inferring. The cause is already computed
-            // one block down for `firstFailure`; computing it here and
-            // reusing it costs nothing and makes the path observable.
+            // harness by hand and inferring. This is the same classification
+            // `firstFailure` needs below — computed once here and reused, so
+            // it costs nothing and makes the path observable.
             const cause = classifyFailure(
               chunk.error,
               chunk.httpStatus,
