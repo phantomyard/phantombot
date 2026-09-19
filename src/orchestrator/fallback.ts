@@ -368,13 +368,21 @@ export async function* runWithFallback(
             // harness failure is a calculated, acceptable price for fluid,
             // immediate streaming. Re-litigate with Andrew before changing it.
             // ─────────────────────────────────────────────────────────────
-            log.warn(
-              "orchestrator: harness recoverable error, falling through",
-              {
-                harnessId: harness.id,
-                error: chunk.error,
-                httpStatus: chunk.httpStatus,
-              },
+            // Classify BEFORE logging, not after. The log line below is the
+            // only externally visible record that this path ran, and until
+            // #592 it printed `error` + `httpStatus` only — so a quota
+            // exhaustion ("codex exited with code 1", no status) and a
+            // segfault ("codex exited with code 1", no status) produced
+            // BYTE-IDENTICAL journal lines. There was no way, from outside
+            // the process, to tell whether the rate-limit handling added in
+            // #591 had fired at all; diagnosing it meant re-running the
+            // harness by hand and inferring. The cause is already computed
+            // one block down for `firstFailure`; computing it here and
+            // reusing it costs nothing and makes the path observable.
+            const cause = classifyFailure(
+              chunk.error,
+              chunk.httpStatus,
+              chunk.stderrTail,
             );
             // Cool the harness off — esp. fast for 4XX (the harness
             // detected an upstream auth/quota/capacity issue and we
@@ -383,6 +391,23 @@ export async function* runWithFallback(
             // provider's Retry-After when the harness surfaced one
             // (issue #559).
             cooldown.markFailure(harness.id, { retryAfterMs: chunk.retryAfterMs });
+            // Log AFTER markFailure so we can report the window it actually
+            // produced. "which harness, why, and how long is it benched" is
+            // the whole question an operator has at 3am; `retryAfterMs`
+            // distinguishes a provider-supplied deadline (the #591 path) from
+            // the generic jittered ladder.
+            log.warn(
+              "orchestrator: harness recoverable error, falling through",
+              {
+                harnessId: harness.id,
+                error: chunk.error,
+                httpStatus: chunk.httpStatus,
+                cause,
+                retryAfterMs: chunk.retryAfterMs,
+                cooldownUntilMs: cooldown.isCooledDown(harness.id).untilMs,
+                nextHarnessId: chain[i + 1]?.id,
+              },
+            );
             alerter.noteFailure(
               harness.id,
               chunk.error,
@@ -399,11 +424,7 @@ export async function* runWithFallback(
             firstFailure ??= {
               harnessId: harness.id,
               error: chunk.error,
-              cause: classifyFailure(
-                chunk.error,
-                chunk.httpStatus,
-                chunk.stderrTail,
-              ),
+              cause,
             };
             recoverableError = true;
             break;

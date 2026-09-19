@@ -137,6 +137,11 @@ export interface CooldownPersistence {
    * failed write can never be allowed to break a turn.
    */
   save(entries: Record<string, HarnessCooldownState>): void;
+  /**
+   * Optional: resolve once every write `save` has queued has settled. A sink
+   * that writes synchronously, or one in a test, can omit it.
+   */
+  settled?(): Promise<void>;
 }
 
 export class CooldownStore {
@@ -262,12 +267,23 @@ export class CooldownStore {
   }
 
   /**
-   * Drop all state. Tests use this; production has no caller because
-   * the store's lifetime is the phantombot process.
+   * Drop all state — and PERSIST the drop.
+   *
+   * This used to also null out `this.persistence`, which made "reset the
+   * cooldowns" a one-way door: the store kept working in memory but silently
+   * stopped writing to disk until the process restarted, so the next restart
+   * re-adopted the very windows that were cleared. Production has no caller
+   * today, so nothing was broken in the field — but a `/status`-style "reset
+   * cooldowns" admin path is exactly the caller this method exists for, and
+   * it would have inherited the bug with no test able to see it.
+   *
+   * Keeping the sink and flushing an empty snapshot makes clear() mean the
+   * same thing in memory and on disk. Tests construct `new CooldownStore()`
+   * with no sink, so clear() stays a pure in-memory reset for them.
    */
   clear(): void {
     this.state.clear();
-    this.persistence = undefined;
+    this.flush();
   }
 }
 

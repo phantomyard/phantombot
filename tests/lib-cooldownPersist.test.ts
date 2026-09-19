@@ -113,3 +113,86 @@ describe("round trip", () => {
     await chmod(readOnly, 0o700);
   });
 });
+
+/**
+ * Write ORDERING. `writeFileAtomic` is write-temp-then-rename, so two saves
+ * in flight race to rename over the same path and the winner is not
+ * necessarily the newer snapshot. A chain fall-through issues one markFailure
+ * per harness back-to-back, so the burst is routine, not exotic.
+ */
+describe("fileCooldownPersistence serialisation", () => {
+  test("the LAST snapshot wins after a rapid burst of saves", async () => {
+    const path = join(dir, "burst.json");
+    const sink = fileCooldownPersistence(path);
+    const now = Date.now();
+    for (let i = 1; i <= 20; i++) {
+      sink.save({ codex: { cooldownUntilMs: now + i * 1000, consecutiveFailures: i } });
+    }
+    await sink.settled?.();
+    const onDisk = await loadCooldownState(path);
+    expect(onDisk.codex?.consecutiveFailures).toBe(20);
+    expect(onDisk.codex?.cooldownUntilMs).toBe(now + 20_000);
+  });
+
+  test("a save during an in-flight write is not lost", async () => {
+    const path = join(dir, "inflight.json");
+    const sink = fileCooldownPersistence(path);
+    const now = Date.now();
+    sink.save({ codex: { cooldownUntilMs: now + 1000, consecutiveFailures: 1 } });
+    // Yield once so the first write is genuinely in flight, then save again —
+    // the second must still reach disk rather than being dropped or
+    // overtaken by the first.
+    await Promise.resolve();
+    sink.save({ codex: { cooldownUntilMs: now + 9000, consecutiveFailures: 9 } });
+    await sink.settled?.();
+    const onDisk = await loadCooldownState(path);
+    expect(onDisk.codex?.consecutiveFailures).toBe(9);
+  });
+
+  test("a failed write does not poison later ones", async () => {
+    const path = join(dir, "nested", "later.json");
+    const sink = fileCooldownPersistence(path);
+    // Parent dir missing → first write fails. It must be swallowed (the
+    // contract is "never throw") and must not wedge the chain.
+    sink.save({ codex: { cooldownUntilMs: Date.now() + 1000, consecutiveFailures: 1 } });
+    await sink.settled?.();
+    const ok = fileCooldownPersistence(join(dir, "ok.json"));
+    ok.save({ codex: { cooldownUntilMs: Date.now() + 2000, consecutiveFailures: 3 } });
+    await ok.settled?.();
+    expect((await loadCooldownState(join(dir, "ok.json"))).codex?.consecutiveFailures).toBe(3);
+  });
+});
+
+/**
+ * clear() used to drop the persistence sink, turning "reset the cooldowns"
+ * into a silent one-way disable of persistence for the rest of the process.
+ */
+describe("CooldownStore.clear", () => {
+  test("persists the cleared state instead of dropping the sink", async () => {
+    const path = join(dir, "cleared.json");
+    const sink = fileCooldownPersistence(path);
+    const store = new CooldownStore();
+    store.hydrate({}, sink);
+    store.markFailure("codex");
+    await sink.settled?.();
+    expect(Object.keys(await loadCooldownState(path))).toEqual(["codex"]);
+
+    store.clear();
+    await sink.settled?.();
+    // The clear itself reached disk: a restart must not re-adopt the window.
+    expect(await loadCooldownState(path)).toEqual({});
+  });
+
+  test("the sink survives clear(), so later failures still persist", async () => {
+    const path = join(dir, "after-clear.json");
+    const sink = fileCooldownPersistence(path);
+    const store = new CooldownStore();
+    store.hydrate({}, sink);
+    store.clear();
+    store.markFailure("codex");
+    await sink.settled?.();
+    // This is the regression: with the sink nulled out, this file stays empty
+    // and the process silently stops persisting until restart.
+    expect(Object.keys(await loadCooldownState(path))).toEqual(["codex"]);
+  });
+});
