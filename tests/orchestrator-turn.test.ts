@@ -76,6 +76,15 @@ const baseInput = () => ({
 
 const FAKE_PI = resolve(__dirname, "fixtures/fake-pi.sh");
 
+/**
+ * Index of a prompt section heading. Exists so a test that slices BETWEEN two
+ * headings can assert both are present first — see the comment at the call
+ * site for what a missing heading silently does to `slice`.
+ */
+function sectionStart(prompt: string, heading: string): number {
+  return prompt.indexOf(heading);
+}
+
 describe("runTurn — successful path", () => {
   test("history byte bound keeps the newest complete UTF-8 turns", () => {
     const bounded = boundHistoryByBytes(
@@ -391,6 +400,13 @@ describe("runTurn — successful path", () => {
     );
 
     const prompt = captured?.systemPrompt ?? "";
+    // Both headings must EXIST before we slice between them. `indexOf` returns
+    // -1 for a missing heading, and `slice(-1)` / `slice(0, -1)` silently
+    // yields a near-empty string that passes both `not.toMatch` assertions —
+    // so renaming either heading would turn this test green while the
+    // behaviour it guards was gone. (#581 review, folded in here.)
+    expect(sectionStart(prompt, "# Narration before tool")).toBeGreaterThan(-1);
+    expect(sectionStart(prompt, "# Reply language")).toBeGreaterThan(-1);
     const narration = prompt.slice(prompt.indexOf("# Narration before tool"));
     const block = narration.slice(0, narration.indexOf("# Reply language"));
     expect(block).toContain("# Narration before tool calls");
