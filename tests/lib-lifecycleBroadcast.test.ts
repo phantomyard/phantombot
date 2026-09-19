@@ -509,7 +509,7 @@ describe("planLifecycleBroadcast — phantomchat accounts", () => {
     });
   });
 
-  test("a persona reachable on BOTH channels is warned on Telegram only", () => {
+  test("a persona reachable on BOTH channels is warned on both", () => {
     const plan = planLifecycleBroadcast({
       config: config(),
       runningPersonas: ["robbie", "lena"],
@@ -520,11 +520,39 @@ describe("planLifecycleBroadcast — phantomchat accounts", () => {
       ],
       excludePersona: "robbie",
     });
+    expect(plan).toHaveLength(2);
+    expect(plan).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          channel: "telegram",
+          persona: "lena",
+          token: "tok-lena",
+        }),
+        expect.objectContaining({
+          channel: "phantomchat",
+          persona: "lena",
+          recipientHexes: ["bb".repeat(32)],
+        }),
+      ]),
+    );
+  });
+
+  test("an empty Telegram allowlist does not suppress PhantomChat", () => {
+    const plan = planLifecycleBroadcast({
+      config: config(),
+      runningPersonas: ["robbie", "lena"],
+      accounts: [
+        { persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] },
+        { persona: "lena", token: "tok-lena", chatIds: [] },
+        pcAccount("lena", ["bc".repeat(32)]),
+      ],
+      excludePersona: "robbie",
+    });
     expect(plan).toHaveLength(1);
     expect(plan[0]).toMatchObject({
-      channel: "telegram",
+      channel: "phantomchat",
       persona: "lena",
-      token: "tok-lena",
+      recipientHexes: ["bc".repeat(32)],
     });
   });
 
@@ -631,6 +659,30 @@ describe("sendLifecycleBroadcast — phantomchat recipients", () => {
     expect(t.sent).toEqual([{ token: "ROBBIE_BOT", chatId: "7", text: "⏳ Heads-up." }]);
     expect(pc.sent.map((s) => s.recipientHex)).toEqual([HEX_A]);
   });
+
+  test("a PhantomChat failure does not suppress Telegram delivery", async () => {
+    const t = fakeTransports();
+    const pc = fakePhantomchatSends();
+    pc.failFor.add(HEX_A);
+    const res = await sendLifecycleBroadcast({
+      recipients: [
+        {
+          channel: "telegram",
+          persona: "lena",
+          token: "LENA_BOT",
+          chatIds: [1],
+        },
+        pcRecipient([HEX_A]),
+      ],
+      message: "⏳ Heads-up.",
+      createTransport: t.createTransport,
+      sendPhantomchat: pc.sendPhantomchat,
+    });
+    expect(res).toEqual({ sent: 1, failed: 1 });
+    expect(t.sent).toEqual([
+      { token: "LENA_BOT", chatId: "1", text: "⏳ Heads-up." },
+    ]);
+  });
 });
 
 describe("notifyLifecycleBackIfPending — phantomchat-only persona", () => {
@@ -691,6 +743,53 @@ describe("notifyLifecycleBackIfPending — phantomchat-only persona", () => {
       ]);
       // The marker is cleared in every terminal case, phantomchat included.
       expect(await readPendingLifecycle(path)).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the back-online line reaches both channels for a dual-channel persona", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-lifecycle-dual-"));
+    const path = join(dir, ".pending-lifecycle.json");
+    try {
+      await writePendingLifecycle(
+        {
+          command: "/restart",
+          originPersona: "lena",
+          personas: ["jake"],
+          writtenAt: new Date().toISOString(),
+        },
+        path,
+      );
+      const pc = fakePhantomchatSends();
+      const t = fakeTransports();
+      const res = await notifyLifecycleBackIfPending({
+        config: lenaResolvedConfig(),
+        currentVersion: "1.2.3",
+        runningPersonas: ["lena", "jake"],
+        accounts: [
+          { persona: "jake", token: "JAKE_BOT", chatIds: [9] },
+          pcAccountForTest("jake", [HEX_PC]),
+        ],
+        path,
+        createTransport: t.createTransport,
+        sendPhantomchat: pc.sendPhantomchat,
+      });
+      expect(res).toEqual({ status: "notified", sent: 2 });
+      expect(t.sent).toEqual([
+        {
+          token: "JAKE_BOT",
+          chatId: "9",
+          text: backOnlineMessage("/restart", "1.2.3"),
+        },
+      ]);
+      expect(pc.sent).toEqual([
+        {
+          relays: ["wss://relay.example"],
+          recipientHex: HEX_PC,
+          text: backOnlineMessage("/restart", "1.2.3"),
+        },
+      ]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
