@@ -176,13 +176,24 @@ export function wrapNip17Message(
  * must NOT appear in `memberPubkeys`, mirroring the PWA's `otherMembers`).
  *
  * Returns `memberPubkeys.length + 1` kind-1059 wraps and the canonical rumor id.
+ *
+ * Also returns one `rewrap` thunk per OTHER member: a re-gift-wrap of that
+ * member's UNCHANGED seal (createGiftWrap mints a fresh ephemeral key and real
+ * timestamp per call, so each attempt is a new event id around the same rumor
+ * id — the exact semantics the DM retry ladder's `rewrapV2` provides). The
+ * self-wrap has no thunk: it is multi-device recovery, not delivery, so a lost
+ * self-copy never justifies ladder traffic (issue #542).
  */
 export function wrapGroupMessage(
   senderSk: Uint8Array,
   memberPubkeys: string[],
   content: string,
   groupId: string,
-): { wraps: NTNostrEvent[]; rumorId: string } {
+): {
+  wraps: NTNostrEvent[];
+  rumorId: string;
+  rewraps: (() => Promise<NTNostrEvent>)[];
+} {
   const senderPubHex = getPublicKey(senderSk);
   const allWraps: NTNostrEvent[] = [];
 
@@ -195,9 +206,12 @@ export function wrapGroupMessage(
   // same rumor id, just like the DM path).
   const rumor = createRumor(content, senderSk, tags);
 
-  // One seal+gift-wrap per other member.
+  // One seal+gift-wrap per other member. Each member's seal is kept so the
+  // caller's retry ladder (#542) can re-gift-wrap the SAME seal.
+  const memberSeals: SignedEvent[] = [];
   for (const memberPk of memberPubkeys) {
     const seal = createSeal(rumor, senderSk, memberPk);
+    memberSeals.push(seal);
     const wrap = createGiftWrap(seal, memberPk);
     allWraps.push(wrap as unknown as NTNostrEvent);
   }
@@ -208,7 +222,13 @@ export function wrapGroupMessage(
   const selfWrap = createGiftWrap(selfSeal, senderPubHex);
   allWraps.push(selfWrap as unknown as NTNostrEvent);
 
-  return { wraps: allWraps, rumorId: rumor.id };
+  const rewraps = memberSeals.map((seal, i) => {
+    const memberPk = memberPubkeys[i]!;
+    return async (): Promise<NTNostrEvent> =>
+      createGiftWrap(seal, memberPk) as unknown as NTNostrEvent;
+  });
+
+  return { wraps: allWraps, rumorId: rumor.id, rewraps };
 }
 
 /**

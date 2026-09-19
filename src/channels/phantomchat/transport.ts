@@ -1354,15 +1354,26 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       timestamp: timestampMs,
     });
 
-    const { wraps } = wrapGroupMessage(
+    const { wraps, rewraps } = wrapGroupMessage(
       this.ourSecretKey,
       others,
       payload,
       groupId,
     );
-    for (const wrap of wraps) {
-      await this.publishWrap(wrap as unknown as NTNostrEvent);
+    // Per-member delivery retry (issue #542): each member wrap carries its own
+    // rewrap thunk — a re-gift-wrap of THAT member's seal — so publishWrap's
+    // 8/20/45s ladder fires only for a member whose wrap is readable from zero
+    // relays and only re-sends to that member. A partial failure (A's wrap
+    // stored, B's dropped) retries B alone. The self-wrap stays fire-and-warn:
+    // it is multi-device recovery, not delivery, so losing it loses nothing
+    // the recipient was waiting for.
+    for (let i = 0; i < rewraps.length; i++) {
+      await this.publishWrap(wraps[i] as unknown as NTNostrEvent, {
+        rewrap: rewraps[i],
+        label: "group",
+      });
     }
+    await this.publishWrap(wraps[rewraps.length] as unknown as NTNostrEvent);
   }
 
   /**
