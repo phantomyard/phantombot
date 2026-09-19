@@ -466,7 +466,7 @@ export async function wrapV2(
   recipientPubHex: string,
   content: string,
   replyTo?: { eventId: string; relayUrl?: string },
-): Promise<{ event: NTNostrEvent; rumorId: string }> {
+): Promise<{ event: NTNostrEvent; rumorId: string; rumor: V2Rumor }> {
   const senderPubHex = getPublicKey(senderSk);
   // ONE Date.now() for BOTH created_at and the ms tag — see MS_TAG. Two calls
   // can straddle a second boundary and desync the sub-second slot from the
@@ -491,13 +491,38 @@ export async function wrapV2(
   };
   const rumorId = getEventHash(rumor as never);
   // Assign id after hashing — rumor type needs it for the signed event
-  const rumorWithId = { ...rumor, id: rumorId };
+  const rumorWithId: V2Rumor = { ...rumor, id: rumorId };
 
+  const event = await sealV2(senderSk, recipientPubHex, rumorWithId);
+  return { event, rumorId, rumor: rumorWithId };
+}
+
+/** A kind-14 phantomchat v2 rumor, id assigned. */
+export interface V2Rumor {
+  kind: number;
+  created_at: number;
+  tags: string[][];
+  content: string;
+  pubkey: string;
+  id: string;
+}
+
+/**
+ * Encrypt + sign one OUTER envelope around an already-built rumor.
+ *
+ * Split out of `wrapV2` so `rewrapV2` cannot drift from it: both must produce
+ * byte-identical envelopes apart from the ephemeral key and timestamp.
+ */
+async function sealV2(
+  senderSk: Uint8Array,
+  recipientPubHex: string,
+  rumor: V2Rumor,
+): Promise<NTNostrEvent> {
   // Derive shared symmetric key (cached after first call per peer)
   const { key: symmetricKey } = await getSymmetricKey(senderSk, recipientPubHex);
 
   // Encrypt rumor JSON with AES-256-GCM
-  const encryptedContent = await encryptV2(JSON.stringify(rumorWithId), symmetricKey);
+  const encryptedContent = await encryptV2(JSON.stringify(rumor), symmetricKey);
 
   // Sign outer event with a FRESH EPHEMERAL keypair per message (NIP-17
   // parity). This prevents relays from building an A→B social graph from
@@ -507,12 +532,33 @@ export async function wrapV2(
   const eventTemplate = {
     kind: 1059,
     created_at: Math.floor(Date.now() / 1000),
-    tags,
+    tags: rumor.tags,
     content: encryptedContent,
   };
-  const event = finalizeEvent(eventTemplate, ephemeralSk) as unknown as NTNostrEvent;
+  return finalizeEvent(eventTemplate, ephemeralSk) as unknown as NTNostrEvent;
+}
 
-  return { event, rumorId };
+/**
+ * Re-envelope a rumor we already sent, for delivery retry (issue #542).
+ *
+ * The OUTER event is new — fresh ephemeral key, fresh AES nonce, fresh
+ * `created_at`, therefore a fresh event id. That is the whole point: relays
+ * dedup by event id, so re-publishing the identical wrap to a relay that
+ * dropped it is a no-op.
+ *
+ * The INNER rumor is byte-identical, so its id is unchanged. Every reader
+ * dedups on the rumor id precisely because one logical message already arrives
+ * under more than one wrap today (relay + P2P) — see the ingest in
+ * `channels/phantomchat/channel.ts`. That is what makes the retry idempotent:
+ * a recipient who got the first copy silently drops the second instead of
+ * rendering a duplicate bubble.
+ */
+export async function rewrapV2(
+  senderSk: Uint8Array,
+  recipientPubHex: string,
+  rumor: V2Rumor,
+): Promise<NTNostrEvent> {
+  return sealV2(senderSk, recipientPubHex, rumor);
 }
 
 /**

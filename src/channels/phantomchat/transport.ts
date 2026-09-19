@@ -22,6 +22,7 @@ import {
   createRumor,
   createSeal,
   wrapGroupMessage,
+  rewrapV2,
   wrapV2,
   type NTNostrEvent as WrapEvent,
 } from "../../lib/nostrCrypto.ts";
@@ -130,6 +131,41 @@ export const PUBLISH_READBACK_TIMEOUT_MS = 5000;
 
 /** Two independently verified relay copies are enough to call delivery confirmed. */
 export const PUBLISH_CONFIRM_QUORUM = 2;
+
+/**
+ * Outbound delivery retry (issue #542).
+ *
+ * The delivery guarantee used to be ONE-WAY. PWA→bot has the full double tick:
+ * the bot sends a NIP-17 delivery receipt and the PWA's DeliveryTracker retries
+ * with a fresh outer wrap at 8s/20s/45s until it lights. bot→PWA had neither —
+ * `verifyStored` re-queried each relay and, on a miss, only warned and fed the
+ * quarantine. An agent reply that landed on no readable relay was lost
+ * silently and permanently, with the PWA's 15s catch-up poll (reading the SAME
+ * relay set that just failed) as the only backstop.
+ *
+ * These are the PWA's own schedule, deliberately: the two sides of one
+ * conversation should give up at the same point, and 8/20/45 is already tuned
+ * against real relay recovery times.
+ *
+ * A retry fires ONLY when the read-back proves the wrap is readable from ZERO
+ * relays AND the peer did not acknowledge it over P2P — i.e. only when the
+ * message is genuinely lost. Each attempt re-envelopes the SAME rumor
+ * (`rewrapV2`), so relays see a new event id while the recipient dedups on the
+ * unchanged rumor id.
+ */
+export const OUTBOUND_RETRY_DELAYS_MS = [8_000, 20_000, 45_000] as const;
+
+export interface PublishWrapOptions {
+  /**
+   * Build a FRESH outer envelope around the same inner rumor, for delivery
+   * retry (issue #542). Supplying it opts this publish into the retry ladder;
+   * omitting it keeps the pre-#542 fire-and-warn behaviour, which is what
+   * every non-message publish (profiles, receipts, typing) wants.
+   */
+  rewrap?: () => Promise<NTNostrEvent>;
+  /** Human label for the give-up log, e.g. "dm" or "group". */
+  label?: string;
+}
 
 /**
  * Warm-spare probe cadence. The channel's existing 15-second catch-up loop
@@ -311,7 +347,7 @@ export interface PhantomchatTransport extends ChannelTransport {
    * whichever is first — or once every relay has failed. The remaining relays
    * keep publishing in the background. Never rejects.
    */
-  publishWrap(event: NTNostrEvent): Promise<void>;
+  publishWrap(event: NTNostrEvent, opts?: PublishWrapOptions): Promise<void>;
   /**
    * Wait for every background relay publish still in flight to settle. A
    * one-shot caller (notify) calls this before close(), so returning early
@@ -427,6 +463,21 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   private readonly inflight = new Set<Promise<void>>();
 
   /**
+   * Pending outbound-retry sleeps (issue #542), so `close()` can cancel them.
+   *
+   * Retries are deliberately NOT in `inflight`: `flush()` is what a one-shot
+   * caller (`phantombot notify`) awaits before tearing the pool down, and a
+   * full retry ladder is ~73s — long enough to look like a hung CLI. A
+   * one-shot send therefore keeps its pre-#542 behaviour (publish, read-back,
+   * warn) while the long-lived listener, which is what the issue is about,
+   * gets the ladder.
+   */
+  private readonly retryTimers = new Map<
+    ReturnType<typeof setTimeout>,
+    () => void
+  >();
+
+  /**
    * Set by the server (see setOutboundRecorder) to record each sent text
    * message's rumor id → text into its RecentOutbound map, so an inbound emoji
    * reaction can be correlated to the message it targets. Null until wired.
@@ -465,6 +516,19 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     private readonly pool: RelayPool,
     private readonly probeJitter: () => number = () =>
       1 + (Math.random() * 2 - 1) * RELAY_HEALTH_PROBE_JITTER,
+    /**
+     * Timing overrides — TESTS ONLY, same seam convention as `probeJitter`
+     * above. Production uses the PWA's 8s/20s/45s ladder and the standard
+     * read-back timings; a test can wait for neither. `readback` applies to
+     * EVERY read-back this transport runs, including the one after the first
+     * publish — otherwise a test asserting that NO retry happened would pass
+     * simply by finishing before the 750ms settle, which is no assertion at
+     * all.
+     */
+    private readonly testTiming: {
+      retryDelaysMs?: readonly number[];
+      readback?: { settleMs?: number; timeoutMs?: number };
+    } = {},
   ) {
     this.relays = [...relays];
     this.ourPubHex = getPublicKey(ourSecretKey);
@@ -645,7 +709,144 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     });
   }
 
-  async publishWrap(event: NTNostrEvent): Promise<void> {
+  /**
+   * How many retry sleeps are pending. Read by the test that proves `close()`
+   * actually cancels them — cancellation is otherwise invisible, since a retry
+   * that wakes after close is turned away by the `closed` check either way and
+   * publishes nothing in both cases. What differs is whether the timer held
+   * the event loop open until it fired.
+   */
+  get pendingRetries(): number {
+    return this.retryTimers.size;
+  }
+
+  /**
+   * Sleep, resolving `false` if the transport closes first. Every retry delay
+   * goes through here so a shutdown never has to wait out a 45s backoff, and a
+   * pending retry can't hold a relay socket open past `close()`.
+   */
+  private wait(ms: number): Promise<boolean> {
+    if (this.closed) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.retryTimers.delete(timer);
+        resolve(true);
+      }, ms);
+      this.retryTimers.set(timer, () => resolve(false));
+    });
+  }
+
+  /**
+   * Re-send a wrap the relays did not store (issue #542), on the PWA's own
+   * 8s/20s/45s ladder.
+   *
+   * Each attempt re-envelopes the SAME rumor: relays see a new event id (so
+   * they don't dedup the retry away) while the recipient sees the same rumor id
+   * (so it dedups a copy it already has instead of rendering it twice). Stops
+   * the moment ANY relay confirms storage — one readable copy is all the
+   * recipient's catch-up poll needs.
+   *
+   * Never throws. Exhausting the ladder is logged at ERROR, because at that
+   * point a reply the user is waiting for is genuinely gone and the only other
+   * evidence would have been silence.
+   */
+  private async retryOutbound(
+    rewrap: () => Promise<NTNostrEvent>,
+    originalEventId: string,
+    label: string,
+  ): Promise<void> {
+    const delays = this.testTiming.retryDelaysMs ?? OUTBOUND_RETRY_DELAYS_MS;
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      const delay = delays[attempt]!;
+      if (!(await this.wait(delay))) return;
+      if (this.closed) return;
+
+      let fresh: NTNostrEvent;
+      try {
+        fresh = await rewrap();
+      } catch (err) {
+        log.warn("phantomchat: could not re-wrap for delivery retry", {
+          originalEventId,
+          error: (err as Error).message,
+        });
+        return;
+      }
+
+      const targets = this.relayHealth.publishTargets();
+      log.info("phantomchat: retrying undelivered wrap", {
+        label,
+        originalEventId,
+        eventId: fresh.id,
+        attempt: attempt + 1,
+        of: delays.length,
+        relays: targets.length,
+      });
+      await Promise.all(this.publishToTargets(fresh, targets));
+      const missing = await this.verifyStored(
+        fresh,
+        this.testTiming.readback,
+        targets,
+      );
+      if (this.closed) return;
+      if (targets.length > 0 && missing.length < targets.length) {
+        log.info("phantomchat: undelivered wrap recovered on retry", {
+          label,
+          originalEventId,
+          eventId: fresh.id,
+          attempt: attempt + 1,
+          confirmed: targets.length - missing.length,
+        });
+        return;
+      }
+    }
+    log.error("phantomchat: outbound message LOST after every retry", {
+      label,
+      originalEventId,
+      attempts: delays.length,
+    });
+  }
+
+  /**
+   * Publish one event to `targets` and score each relay's answer. Returns one
+   * promise per target: did that relay really accept?
+   *
+   * Extracted so the retry ladder (#542) republishes through EXACTLY the same
+   * path as a first attempt — same NIP-42 signer, same accept-latency scoring,
+   * same connection-failure classification. A second, drifting copy of this is
+   * how a retry quietly stops feeding relay health.
+   */
+  private publishToTargets(
+    event: NTNostrEvent,
+    targets: readonly string[],
+  ): Promise<boolean>[] {
+    const startedAt = Date.now();
+    let perRelay: Promise<string>[];
+    try {
+      perRelay = this.pool.publish([...targets], event, {
+        onauth: this.authSigner,
+      });
+    } catch (err) {
+      perRelay = targets.map(() => Promise.reject(err));
+    }
+    return perRelay.map((p, i) => {
+      const relay = targets[i];
+      const score = (accepted: boolean): boolean => {
+        if (relay) {
+          this.relayHealth.recordAccept(relay, Date.now() - startedAt, accepted);
+        }
+        return accepted;
+      };
+      return p.then(
+        (reason) => score(!isRelayConnectionFailure(reason)),
+        () => score(false),
+      );
+    });
+  }
+
+  async publishWrap(
+    event: NTNostrEvent,
+    opts?: PublishWrapOptions,
+  ): Promise<void> {
     // Tee to the P2P bridge FIRST so a reply races out over WebRTC in parallel
     // with the relay publish, not after it. The bridge answers with whether the
     // peer ACKNOWLEDGED the wrap (a P2P delivery receipt). Guarded so a bridge
@@ -669,28 +870,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     // MIN_PUBLISH_RELAYS: the floor outranks the quarantine. `onauth` is the
     // NIP-42 signer (issue #368).
     const targets = this.relayHealth.publishTargets();
-    const startedAt = Date.now();
-    let perRelay: Promise<string>[];
-    try {
-      perRelay = this.pool.publish(targets, event, { onauth: this.authSigner });
-    } catch (err) {
-      perRelay = targets.map(() => Promise.reject(err));
-    }
-    // One boolean per relay: did it really accept? Each outcome also feeds the
-    // relay's accept latency into the slow-relay quarantine.
-    const outcomes = perRelay.map((p, i) => {
-      const relay = targets[i];
-      const score = (accepted: boolean): boolean => {
-        if (relay) {
-          this.relayHealth.recordAccept(relay, Date.now() - startedAt, accepted);
-        }
-        return accepted;
-      };
-      return p.then(
-        (reason) => score(!isRelayConnectionFailure(reason)),
-        () => score(false),
-      );
-    });
+    const outcomes = this.publishToTargets(event, targets);
 
     // THE FIX for "every send waits for the slowest relay". We used to
     // `await Promise.allSettled(...)` here, so one bad relay cost each message
@@ -725,7 +905,37 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       // never be stored — re-query each relay for the event id and warn,
       // naming the relays. Detached, and started only once every relay has
       // answered, so a merely SLOW relay isn't scored as a dropping one.
-      void this.verifyStored(event, undefined, targets);
+      //
+      // Delivery retry (issue #542) hangs off the read-back, and stays DETACHED
+      // with it. `settled` is what `flush()` drains, so awaiting the read-back
+      // here would make a one-shot send wait out its settle + per-relay timeout
+      // — and the retry ladder on top of that.
+      void this.verifyStored(event, this.testTiming.readback, targets)
+        .then(async (missing) => {
+          const rewrap = opts?.rewrap;
+          if (!rewrap) return;
+          // Only when the wrap is readable from ZERO relays: one surviving copy
+          // is all the recipient's catch-up poll needs, and re-sending on a
+          // partial miss would multiply traffic for nothing.
+          if (targets.length === 0 || missing.length < targets.length) return;
+          if (await p2pAcked) {
+            // The peer acknowledged the wrap over WebRTC, so it HAS the
+            // message. Relay storage failing after that is a redundancy
+            // problem, not a delivery one, and the quarantine already
+            // recorded it.
+            log.debug("phantomchat: relays dropped a wrap the peer already has", {
+              eventId: event.id,
+            });
+            return;
+          }
+          await this.retryOutbound(rewrap, event.id, opts?.label ?? "wrap");
+        })
+        .catch((err: unknown) => {
+          log.debug("phantomchat: delivery retry chain threw", {
+            eventId: event.id,
+            error: (err as Error).message,
+          });
+        });
     });
     const tracked: Promise<void> = settled
       .catch(() => {})
@@ -966,7 +1176,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    * with stock clients and the PWA's GroupAPI still expects that shape.
    */
   async sendMessage(conversationId: string, text: string): Promise<void> {
-    const { event, rumorId } = await wrapV2(
+    const { event, rumorId, rumor } = await wrapV2(
       this.ourSecretKey,
       conversationId,
       text,
@@ -983,7 +1193,14 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
         });
       }
     }
-    await this.publishWrap(event as unknown as NTNostrEvent);
+    // #542: opt this send into the delivery-retry ladder. The rumor is
+    // captured, not rebuilt — a second `wrapV2` would mint a NEW rumor id and
+    // the recipient would render the retry as a duplicate bubble instead of
+    // dropping it.
+    await this.publishWrap(event as unknown as NTNostrEvent, {
+      label: "dm",
+      rewrap: () => rewrapV2(this.ourSecretKey, conversationId, rumor),
+    });
   }
 
   /**
@@ -1044,8 +1261,15 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       content: fileMeta,
       timestamp: Date.now(),
     });
-    const { event } = await wrapV2(this.ourSecretKey, conversationId, envelope);
-    await this.publishWrap(event as unknown as NTNostrEvent);
+    const { event, rumor } = await wrapV2(
+      this.ourSecretKey,
+      conversationId,
+      envelope,
+    );
+    await this.publishWrap(event as unknown as NTNostrEvent, {
+      label: "voice",
+      rewrap: () => rewrapV2(this.ourSecretKey, conversationId, rumor),
+    });
   }
 
   /**
@@ -1244,6 +1468,13 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    // Wake every pending retry sleep so the ladder unwinds immediately instead
+    // of holding the process alive for up to 45s after teardown.
+    for (const [timer, cancel] of this.retryTimers) {
+      clearTimeout(timer);
+      cancel();
+    }
+    this.retryTimers.clear();
     try {
       this.pool.close(this.relays);
     } catch (e) {
