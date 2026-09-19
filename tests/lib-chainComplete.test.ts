@@ -10,9 +10,13 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { completeOverChain } from "../src/lib/chainComplete.ts";
+import {
+  completeOverChain,
+  HarnessCompletionError,
+} from "../src/lib/chainComplete.ts";
 import { CooldownStore } from "../src/lib/cooldown.ts";
-import type { Harness } from "../src/harnesses/types.ts";
+import { setLogSink } from "../src/lib/logSink.ts";
+import type { Harness, HarnessChunk } from "../src/harnesses/types.ts";
 
 function fake(id: string): Harness {
   return { id, available: async () => true, async *invoke() {} };
@@ -147,5 +151,283 @@ describe("completeOverChain", () => {
     ).rejects.toThrow("stopped");
     expect(tried).toEqual(["codex"]);
     expect(cooldown.isCooledDown("codex").cooled).toBe(false);
+  });
+});
+
+/**
+ * Everything below is #595: this path used to cool a harness with no
+ * classification and no provider hint, which matters MORE here than in the
+ * orchestrator — on an untrusted turn the threat judge runs first, so the
+ * window IT stamps is the one `fallback.ts` inherits, and a harness already
+ * cooled is skipped without ever being classified.
+ */
+function errChunk(
+  over: Partial<Extract<HarnessChunk, { type: "error" }>> = {},
+): Extract<HarnessChunk, { type: "error" }> {
+  return {
+    type: "error",
+    error: "codex exited with code 1",
+    recoverable: true,
+    ...over,
+  };
+}
+
+const QUOTA_STDERR = [
+  "ERROR: You've hit your usage limit. Upgrade to Pro or try again at 8:58 PM.",
+];
+
+function failThroughLines(lines: string[], label = "test") {
+  return lines
+    .map((line) => JSON.parse(line))
+    .filter((line) => line.msg === `${label}: harness failed — falling through`);
+}
+
+describe("completeOverChain failure diagnostics (#595)", () => {
+  test("classifies on the harness STDERR, not just the exit line", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      const out = await completeOverChain(
+        [fake("codex"), fake("pi")],
+        async (h) => {
+          if (h.id === "codex") {
+            throw new HarnessCompletionError(
+              errChunk({ stderrTail: QUOTA_STDERR }),
+            );
+          }
+          return "from-pi";
+        },
+        { ...LABEL, cooldown: new CooldownStore() },
+      );
+      expect(out).toBe("from-pi");
+      const logged = failThroughLines(lines);
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).toMatchObject({
+        harnessId: "codex",
+        cause: "rate_limit",
+        nextHarnessId: "pi",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  test("a crash with the SAME error line is distinguishable from a quota", async () => {
+    // The pair that made v1.1.389 look broken: byte-identical `error`, and
+    // only `cause` tells an operator which one they are looking at.
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      await completeOverChain(
+        [fake("codex"), fake("pi")],
+        async (h) => {
+          if (h.id === "codex") {
+            throw new HarnessCompletionError(
+              errChunk({ stderrTail: ["panic: runtime error: index out of range"] }),
+            );
+          }
+          return "from-pi";
+        },
+        { ...LABEL, cooldown: new CooldownStore() },
+      );
+      const logged = failThroughLines(lines);
+      expect(logged[0].error).toBe("codex exited with code 1");
+      expect(logged[0].cause).toBe("other");
+    } finally {
+      restore();
+    }
+  });
+
+  test("honours the provider's deadline instead of the generic ladder", async () => {
+    // The whole point: a four-hour quota must not be benched for ~150 s and
+    // re-probed all afternoon — and must not pre-empt the orchestrator's own
+    // sighted classification by cooling the harness blind first.
+    const cooldown = new CooldownStore();
+    const fourHours = 4 * 60 * 60 * 1000;
+    await completeOverChain(
+      [fake("codex"), fake("pi")],
+      async (h) => {
+        if (h.id === "codex") {
+          throw new HarnessCompletionError(
+            errChunk({ stderrTail: QUOTA_STDERR, retryAfterMs: fourHours }),
+          );
+        }
+        return "from-pi";
+      },
+      { ...LABEL, cooldown },
+    );
+    const status = cooldown.isCooledDown("codex");
+    expect(status.cooled).toBe(true);
+    const remaining = status.untilMs - Date.now();
+    expect(remaining).toBeGreaterThan(fourHours - 5_000);
+    expect(remaining).toBeLessThanOrEqual(fourHours);
+  });
+
+  test("the logged cooldown is the window the store actually holds", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    const cooldown = new CooldownStore();
+    try {
+      await completeOverChain(
+        [fake("codex"), fake("pi")],
+        async (h) => {
+          if (h.id === "codex") {
+            throw new HarnessCompletionError(
+              errChunk({ stderrTail: QUOTA_STDERR, retryAfterMs: 90 * 60_000 }),
+            );
+          }
+          return "from-pi";
+        },
+        { ...LABEL, cooldown },
+      );
+      const logged = failThroughLines(lines);
+      expect(logged[0].retryAfterMs).toBe(90 * 60_000);
+      // A journal that claims a bench the process is not honouring is worse
+      // than no journal at all.
+      expect(logged[0].cooldownUntilMs).toBe(cooldown.isCooledDown("codex").untilMs);
+    } finally {
+      restore();
+    }
+  });
+
+  test("nextHarnessId names the next ELIGIBLE harness, skipping a cooled one", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    const cooldown = new CooldownStore();
+    cooldown.markFailure("claude");
+    try {
+      await completeOverChain(
+        [fake("codex"), fake("claude"), fake("pi")],
+        async (h) => {
+          if (h.id === "codex") throw new HarnessCompletionError(errChunk());
+          return "from-" + h.id;
+        },
+        { ...LABEL, cooldown },
+      );
+      // Pointing an operator at `claude` would send them to a journal where
+      // the work never landed: it is benched, so `pi` takes the turn.
+      expect(failThroughLines(lines)[0].nextHarnessId).toBe("pi");
+    } finally {
+      restore();
+    }
+  });
+
+  test("a bare Error still cools and still classifies on its message", async () => {
+    // Not every caller carries a chunk; the old shape must not regress into
+    // a crash or a silent un-cooled failure.
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    const cooldown = new CooldownStore();
+    try {
+      await completeOverChain(
+        [fake("codex"), fake("pi")],
+        async (h) => {
+          if (h.id === "codex") throw new Error("429 too many requests");
+          return "from-pi";
+        },
+        { ...LABEL, cooldown },
+      );
+      expect(failThroughLines(lines)[0].cause).toBe("rate_limit");
+      expect(cooldown.isCooledDown("codex").cooled).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  test("an exhausted chain logs WHY each harness declined", async () => {
+    // For the judge this line is the only record of a fail-open: every
+    // untrusted input during the outage goes unscreened.
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      await expect(
+        completeOverChain(
+          [fake("codex"), fake("pi")],
+          async (h) => {
+            throw new HarnessCompletionError(
+              errChunk({
+                error: `${h.id} exited with code 1`,
+                stderrTail:
+                  h.id === "codex" ? QUOTA_STDERR : ["401 unauthorized"],
+              }),
+            );
+          },
+          { ...LABEL, cooldown: new CooldownStore() },
+        ),
+      ).rejects.toThrow("pi exited with code 1");
+      const exhausted = lines
+        .map((l) => JSON.parse(l))
+        .filter((l) => l.msg === "test: no harness completed — chain exhausted");
+      expect(exhausted).toHaveLength(1);
+      expect(exhausted[0].attempted).toBe(2);
+      expect(exhausted[0].causes).toEqual([
+        { harnessId: "codex", cause: "rate_limit" },
+        { harnessId: "pi", cause: "auth" },
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("the exhaustion line names SKIPPED and EMPTY harnesses too", async () => {
+    // A chain can come up empty without a single throw: benched harnesses
+    // plus one that answered nothing. If only thrown failures were recorded,
+    // the judge's fail-open would leave no line at all here.
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    const cooldown = new CooldownStore();
+    cooldown.markFailure("codex");
+    try {
+      await expect(
+        completeOverChain(
+          [fake("codex"), fake("pi"), fake("claude")],
+          async (h) => {
+            if (h.id === "pi") return "";
+            throw new HarnessCompletionError(
+              errChunk({ error: "claude exited with code 1" }),
+            );
+          },
+          { ...LABEL, cooldown },
+        ),
+      ).rejects.toThrow("claude exited with code 1");
+      const exhausted = lines
+        .map((l) => JSON.parse(l))
+        .filter((l) => l.msg === "test: no harness completed — chain exhausted");
+      expect(exhausted).toHaveLength(1);
+      // Only two harnesses were actually invoked; all three are accounted for.
+      expect(exhausted[0].attempted).toBe(2);
+      expect(exhausted[0].causes).toEqual([
+        { harnessId: "codex", cause: "cooldown_skipped" },
+        { harnessId: "pi", cause: "empty_completion" },
+        { harnessId: "claude", cause: "other" },
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("an ABORTED chain logs no exhaustion line — nobody declined", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    const controller = new AbortController();
+    try {
+      await expect(
+        completeOverChain(
+          [fake("codex"), fake("pi")],
+          async () => {
+            controller.abort();
+            throw new Error("stopped");
+          },
+          { ...LABEL, cooldown: new CooldownStore(), signal: controller.signal },
+        ),
+      ).rejects.toThrow("stopped");
+      expect(
+        lines
+          .map((l) => JSON.parse(l))
+          .filter((l) => l.msg === "test: no harness completed — chain exhausted"),
+      ).toHaveLength(0);
+    } finally {
+      restore();
+    }
   });
 });

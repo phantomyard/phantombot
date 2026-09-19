@@ -18,6 +18,7 @@ import type {
 } from "../src/harnesses/types.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 import { CooldownStore } from "../src/lib/cooldown.ts";
+import { HarnessCompletionError } from "../src/lib/chainComplete.ts";
 import {
   extractDurableFactsOnEviction,
   formatDurableFacts,
@@ -807,6 +808,33 @@ describe("makeExtractionComplete", () => {
     const floored = recording();
     await makeExtractionComplete([floored.harness], cfg)!("s", "u");
     expect(floored.seen.req?.tmpBaseDir).toBe(join(homedir(), "tmp"));
+  });
+
+  test("carries stderr and the provider deadline out with the error (#595)", async () => {
+    // Same boundary as the judge: without the chunk, extraction cools a
+    // four-hour quota for ~150 s and re-probes it all afternoon.
+    const dead: Harness = {
+      id: "codex",
+      available: async () => true,
+      async *invoke() {
+        yield {
+          type: "error",
+          error: "codex exited with code 1",
+          recoverable: true,
+          retryAfterMs: 14_400_000,
+          stderrTail: ["ERROR: You've hit your usage limit."],
+        } as HarnessChunk;
+      },
+    };
+    const err = await makeExtractionComplete([dead], cfg, "/tmp")!("s", "u").then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(HarnessCompletionError);
+    expect((err as HarnessCompletionError).retryAfterMs).toBe(14_400_000);
+    expect((err as HarnessCompletionError).stderrTail).toEqual([
+      "ERROR: You've hit your usage limit.",
+    ]);
   });
 
   test("FALLS OVER when the primary is out of quota", async () => {

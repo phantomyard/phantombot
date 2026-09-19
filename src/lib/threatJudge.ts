@@ -92,7 +92,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
-import { completeOverChain } from "./chainComplete.ts";
+import {
+  completeOverChain,
+  HarnessCompletionError,
+} from "./chainComplete.ts";
 import type { CooldownStore } from "./cooldown.ts";
 
 /** At or above this score, escalate to the principal. */
@@ -467,7 +470,11 @@ export function makeHarnessJudgeComplete(
       else if (c.type === "done") {
         if (c.finalText) return c.finalText;
       } else if (c.type === "error") {
-        throw new Error(c.error);
+        // Carry the WHOLE chunk, not just its message: stderrTail is what
+        // classifies a CLI failure at all, and retryAfterMs is the provider's
+        // own deadline. Flattening to `new Error(c.error)` made every failure
+        // on this path classify `other` and cool on the generic ladder (#595).
+        throw new HarnessCompletionError(c);
       }
     }
     return chunks.join("");
