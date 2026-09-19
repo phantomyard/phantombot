@@ -17,6 +17,7 @@ import type {
   HarnessRequest,
 } from "../src/harnesses/types.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
+import { CooldownStore } from "../src/lib/cooldown.ts";
 import {
   extractDurableFactsOnEviction,
   formatDurableFacts,
@@ -806,5 +807,36 @@ describe("makeExtractionComplete", () => {
     const floored = recording();
     await makeExtractionComplete([floored.harness], cfg)!("s", "u");
     expect(floored.seen.req?.tmpBaseDir).toBe(join(homedir(), "tmp"));
+  });
+
+  test("FALLS OVER when the primary is out of quota", async () => {
+    // The silent half of a quota window: chat turns fail over and look fine
+    // while extraction, pinned to chain[0], logs "will retry batch" and drops
+    // every batch for as long as the window lasts. Memory just stops.
+    const dead: Harness = {
+      id: "codex",
+      available: async () => true,
+      async *invoke() {
+        yield { type: "error", error: "codex exited with code 1", recoverable: true } as HarnessChunk;
+      },
+    };
+    const alive: Harness = {
+      id: "pi",
+      available: async () => true,
+      async *invoke() {
+        yield { type: "done", finalText: '[{"fact":"x","confidence":0.9}]' } as HarnessChunk;
+      },
+    };
+    const complete = makeExtractionComplete(
+      [dead, alive],
+      cfg,
+      undefined,
+      new CooldownStore(),
+    )!;
+    expect(await complete("s", "u")).toContain('"fact":"x"');
+  });
+
+  test("is undefined only for an EMPTY chain", () => {
+    expect(makeExtractionComplete([], cfg)).toBeUndefined();
   });
 });

@@ -32,10 +32,12 @@
  * 150s and stampede). A successful turn (`done` chunk with non-empty
  * text) resets the failure count and clears any active cooldown.
  *
- * Lifetime: process-local. Resets across phantombot restarts. That's
- * fine — the cooldown is a soft hint for "this is probably still
- * broken, save the round-trip"; if we just restarted, we're fresh
- * out of state and might as well try.
+ * Lifetime: in-memory, but OPTIONALLY persisted — see `hydrate()`. A window
+ * the provider set (a quota that resets at a wall-clock time) outlives our
+ * process, and `phantombot update` restarts the service, so a purely
+ * process-local store re-probes a quota it already knows is closed every time
+ * the box comes back. Persisted windows are re-adopted only while still in
+ * the future.
  *
  * Concurrency: phantombot serializes turns per conversation, and the
  * orchestrator runs a single turn at a time within one process, so
@@ -45,8 +47,25 @@
 /** Base cooldown for the first consecutive failure, in milliseconds. */
 export const BASE_COOLDOWN_MS = 150_000; // 150 s
 
-/** Hard upper bound on a single cooldown window, in milliseconds. */
+/** Hard upper bound on a HEURISTIC (laddered) cooldown window, in ms. */
 export const MAX_COOLDOWN_MS = 3_600_000; // 1 h
+
+/**
+ * Upper bound on a window the PROVIDER asked for explicitly — a Retry-After
+ * duration or a parsed "try again at ..." deadline.
+ *
+ * Higher than the ladder cap on purpose. A subscription quota is measured in
+ * hours ("try again at 8:58 PM" on a 16:58 failure is four of them), and
+ * clamping that to the ladder's one hour means re-probing a window we have
+ * been TOLD is closed, three more times, for nothing. The ladder's cap stays
+ * where it is because the ladder is a guess; this one is an instruction.
+ *
+ * Still bounded, because the instruction arrives as parsed prose: the worst
+ * case a bad parse can buy is six hours of the chain preferring a fallback,
+ * never a dropped turn — the all-cooled escape hatch in
+ * orchestrator/fallback.ts runs the chain regardless when nobody is eligible.
+ */
+export const MAX_EXPLICIT_COOLDOWN_MS = 6 * 3_600_000; // 6 h
 
 /**
  * Jitter ratio: the actual cooldown is uniformly drawn from
@@ -54,7 +73,7 @@ export const MAX_COOLDOWN_MS = 3_600_000; // 1 h
  */
 export const JITTER_RATIO = 0.25;
 
-interface HarnessCooldownState {
+export interface HarnessCooldownState {
   /** How many consecutive failures we've seen. Reset on success. */
   consecutiveFailures: number;
   /** Epoch ms after which the harness is eligible again. */
@@ -111,8 +130,18 @@ export function applyJitter(base: number, random: RandomFn): number {
  * by the orchestrator when there is no other option (the alternative
  * would be a stuck agent that refuses to reply). See orchestrator/fallback.ts.
  */
+export interface CooldownPersistence {
+  /**
+   * Write the whole store out. Called on every state change, so it must be
+   * cheap and MUST NOT throw — the cooldown is a latency optimisation and a
+   * failed write can never be allowed to break a turn.
+   */
+  save(entries: Record<string, HarnessCooldownState>): void;
+}
+
 export class CooldownStore {
   private readonly state = new Map<string, HarnessCooldownState>();
+  private persistence: CooldownPersistence | undefined;
 
   constructor(
     private readonly random: RandomFn = Math.random,
@@ -141,7 +170,7 @@ export class CooldownStore {
     const retryAfterMs = opts.retryAfterMs;
     const jittered =
       retryAfterMs !== undefined && retryAfterMs > 0
-        ? Math.min(Math.max(Math.round(retryAfterMs), 1), MAX_COOLDOWN_MS)
+        ? Math.min(Math.max(Math.round(retryAfterMs), 1), MAX_EXPLICIT_COOLDOWN_MS)
         : applyJitter(baseCooldownForFailures(failures), this.random);
     const untilMs = this.now() + jittered;
     const next: HarnessCooldownState = {
@@ -149,6 +178,7 @@ export class CooldownStore {
       cooldownUntilMs: untilMs,
     };
     this.state.set(harnessId, next);
+    this.flush();
     return {
       cooled: true,
       untilMs,
@@ -161,7 +191,54 @@ export class CooldownStore {
    * counter and any active cooldown.
    */
   markSuccess(harnessId: string): void {
-    this.state.delete(harnessId);
+    const had = this.state.delete(harnessId);
+    if (had) this.flush();
+  }
+
+  /**
+   * Install a persistence sink and adopt any windows it previously stored.
+   *
+   * Why persist at all, when the header above says a fresh process "might as
+   * well try": because a window the PROVIDER set outlives our process. A
+   * subscription quota that resets at 8:58 PM is still closed after a restart,
+   * an update, or a crash loop — and `phantombot update` restarts the service,
+   * so the case is common rather than exotic. Re-probing then is not a cheap
+   * optimism, it is a guaranteed-failed turn's worth of latency in front of
+   * the user, repeated on every restart inside the window.
+   *
+   * Only FUTURE windows are adopted, and the failure counts that come with
+   * them: an expired entry restores nothing, so a box that was down for a day
+   * comes up clean rather than benched.
+   */
+  hydrate(
+    entries: Record<string, HarnessCooldownState>,
+    persistence?: CooldownPersistence,
+  ): void {
+    const now = this.now();
+    for (const [harnessId, entry] of Object.entries(entries)) {
+      if (!entry || typeof entry.cooldownUntilMs !== "number") continue;
+      if (entry.cooldownUntilMs <= now) continue;
+      this.state.set(harnessId, {
+        consecutiveFailures: Math.max(1, entry.consecutiveFailures ?? 1),
+        cooldownUntilMs: entry.cooldownUntilMs,
+      });
+    }
+    this.persistence = persistence;
+  }
+
+  /** Current windows, for persistence and for `/status`-style diagnostics. */
+  snapshot(): Record<string, HarnessCooldownState> {
+    return Object.fromEntries(this.state);
+  }
+
+  private flush(): void {
+    if (!this.persistence) return;
+    try {
+      this.persistence.save(this.snapshot());
+    } catch {
+      // Contracted never to throw; belt and braces so a sink that breaks its
+      // contract still cannot take a turn down with it.
+    }
   }
 
   /**
@@ -190,6 +267,7 @@ export class CooldownStore {
    */
   clear(): void {
     this.state.clear();
+    this.persistence = undefined;
   }
 }
 

@@ -1180,4 +1180,26 @@ describe("runHarnessProcess — Retry-After producer (issue #559, review on #561
     expect(errorChunk).toBeDefined();
     expect(errorChunk.retryAfterMs).toBeUndefined();
   });
+
+  test("a subscription quota's WALL CLOCK is stamped as a window", async () => {
+    // codex's real wording. No duration anywhere in it, so before this the
+    // four-hour window fell to the ladder and got re-probed hourly.
+    const chunks = await runFakeDeath(
+      "ERROR: You have hit your usage limit. Upgrade to Pro or try again at 8:58 PM.",
+    );
+    const errorChunk = chunks.find((c) => c.type === "error");
+    expect(errorChunk.retryAfterMs).toBeGreaterThan(0);
+    expect(errorChunk.retryAfterMs).toBeLessThanOrEqual(24 * 3_600_000);
+  });
+
+  test("a wall clock in a NON-rate-limit failure is ignored", async () => {
+    // The deadline form is only consulted for failures that classify as a
+    // rate limit, so a time string in an unrelated trace cannot bench a
+    // healthy harness for hours.
+    const chunks = await runFakeDeath(
+      "TypeError: undefined is not a function (job scheduled, retry at 9:00 AM)",
+    );
+    const errorChunk = chunks.find((c) => c.type === "error");
+    expect(errorChunk.retryAfterMs).toBeUndefined();
+  });
 });

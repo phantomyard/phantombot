@@ -12,6 +12,7 @@ import {
   DEGRADE_AFTER_FAILURES,
   HarnessAlerter,
   parseRetryAfterMs,
+  parseRetryDeadlineMs,
   REALERT_MS,
 } from "../src/lib/harnessAlert.ts";
 import { killCauseToErrorChunk } from "../src/lib/harnessRunner.ts";
@@ -488,5 +489,105 @@ describe("parseRetryAfterMs (#559, review on #561: the hint needs a parser)", ()
     const stderr = "Error: 429 too many requests, retry after 25s";
     expect(classifyFailure(stderr)).toBe("rate_limit");
     expect(parseRetryAfterMs(stderr)).toBe(25_000);
+  });
+});
+
+describe("classifyFailure — the STDERR tail, not just the exit line", () => {
+  // The bug: a CLI harness dies with "codex exited with code 1". That string
+  // names no cause, so a four-hour subscription-quota exhaustion classified
+  // as `other` — no rate-limit handling, and the owner was told the harness
+  // was "unavailable". Everything the provider actually said was on stderr,
+  // which the classifier never saw.
+  const CODEX_EXIT = "codex exited with code 1";
+  const CODEX_STDERR = [
+    "ERROR: You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing)",
+    "or try again at 8:58 PM.",
+  ];
+
+  test("the exit line ALONE is still uninformative — that is the bug", () => {
+    expect(classifyFailure(CODEX_EXIT)).toBe("other");
+  });
+
+  test("with the stderr tail it classifies as a rate limit", () => {
+    expect(classifyFailure(CODEX_EXIT, undefined, CODEX_STDERR)).toBe(
+      "rate_limit",
+    );
+  });
+
+  test("accepts the tail as one joined string too", () => {
+    expect(classifyFailure(CODEX_EXIT, undefined, CODEX_STDERR.join("\n"))).toBe(
+      "rate_limit",
+    );
+  });
+
+  test("a claude-style plan limit on stderr also classifies", () => {
+    expect(
+      classifyFailure("claude exited with code 1", undefined, [
+        "Claude usage limit reached. Your limit will reset at 9pm.",
+      ]),
+    ).toBe("rate_limit");
+  });
+
+  test("an unrelated stderr tail does NOT invent a rate limit", () => {
+    expect(
+      classifyFailure(CODEX_EXIT, undefined, [
+        "TypeError: cannot read property 'x' of undefined",
+      ]),
+    ).toBe("other");
+  });
+
+  test("an HTTP status still wins over the tail", () => {
+    expect(classifyFailure(CODEX_EXIT, 401, CODEX_STDERR)).toBe("auth");
+  });
+});
+
+describe("parseRetryDeadlineMs — wall-clock deadlines", () => {
+  // 2026-09-19 16:58 local. Codex's reply to an exhausted subscription is a
+  // TIME, not a duration, so the duration parser returns nothing and the
+  // four-hour window went to the jittered ladder — capped at an hour, so
+  // phantombot re-probed a dead quota every ~40 minutes all afternoon.
+  const now = new Date(2026, 8, 19, 16, 58, 0, 0).getTime();
+  const HOUR = 3_600_000;
+
+  test("the DURATION parser cannot read it — that is why this exists", () => {
+    expect(parseRetryAfterMs("or try again at 8:58 PM.")).toBeUndefined();
+  });
+
+  test("12-hour clock with a meridiem → the next occurrence", () => {
+    expect(parseRetryDeadlineMs("or try again at 8:58 PM.", now)).toBe(4 * HOUR);
+  });
+
+  test("24-hour clock reads literally", () => {
+    expect(parseRetryDeadlineMs("rate limit resets at 20:58", now)).toBe(4 * HOUR);
+  });
+
+  test("an hour already past today means TOMORROW, never a negative wait", () => {
+    const ms = parseRetryDeadlineMs("try again at 9:00 AM", now)!;
+    expect(ms).toBeGreaterThan(0);
+    expect(ms).toBe(16 * HOUR + 2 * 60_000);
+  });
+
+  test("an absolute ISO timestamp is honoured", () => {
+    const at = new Date(now + 90 * 60_000).toISOString();
+    expect(parseRetryDeadlineMs(`quota resets at ${at}`, now)).toBe(90 * 60_000);
+  });
+
+  test("an ISO timestamp already in the PAST yields no hint", () => {
+    const at = new Date(now - 60_000).toISOString();
+    expect(parseRetryDeadlineMs(`quota resets at ${at}`, now)).toBeUndefined();
+  });
+
+  test("a duration phrasing is left to the duration parser", () => {
+    expect(parseRetryDeadlineMs("try again in 90 seconds", now)).toBeUndefined();
+  });
+
+  test("a bare time with no retry verb is ignored", () => {
+    expect(
+      parseRetryDeadlineMs("request started at 8:58 PM and failed", now),
+    ).toBeUndefined();
+  });
+
+  test("nonsense clock values are rejected rather than clamped", () => {
+    expect(parseRetryDeadlineMs("try again at 99:99", now)).toBeUndefined();
   });
 });

@@ -114,6 +114,15 @@ const RATE_LIMIT_MARKERS = [
   "too many requests",
   "quota",
   "resource_exhausted",
+  // Subscription-plan exhaustion. Not an HTTP 429 and not the word "quota":
+  // codex says "You've hit your usage limit. Upgrade to Pro ... or try again
+  // at 8:58 PM", claude says "Claude usage limit reached". Both are the same
+  // thing as a 429 for our purposes — transient, clears on a wall clock, and
+  // must not be classified as `other` (observed on kw-phantombot 2026-09-19:
+  // four hours of codex failures reported to the owner as "unavailable").
+  "usage limit",
+  "upgrade to pro",
+  "plan limit",
 ];
 
 /** Word-bounded bare status code: "429 Too Many Requests" carries no other
@@ -138,6 +147,12 @@ const TIMEOUT_MARKERS = ["timed out after", "produced no output within"];
  */
 const EMPTY_MARKERS = ["empty reply"];
 
+/** Normalise the optional stderr tail into one searchable string. */
+function stderrTailText(tail?: readonly string[] | string): string {
+  if (!tail) return "";
+  return typeof tail === "string" ? tail : tail.join("\n");
+}
+
 /**
  * Classify a harness error chunk. Matching is on lowercased substrings
  * because the text is harness-authored and varies by CLI ("claude api
@@ -149,10 +164,14 @@ const EMPTY_MARKERS = ["empty reply"];
 export function classifyFailure(
   error: string,
   httpStatus?: number,
+  stderrTail?: readonly string[] | string,
 ): HarnessFailureCause {
   if (httpStatus === 401 || httpStatus === 403) return "auth";
   if (httpStatus === 429) return "rate_limit";
-  const text = error.toLowerCase();
+  const text = [error, stderrTailText(stderrTail)]
+    .filter((s) => s.length > 0)
+    .join("\n")
+    .toLowerCase();
   if (AUTH_MARKERS.some((m) => text.includes(m))) return "auth";
   if (
     RATE_LIMIT_MARKERS.some((m) => text.includes(m)) ||
@@ -229,8 +248,9 @@ export class HarnessAlerter {
     harnessId: string,
     error: string,
     httpStatus?: number,
+    stderrTail?: readonly string[],
   ): number {
-    const cause = classifyFailure(error, httpStatus);
+    const cause = classifyFailure(error, httpStatus, stderrTail);
     const prev = this.incidents.get(harnessId);
     const state: IncidentState = prev ?? {
       consecutiveFailures: 0,
@@ -305,7 +325,7 @@ export class HarnessAlerter {
     chain: string[];
     stderrTail?: string[];
   }): Promise<void> {
-    const cause = classifyFailure(input.error, input.httpStatus);
+    const cause = classifyFailure(input.error, input.httpStatus, input.stderrTail);
     const label =
       cause === "rate_limit"
         ? "rate limited"
@@ -456,6 +476,70 @@ const RETRY_AFTER_PATTERNS = [
   /\bretry in[^0-9-]{0,20}(\d+(?:\.\d+)?)\s*(ms|s|secs?|seconds?|m|mins?|minutes?)?\b/i,
   /\btry again in[^0-9-]{0,20}(\d+(?:\.\d+)?)\s*(ms|s|secs?|seconds?|m|mins?|minutes?)?\b/i,
 ];
+
+/**
+ * Absolute-deadline forms, for providers that answer "come back later" with a
+ * WALL CLOCK rather than a duration:
+ *
+ *   You've hit your usage limit. Upgrade to Pro ... or try again at 8:58 PM.
+ *   rate limit resets at 20:58
+ *   quota resets at 2026-09-19T20:58:00Z
+ *
+ * This exists because the duration parser above returns undefined for all of
+ * them, which sends a four-hour subscription window to the jittered ladder —
+ * capped at an hour, so phantombot re-probes a quota it KNOWS is dead, every
+ * ~40 minutes, all afternoon (observed on kw-phantombot 2026-09-19).
+ *
+ * Deliberately narrow, and deliberately NOT load-bearing:
+ *
+ *   - The verb must be a retry/reset verb AND the preposition must be "at".
+ *     "try again in 90 seconds" is the duration parser's job and stays there.
+ *   - A bare clock is read as the NEXT occurrence in LOCAL time: an hour that
+ *     has already passed today means tomorrow. Providers phrase these in the
+ *     account's own timezone and the box is normally in it; being wrong here
+ *     costs a longer-than-needed cooldown on a harness the chain has already
+ *     failed over past, never a dropped turn.
+ *   - Callers only consult it for failures that classified as `rate_limit`,
+ *     so a stray "at 9:00" in an unrelated stack trace cannot bench a healthy
+ *     harness for hours.
+ *
+ * Returns milliseconds from `now`, or undefined when no deadline is present.
+ */
+const RETRY_AT_ISO =
+  /\b(?:try again|retry|resets?|resuming|available again)\s+(?:at|on)\s+(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/i;
+
+const RETRY_AT_CLOCK =
+  /\b(?:try again|retry|resets?|resuming|available again)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?/i;
+
+export function parseRetryDeadlineMs(
+  text: string,
+  now: number = Date.now(),
+): number | undefined {
+  const iso = RETRY_AT_ISO.exec(text);
+  if (iso) {
+    const at = Date.parse(iso[1]!.replace(" ", "T"));
+    if (Number.isFinite(at) && at > now) return at - now;
+    // A parsed-but-past deadline means the window already closed: no hint,
+    // rather than a negative one the caller would have to defend against.
+    if (Number.isFinite(at)) return undefined;
+  }
+  const clock = RETRY_AT_CLOCK.exec(text);
+  if (!clock) return undefined;
+  let hour = Number(clock[1]);
+  const minute = clock[2] === undefined ? 0 : Number(clock[2]);
+  const meridiem = clock[3]?.toLowerCase().replace(/\./g, "");
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return undefined;
+  if (minute > 59) return undefined;
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  else if (meridiem === "am" && hour === 12) hour = 0;
+  if (hour > 23) return undefined;
+  const target = new Date(now);
+  target.setHours(hour, minute, 0, 0);
+  let deltaMs = target.getTime() - now;
+  // Already past today → the provider means tomorrow.
+  if (deltaMs <= 0) deltaMs += 24 * 60 * 60 * 1000;
+  return deltaMs;
+}
 
 export function parseRetryAfterMs(text: string): number | undefined {
   for (const pattern of RETRY_AFTER_PATTERNS) {

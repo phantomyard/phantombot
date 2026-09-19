@@ -31,7 +31,11 @@
 import type { FileSink, Subprocess, SpawnOptions } from "bun";
 import { killProcessGroup } from "./processGroup.ts";
 import { log } from "./logger.ts";
-import { parseRetryAfterMs } from "./harnessAlert.ts";
+import {
+  classifyFailure,
+  parseRetryAfterMs,
+  parseRetryDeadlineMs,
+} from "./harnessAlert.ts";
 import { redactForLog } from "./redact.ts";
 import type { HarnessChunk, HarnessRequest } from "../harnesses/types.ts";
 import {
@@ -958,7 +962,17 @@ export async function* runHarnessProcess(
     // the only place a CLI-subprocess harness surfaces the provider's
     // Retry-After — claude's synthetic envelope and pi's exit code carry
     // no structured hint of their own.
-    const retryAfterMs = parseRetryAfterMs(stderrText);
+    // A duration hint wins when present. Failing that, a rate-limited harness
+    // may have given a wall-clock deadline instead ("try again at 8:58 PM" —
+    // codex's subscription-quota wording). That form is only consulted when
+    // the failure actually classifies as a rate limit, so an unrelated time
+    // string in a stack trace cannot bench a healthy harness for hours.
+    const exitError = `${harnessId} exited with code ${code}`;
+    const retryAfterMs =
+      parseRetryAfterMs(stderrText) ??
+      (classifyFailure(exitError, undefined, stderrText) === "rate_limit"
+        ? parseRetryDeadlineMs(stderrText)
+        : undefined);
     yield {
       type: "error",
       error: `${harnessId} exited with code ${code}${signalCode ? ` (${signalCode})` : ""}`,
