@@ -996,6 +996,7 @@ describe("lifecycle commands: single-flight, not owned (#439, #519)", () => {
     const pendingLifecyclePath = join(dir, ".pending-lifecycle.json");
     try {
       let restartCalled = false;
+      let markerSeenBySend: string | undefined;
       const serviceControl = {
         isActive: async () => true,
         restart: async () => {
@@ -1023,6 +1024,17 @@ describe("lifecycle commands: single-flight, not owned (#439, #519)", () => {
               // Never resolves — the old code awaited this before writing
               // the marker, losing the back-online notify entirely.
               async sendMessage() {
+                // Pins the ordering: the marker must already exist while this
+                // send is still in flight — a send-first ordering loses the
+                // back-online notify if the process is killed mid-announce.
+                // Captured, not asserted, here: sendLifecycleBroadcast
+                // swallows send throws, so an in-flight expect would die
+                // silently. The assertion lives below, outside the swallow.
+                try {
+                  markerSeenBySend = await readFile(pendingLifecyclePath, "utf8");
+                } catch {
+                  // No marker yet = send-first ordering = caught below.
+                }
                 await new Promise(() => {});
               },
             }) as any,
@@ -1043,6 +1055,11 @@ describe("lifecycle commands: single-flight, not owned (#439, #519)", () => {
       const record = JSON.parse(await readFile(pendingLifecyclePath, "utf8"));
       expect(record.command).toBe("/restart");
       expect(record.personas.sort()).toEqual(["kai", "lena"]);
+      // Ordering pin, observed mid-flight by the send itself (see above).
+      expect(markerSeenBySend).toBeTruthy();
+      const seenBySend = JSON.parse(markerSeenBySend!);
+      expect(seenBySend.command).toBe("/restart");
+      expect(seenBySend.personas.sort()).toEqual(["kai", "lena"]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
