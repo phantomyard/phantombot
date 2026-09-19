@@ -186,9 +186,15 @@ export function createNarrationStreamGate(
   // second paragraph of an email draft.
   let sinceBoundary = "";
 
-  const mismatched = (text: string): boolean => {
+  /**
+   * The language of `text` when it is confidently NOT the expected one.
+   * Returns the offending code (not a boolean) so the drop log can carry it:
+   * #585 keys its counter on the (expected, actual) pair, and a drop logged
+   * without `actual` is a half-populated key.
+   */
+  const mismatchOf = (text: string): string | undefined => {
     const actual = detectLanguage(text);
-    return actual !== undefined && actual.code !== expected.code;
+    return actual && actual.code !== expected.code ? actual.code : undefined;
   };
 
   const textChunk = (text: string): HarnessChunk[] =>
@@ -222,10 +228,12 @@ export function createNarrationStreamGate(
     if (!wasNarration) return block;
     const kept: string[] = [];
     for (const line of block.split("\n")) {
-      if (line.trim() && mismatched(line)) {
+      const actual = line.trim() ? mismatchOf(line) : undefined;
+      if (actual) {
         dropped.push(line);
         log.info("narration: dropped a line in the wrong language", {
           expected: expected.code,
+          actual,
           chars: line.length,
         });
         continue;
@@ -264,7 +272,7 @@ export function createNarrationStreamGate(
     while ((nl = pending.indexOf("\n")) !== -1) {
       const line = pending.slice(0, nl + 1);
       pending = pending.slice(nl + 1);
-      if (!lineClear && mismatched(line)) {
+      if (!lineClear && mismatchOf(line)) {
         // Start holding HERE, and carry the rest of the buffer with it.
         hold = line + pending;
         pending = "";
