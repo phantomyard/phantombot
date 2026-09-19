@@ -273,6 +273,22 @@ describe("the tool is the second signal (Kai + Lena, #587 review)", () => {
     expect(rendered(out)).toBe("");
   });
 
+  test("a read/search tool is not a send, so the leak in front of it is gated", () => {
+    // Kai + Lena, second round: the first carve-out matched substrings, so
+    // `gmail_read_email` (mail), `slack_list_messages` (message) and
+    // `postgres_query` (post) all counted as sends and released the leak.
+    for (const name of [
+      "gmail_read_email",
+      "mcp__gmail__search_emails",
+      "slack_list_messages",
+      "postgres_query",
+    ]) {
+      const leak = "Miro la nota del contrato de energía.";
+      const out = run(EN, [text(leak), progress(name), done(leak)]);
+      expect([name, rendered(out)]).toEqual([name, ""]);
+    }
+  });
+
   test("raw stdout liveness is not a tool call and cannot drop anything", () => {
     // harnessRunner emits `progress` with NO `tool` for any non-JSON stdout
     // line. Treating that as a boundary let an unrelated log line delete the

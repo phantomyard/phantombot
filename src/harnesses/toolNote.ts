@@ -258,45 +258,129 @@ function normaliseName(name: string): string {
 }
 
 /**
- * Tools that TRANSMIT text to someone other than the principal: mail, chat,
- * SMS, a post, a push notification.
+ * Verbs that, on their own, mean this tool SENDS something.
+ *
+ * Matched as whole TOKENS of the tool name (`mcp__gmail__send_email` →
+ * `mcp`,`gmail`,`send`,`email`), never as substrings: substring matching made
+ * `gmail_read_email`, `slack_list_messages` and `postgres_query` all look like
+ * sends, which silently disabled the gate on the most common boundaries there
+ * are (Kai + Lena, #587 review).
+ */
+const SEND_VERBS = [
+  "send",
+  "notify",
+  "reply",
+  "tweet",
+  "dm",
+  "publish",
+  "broadcast",
+  "compose",
+  "forward"
+] as const;
+
+/**
+ * Verbs that only mean "send" when they carry an object: `post_message` sends,
+ * `get_post` and `postgres_query` do not. Never sufficient alone.
+ */
+const QUALIFIED_SEND_VERBS = ["post", "share", "create"] as const;
+
+/** Objects that turn a qualified verb into a send, and glue onto any verb. */
+const TRANSMIT_OBJECTS = [
+  "message",
+  "messages",
+  "mail",
+  "mails",
+  "email",
+  "emails",
+  "sms",
+  "text",
+  "texts",
+  "notification",
+  "notifications",
+  "dm",
+  "dms",
+  "comment",
+  "comments",
+  "reply",
+  "replies",
+  "status",
+  "tweet",
+  "post",
+  "chat"
+] as const;
+
+/**
+ * Verbs that READ. Their presence vetoes the carve-out outright: a name like
+ * `list_sent_messages` inspects a mailbox, it does not write to one, and the
+ * safe side of this decision is always "keep gating".
+ */
+const READ_VERBS = [
+  "read",
+  "list",
+  "get",
+  "search",
+  "fetch",
+  "query",
+  "view",
+  "browse",
+  "download",
+  "find",
+  "select",
+  "show",
+  "count"
+] as const;
+
+/** Split a tool name into lowercase word tokens, splitting camelCase too. */
+function nameTokens(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+/** `sendmessage`, `sendEmail` → a verb glued directly onto its object. */
+function isGluedSend(token: string, verbs: readonly string[]): boolean {
+  return verbs.some(
+    (verb) =>
+      token.length > verb.length &&
+      token.startsWith(verb) &&
+      TRANSMIT_OBJECTS.includes(token.slice(verb.length) as never)
+  );
+}
+
+/**
+ * Does this tool transmit user-visible content to a third party?
  *
  * These matter to the narration gate (#580). Text written immediately before
  * such a call is far more likely to be the PAYLOAD — a draft the principal
  * asked for in the recipient's language — than narration about the call, and
  * the reply-language rule explicitly protects that draft ("text you compose
- * FOR a third party is still written in that party's language"). Matched as
- * substrings of the normalised name so the many wrappers around one verb
- * (`send_message`, `mcp__gmail__send_email`, `slack_post_message`) all hit.
+ * FOR a third party is still written in that party's language").
  *
- * Deliberately narrow: each entry costs the gate a real boundary, so this is
- * a list of verbs that SEND, not of tools that merely touch the outside world
- * (`fetch`, `search` and friends stay gated).
- */
-const TRANSMIT_NAME_PARTS = [
-  "send",
-  "mail",
-  "message",
-  "notify",
-  "post",
-  "reply",
-  "sms",
-  "tweet",
-  "publish",
-  "broadcast"
-] as const;
-
-/**
- * Does this tool transmit user-visible content to a third party?
- *
- * Returns false when the name is missing: an unnamed tool is not evidence of
- * a send, and defaulting to true here would silently disable the gate for any
- * harness that fails to report names.
+ * Deliberately narrow in BOTH directions: each match costs the gate a real
+ * boundary, so the classifier keys on send-class VERBS (`send`, `notify`,
+ * `post_message`) and never on the bare nouns `mail`/`message`/`post` that a
+ * read or search tool carries just as often. Returns false when the name is
+ * missing: an unnamed tool is not evidence of a send, and defaulting to true
+ * would silently disable the gate for any harness that omits names.
  */
 export function toolTransmitsContent(name: string | undefined): boolean {
   if (!name) return false;
-  const n = normaliseName(name);
-  return TRANSMIT_NAME_PARTS.some((part) => n.includes(part));
+  const tokens = nameTokens(name);
+  if (tokens.length === 0) return false;
+  if (tokens.some((t) => READ_VERBS.includes(t as never))) return false;
+
+  for (const [index, token] of tokens.entries()) {
+    if (SEND_VERBS.includes(token as never)) return true;
+    if (isGluedSend(token, SEND_VERBS)) return true;
+    const qualified =
+      QUALIFIED_SEND_VERBS.includes(token as never) &&
+      tokens.slice(index + 1).some((rest) => TRANSMIT_OBJECTS.includes(rest as never));
+    if (qualified) return true;
+    if (isGluedSend(token, QUALIFIED_SEND_VERBS)) return true;
+  }
+  return false;
 }
 
 /**
