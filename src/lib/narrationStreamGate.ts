@@ -46,6 +46,7 @@ import { toolTransmitsContent } from "../harnesses/toolNote.ts";
 import type { HarnessChunk } from "../harnesses/types.ts";
 import { detectLanguage, expectedLanguageOf } from "./languageGate.ts";
 import { log } from "./logger.ts";
+import { bumpCounters } from "./persistedCounters.ts";
 
 /**
  * Give up on classifying the current line after this many bytes. A line this
@@ -250,11 +251,23 @@ export function createNarrationStreamGate(
     lineClear = false;
     const wasNarration = isNarrationBlock(sinceBoundary);
     sinceBoundary = "";
-    if (!wasNarration) return block;
+    if (!wasNarration) {
+      // Shape rejection (#585): held text the shape test declined to call
+      // narration, so it was emitted. Holds only originate from
+      // language-suspect text, so the count approximates wrong-language
+      // releases without verifying the language itself. Deliberate
+      // under-enforcement — counted, not punished, so a mistuned shape
+      // guard shows up as a number instead of as a user complaint.
+      if (block.trim()) {
+        bumpCounters({ [`narration.shape-rejection.${expected.code}`]: 1 });
+      }
+      return block;
+    }
     if (toolTransmitsContent(tool?.name)) {
       // The next thing this turn does is SEND. Whatever is held is the
       // principal's only view of what went out; never eat it.
       if (block.trim()) {
+        bumpCounters({ [`narration.sending-keep.${expected.code}`]: 1 });
         log.debug("narration: kept a held block in front of a sending tool", {
           expected: expected.code,
           tool: tool?.name,
@@ -264,10 +277,13 @@ export function createNarrationStreamGate(
       return block;
     }
     const kept: string[] = [];
+    const drops: Record<string, number> = {};
     for (const line of block.split("\n")) {
       const actual = line.trim() ? mismatchOf(line) : undefined;
       if (actual) {
         dropped.push(line);
+        drops[`narration.drop.${expected.code}.${actual}`] =
+          (drops[`narration.drop.${expected.code}.${actual}`] ?? 0) + 1;
         log.info("narration: dropped a line in the wrong language", {
           expected: expected.code,
           actual,
@@ -277,6 +293,8 @@ export function createNarrationStreamGate(
       }
       kept.push(line);
     }
+    // One batched bump for the whole boundary, whatever the line count.
+    if (Object.keys(drops).length > 0) bumpCounters(drops);
     const out = kept.join("\n");
     return out.trim() ? out : "";
   };
@@ -361,7 +379,16 @@ export function createNarrationStreamGate(
   };
 
   return {
-    releaseHold: (): HarnessChunk[] => textChunk(release()),
+    releaseHold: (): HarnessChunk[] => {
+      const out = release();
+      // Idle release (#585): held text flushed because the upstream went
+      // quiet, not because a boundary resolved it. A high rate means the
+      // 500ms window is too tight and leaks are escaping through it.
+      if (out.trim()) {
+        bumpCounters({ [`narration.idle-release.${expected.code}`]: 1 });
+      }
+      return textChunk(out);
+    },
     push(chunk: HarnessChunk): HarnessChunk[] {
       switch (chunk.type) {
         case "text":

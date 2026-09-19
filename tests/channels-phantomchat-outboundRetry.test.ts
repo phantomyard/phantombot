@@ -4,6 +4,10 @@ import {
   OUTBOUND_RETRY_DELAYS_MS,
   SimplePoolPhantomchatTransport,
 } from "../src/channels/phantomchat/transport.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readCounters } from "../src/lib/persistedCounters.ts";
 import {
   rewrapV2,
   unwrapNip17Message,
@@ -205,6 +209,31 @@ describe("outbound delivery retry (#542)", () => {
     // One original + exactly three attempts.
     expect(published.length).toBe(4);
     t.close();
+  });
+
+  test("a give-up is counted in the #585 store", async () => {
+    // Point the counter store at a sandbox so the assertion is
+    // self-contained; restored before the test returns.
+    const prev = process.env.XDG_STATE_HOME;
+    const workdir = mkdtempSync(join(tmpdir(), "outbound-retry-counters-"));
+    process.env.XDG_STATE_HOME = workdir;
+    try {
+      const sender = generateSecretKey();
+      const { pool } = fakePool(() => false);
+      const t = transportFor(sender, pool);
+
+      await t.sendMessage(getPublicKey(generateSecretKey()), "hello");
+      let lost = 0;
+      await until(() => {
+        void readCounters().then((c) => (lost = c["delivery.lost.dm"] ?? 0));
+        return lost === 1;
+      }, "the delivery.lost.dm counter");
+      t.close();
+    } finally {
+      if (prev === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prev;
+      rmSync(workdir, { recursive: true, force: true });
+    }
   });
 
   test("close() cancels a pending retry instead of holding the process open", async () => {
