@@ -4,7 +4,13 @@ import {
   OUTBOUND_RETRY_DELAYS_MS,
   SimplePoolPhantomchatTransport,
 } from "../src/channels/phantomchat/transport.ts";
-import { rewrapV2, unwrapV2, wrapV2 } from "../src/lib/nostrCrypto.ts";
+import {
+  rewrapV2,
+  unwrapNip17Message,
+  unwrapV2,
+  wrapGroupMessage,
+  wrapV2,
+} from "../src/lib/nostrCrypto.ts";
 import type { NostrEvent as NTNostrEvent } from "nostr-tools/pure";
 import type { Filter as NostrFilter } from "nostr-tools/filter";
 
@@ -56,6 +62,20 @@ function fakePool(storeFrom?: (e: NTNostrEvent) => boolean): FakePool {
     close() {},
   };
   return { pool, published, stored };
+}
+
+/**
+ * fakePool that stores only the FIRST published event and drops every later
+ * one — the partial-failure shape for the group path: the first member's wrap
+ * sticks, everyone else's (and the retries') are dropped.
+ */
+function fakePoolStoringFirst(): FakePool {
+  let firstSeen = false;
+  return fakePool(() => {
+    if (firstSeen) return false;
+    firstSeen = true;
+    return true;
+  });
 }
 
 /** Wait until `check()` holds, or fail loudly rather than hang the suite. */
@@ -207,6 +227,114 @@ describe("outbound delivery retry (#542)", () => {
     expect(slow.pendingRetries).toBe(0);
     await settle(60);
     expect(published.length).toBe(1);
+  });
+});
+
+/**
+ * Group egress retry (#542): each member wrap carries its own rewrap thunk, so
+ * a member whose wrap no relay stored is retried individually — and a member
+ * whose wrap DID stick (or the self-wrap) is never re-sent.
+ */
+describe("group send per-member retry (#542)", () => {
+  test("wrapGroupMessage exposes one rewrap thunk per other member, none for the self-wrap", async () => {
+    const sender = generateSecretKey();
+    const memberA = generateSecretKey();
+    const memberB = generateSecretKey();
+    const { wraps, rewraps } = wrapGroupMessage(
+      sender,
+      [getPublicKey(memberA), getPublicKey(memberB)],
+      "hi HQ",
+      "grp-1",
+    );
+
+    // Thunks exist ONLY for the other members — the self-wrap is multi-device
+    // recovery, not delivery, and never justifies ladder traffic.
+    expect(rewraps.length).toBe(2);
+    expect(wraps.length).toBe(3);
+
+    // Each thunk re-gift-wraps that member's UNCHANGED seal: fresh outer
+    // envelope (new event id, new ephemeral key, fresh AES content) around the
+    // SAME rumor id — the recipient dedups on the rumor, relays on the id.
+    for (let i = 0; i < rewraps.length; i++) {
+      const original = wraps[i]!;
+      const again = await rewraps[i]!();
+      expect(again.id).not.toBe(original.id);
+      expect(again.pubkey).not.toBe(original.pubkey);
+      expect(again.content).not.toBe(original.content);
+
+      const memberSk = i === 0 ? memberA : memberB;
+      const first = unwrapNip17Message(original, memberSk);
+      const second = unwrapNip17Message(again as NTNostrEvent, memberSk);
+      expect(second.id).toBe(first.id);
+      expect(second.content).toBe(first.content);
+      expect(second.tags.find((t) => t[0] === "group")).toEqual([
+        "group",
+        "grp-1",
+      ]);
+    }
+  });
+
+  test("a member wrap stored on no relay is retried with the same rumor; the stored member and self-wrap are not", async () => {
+    const sender = generateSecretKey();
+    const memberASk = generateSecretKey();
+    const memberBSk = generateSecretKey();
+    // Relays store the FIRST published wrap (member A's) and drop everything
+    // else — so B's wrap is genuinely lost and A's is genuinely delivered.
+    const { pool, published } = fakePoolStoringFirst();
+    const t = transportFor(sender, pool);
+
+    await t.sendGroupMessage(
+      "grp-1",
+      [getPublicKey(memberASk), getPublicKey(memberBSk)],
+      "hi HQ",
+    );
+
+    // Initial fan-out is A, B, self (in order). B's ladder then adds exactly
+    // three retries and nothing else ever publishes again.
+    await until(() => published.length >= 6, "B's retries");
+    await settle();
+    expect(published.length).toBe(6);
+
+    const rumorIdFor = (e: NTNostrEvent, sk: Uint8Array): string | undefined => {
+      try {
+        return unwrapNip17Message(e, sk).id;
+      } catch {
+        return undefined;
+      }
+    };
+    const aRumor = rumorIdFor(published[0]!, memberASk);
+    const bRumor = rumorIdFor(published[1]!, memberBSk);
+    // One group rumor shared by every member wrap (wrapGroupMessage seals the
+    // SAME rumor per member), so both unwrap to the same rumor id.
+    expect(aRumor).toBeDefined();
+    expect(bRumor).toBe(aRumor);
+
+    // Member A's wrap was stored: it is published exactly once, never retried.
+    for (const e of published.slice(1)) {
+      expect(rumorIdFor(e, memberASk)).toBeUndefined();
+    }
+
+    // Member B's three retries are fresh envelopes around B's SAME rumor.
+    for (const e of published.slice(3)) {
+      expect(rumorIdFor(e, memberBSk)).toBe(bRumor);
+    }
+    t.close();
+  });
+
+  test("the self-wrap never enters the retry ladder", async () => {
+    const sender = generateSecretKey();
+    const memberASk = generateSecretKey();
+    const { pool, published } = fakePool(() => false); // everything dropped
+    const t = transportFor(sender, pool);
+
+    await t.sendGroupMessage("grp-1", [getPublicKey(memberASk)], "hi HQ");
+
+    // Member wrap: original + 3 retries = 4. Self-wrap: original only, no
+    // matter that its read-back also came back empty.
+    await until(() => published.length >= 5, "the member retries");
+    await settle();
+    expect(published.length).toBe(5);
+    t.close();
   });
 });
 
