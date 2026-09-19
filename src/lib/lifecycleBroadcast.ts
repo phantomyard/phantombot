@@ -10,18 +10,18 @@
  * else was told.
  *
  * SCOPE — channel-neutral as of phantombot#523. Telegram accounts fan out
- * through bot tokens; a persona served ONLY over PhantomChat is warned through
+ * through bot tokens; a persona served over PhantomChat is also warned through
  * its own phantomchat.json identity (nsec + relays + allowlist) via the same
  * one-shot out-of-loop send path `phantombot notify` uses
  * (`channels/phantomchat/oneShotSend.ts`). A persona reachable on BOTH channels
- * is warned on Telegram only — the PhantomChat half exists to close the gap,
- * not to double-notify. PhantomChat recipients are the persona's allowed_npubs
- * hexes (the trusted tier — relay_npubs are never notified); an open/TOFU bot
- * with an EMPTY allowlist has no known contacts and is skipped, exactly like
- * the Telegram skip it replaces. When no account map is supplied (embedded
- * callers), the conservative fallback inference stays Telegram-only —
- * inferring a phantomchat identity from an arbitrary config layer would mean
- * reading persona dirs the caller may not own.
+ * is warned on both: notifications fan out independently to every configured
+ * channel, matching `phantombot notify`. PhantomChat recipients are the
+ * persona's allowed_npubs hexes (the trusted tier — relay_npubs are never
+ * notified); an open/TOFU bot with an EMPTY allowlist has no known contacts
+ * and is skipped, exactly like the Telegram skip it replaces. When no account
+ * map is supplied (embedded callers), the conservative fallback inference
+ * stays Telegram-only — inferring a phantomchat identity from an arbitrary
+ * config layer would mean reading persona dirs the caller may not own.
  *
  * Two halves, deliberately split:
  *
@@ -200,8 +200,7 @@ export function planLifecycleBroadcast(
   const seenPc = new Set<string>();
   const out: BroadcastRecipient[] = [];
   // Group the supplied accounts by persona: a persona can carry BOTH a
-  // telegram and a phantomchat account, and the pick below must be
-  // deterministic (Telegram preferred) rather than last-in-list wins.
+  // telegram and a phantomchat account, and both must be planned independently.
   const supplied = input.accounts
     ? (() => {
         const m = new Map<string, LifecycleAccount[]>();
@@ -220,9 +219,6 @@ export function planLifecycleBroadcast(
     const mapped = supplied?.get(persona);
     // A supplied map is exhaustive by construction: a persona missing from it
     // has no channel at all, and must NOT fall back to guessing at config.
-    // Telegram wins when a persona carries both channels — the PhantomChat
-    // half exists to reach phantomchat-ONLY personas (phantombot#523), not
-    // to double-notify one reachable on both.
     const tgAccount: { token: string; allowedUserIds: number[] } | undefined =
       supplied
         ? (() => {
@@ -237,12 +233,14 @@ export function planLifecycleBroadcast(
         seenTg.add(key);
         return true;
       });
-      // A telegram account claims the persona even when its allowlist is
-      // empty — an empty Telegram allowlist and a PhantomChat fallback are
-      // both misconfigurations; silent channel-hopping would hide that.
-      if (chatIds.length === 0) continue;
-      out.push({ channel: "telegram", persona, token: tgAccount.token, chatIds });
-      continue;
+      if (chatIds.length > 0) {
+        out.push({
+          channel: "telegram",
+          persona,
+          token: tgAccount.token,
+          chatIds,
+        });
+      }
     }
     // Supplied-only: the fallback inference above is Telegram-shaped, so a
     // phantomchat account is only ever used when the daemon's real listener
@@ -260,19 +258,21 @@ export function planLifecycleBroadcast(
           seenPc.add(key);
           return true;
         });
-      if (hexes.length === 0) continue;
-      out.push({
-        channel: "phantomchat",
-        persona,
-        secretKey: pcAccount.secretKey,
-        relays: pcAccount.relays,
-        recipientHexes: hexes,
-      });
-      continue;
+      if (hexes.length > 0) {
+        out.push({
+          channel: "phantomchat",
+          persona,
+          secretKey: pcAccount.secretKey,
+          relays: pcAccount.relays,
+          recipientHexes: hexes,
+        });
+      }
     }
-    log.debug("lifecycleBroadcast: persona has no channel account, skipped", {
-      persona,
-    });
+    if (!tgAccount && !pcAccount) {
+      log.debug("lifecycleBroadcast: persona has no channel account, skipped", {
+        persona,
+      });
+    }
   }
   return out;
 }
