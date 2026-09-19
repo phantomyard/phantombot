@@ -281,8 +281,18 @@ const SEND_VERBS = [
 /**
  * Verbs that only mean "send" when they carry an object: `post_message` sends,
  * `get_post` and `postgres_query` do not. Never sufficient alone.
+ *
+ * `add`/`write`/`append`/`update` are here because the most common transmit
+ * tools in practice do not say "send" at all: the official GitHub MCP surface
+ * publishes with `add_issue_comment`, `add_pull_request_review_comment` and
+ * `discussion_comment_write` (Kai, #587 review). Missing those recreates the
+ * exact blind-send this carve-out exists to prevent — the draft is dropped
+ * from the stream AND from `finalText` while the tool publishes it anyway,
+ * leaving the principal with no copy of what went out. Alone they are far too
+ * broad (`write_file`, `add_label`, `update_config`), so like `post` they are
+ * only a send when a transmit OBJECT appears with them.
  */
-const QUALIFIED_SEND_VERBS = ["post", "share", "create"] as const;
+const QUALIFIED_SEND_VERBS = ["post", "share", "create", "add", "write", "append", "update"] as const;
 
 /** Objects that turn a qualified verb into a send, and glue onto any verb. */
 const TRANSMIT_OBJECTS = [
@@ -306,7 +316,18 @@ const TRANSMIT_OBJECTS = [
   "status",
   "tweet",
   "post",
-  "chat"
+  "chat",
+  // Publishing prose to a tracker is a transmit too: `create_issue` and
+  // `add_pull_request_review_comment` put composed text in front of third
+  // parties exactly like `send_email` does.
+  "issue",
+  "issues",
+  "discussion",
+  "discussions",
+  "review",
+  "reviews",
+  "thread",
+  "threads"
 ] as const;
 
 /**
@@ -374,9 +395,12 @@ export function toolTransmitsContent(name: string | undefined): boolean {
   for (const [index, token] of tokens.entries()) {
     if (SEND_VERBS.includes(token as never)) return true;
     if (isGluedSend(token, SEND_VERBS)) return true;
+    // The object may sit on EITHER side of the verb: `add_issue_comment` puts
+    // it after, `discussion_comment_write` puts it before. Requiring it after
+    // silently missed every trailing-verb name.
     const qualified =
       QUALIFIED_SEND_VERBS.includes(token as never) &&
-      tokens.slice(index + 1).some((rest) => TRANSMIT_OBJECTS.includes(rest as never));
+      tokens.some((rest, i) => i !== index && TRANSMIT_OBJECTS.includes(rest as never));
     if (qualified) return true;
     if (isGluedSend(token, QUALIFIED_SEND_VERBS)) return true;
   }

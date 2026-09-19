@@ -211,7 +211,17 @@ describe("toolTransmitsContent (#587 carve-out)", () => {
     // A qualified verb with no transmit OBJECT is not a send either — these
     // are the names that break if `post`/`create` are allowed to stand alone.
     "create_file",
-    "post_process"
+    "post_process",
+    // ...and that stays true for the edit-class verbs added for Kai's
+    // `add_issue_comment` blocker: they are only sends WITH a transmit object,
+    // or every file/config/label write would silently un-gate #580.
+    "write_file",
+    "add_label",
+    "update_config",
+    "append_to_file",
+    "add_column",
+    "get_issue_comment",
+    "list_discussion_comments"
   ];
 
   const SENDS = [
@@ -232,7 +242,18 @@ describe("toolTransmitsContent (#587 carve-out)", () => {
     // camelCase must be split (the verb is not glued to an object here)...
     "replyToThread",
     // ...and a verb glued straight onto its object must still be caught.
-    "sendmail"
+    "sendmail",
+    // The real transmit vocabulary does not say "send" (Kai, #587): these are
+    // the GitHub MCP names that publish text, with the verb both leading...
+    "add_issue_comment",
+    "add_pull_request_review_comment",
+    "mcp__github__add_issue_comment",
+    "create_issue",
+    "addComment",
+    // ...and trailing its object, which the after-the-verb-only scan missed.
+    "discussion_comment_write",
+    "issue_comment_update",
+    "comment_append"
   ];
 
   test("read, search and database tools are NOT sends", () => {

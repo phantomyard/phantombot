@@ -262,6 +262,36 @@ describe("the tool is the second signal (Kai + Lena, #587 review)", () => {
     }
   });
 
+  test("a tracker comment publishes too, even though it never says 'send'", () => {
+    // Kai's second blocker: the token classifier covered `send`-class verbs
+    // and missed the vocabulary the GitHub MCP surface actually uses, so a
+    // Dutch comment drafted for an issue was dropped from the stream AND from
+    // finalText while `add_issue_comment` posted it — a blind send.
+    for (const name of [
+      "add_issue_comment",
+      "add_pull_request_review_comment",
+      "discussion_comment_write",
+      "mcp__github__create_issue",
+    ]) {
+      const out = run(DRAFT_ASK, [text(DRAFT), progress(name), done(DRAFT)]);
+      expect([name, rendered(out)]).toEqual([name, DRAFT]);
+      expect([name, finalOf(out)]).toEqual([name, DRAFT]);
+    }
+  });
+
+  test("reading a comment is not publishing one", () => {
+    // The widened vocabulary must not hand the read side an exemption: these
+    // carry the same nouns and are still ordinary boundaries.
+    for (const name of ["get_issue_comment", "list_discussion_comments", "write_file"]) {
+      const out = run(EN, [
+        text("Miro la nota del contrato de energía."),
+        progress(name),
+        done("Miro la nota del contrato de energía."),
+      ]);
+      expect([name, rendered(out)]).toEqual([name, ""]);
+    }
+  });
+
   test("but a NON-sending tool still gates the same leak", () => {
     // The carve-out must not become a blanket amnesty: the #580 leak shape in
     // front of an ordinary tool is still dropped.
