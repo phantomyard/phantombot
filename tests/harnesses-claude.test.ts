@@ -274,7 +274,7 @@ describe("parseStreamJson", () => {
     expect(c).toEqual({
       type: "progress",
       note: "tool: Bash",
-      tool: { title: "tool: Bash", kind: "execute", locations: [] },
+      tool: { title: "tool: Bash", name: "Bash", kind: "execute", locations: [] },
     });
   });
 
@@ -290,7 +290,7 @@ describe("parseStreamJson", () => {
     expect(c).toEqual({
       type: "progress",
       note: "Bash: git status",
-      tool: { title: "Bash: git status", kind: "execute", locations: [] },
+      tool: { title: "Bash: git status", name: "Bash", kind: "execute", locations: [] },
     });
   });
 
@@ -376,7 +376,7 @@ describe("parseStreamJson", () => {
     expect(c).toEqual({
       type: "progress",
       note: "tool: Read",
-      tool: { title: "tool: Read", kind: "read", locations: [] },
+      tool: { title: "tool: Read", name: "Read", kind: "read", locations: [] },
     });
   });
 

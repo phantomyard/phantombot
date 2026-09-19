@@ -182,7 +182,7 @@ describe("parsePiEvent", () => {
     expect(c).toEqual({
       type: "progress",
       note: "tool: bash",
-      tool: { title: "tool: bash", kind: "execute", locations: [] },
+      tool: { title: "tool: bash", name: "bash", kind: "execute", locations: [] },
     });
   });
 
@@ -195,7 +195,7 @@ describe("parsePiEvent", () => {
     expect(c).toEqual({
       type: "progress",
       note: "bash: npm test",
-      tool: { title: "bash: npm test", kind: "execute", locations: [] },
+      tool: { title: "bash: npm test", name: "bash", kind: "execute", locations: [] },
     });
   });
 
@@ -207,7 +207,7 @@ describe("parsePiEvent", () => {
     expect(c).toEqual({
       type: "progress",
       note: "tool: run_shell_command",
-      tool: { title: "tool: run_shell_command", kind: "execute", locations: [] },
+      tool: { title: "tool: run_shell_command", name: "run_shell_command", kind: "execute", locations: [] },
     });
   });
 
@@ -269,7 +269,7 @@ describe("parsePiEvent", () => {
     expect(c).toEqual({
       type: "progress",
       note: "bash: npm test",
-      tool: { title: "bash: npm test", kind: "execute", locations: [] },
+      tool: { title: "bash: npm test", name: "bash", kind: "execute", locations: [] },
     });
   });
 

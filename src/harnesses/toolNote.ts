@@ -76,6 +76,14 @@ export interface ToolLocation {
 export interface ToolCallDetail {
   /** Single-line, length-capped title — identical to `buildToolNote(...)`. */
   title: string;
+  /**
+   * The tool's own name as the harness reported it (collapsed, not
+   * normalised), when it reported one at all. `title` is presentational and
+   * ambiguous — `"tool: bash"` and `"Bash: git status"` put the name on
+   * opposite sides of the colon — so any consumer that needs to REASON about
+   * which tool ran reads this instead of parsing the title.
+   */
+  name?: string;
   /** ACP ToolKind, used for the panel icon. */
   kind: ToolKind;
   /** File paths to surface as clickable links. Empty for non-file tools. */
@@ -250,6 +258,156 @@ function normaliseName(name: string): string {
 }
 
 /**
+ * Verbs that, on their own, mean this tool SENDS something.
+ *
+ * Matched as whole TOKENS of the tool name (`mcp__gmail__send_email` →
+ * `mcp`,`gmail`,`send`,`email`), never as substrings: substring matching made
+ * `gmail_read_email`, `slack_list_messages` and `postgres_query` all look like
+ * sends, which silently disabled the gate on the most common boundaries there
+ * are (Kai + Lena, #587 review).
+ */
+const SEND_VERBS = [
+  "send",
+  "notify",
+  "reply",
+  "tweet",
+  "dm",
+  "publish",
+  "broadcast",
+  "compose",
+  "forward"
+] as const;
+
+/**
+ * Verbs that only mean "send" when they carry an object: `post_message` sends,
+ * `get_post` and `postgres_query` do not. Never sufficient alone.
+ *
+ * `add`/`write`/`append`/`update` are here because the most common transmit
+ * tools in practice do not say "send" at all: the official GitHub MCP surface
+ * publishes with `add_issue_comment`, `add_pull_request_review_comment` and
+ * `discussion_comment_write` (Kai, #587 review). Missing those recreates the
+ * exact blind-send this carve-out exists to prevent — the draft is dropped
+ * from the stream AND from `finalText` while the tool publishes it anyway,
+ * leaving the principal with no copy of what went out. Alone they are far too
+ * broad (`write_file`, `add_label`, `update_config`), so like `post` they are
+ * only a send when a transmit OBJECT appears with them.
+ */
+const QUALIFIED_SEND_VERBS = ["post", "share", "create", "add", "write", "append", "update"] as const;
+
+/** Objects that turn a qualified verb into a send, and glue onto any verb. */
+const TRANSMIT_OBJECTS = [
+  "message",
+  "messages",
+  "mail",
+  "mails",
+  "email",
+  "emails",
+  "sms",
+  "text",
+  "texts",
+  "notification",
+  "notifications",
+  "dm",
+  "dms",
+  "comment",
+  "comments",
+  "reply",
+  "replies",
+  "status",
+  "tweet",
+  "post",
+  "chat",
+  // Publishing prose to a tracker is a transmit too: `create_issue` and
+  // `add_pull_request_review_comment` put composed text in front of third
+  // parties exactly like `send_email` does.
+  "issue",
+  "issues",
+  "discussion",
+  "discussions",
+  "review",
+  "reviews",
+  "thread",
+  "threads"
+] as const;
+
+/**
+ * Verbs that READ. Their presence vetoes the carve-out outright: a name like
+ * `list_sent_messages` inspects a mailbox, it does not write to one, and the
+ * safe side of this decision is always "keep gating".
+ */
+const READ_VERBS = [
+  "read",
+  "list",
+  "get",
+  "search",
+  "fetch",
+  "query",
+  "view",
+  "browse",
+  "download",
+  "find",
+  "select",
+  "show",
+  "count"
+] as const;
+
+/** Split a tool name into lowercase word tokens, splitting camelCase too. */
+function nameTokens(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+/** `sendmessage`, `sendEmail` → a verb glued directly onto its object. */
+function isGluedSend(token: string, verbs: readonly string[]): boolean {
+  return verbs.some(
+    (verb) =>
+      token.length > verb.length &&
+      token.startsWith(verb) &&
+      TRANSMIT_OBJECTS.includes(token.slice(verb.length) as never)
+  );
+}
+
+/**
+ * Does this tool transmit user-visible content to a third party?
+ *
+ * These matter to the narration gate (#580). Text written immediately before
+ * such a call is far more likely to be the PAYLOAD — a draft the principal
+ * asked for in the recipient's language — than narration about the call, and
+ * the reply-language rule explicitly protects that draft ("text you compose
+ * FOR a third party is still written in that party's language").
+ *
+ * Deliberately narrow in BOTH directions: each match costs the gate a real
+ * boundary, so the classifier keys on send-class VERBS (`send`, `notify`,
+ * `post_message`) and never on the bare nouns `mail`/`message`/`post` that a
+ * read or search tool carries just as often. Returns false when the name is
+ * missing: an unnamed tool is not evidence of a send, and defaulting to true
+ * would silently disable the gate for any harness that omits names.
+ */
+export function toolTransmitsContent(name: string | undefined): boolean {
+  if (!name) return false;
+  const tokens = nameTokens(name);
+  if (tokens.length === 0) return false;
+  if (tokens.some((t) => READ_VERBS.includes(t as never))) return false;
+
+  for (const [index, token] of tokens.entries()) {
+    if (SEND_VERBS.includes(token as never)) return true;
+    if (isGluedSend(token, SEND_VERBS)) return true;
+    // The object may sit on EITHER side of the verb: `add_issue_comment` puts
+    // it after, `discussion_comment_write` puts it before. Requiring it after
+    // silently missed every trailing-verb name.
+    const qualified =
+      QUALIFIED_SEND_VERBS.includes(token as never) &&
+      tokens.some((rest, i) => i !== index && TRANSMIT_OBJECTS.includes(rest as never));
+    if (qualified) return true;
+    if (isGluedSend(token, QUALIFIED_SEND_VERBS)) return true;
+  }
+  return false;
+}
+
+/**
  * Map a tool to its ACP `kind`. Prefers the tool NAME (Read→read, Bash→execute)
  * and falls back to input FIELD names when the name is unknown/absent, mirroring
  * how {@link buildToolNote} extracts detail. Defaults to `other`.
@@ -307,6 +465,7 @@ export function buildToolCall(
   const name = typeof toolName === "string" ? collapse(toolName) : "";
   return {
     title: buildToolNote(toolName, input),
+    ...(name ? { name } : {}),
     kind: classifyKind(name, input),
     locations: extractLocations(input)
   };

@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   buildToolCall,
   buildToolNote,
-  MAX_TOOL_NOTE_LEN
+  MAX_TOOL_NOTE_LEN,
+  toolTransmitsContent
 } from "../src/harnesses/toolNote.ts";
 
 describe("buildToolNote", () => {
@@ -178,5 +179,105 @@ describe("buildToolCall (#231)", () => {
       expect(call.locations).toEqual([]);
       expect(typeof call.kind).toBe("string");
     }
+  });
+});
+
+describe("toolTransmitsContent (#587 carve-out)", () => {
+  // Kai and Lena both blocked on the first cut, which matched every entry as
+  // an arbitrary SUBSTRING: `gmail_read_email` and `mcp__gmail__search_emails`
+  // hit on `mail`, `slack_list_messages` on `message`, `postgres_query` on
+  // `post`. Each false positive releases a wrong-language narration line in
+  // front of an ordinary read — a partial reopen of #580 on the commonest
+  // tool names there are.
+  const READS = [
+    "gmail_read_email",
+    "mcp__gmail__search_emails",
+    "slack_list_messages",
+    "postgres_query",
+    "list_posts",
+    "get_post",
+    "mcp__slack__conversations_history",
+    "read_messages",
+    "search_mail",
+    "fetch_notifications",
+    "Read",
+    "Bash",
+    "web_fetch",
+    // A read verb VETOES the carve-out even when a send verb is also present:
+    // these inspect an outbox, they do not write to one, and the safe side of
+    // an ambiguous name is always "keep gating".
+    "get_send_status",
+    "list_send_jobs",
+    // A qualified verb with no transmit OBJECT is not a send either — these
+    // are the names that break if `post`/`create` are allowed to stand alone.
+    "create_file",
+    "post_process",
+    // ...and that stays true for the edit-class verbs added for Kai's
+    // `add_issue_comment` blocker: they are only sends WITH a transmit object,
+    // or every file/config/label write would silently un-gate #580.
+    "write_file",
+    "add_label",
+    "update_config",
+    "append_to_file",
+    "add_column",
+    "get_issue_comment",
+    "list_discussion_comments"
+  ];
+
+  const SENDS = [
+    "send_message",
+    "sendEmail",
+    "SendMessage",
+    "mcp__gmail__send_email",
+    "Slack-Post-Message",
+    "post_status",
+    "notify",
+    "phantombot_notify",
+    "reply_to_thread",
+    "tweet",
+    "publish_post",
+    "broadcast",
+    "sms_send",
+    "forward_email",
+    // camelCase must be split (the verb is not glued to an object here)...
+    "replyToThread",
+    // ...and a verb glued straight onto its object must still be caught.
+    "sendmail",
+    // The real transmit vocabulary does not say "send" (Kai, #587): these are
+    // the GitHub MCP names that publish text, with the verb both leading...
+    "add_issue_comment",
+    "add_pull_request_review_comment",
+    "mcp__github__add_issue_comment",
+    "create_issue",
+    "addComment",
+    // ...and trailing its object, which the after-the-verb-only scan missed.
+    "discussion_comment_write",
+    "issue_comment_update",
+    "comment_append"
+  ];
+
+  test("read, search and database tools are NOT sends", () => {
+    for (const name of READS) {
+      expect([name, toolTransmitsContent(name)]).toEqual([name, false]);
+    }
+  });
+
+  test("send-class verbs, including wrappers and camelCase, ARE sends", () => {
+    for (const name of SENDS) {
+      expect([name, toolTransmitsContent(name)]).toEqual([name, true]);
+    }
+  });
+
+  test("a bare transmit NOUN is never enough on its own", () => {
+    // The nouns are what made the substring version wrong; they only count
+    // when a verb carries them.
+    for (const name of ["email", "message", "mailbox", "postgres", "texture"]) {
+      expect([name, toolTransmitsContent(name)]).toEqual([name, false]);
+    }
+  });
+
+  test("an unnamed tool is not evidence of a send", () => {
+    expect(toolTransmitsContent(undefined)).toBe(false);
+    expect(toolTransmitsContent("")).toBe(false);
   });
 });

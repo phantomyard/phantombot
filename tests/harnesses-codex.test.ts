@@ -85,7 +85,7 @@ describe("parseCodexEvent", () => {
     })).toEqual({
       type: "progress",
       note: "tool: shell",
-      tool: { title: "tool: shell", kind: "execute", locations: [] },
+      tool: { title: "tool: shell", name: "shell", kind: "execute", locations: [] },
     });
   });
 
@@ -96,7 +96,7 @@ describe("parseCodexEvent", () => {
     })).toEqual({
       type: "progress",
       note: "shell: git status",
-      tool: { title: "shell: git status", kind: "execute", locations: [] },
+      tool: { title: "shell: git status", name: "shell", kind: "execute", locations: [] },
     });
   });
 
