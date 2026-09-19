@@ -1263,6 +1263,13 @@ async function processChatMessage(
     enabled: narrationEnabled,
     send: (text) => sendTextSegment(text, "narration"),
     suppress: () => willReplyWithVoice,
+    // #580: withhold a narration line that is confidently in another language.
+    // The RAW incoming text, not the assembled prompt: the reply-language rule
+    // names the user's latest message as the sole authority, and explicitly
+    // calls group catch-up context, relay framing and attachment placeholders
+    // DATA. Feeding those in would let a Dutch group digest re-language the
+    // narration of an English question.
+    expectedLanguageSource: msg.text,
   });
 
   // Mechanical capture nudge: every CAPTURE_NUDGE_INTERVAL user turns
