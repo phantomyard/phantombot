@@ -67,7 +67,6 @@ import type { LifecycleAccount } from "../../lib/lifecycleBroadcast.ts";
 import { ConversationBacklog } from "./backlog.ts";
 import { loadPhantomchatPersonaConfig } from "../phantomchat/personaStore.ts";
 import { RecentOutbound, runReactionTurn } from "./reactions.ts";
-import { appendFallbackReplyTag } from "./fallbackTag.ts";
 import {
   hasTextSubstance,
   splitIntoSegments,
@@ -1185,8 +1184,6 @@ async function processChatMessage(
   let errored: string | undefined;
   let progressCount = 0;
   let chosenHarness: string | undefined;
-  // Done-chunk meta, kept for the fallback attribution tag (#559).
-  let doneMeta: Record<string, unknown> | undefined;
 
   const sendTextSegment = async (
     text: string,
@@ -1465,7 +1462,6 @@ async function processChatMessage(
         if (typeof meta?.harnessId === "string") {
           chosenHarness = meta.harnessId;
         }
-        doneMeta = chunk.meta;
       }
       if (chunk.type === "error") errored = chunk.error;
     }
@@ -1583,11 +1579,6 @@ async function processChatMessage(
       consumedReplyChars,
     );
   }
-  // Issue #559: a turn served by a fallback harness is tagged so the user
-  // can see which model actually answered. Text path only — the voice path
-  // synthesizes from fullReply, so the tag is never spoken.
-  outText = appendFallbackReplyTag(outText, doneMeta);
-
   if (requestedReplyMode === "default") {
     await clearReplyModeOverride({
       persona: input.persona,
