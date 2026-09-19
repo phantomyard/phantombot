@@ -1098,18 +1098,18 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // inference labels a sibling and sends through the wrong token. Only this
   // scope knows the true mapping, so it is passed down explicitly.
   //
-  // PhantomChat half (phantombot#523): a persona served ONLY over PhantomChat
-  // has no Telegram bot to warn through, so its phantomchat.json identity is
-  // supplied here — the applier DMs its allowed owners from its own nsec via
-  // the shared one-shot send path. Relayed through the persona's CACHED relays
-  // (the canonical /relays.json fetch happens later, with the listeners): a
+  // Every runnable phantomchat persona with an allowlist is supplied, INCLUDING
+  // personas that also have a Telegram listener: the planner fans a persona's
+  // message out to BOTH channels independently (phantombot#586), so a
+  // dual-channel persona is reached on phantomchat too. Suppressing the
+  // phantomchat account for telegram-listed personas here orphaned that
+  // fan-out — dual-channel personas silently lost every PhantomChat lifecycle
+  // notice (heads-up AND back-online) because the planner never saw their
+  // phantomchat account. The planner's dedup (by (persona, hex)) keeps one
+  // owner from being DM'd twice. An empty allowlist still means no known
+  // contacts: skipped. Relayed through the persona's CACHED relays (the
+  // canonical /relays.json fetch happens later, with the listeners): a
   // heads-up is best-effort, and the cache is the last known-good set.
-  // Personas reachable on BOTH channels are Telegram-only in the map — the
-  // planner prefers Telegram and this keeps a dual-channel persona from being
-  // double-notified. An empty allowlist means no known contacts: skipped.
-  const telegramLifecyclePersonas = new Set(
-    telegramListeners.map((l) => l.persona),
-  );
   const lifecycleAccounts = [
     ...telegramListeners.map((l) => ({
       persona: l.persona,
@@ -1117,11 +1117,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       chatIds: l.account.allowedUserIds,
     })),
     ...runnablePhantomchatPersonas
-      .filter(
-        (spec) =>
-          !telegramLifecyclePersonas.has(spec.persona) &&
-          spec.config.allowedHex.length > 0,
-      )
+      .filter((spec) => spec.config.allowedHex.length > 0)
       .map((spec) => ({
         channel: "phantomchat" as const,
         persona: spec.persona,

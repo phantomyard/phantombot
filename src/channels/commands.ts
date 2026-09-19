@@ -424,11 +424,31 @@ async function runLifecycle(
 
 /**
  * Warn every other persona that the shared process is about to go down, and
- * record who was warned so startup can tell those same personas we're back.
+ * record who to tell we're back.
  *
- * Best-effort throughout: any failure here is logged and swallowed, because
- * the restart the user asked for must not hinge on a courtesy message.
+ * The marker is the AUTHORITATIVE notification path, so it is written BEFORE
+ * any send: the post-restart "back online" fan-out (startup,
+ * `notifyLifecycleBackIfPending`) reads it, and it must survive even if every
+ * heads-up send below hangs or the process is killed mid-announce. The
+ * heads-up itself is best-effort TWICE over:
+ *
+ *   - bounded: a slow channel (PhantomChat one-shot connects pools, answers
+ *     NIP-42 challenges, gift-wraps, flushes — seconds per recipient) must not
+ *     delay the restart the user asked for. The race resolves at
+ *     `HEADS_UP_TIMEOUT_MS` and whatever is still in flight dies with us.
+ *     Telegram, being instant HTTP, almost always makes it out; PhantomChat
+ *     copies that miss are covered by the post-restart fan-out instead.
+ *   - swallowed: any throw is logged, never propagated.
+ *
+ * For /restart the origin persona is added to the marker's notify list — its
+ * immediate "restarting…" reply is the pre-notice, and the post-restart
+ * "back online" line is its confirmation, mirroring how the pending-update
+ * marker confirms an /update in the chat that typed it. For /update the
+ * origin is left off: the update marker already confirms there, and a second
+ * "back online" in the same chat is noise.
  */
+const HEADS_UP_TIMEOUT_MS = 4_000;
+
 async function announceImpendingRestart(
   ctx: SlashCommandContext,
   command: string,
@@ -441,21 +461,41 @@ async function announceImpendingRestart(
       accounts: ctx.lifecycleAccounts,
       excludePersona: ctx.persona,
     });
-    if (recipients.length === 0) return;
-    await sendLifecycleBroadcast({
-      recipients,
-      message: impendingRestartMessage(command, ctx.persona),
-      createTransport: ctx.createTelegramTransport,
-    });
+    // Everyone who gets the back-online line: the warned others, plus the
+    // origin for /restart (see docstring). Written before any send so the
+    // post-restart notify cannot be lost to a slow or killed announce.
+    const notifyPersonas = [
+      ...new Set(
+        command === "/restart"
+          ? [...recipients.map((r) => r.persona), ctx.persona]
+          : recipients.map((r) => r.persona),
+      ),
+    ];
     await writePendingLifecycle(
       {
         command,
         originPersona: ctx.persona,
-        personas: recipients.map((r) => r.persona),
+        personas: notifyPersonas,
         writtenAt: new Date().toISOString(),
       },
       ctx.pendingLifecyclePath,
     );
+    if (recipients.length === 0) return;
+    // Never let a courtesy message hold the restart hostage: bound the whole
+    // announce. sendLifecycleBroadcast never throws, so the loser of this
+    // race is simply abandoned (its pool dies with the process).
+    await Promise.race([
+      sendLifecycleBroadcast({
+        recipients,
+        message: impendingRestartMessage(command, ctx.persona),
+        createTransport: ctx.createTelegramTransport,
+      }),
+      new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, HEADS_UP_TIMEOUT_MS);
+        // Don't hold the event loop (or a test run) open for a courtesy.
+        t.unref?.();
+      }),
+    ]);
   } catch (e) {
     log.warn("commands: lifecycle heads-up failed", {
       command,

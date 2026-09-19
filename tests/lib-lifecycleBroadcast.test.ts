@@ -341,7 +341,10 @@ describe("notifyLifecycleBackIfPending", () => {
     );
   });
 
-  test("the marker is cleared even when every send fails", async () => {
+  test("a TOTAL send failure keeps the marker so the next restart retries", async () => {
+    // Boot-time relay/bot outages happen; a back-online line lost to one is
+    // exactly what this module exists to prevent. Partial failure still
+    // clears — re-sending to the ones that got through is worse noise.
     await withMarker(
       {
         command: "/update",
@@ -358,7 +361,36 @@ describe("notifyLifecycleBackIfPending", () => {
           path,
           createTransport: t.createTransport,
         });
+        expect(r.status).toBe("send_failed");
+        // Marker survives — next restart retries (bounded by the 1h staleness).
+        expect(await readPendingLifecycle(path)).toBeDefined();
+      },
+    );
+  });
+
+  test("the origin persona gets the back-online line when the marker names it", async () => {
+    // New-marker semantics: for /restart the announce lists the origin too —
+    // its post-restart confirmation in the chat that typed the command.
+    await withMarker(
+      {
+        command: "/restart",
+        originPersona: "robbie",
+        personas: ["lena", "robbie"],
+        writtenAt: new Date().toISOString(),
+      },
+      async (path) => {
+        const t = fakeTransports();
+        const r = await notifyLifecycleBackIfPending({
+          config: config(),
+          currentVersion: "1.2.3",
+          path,
+          createTransport: t.createTransport,
+        });
         expect(r.status).toBe("notified");
+        expect(t.sent.map((s) => s.token).sort()).toEqual([
+          "tok-lena",
+          "tok-robbie",
+        ]);
         expect(await readPendingLifecycle(path)).toBeUndefined();
       },
     );
