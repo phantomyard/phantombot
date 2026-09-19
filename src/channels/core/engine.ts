@@ -97,7 +97,6 @@ import type { GroupChatState } from "./routing.ts";
 import { abortReasonString, persistInterruptedTurn } from "./interrupted.ts";
 import {
   captureNudgeForTurn,
-  REPLY_LANGUAGE_INSTRUCTION,
   CHAT_REPLY_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
@@ -1368,12 +1367,10 @@ async function processChatMessage(
       //   - Voice-out: stack VOICE_REPLY_INSTRUCTION on top — stricter
       //     1-3 sentence limit and no markdown so TTS doesn't read out
       //     headers/bullets.
-      //   - Language: stack REPLY_LANGUAGE_INSTRUCTION on EVERY turn —
-      //     reply (and narration) in the language of the user's latest
-      //     message, everything else in the turn being data. Third axis
-      //     of the same channel-layer contract as format and length, and
-      //     unconditional on purpose: the classifier it replaced went
-      //     silent on exactly the languages it could not score.
+      //   - Language: NOT here. REPLY_LANGUAGE_INSTRUCTION is pushed by
+      //     the orchestrator as the last overlay on every turn (#580), so
+      //     it is one copy, in the freshest position, for every entry
+      //     point rather than just the two chat channels.
       // Living at the channel layer (not in persona files) keeps these
       // rules from leaking into CLI/nightly turns, where verbosity is
       // fine and the user isn't on a phone.
@@ -1384,7 +1381,6 @@ async function processChatMessage(
         willReplyWithVoice
           ? `${CHAT_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
           : CHAT_REPLY_INSTRUCTION,
-        REPLY_LANGUAGE_INSTRUCTION,
         captureNudge,
       ]
         .filter(Boolean)

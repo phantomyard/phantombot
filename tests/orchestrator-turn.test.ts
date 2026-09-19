@@ -363,13 +363,109 @@ describe("runTurn — successful path", () => {
 
     const prompt = captured?.systemPrompt ?? "";
     expect(prompt).toContain("Narration before tool calls");
-    // Multilingual nudge: the rule must point narration at the user's
-    // LATEST message, so non-English speakers don't get English filler —
-    // and so it cannot be read as "infer it from the conversation", which
-    // is what flipped narration mid-turn (#548).
-    expect(prompt).toMatch(/language of the user'?s LATEST message/i);
-    expect(prompt).not.toMatch(/whatever language the conversation/i);
   });
+
+  // #580. The narration block used to restate the reply-language rule and
+  // illustrate it with one named language, from the LAST overlay slot.
+  // Across 14,790 scored turns on two personas, every observed leak was a
+  // narration line in exactly that language while the reply body stayed
+  // correct. The block must now say nothing about language at all — the
+  // single copy of the rule is REPLY_LANGUAGE_INSTRUCTION.
+  test("the narration overlay says nothing about language", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [harness],
+        toolNarration: true,
+      }),
+    );
+
+    const prompt = captured?.systemPrompt ?? "";
+    const narration = prompt.slice(prompt.indexOf("# Narration before tool"));
+    const block = narration.slice(0, narration.indexOf("# Reply language"));
+    expect(block).toContain("# Narration before tool calls");
+    expect(block).not.toMatch(/language/i);
+    expect(block).not.toMatch(/Spanish|English|Dutch/);
+  });
+
+  // The narration budget (#580): narration's value to the principal is the
+  // chance to interrupt, and a sentence in front of each of twenty cheap
+  // reads buries the one call worth stopping.
+  test("the narration overlay asks for selective, not per-call, narration", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [harness],
+        toolNarration: true,
+      }),
+    );
+
+    const prompt = captured?.systemPrompt ?? "";
+    expect(prompt).toContain("Narrate SELECTIVELY");
+    expect(prompt).toMatch(/FIRST tool call of the turn/);
+    expect(prompt).toMatch(/CHANGES STATE/);
+  });
+
+  // #580: one copy of the rule, in the freshest slot, on every entry point.
+  // It previously lived in the Telegram and phantomchat suffixes only, so
+  // ACP and the TUI — which both call runTurn directly — carried no
+  // language rule at all.
+  test.each([
+    ["with narration", true],
+    ["without narration", false],
+  ])(
+    "REPLY_LANGUAGE_INSTRUCTION is present and LAST (%s)",
+    async (_name, toolNarration) => {
+      let captured: HarnessRequest | undefined;
+      const harness = new ScriptedHarness(
+        "fake",
+        [{ type: "done", finalText: "ok" }],
+        (req) => {
+          captured = req;
+        },
+      );
+
+      await collect(
+        runTurn({
+          ...baseInput(),
+          userMessage: "hi",
+          harnesses: [harness],
+          systemPromptSuffix: "# CUSTOM SUFFIX MARKER",
+          toolNarration,
+        }),
+      );
+
+      const prompt = captured?.systemPrompt ?? "";
+      expect(prompt).toContain("# Reply language");
+      // Exactly one copy.
+      expect(prompt.split("# Reply language").length - 1).toBe(1);
+      // And nothing after it: the last overlay owns the recency slot.
+      const rest = prompt.slice(
+        prompt.indexOf("# Reply language") + "# Reply language".length,
+      );
+      expect(rest).not.toMatch(/^#\s/m);
+    },
+  );
 
   test("toolNarration coexists with systemPromptSuffix — both land in the prompt", async () => {
     let captured: HarnessRequest | undefined;

@@ -1316,7 +1316,11 @@ their own conventions.
 
 Telegram and PhantomChat replies are shaped for phone chats:
 
-- Progress narration is coalesced instead of sent once per tool call.
+- Progress narration is coalesced instead of sent once per tool call, and the
+  agent is asked to narrate *selectively* — the first call of a turn, anything
+  that changes state or reaches off the machine, anything slow — rather than in
+  front of each of twenty cheap reads. Narration's value is the chance to stop
+  a run that is going wrong; a line per lookup buries the call worth stopping.
 - Final replies are split into readable bubbles.
 - Markdown tables and code fences are kept intact where possible.
 - Voice replies are split into short voice notes.
@@ -1934,10 +1938,11 @@ fallback list is shown instead, and new personas default to
 
 ## Reply Language
 
-Chat channels (Telegram and PhantomChat) state one deterministic rule to the
-harness on every turn: **reply in the language of your latest message** — and
-that includes the agent's pre-tool narration lines. Everything else in the turn
-is data, whatever language it is written in.
+Every turn — Telegram, PhantomChat, `phantombot ask`, the TUI and the editor
+(ACP) connectors alike — states one deterministic rule to the harness: **reply
+in the language of your latest message** — and that includes the agent's
+pre-tool narration lines. Everything else in the turn is data, whatever
+language it is written in.
 
 - The rule names, explicitly, what does *not* decide the language: a document
   or email being read, tool output, retrieved memory, the daily journal, a
@@ -1953,6 +1958,15 @@ is data, whatever language it is written in.
 Text the agent composes *for a third party* — an outbound email, a message to
 a supplier — is still written in that party's language. Only the reply to you
 is fixed.
+
+The rule is the **last** thing in the assembled prompt, and it is the only
+copy of itself. Until 1.1.381 it lived in the Telegram and PhantomChat
+prompt suffixes — so the editor and TUI surfaces carried no language rule at
+all — while the last position belonged to the narration block, which restated
+the rule and illustrated it with one named language. Across ~14,800 scored
+turns on two personas every measured violation was a narration line in exactly
+that language, with the reply body correct. The narration block now says
+nothing about language.
 
 Earlier releases (0.9.x–1.1.361) classified each inbound message in code and
 injected a concrete "Reply in English". That was stronger on the seven

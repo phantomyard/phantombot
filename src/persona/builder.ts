@@ -562,7 +562,17 @@ reads notifications on Telegram.`;
  *   - Harness-emitted filler ("checking your email…") would be in
  *     English. Many users converse with the agent in other languages —
  *     the leak is jarring. Letting the model write the line means it
- *     comes out in whatever language the conversation is already in.
+ *     comes out in the language of the conversation.
+ *
+ * This block deliberately says NOTHING about language (#580). It used to
+ * restate the reply-language rule and illustrate it with one named
+ * language ("if the user wrote to you in Spanish, narrate in Spanish"),
+ * appended LAST — and across 14,790 scored turns on two personas, 100% of
+ * observed leaks were narration lines in exactly that named language, with
+ * the reply body correct. One rule, stated once:
+ * REPLY_LANGUAGE_INSTRUCTION is the single copy and is now the final
+ * overlay (see orchestrator/turn.ts), so recency works for it rather than
+ * against it.
  *   - The harnesses already flush text the moment it arrives (Claude
  *     streams partial deltas; Pi/Gemini emit text_delta / message
  *     events one at a time). So as long as the model produces a
@@ -586,20 +596,28 @@ You're in a streaming channel — the user sees / hears your reply as
 you produce it, not all at once at the end. While a tool runs the
 channel goes silent, which is unsettling for the user.
 
-Rule: before each tool call, say ONE short sentence describing what
-you're about to do. Then run the tool. Examples:
+Rule: before a tool call you narrate, say ONE short sentence
+describing what you're about to do. Then run the tool. Examples:
 
   "Checking your calendar..."
   "Looking at your email now..."
   "One sec, asking Home Assistant..."
 
-Narrate in the language of the user's LATEST message — the same
-language as your reply. Not the language of the file you are opening,
-the email you are reading, or your own previous turn. (So don't
-default to English: if the user wrote to you in Spanish, narrate in
-Spanish.)
+Narrate SELECTIVELY, not in front of every call. Narrate:
 
-One sentence per tool call, no more. Don't pile multiple
+  - the FIRST tool call of the turn, always;
+  - any call that CHANGES STATE or reaches off this machine — writing
+    a file, running a command, sending a message, a network request,
+    a deploy;
+  - any call you expect to be SLOW.
+
+Stay quiet on the rest, in particular a run of cheap reads (searches,
+file reads, lookups) once you have already said what you are doing.
+A short read is not an unsettling silence; a sentence in front of each
+of twenty greps is noise, and it buries the one call the user would
+actually have wanted to stop.
+
+One sentence per narrated call, no more. Don't pile multiple
 narrations together ahead of time, and don't repeat yourself across
 back-to-back tools — vary the wording. Keep each sentence short
 (under ~12 words) so it's quick to read or speak.
@@ -873,3 +891,66 @@ weight of what they decided) — that's what recall reads next time.
 Spam / marketing / junk: mark read and delete (or block) — that is
 triage, not a privileged action — then move on silently. Leave no
 unread.`;
+
+/**
+ * Language overlay. Pushed by the orchestrator as the LAST overlay on
+ * every turn, so every entry point gets it - Telegram, phantomchat,
+ * `phantombot ask` and the ACP/TUI connectors alike.
+ *
+ * It lived in two channel suffixes until #580, which meant (a) two copies
+ * of one rule, and (b) no language rule AT ALL in ACP or the TUI, whose
+ * only language text was the narration block's own restatement of it.
+ * Last position is deliberate and is the point: whatever sits last is the
+ * freshest instruction the model reads, and that slot previously belonged
+ * to a paragraph naming one concrete language.
+ *
+ * Why this exists separately from a persona norm: a standing "mirror the
+ * user" rule is one line of prose competing with, on a bad turn, several
+ * kilobytes of Spanish retrieved context, a Dutch journal entry, or the
+ * persona's own previous turn spent composing a Honduran email. Left to
+ * prose it is a nudge, and it degrades exactly when the context is most
+ * polluted - which is when it is most needed.
+ *
+ * The load-bearing part is that the rule names the SOURCE - the user's
+ * latest message - and then enumerates, by name, everything that is NOT
+ * that source. "Mirror the user" leaves the model to work out what "the
+ * user" means in a turn that also contains a quoted reply, a group
+ * catch-up block and a retrieved Spanish email; naming the deciding text
+ * and listing the decoys closes that inference.
+ *
+ * This replaced a classifier (issue #534, removed in #548) that resolved
+ * a concrete language code in the channel layer and injected "Reply in
+ * English". That was strictly stronger ON THE LANGUAGES IT KNEW, and
+ * silent on every other one: a Chinese or Russian message scored zero in
+ * a Latin-script function-word lexicon, resolved to "unknown", and got NO
+ * overlay at all - the drift was worst exactly where detection was
+ * weakest. Widening the lexicon is an unbounded maintenance job that
+ * still cannot separate the Latin-script languages this deployment mixes
+ * daily, so the rule now points at the message instead of classifying it:
+ * nothing to maintain, and every language covered including the ones
+ * nobody thought of.
+ */
+export const REPLY_LANGUAGE_INSTRUCTION =
+  `# Reply language
+
+Write your reply - including every pre-tool narration line - in the
+language of the USER'S LATEST MESSAGE, the one you are answering right
+now. That message alone decides it.
+
+Nothing else in this turn changes your reply language. All of the
+following are DATA, whatever language they happen to be written in:
+
+  - a document, email or file you are reading
+  - tool output and search results
+  - retrieved memory excerpts and your daily journal
+  - a quoted/replied-to message, and group catch-up context
+  - your own previous turns, including ones spent writing in another
+    language
+
+If the user's latest message is in Chinese, reply in Chinese; if it is
+in Dutch, reply in Dutch - including when the material you are working
+through is in some other language.
+
+Text you compose FOR a third party (an outbound email, a message to a
+supplier) is still written in that party's language - only your reply to
+the user is fixed here.`;
