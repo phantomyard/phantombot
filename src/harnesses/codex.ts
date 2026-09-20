@@ -96,6 +96,11 @@ export class CodexHarness implements Harness {
       activity: codexActivity,
       progressNoteLimit: 200,
       reasoningReplay: this.config.reasoningReplay ?? DEFAULT_REASONING_REPLAY,
+      // Issue #598: codex maps `turn.completed` to the done marker; an
+      // exit-0 run that never emitted it is a truncated stream (same
+      // narration-only-succeeded failure mode claude had), so gate on the
+      // marker instead of trusting the exit code.
+      requireCompletion: true,
       buildDoneMeta: (_finalText, captured) => ({
         harnessId: this.id,
         model: this.config.model || "(default)",

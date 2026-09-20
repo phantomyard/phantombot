@@ -17,6 +17,14 @@
 #              exit 1 like a provider death: an attempt that DID real,
 #              side-effecting work before dying. Drives the producedOutput
 #              ladder test (tools aren't idempotent → no retry).
+#   stallaftertools — the 2026-09-20 TUI incident (#598, pi case): narration
+#              text BEFORE tools, two real tool rounds, then turn_end fires
+#              anyway and pi exits 0 — the stream died after the tool results
+#              and pi treated the truncated turn as finished. Must be a
+#              recoverable error, NOT done.
+#   toolsdone — healthy control for the same guard: tools run, then the model
+#              replies with text AFTER the last tool result, then turn_end.
+#              Must yield done with the full text.
 #   argv     — echo argv (joined) as a text_delta, exit 0 (arg-shape test)
 #   env      — echo the PHANTOMBOT_*_MODEL env vars + the PI provider/api-key
 #              as a text_delta, exit 0 (routing env-projection test)
@@ -109,6 +117,34 @@ case "$mode" in
     printf '%s\n' '{"type":"tool_execution_start","toolName":"bash","args":{"command":"echo side-effect"}}'
     printf '%s\n' '{"type":"tool_execution_end","toolName":"bash","result":{}}'
     exit 1
+    ;;
+  stallaftertools)
+    # The 2026-09-20 TUI incident, issue #598: narration before the tools, two
+    # real tool rounds (with toolCallId so the boundary tracker sees them),
+    # then turn_end WITHOUT any text after the tool results. Exit 0.
+    printf '%s\n' '{"type":"session","version":3,"id":"abc"}'
+    printf '%s\n' '{"type":"agent_start"}'
+    printf '%s\n' '{"type":"turn_start"}'
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Good question - let me check the routing.","partial":{}},"message":{}}'
+    printf '%s\n' '{"type":"tool_execution_start","toolCallId":"tc1","toolName":"bash","args":{"command":"ls"}}'
+    printf '%s\n' '{"type":"tool_execution_end","toolCallId":"tc1","toolName":"bash","result":{}}'
+    printf '%s\n' '{"type":"tool_execution_start","toolCallId":"tc2","toolName":"bash","args":{"command":"pwd"}}'
+    printf '%s\n' '{"type":"tool_execution_end","toolCallId":"tc2","toolName":"bash","result":{}}'
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
+    exit 0
+    ;;
+  toolsdone)
+    # Healthy tool turn: one tool round, then reply text AFTER the tool result,
+    # then turn_end. The post-tool-text guard must let this through as done.
+    printf '%s\n' '{"type":"session","version":3,"id":"abc"}'
+    printf '%s\n' '{"type":"agent_start"}'
+    printf '%s\n' '{"type":"turn_start"}'
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Checking...","partial":{}},"message":{}}'
+    printf '%s\n' '{"type":"tool_execution_start","toolCallId":"tc1","toolName":"bash","args":{"command":"ls"}}'
+    printf '%s\n' '{"type":"tool_execution_end","toolCallId":"tc1","toolName":"bash","result":{}}'
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Here is the answer.","partial":{}},"message":{}}'
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
+    exit 0
     ;;
   ratelimit)
     # FAKE_PI_RATELIMIT_TEXT overrides the stderr prose so tests can drive

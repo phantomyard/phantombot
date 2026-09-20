@@ -51,6 +51,24 @@ describe("persisted counters store", () => {
     );
   });
 
+  test("a queued bump lands in the state home it was enqueued under", async () => {
+    // CI flake on #599 (head 2bbb7cd): a bump's write resolved its path at
+    // flush time, so swapping XDG_STATE_HOME between enqueue and flush
+    // redirected the bump into the new state home and contaminated the
+    // next test's fresh store. The write must land where the fact happened.
+    const dirB = mkdtempSync(join(tmpdir(), "counters-redirect-"));
+    try {
+      bumpCounters({ "test.redirect": 1 });
+      process.env.XDG_STATE_HOME = dirB; // swap before the chain flushes
+      expect(await readCounters()).toEqual({}); // B stays clean
+      process.env.XDG_STATE_HOME = workdir;
+      expect(await readCounters()).toEqual({ "test.redirect": 1 });
+    } finally {
+      process.env.XDG_STATE_HOME = workdir;
+      rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+
   test("zero and negative bumps are ignored", async () => {
     bumpCounters({ "a.b": 0, "c.d": -3 });
     expect(await readCounters()).toEqual({});

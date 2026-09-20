@@ -17,6 +17,11 @@
 #   posttool_thinking — tool_use -> user tool_result -> spaced thinking
 #              heartbeats -> final text. Proves user-side tool_result clears
 #              the tool-running idle latch.
+#   narration_only — narration text + tool_use, then exit 0 WITHOUT a result
+#              envelope: the truncated-stream failure mode of issue #598. Must
+#              surface as a recoverable error, never a succeeded turn.
+#   result_error — text + a result envelope with is_error:true, exit 0: a
+#              failure the exit code hides (issue #598).
 
 mode="${FAKE_CLAUDE_MODE:-normal}"
 
@@ -76,6 +81,18 @@ case "$mode" in
     sleep 0.45
     printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"finished"}]}}'
     printf '%s\n' '{"type":"result"}'
+    exit 0
+    ;;
+  narration_only)
+    # The wire shape of the 2026-09-20 TUI stall: the model narrated, called
+    # a tool, and the stream died — CLI still exits 0, no result envelope.
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Good question — let me check that."}]}}'
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}'
+    exit 0
+    ;;
+  result_error)
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}'
+    printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true}'
     exit 0
     ;;
   *)

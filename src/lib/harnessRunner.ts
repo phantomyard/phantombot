@@ -713,6 +713,22 @@ export async function* runHarnessProcess(
   // finished this turn" marker (pi's turn_end, codex's turn.completed). Only
   // consulted when spec.requireCompletion is set; see the exit-0 gate below.
   let sawCompletion = false;
+  // Set once the parser surfaced an error chunk (terminal or recoverable).
+  // The completion gate below stays quiet then: the orchestrator has already
+  // failed over on that error, so a second "without a completion signal"
+  // error on the same stream would only be noise (issue #598 — a result
+  // envelope with is_error:true yields its own error and then exits 0).
+  let sawErrorChunk = false;
+  // Post-tool-text guard state (issue #598, the pi case): whether any tool
+  // boundary was crossed in this stream, and whether reply text arrived after
+  // the MOST RECENT one. A completed turn that ran tools but produced no text
+  // after the last tool boundary is a truncated turn wearing the completion
+  // marker's shape — pi can fire turn_end after a stream that died right after
+  // the tool results (observed 2026-09-20: TUI turn 60642dab, two bash calls,
+  // turn_end ~3s later, zero text after). Text BEFORE tools is narration and
+  // must not satisfy the guard.
+  let sawTool = false;
+  let textAfterLastTool = false;
   // Set when a parser returns a terminal policy error (e.g. the subagent
   // tripwire). The error chunk is yielded, the subprocess is killed NOW,
   // and every line after it — same batch or later — is dropped: nothing a
@@ -737,6 +753,12 @@ export async function* runHarnessProcess(
     for (const boundary of boundaries) {
       if (boundary.phase === "start") killer.toolStart(boundary.id);
       else killer.toolEnd(boundary.id);
+      // Any tool boundary invalidates earlier text as the final reply: a
+      // completed turn must produce text AFTER its last tool boundary
+      // (issue #598). Both phases reset — a start with no end is the same
+      // truncation shape as an end with no reply after it.
+      sawTool = true;
+      textAfterLastTool = false;
     }
     const res = spec.parseEvent(parsed);
     if (!res) return;
@@ -749,6 +771,7 @@ export async function* runHarnessProcess(
     } else {
       c = res;
     }
+    if (c.type === "error") sawErrorChunk = true;
     if (c.type === "error" && c.terminal) {
       terminalError = c;
       killer.terminate(); // SIGTERM → grace → SIGKILL the whole group
@@ -761,7 +784,10 @@ export async function* runHarnessProcess(
     // deliberately do not — only user-visible output means "not quiet".
     if (c.type === "text") replay?.visible("text", c.text);
     else if (c.type === "progress") replay?.visible("progress", c.note);
-    if (c.type === "text") finalText += c.text;
+    if (c.type === "text") {
+      finalText += c.text;
+      textAfterLastTool = true;
+    }
     if (c.type === "done") {
       captured = c.meta;
       sawCompletion = true;
@@ -989,21 +1015,54 @@ export async function* runHarnessProcess(
   }
 
   // Completion gate (opt-in via spec.requireCompletion): an exit-0 run that
-  // never emitted the harness's completion marker (pi's turn_end) is a
-  // "stopped mid-turn" state, not a finished answer — the accumulated text is
-  // only partial output / tool narration. Yield a recoverable error so the
-  // orchestrator falls through to the next harness instead of storing the
-  // fragment as the reply. See issue #352. Note `finalText` may be non-empty
-  // here (narration IS text), so the existing empty-done fall-through in
-  // runWithFallback cannot catch this case — the completion marker can.
+  // never emitted the harness's completion marker (pi's turn_end, claude's
+  // result envelope, codex's turn.completed) is a "stopped mid-turn" state,
+  // not a finished answer — the accumulated text is only partial output /
+  // tool narration. Yield a recoverable error so the orchestrator falls
+  // through to the next harness instead of storing the fragment as the reply.
+  // See issues #352 and #598. Note `finalText` may be non-empty here (narration
+  // IS text), so the existing empty-done fall-through in runWithFallback
+  // cannot catch this case — the completion marker can.
   if (spec.requireCompletion && !sawCompletion) {
     await awaitStderrDrained();
-    yield {
-      type: "error",
-      error: `${harnessId} exited 0 without a completion signal (only partial/tool output — likely stopped mid-turn)`,
-      recoverable: true,
-      stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
-    };
+    // A parser error chunk was already surfaced on this stream (e.g. a
+    // result envelope with is_error:true, or a mid-stream api error): the
+    // orchestrator has already failed over on it. Stay quiet — a second
+    // error would be noise, and a done would lie (issue #598).
+    if (!sawErrorChunk) {
+      yield {
+        type: "error",
+        error: `${harnessId} exited 0 without a completion signal (only partial/tool output — likely stopped mid-turn)`,
+        recoverable: true,
+        stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
+      };
+    }
+    return;
+  }
+
+  // Post-tool-text guard (issue #598, the pi case): the completion marker
+  // fired and the turn exited 0, BUT the stream ran tools and never produced
+  // reply text after the last tool boundary — the model's stream died right
+  // after the tool results and pi treated the truncated turn as finished
+  // (turn_end still fires; observed on the TUI twice on 2026-09-20). The
+  // pre-tool text is narration, not an answer: storing it as the reply is
+  // exactly the bug. Same contract as the gate above — recoverable, so the
+  // orchestrator retries/falls through, and quiet when an error chunk was
+  // already surfaced so we never report one truncation twice. Only applies
+  // to gated harnesses (requireCompletion); the legacy exit-0-accepts-done
+  // harnesses keep their old contract.
+  if (
+    spec.requireCompletion && sawCompletion && sawTool && !textAfterLastTool
+  ) {
+    await awaitStderrDrained();
+    if (!sawErrorChunk) {
+      yield {
+        type: "error",
+        error: `${harnessId} completed without reply text after its last tool call (likely stopped mid-turn)`,
+        recoverable: true,
+        stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
+      };
+    }
     return;
   }
 

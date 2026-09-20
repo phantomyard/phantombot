@@ -129,6 +129,20 @@ describe("CodexHarness.invoke", () => {
     expect(done.meta?.harnessId).toBe("codex");
   });
 
+  test("narration-only exit 0 (no turn.completed) is a recoverable error, never a succeeded turn (#598)", async () => {
+    process.env.FAKE_CODEX_MODE = "narration_only";
+    const chunks = await collect(
+      mkHarness().invoke(newRequest({ idleTimeoutMs: 2_000, hardTimeoutMs: 5_000 })),
+    );
+    expect(chunks.filter((c) => c.type === "done")).toHaveLength(0);
+    const errors = chunks.filter((c) => c.type === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ type: "error", recoverable: true });
+    expect((errors[0] as { error: string }).error).toContain(
+      "without a completion signal",
+    );
+  });
+
   test("toolsMode 'none' uses --sandbox read-only, NOT the YOLO bypass", async () => {
     process.env.FAKE_CODEX_MODE = "argv";
     const chunks = await collect(mkHarness().invoke(newRequest({ toolsMode: "none" })));

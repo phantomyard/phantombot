@@ -15,6 +15,9 @@
 #   productive -> stream agent_message text spaced under the idle window,
 #                 then turn.completed. Used to prove productive output DOES
 #                 keep resetting the idle timer, so the turn finishes cleanly.
+#   narration_only -> narration + tool call, then exit 0 WITHOUT turn.completed:
+#                 the truncated-stream failure mode of issue #598. Must surface
+#                 as a recoverable error, never a succeeded turn.
 
 mode="${FAKE_CODEX_MODE:-normal}"
 
@@ -27,6 +30,13 @@ case "$mode" in
     printf '%s\n' '{"type":"turn.started"}'
     printf '%s\n' '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"hello codex"}}'
     printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}'
+    exit 0
+    ;;
+  narration_only)
+    printf '%s\n' '{"type":"thread.started","thread_id":"t1"}'
+    printf '%s\n' '{"type":"turn.started"}'
+    printf '%s\n' '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"let me check that"}}'
+    printf '%s\n' '{"type":"item.completed","item":{"id":"i2","type":"command_execution","name":"shell","status":"in_progress"}}'
     exit 0
     ;;
   error)

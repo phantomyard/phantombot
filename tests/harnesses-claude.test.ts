@@ -233,6 +233,34 @@ describe("parseStreamJson api-error gate", () => {
   });
 });
 
+describe("parseStreamJson result envelope (issue #598)", () => {
+  test("a result envelope is the completion marker — payload-less done", () => {
+    expect(parseStreamJson({ type: "result" })).toEqual({
+      type: "done",
+      finalText: "",
+      meta: undefined,
+    });
+  });
+
+  test("is_error:true result is a recoverable error, never a completion", () => {
+    // Observed on the wire: the CLI exits 0 alongside is_error:true, so the
+    // flag — not the exit code — decides (forced model_not_found).
+    const c = parseStreamJson({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+    });
+    expect(c).toMatchObject({ type: "error", recoverable: true });
+    expect((c as { error: string }).error).toContain("error_during_execution");
+  });
+
+  test("a result envelope stamped max_output_tokens completes the turn — a real truncated reply", () => {
+    expect(
+      parseStreamJson({ type: "result", error: "max_output_tokens" }),
+    ).toEqual({ type: "done", finalText: "", meta: undefined });
+  });
+});
+
 describe("parseStreamJson", () => {
   test("extracts assistant text content", () => {
     const c = parseStreamJson({
@@ -263,7 +291,13 @@ describe("parseStreamJson", () => {
         message: { content: [{ type: "text", text: "not surfaced" }] },
       }),
     ).toBeUndefined();
-    expect(parseStreamJson({ type: "result" })).toBeUndefined();
+    // A result envelope is no longer ignored — it is the completion marker
+    // (issue #598): payload-less done, consumed by the engine.
+    expect(parseStreamJson({ type: "result" })).toEqual({
+      type: "done",
+      finalText: "",
+      meta: undefined,
+    });
   });
 
   test("progress for tool_use blocks with tool name in note", () => {
@@ -504,6 +538,42 @@ describe("ClaudeHarness.invoke (subprocess)", () => {
       type: "done",
       finalText: "finished",
     });
+  });
+
+  test("narration-only exit 0 (no result envelope) is a recoverable error, never a succeeded turn (#598)", async () => {
+    // The wire shape of the 2026-09-20 TUI stall: narration + tool call, the
+    // stream dies, CLI exits 0. Pre-fix this yielded done with narration-only
+    // finalText and the turn was recorded as succeeded.
+    process.env.FAKE_CLAUDE_MODE = "narration_only";
+    const chunks = await collect(
+      mkHarness().invoke(newRequest({ idleTimeoutMs: 2_000, hardTimeoutMs: 5_000 })),
+    );
+    expect(chunks.filter((c) => c.type === "done")).toHaveLength(0);
+    const errors = chunks.filter((c) => c.type === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ type: "error", recoverable: true });
+    expect((errors[0] as { error: string }).error).toContain(
+      "without a completion signal",
+    );
+    // The narration still streams — the user keeps the partial output.
+    expect(chunks).toContainEqual({
+      type: "text",
+      text: "Good question — let me check that.",
+    });
+  });
+
+  test("an is_error result envelope with exit 0 is a recoverable error (#598)", async () => {
+    process.env.FAKE_CLAUDE_MODE = "result_error";
+    const chunks = await collect(
+      mkHarness().invoke(newRequest({ idleTimeoutMs: 2_000, hardTimeoutMs: 5_000 })),
+    );
+    expect(chunks.filter((c) => c.type === "done")).toHaveLength(0);
+    const errors = chunks.filter((c) => c.type === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ type: "error", recoverable: true });
+    expect((errors[0] as { error: string }).error).toContain(
+      "error_during_execution",
+    );
   });
 });
 
