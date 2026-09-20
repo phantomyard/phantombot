@@ -38,6 +38,7 @@ import {
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
 import {
+  getPersonaSecret,
   setPersonaSecret,
   type SetPersonaSecretResult,
 } from "../lib/vaultSecrets.ts";
@@ -104,15 +105,24 @@ export async function applyJevConfig(
   const { config, persona, update } = input;
   const configPath = personaConfigPath(config.personasDir, persona);
   const writeSecret = input.writeSecret ?? setPersonaSecret;
-  let secretResult: SetPersonaSecretResult | undefined;
 
+  // Vault FIRST, and abort before touching config.toml when it fails —
+  // writing an enabled [jev] block whose key never landed would leave Jev
+  // configured with a missing or stale credential while the operator was
+  // told the save failed.
   if (update.apiKey !== undefined) {
-    secretResult = await writeSecret(
+    const secretResult: SetPersonaSecretResult = await writeSecret(
       config,
       update.keyEnv,
       update.apiKey,
       persona,
     );
+    if (!secretResult.ok) {
+      throw new Error(
+        `jev: could not store ${update.keyEnv} in the ${secretResult.persona ?? persona} vault: ` +
+          (secretResult.error ?? "unknown error"),
+      );
+    }
   }
 
   await updateConfigToml(configPath, (toml) => {
@@ -134,13 +144,6 @@ export async function applyJevConfig(
     // A key in the plaintext file is never right, whatever it came from.
     deleteIn(toml, ["jev", "api_key"]);
   });
-
-  if (secretResult && !secretResult.ok) {
-    throw new Error(
-      `jev: could not store ${update.keyEnv} in the ${secretResult.persona ?? persona} vault: ` +
-        (secretResult.error ?? "unknown error"),
-    );
-  }
 }
 
 /**
@@ -184,31 +187,45 @@ export interface ReusableJevKey {
  * new secrets (the frictionless rule, principal 2026-09-20): the Jev key
  * itself if one is already stored, the embeddings OpenAI-compatible key when
  * its endpoint IS OpenRouter, and a generic OPENROUTER_API_KEY export.
- * Discovery reads process.env — the loaded persona's vault is already
- * injected there at startup, and the wizard paths reload it before calling.
+ *
+ * Discovery is PERSONA-SCOPED (getPersonaSecret): the target persona's own
+ * vault is read first, and process.env is only consulted through the
+ * ambient-env guard — on a multi-persona daemon the injected environment
+ * belongs to whichever vault was loaded at startup, so reading it raw could
+ * offer (and validate) the DEFAULT persona's key and then write key_env
+ * into a target vault that does not contain it. Never throws — an
+ * unopenable vault degrades to the guarded ambient fallback.
  */
-export function findReusableJevKeys(config: Config): ReusableJevKey[] {
+export async function findReusableJevKeys(
+  config: Config,
+  persona?: string,
+): Promise<ReusableJevKey[]> {
   const out: ReusableJevKey[] = [];
   const seen = new Set<string>();
-  const add = (env: string, label: string) => {
-    if (seen.has(env) || !process.env[env]?.trim()) return;
+  const add = async (env: string, label: string) => {
+    if (seen.has(env)) return;
+    const value = await getPersonaSecret(config, env, persona);
+    if (!value?.trim()) return;
     seen.add(env);
     out.push({ env, label });
   };
-  add(JEV_DEFAULT_KEY_ENV, "the Jev key already in the vault");
+  await add(JEV_DEFAULT_KEY_ENV, "the Jev key already in the vault");
   const embeddingsUrl = config.embeddings.openaiCompatible?.baseUrl ?? "";
   if (/openrouter\.ai/i.test(embeddingsUrl)) {
-    add(
+    await add(
       "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
       "the OpenRouter key already used for embeddings",
     );
   }
-  add("OPENROUTER_API_KEY", "the OpenRouter key in the environment");
+  await add(
+    "OPENROUTER_API_KEY",
+    "an OpenRouter key already stored for this persona",
+  );
   return out;
 }
 
 /**
- * Live key probe: one trivial forced-tool decision against the configured
+ * Live key probe: one trivial choice decision against the configured
  * endpoint. A key that does not work is caught at configure time, not at
  * the first held message — the same gate the embedding and voice wizards
  * apply. Also used by the /status probe.
@@ -223,14 +240,14 @@ export async function validateJevKey(settings: {
     baseUrl: settings.baseUrl,
     apiKey: settings.apiKey,
     model: settings.model ?? JEV_DEFAULT_MODEL,
-    prompt: "Validation ping. Reply by calling the ping function.",
-    tool: "ping",
-    description: "Answer a validation ping.",
-    parameters: {
-      type: "object",
-      properties: { pong: { type: "string", enum: ["ok"] } },
-      required: ["pong"],
-      additionalProperties: false,
+    instructions: "Answer the validation ping.",
+    state: "Validation ping.",
+    questions: {
+      pong: {
+        type: "choice",
+        instructions: "Reply to the ping.",
+        criteria: { ok: "The ping was received" },
+      },
     },
     timeoutMs: 5000,
     fetchImpl: settings.fetchImpl,
@@ -261,7 +278,7 @@ export async function runJev(input: RunInput = {}): Promise<number> {
 
   const deps = {
     existing: config.jev,
-    reusableKeys: findReusableJevKeys(config),
+    reusableKeys: await findReusableJevKeys(config, persona),
     validate: (settings: { baseUrl: string; apiKey: string; model?: string }) =>
       validateJevKey(settings),
   };

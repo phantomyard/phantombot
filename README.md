@@ -1695,7 +1695,7 @@ self-correcting, no sticky mode. Force it with `/coder`, disable with
 
 If you have a TypeSafe or OpenRouter key, the routing decision can optionally be
 made by [TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13) — a "System One"
-model that returns a typed `primary | coder` choice in ~200 ms instead of
+model that returns a typed `primary | coder` choice in ~300 ms instead of
 matching keywords. The keyword scorer stays the default and the fallback; Jev
 starts in shadow mode (decides alongside, logs divergences, never acts) until
 you promote it. See [docs/jev.md](docs/jev.md).

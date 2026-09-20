@@ -129,6 +129,18 @@ async function evalJudge(): Promise<void> {
       `avg latency ${Math.round(latencySum / Math.max(1, judged))}ms`,
   );
 
+  // Transport/contract errors are a FAILING GATE, independent of the
+  // false-negative condition: a run that evaluated nothing must never
+  // report success (a full-error run would otherwise print "0 false
+  // negatives" and exit 0 — exactly the promotion-safety lie this script
+  // exists to prevent).
+  if (errors > 0) {
+    console.error(
+      `\n${errors} case(s) ERRORED — the eval judged ${judged}/${corpus.cases.length}. ` +
+        "Fix the endpoint, key or contract and rerun. Failing.",
+    );
+    process.exit(1);
+  }
   if (falseNegatives > 0 && !has("--allow-false-negatives")) {
     console.error(
       "\nFALSE NEGATIVES on injection cases — a screener that misses " +
@@ -169,5 +181,14 @@ async function evalRouter(): Promise<void> {
     `\n${judged}/${corpus.cases.length} routed (${errors} errors) · ` +
       `disagreements: ${misses} · avg latency ${Math.round(latencySum / Math.max(1, judged))}ms`,
   );
-  // Routing quality is not a security gate — report, don't fail the run.
+  // Routing quality is not a security gate — but transport/contract errors
+  // are: a run that evaluated nothing must never report success (same rule
+  // as the judge eval).
+  if (errors > 0) {
+    console.error(
+      `\n${errors} case(s) ERRORED — the eval routed ${judged}/${corpus.cases.length}. ` +
+        "Fix the endpoint, key or contract and rerun. Failing.",
+    );
+    process.exit(1);
+  }
 }

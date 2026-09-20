@@ -411,6 +411,7 @@ export function makeScreener(
         apiKey: jev!.apiKey!,
         model: jev!.model,
         timeoutMs: jev!.judge.timeoutMs,
+        threshold: jev!.judge.threshold,
       },
       priors: drawersText,
       signal: sig,

@@ -67,13 +67,13 @@ describe("config [jev]", () => {
       enabled: false,
       mode: "shadow",
       timeoutMs: 1500,
-      threshold: 80,
+      threshold: 70,
       failClosed: false,
     });
     expect(config.jev!.router).toEqual({
       enabled: false,
       mode: "shadow",
-      timeoutMs: 300,
+      timeoutMs: 800,
     });
   });
 
@@ -106,6 +106,42 @@ describe("config [jev]", () => {
     expect(config.jev!.provider).toBe("openrouter");
     expect(config.jev!.judge.enabled).toBe(true);
     expect(config.jev!.judge.mode).toBe("active");
+  });
+
+  test("REJECTS an out-of-range judge threshold — 101 would silently disable every hold", async () => {
+    const config = await loadConfig();
+    await writePersonaToml(
+      config,
+      '[jev]\nprovider = "openrouter"\n\n[jev.judge]\nenabled = true\nthreshold = 101\n',
+    );
+    await expect(loadConfig()).rejects.toThrow("threshold must be 0..100");
+  });
+
+  test("REJECTS a negative judge threshold — it would hold everything", async () => {
+    const config = await loadConfig();
+    await writePersonaToml(
+      config,
+      '[jev]\nprovider = "openrouter"\n\n[jev.judge]\nenabled = true\nthreshold = -1\n',
+    );
+    await expect(loadConfig()).rejects.toThrow("threshold must be 0..100");
+  });
+
+  test("REJECTS non-positive timeouts — they reach AbortSignal.timeout and can throw", async () => {
+    const config = await loadConfig();
+    await writePersonaToml(
+      config,
+      '[jev]\nprovider = "openrouter"\n\n[jev.judge]\ntimeout_ms = 0\n',
+    );
+    await expect(loadConfig()).rejects.toThrow(
+      "[jev.judge] timeout_ms must be 1..30000",
+    );
+    await writePersonaToml(
+      config,
+      '[jev]\nprovider = "openrouter"\n\n[jev.router]\ntimeout_ms = -5\n',
+    );
+    await expect(loadConfig()).rejects.toThrow(
+      "[jev.router] timeout_ms must be 1..30000",
+    );
   });
 
   test("the key resolves from the env under key_env, never from TOML", async () => {

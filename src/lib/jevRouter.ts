@@ -19,9 +19,10 @@
  *
  * Two properties keep this safe to sit on the critical path of EVERY turn:
  *
- *   1. HARD LATENCY CAP. The default is 300 ms (JEV_ROUTER_DEFAULT_TIMEOUT_MS).
- *      Exceeding the budget degrades to the keyword score — a slow Jev must
- *      never stall a turn.
+ *   1. HARD LATENCY CAP. The default is 800 ms (JEV_ROUTER_DEFAULT_TIMEOUT_MS),
+ *      sized from the live corpus (a 300 ms cap times out on realistic
+ *      states). Exceeding the budget degrades to the keyword score — a slow
+ *      Jev must never stall a turn.
  *   2. THE MANUAL OVERRIDE ALWAYS WINS. `/coder` / `/nocoder` are the
  *      operator's explicit word; the caller checks them BEFORE consulting
  *      this module, so Jev can never overrule a human.
@@ -35,11 +36,15 @@
 import { jevDecide, JEV_DEFAULT_MODEL, type JevFetch } from "./jev.ts";
 
 /**
- * Hard default wall-clock cap for a routing decision. Jev's own p50 is far
- * below this; the cap exists so a degraded endpoint costs one scorer
- * fallback, not a stalled turn.
+ * Hard default wall-clock cap for a routing decision. Sized from the live
+ * router corpus (2026-09-20): short states return in ~280-300 ms but
+ * realistic ones (a pasted trace, a PR description) run 300-600 ms, so the
+ * original 300 ms cap timed out 8/10 corpus cases — a cap the endpoint's
+ * own p50 exceeds just makes active mode a permanent fallback. 800 ms
+ * keeps the guarantee that matters: a DEGRADED endpoint costs one instant
+ * scorer fallback, never a stalled turn.
  */
-export const JEV_ROUTER_DEFAULT_TIMEOUT_MS = 300;
+export const JEV_ROUTER_DEFAULT_TIMEOUT_MS = 800;
 
 export type JevRoute = "primary" | "coder";
 
@@ -59,25 +64,21 @@ const ROUTER_HISTORY_TURNS = 4;
 /** Per-turn cap so one pasted log can't eat the tiny prompt budget. */
 const ROUTER_TURN_CAP_CHARS = 1200;
 
-const ROUTER_TOOL = "route_turn";
-const ROUTER_PARAMETERS: Record<string, unknown> = {
-  type: "object",
-  properties: {
-    route: {
-      type: "string",
-      enum: ["primary", "coder"],
-      description:
-        "coder = a substantial coding job (write/review/debug/refactor code, work a PR); primary = everything else.",
-    },
-    confidence: {
-      type: "number",
-      minimum: 0,
-      maximum: 1,
-      description: "Calibrated confidence in the chosen route.",
-    },
+/**
+ * The routing choice, as a Jev choice question — the criteria KEYS are the
+ * routes. The answer's own calibrated confidence travels with it, so unlike
+ * a chat-completions forced tool call there is no need to ASK the model for
+ * a confidence number.
+ */
+const ROUTER_QUESTION = {
+  type: "choice" as const,
+  instructions: "Which brain answers the NEXT user message?",
+  criteria: {
+    primary:
+      "Conversation, questions, planning, admin, small talk — even if it casually mentions code words without coding work to do",
+    coder:
+      "A substantial coding job: writing, reviewing, debugging, refactoring or explaining real code; working a pull/merge request; acting on a pasted stack trace, log, diff, or CI/build/test failure",
   },
-  required: ["route", "confidence"],
-  additionalProperties: false,
 };
 
 const ROUTER_SYSTEM = `You decide which brain answers the NEXT user message in an ongoing chat with a personal assistant: the PRIMARY brain (a fast, personable general model) or the CODER brain (a heavyweight programming model).
@@ -113,11 +114,9 @@ export async function jevRoute(opts: {
     baseUrl: opts.settings.baseUrl,
     apiKey: opts.settings.apiKey,
     model: opts.settings.model ?? JEV_DEFAULT_MODEL,
-    system: ROUTER_SYSTEM,
-    prompt,
-    tool: ROUTER_TOOL,
-    description: "Route the next turn to the primary or coder brain.",
-    parameters: ROUTER_PARAMETERS,
+    instructions: ROUTER_SYSTEM,
+    state: prompt,
+    questions: { route: ROUTER_QUESTION },
     timeoutMs: opts.settings.timeoutMs ?? JEV_ROUTER_DEFAULT_TIMEOUT_MS,
     signal: opts.signal,
     fetchImpl: opts.fetchImpl,
@@ -126,21 +125,21 @@ export async function jevRoute(opts: {
     return { ok: false, error: decision.error, latencyMs: decision.latencyMs };
   }
 
-  const route = decision.args.route;
-  if (route !== "primary" && route !== "coder") {
+  const answer = decision.answers.route;
+  if (
+    answer?.type !== "choice" ||
+    (answer.choice !== "primary" && answer.choice !== "coder")
+  ) {
     return {
       ok: false,
-      error: `jev returned out-of-schema route ${JSON.stringify(route)}`,
+      error: "jev returned an out-of-schema route",
       latencyMs: decision.latencyMs,
     };
   }
-  const rawConfidence = Number(decision.args.confidence);
   return {
     ok: true,
-    route,
-    confidence: Number.isFinite(rawConfidence)
-      ? Math.max(0, Math.min(1, rawConfidence))
-      : 0.5,
+    route: answer.choice,
+    confidence: Math.max(0, Math.min(1, answer.confidence)),
     latencyMs: decision.latencyMs,
   };
 }

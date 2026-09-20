@@ -15,6 +15,8 @@ import {
   type JevConfigUpdate,
 } from "../src/cli/jev.ts";
 import { type Config, loadConfig } from "../src/config.ts";
+import { openPersonaVault } from "../src/lib/vault.ts";
+import { _resetVaultTrackingForTesting } from "../src/lib/vaultEnvTracking.ts";
 
 let workdir: string;
 let config: Config;
@@ -43,6 +45,7 @@ beforeEach(async () => {
     savedEnv[name] = process.env[name];
     delete process.env[name];
   }
+  _resetVaultTrackingForTesting();
   config = await loadConfig();
 });
 
@@ -53,8 +56,21 @@ afterEach(async () => {
     if (savedEnv[name] === undefined) delete process.env[name];
     else process.env[name] = savedEnv[name]!;
   }
+  _resetVaultTrackingForTesting();
   await rm(workdir, { recursive: true, force: true });
 });
+
+/** Seed a real per-persona vault (mirrors config-embeddings-vault.test.ts). */
+async function seedVault(target: string, name: string, value: string) {
+  const dir = join(config.personasDir, target);
+  await mkdir(dir, { recursive: true });
+  const v = await openPersonaVault(dir);
+  try {
+    v.set(name, value);
+  } finally {
+    v.close();
+  }
+}
 
 function personaTomlPath(): string {
   return join(config.personasDir, persona, "config.toml");
@@ -142,7 +158,7 @@ describe("applyJevConfig", () => {
     expect(text).not.toContain("api_key");
   });
 
-  test("a failed vault write aborts with the secret name, never the value", async () => {
+  test("a failed vault write aborts with the secret name, never the value — and config.toml stays UNTOUCHED", async () => {
     await expect(
       applyJevConfig({
         config,
@@ -151,6 +167,17 @@ describe("applyJevConfig", () => {
         writeSecret: async () => ({ ok: false, persona, error: "vault locked" }),
       }),
     ).rejects.toThrow("PHANTOMBOT_JEV_API_KEY");
+    // The atomicity rule (review, #600): a failed key replacement must not
+    // leave an enabled [jev] block pointing at a missing credential. The
+    // persona's config.toml is either absent or free of any [jev] block.
+    let text = "";
+    try {
+      text = await readFile(personaTomlPath(), "utf8");
+    } catch {
+      // never written — the strongest form of untouched
+    }
+    expect(text).not.toContain("[jev]");
+    expect(text).not.toContain("sk-secret-value");
   });
 });
 
@@ -195,7 +222,7 @@ describe("findReusableJevKeys — frictionless discovery", () => {
     process.env.PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY = "sk-or-embed";
     // No embeddings block → the key alone doesn't prove an OpenRouter endpoint.
     expect(
-      findReusableJevKeys(config).map((k) => k.env),
+      (await findReusableJevKeys(config)).map((k) => k.env),
     ).not.toContain("PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY");
 
     await mkdir(join(config.personasDir, persona), { recursive: true });
@@ -204,7 +231,7 @@ describe("findReusableJevKeys — frictionless discovery", () => {
       '[embeddings]\nprovider = "openai-compatible"\n\n[embeddings.openai_compatible]\nbase_url = "https://openrouter.ai/api/v1"\nmodel = "openai/text-embedding-3-small"\n',
     );
     const reloaded = await loadConfig();
-    expect(findReusableJevKeys(reloaded).map((k) => k.env)).toContain(
+    expect((await findReusableJevKeys(reloaded)).map((k) => k.env)).toContain(
       "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
     );
   });
@@ -212,8 +239,35 @@ describe("findReusableJevKeys — frictionless discovery", () => {
   test("finds a stored Jev key and a generic OpenRouter export", async () => {
     process.env.PHANTOMBOT_JEV_API_KEY = "sk-jev";
     process.env.OPENROUTER_API_KEY = "sk-generic";
-    const envs = findReusableJevKeys(config).map((k) => k.env);
+    const envs = (await findReusableJevKeys(config)).map((k) => k.env);
     expect(envs).toContain("PHANTOMBOT_JEV_API_KEY");
     expect(envs).toContain("OPENROUTER_API_KEY");
+  });
+
+  test("SECONDARY-PERSONA regression: the default persona's vault key is never offered to another persona", async () => {
+    // The multi-persona daemon injects exactly ONE persona's vault at
+    // startup. Discovery that read process.env raw would offer (and
+    // validate) THAT persona's key for any other persona selected in the
+    // TUI, then write key_env into a vault that does not contain it
+    // (review, #600).
+    const { loadVaultIntoEnv } = await import("../src/lib/vault.ts");
+    await seedVault("phantom", "PHANTOMBOT_JEV_API_KEY", "sk-or-PHANTOM");
+    await seedVault("kai", "OPENROUTER_API_KEY", "sk-or-KAI");
+    await loadVaultIntoEnv(join(config.personasDir, "phantom"));
+    expect(process.env.PHANTOMBOT_JEV_API_KEY).toBe("sk-or-PHANTOM");
+
+    // kai is offered only what KAI can resolve — phantom's injected key is
+    // not a candidate, kai's own vault row is.
+    const kaiEnvs = (await findReusableJevKeys(config, "kai")).map(
+      (k) => k.env,
+    );
+    expect(kaiEnvs).not.toContain("PHANTOMBOT_JEV_API_KEY");
+    expect(kaiEnvs).toContain("OPENROUTER_API_KEY");
+
+    // …and the loaded persona itself still sees its own key.
+    const phantomEnvs = (await findReusableJevKeys(config, "phantom")).map(
+      (k) => k.env,
+    );
+    expect(phantomEnvs).toContain("PHANTOMBOT_JEV_API_KEY");
   });
 });

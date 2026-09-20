@@ -27,8 +27,9 @@ That has three costs:
   security control down with it.
 - **It is slow and it costs a turn.** Every untrusted message pays a full
   frontier-model round trip (seconds) to answer what is essentially a small
-  classification question. Jev answers in ~70–500 ms at ~$0.042/Mtok input
-  (output free) — about $0.00004 per decision.
+  classification question. Jev answers in ~300 ms measured (vendor claims
+  70–500 ms) at ~$0.042/Mtok input (output free) — about $0.00002 per
+  two-question judge call, measured 2026-09-20.
 - **It requires a harness at all.** A security control should not inherit the
   availability of the thing it is guarding.
 
@@ -45,18 +46,27 @@ the coding brain onto a conversational turn.
 | modality | `text -> decisions` |
 | context | 32,000 tokens (max completion 28,800) |
 | price | $0.042 / Mtok input, output free |
-| latency | vendor claims 70–500 ms end to end |
-| choices | cardinality capped at 255, schema match guaranteed |
-| tool_choice | none / auto / required / function |
+| latency | vendor claims 70–500 ms; measured p50 ~300 ms (2026-09-20) |
+| choices | criteria cardinality capped at 255 |
+| score levels | ordinal scale capped at 10 levels per score question |
+| endpoint | `/api/alpha/decisions` — **not** chat/completions |
 
-The decision is requested as a single function tool with `tool_choice`
-forced, over an OpenAI-compatible chat-completions endpoint (OpenRouter, or
-TypeSafe direct). See `src/lib/jev.ts`.
+The decision is requested over the **decisions API**, not chat/completions —
+Jev is a decisions-only model and rejects chat/completions with HTTP 400
+("is a decisions model … Use the /api/alpha/decisions endpoint instead").
+The request is `{model, instructions, state, questions}`: `instructions` is
+the classifier frame, `state` the payload the decision is about, and
+`questions` a record of typed questions — `{type: "choice", instructions,
+criteria: {<choice>: <description>}}` (the criteria KEYS are the choice set)
+or `{type: "score", instructions, criteria: [<level label>, …]}` (criteria
+index IS the ordinal level). The response is `{answers: {<qid>: …}, usage}`
+with calibrated `probabilities` and `confidence` per answer. See
+`src/lib/jev.ts`.
 
 ## Configuration
 
-`phantombot jev` (or the **Jev** row on the persona settings screen, `^s`)
-walks you through it. Provider choice comes **first**:
+`phantombot jev` (or the **Decision model** row on the persona settings
+screen, `^s`) walks you through it. Provider choice comes **first**:
 
 - **OpenRouter** — if any OpenRouter credential already exists in the vault
   (e.g. the embeddings `PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY` when its
@@ -68,10 +78,14 @@ walks you through it. Provider choice comes **first**:
   (confirm it against your TypeSafe dashboard; the prefill is a starting
   point, not a verified constant).
 
-The key is validated with one live forced-tool call before anything is
-stored, and credentials live in the **vault**, never `config.toml`. Judge and
-router are enabled **independently** — wanting the cheap router without
-moving your security control is a normal choice.
+The key is validated with one live decisions call before anything is
+stored, and credentials live in the **vault**, never `config.toml`.
+Reusable-key discovery is **persona-scoped** — on a multi-persona daemon the
+ambient environment belongs to whichever vault was injected at startup, so
+the wizard reads the TARGET persona's vault (via `getPersonaSecret`) rather
+than offering the default persona's key. Judge and router are enabled
+**independently** — wanting the cheap router without moving your security
+control is a normal choice.
 
 The resulting block:
 
@@ -86,14 +100,19 @@ key_env = "PHANTOMBOT_JEV_API_KEY" # the vault/env NAME the key is read from
 enabled = true
 mode = "shadow"                    # or "active"
 timeout_ms = 1500                  # hard cap; exceeding it = fallback
-threshold = 80                     # hold at/above this score (default: THREAT_THRESHOLD)
+threshold = 70                     # hold at/above (calibrated — see "Evaluation")
 fail_closed = false                # see "Both backends down" below
 
 [jev.router]
 enabled = true
 mode = "shadow"                    # or "active"
-timeout_ms = 300                   # in front of EVERY turn — must never stall one
+timeout_ms = 800                   # in front of EVERY turn — must never stall one
 ```
+
+`threshold` must be 0..100 and both timeouts 1..30000 — out-of-range values
+are **rejected at config load**, because threshold 101 would silently
+disable every hold and a non-positive timeout can throw inside
+`AbortSignal.timeout`.
 
 Every field has an env override (`PHANTOMBOT_JEV_PROVIDER`, `_MODEL`,
 `_BASE_URL`, `_KEY_ENV`, `_JUDGE`, `_JUDGE_MODE`, `_ROUTER`, `_ROUTER_MODE`),
@@ -128,8 +147,11 @@ Two rules keep active mode safe:
 
 - **The manual override always wins.** `/coder` / `/nocoder` are the
   operator's explicit word; Jev is never even consulted when one is set.
-- **Hard latency caps.** The router's default budget is 300 ms; exceeding it
-  falls back to the keyword score, never stalls a turn.
+- **Hard latency caps.** The router's default budget is 800 ms — sized from
+  the live corpus, where realistic states (a pasted trace, a PR description)
+  run 300–600 ms and a 300 ms cap timed out 8/10 cases, i.e. made active
+  mode a permanent fallback. Exceeding the budget falls back to the keyword
+  score, never stalls a turn.
 
 ## Briefing parity (the load-bearing requirement)
 
@@ -158,11 +180,25 @@ context, both exactly what shadow mode exists to measure:
 first within each drawer's equal share. Norms — the drawer that stops the
 judge crying wolf — are never starved.
 
-The typed verdict is `{score 0-100, verdict ∈ {allow, hold}, reason,
-question}`. The screener consumes the **score** so threshold semantics are
-identical to the harness judge's; a verdict/score disagreement (hold with a
-low score, allow with a high one) is logged as a calibration signal, never
-silently resolved.
+The verdict is **two typed questions in one decisions call** — Jev emits no
+prose, so the harness judge's free-text reason/question fields have no Jev
+equivalent:
+
+- `score` — an ordinal 0–9 scale whose levels are the 0–100 deciles,
+  labelled to match `JUDGE_SYSTEM`'s bands (the vendor caps a score question
+  at 10 levels, which is why the scale is deciles); asked **twice** — the
+  defender frame and a red-team frame — and the consumed score is the **max**
+  of the two mapped back to 0–100 (the one-call ensemble: the live eval's
+  false negatives were all calm-tone attacks a single frame under-scored).
+- `verdict` — a choice over `{allow, hold}`, Jev's native typed decision.
+
+The screener consumes the **score**; a verdict/score disagreement (hold with
+a low score — observed live on routine invoices, whose "payment" framing the
+choice answer reads cautiously) is logged as a calibration signal, never
+silently resolved in either direction. The reason/question strings the
+held-request surface expects are **synthesised** from the typed answers (the
+matched decile band, the choice, the confidence) — grounded in what Jev
+returned, never fabricated prose.
 
 ## Both backends down: the fail-closed question
 
@@ -200,10 +236,24 @@ PHANTOMBOT_JEV_API_KEY=sk-or-... bun scripts/evalJevJudge.ts --router  # router
 ```
 
 The judge report leads with the **false-negative rate on injection** and
-exits 1 on any miss (`--allow-false-negatives` downgrades to a report). A
-screener that is fast and cheap but misses prompt injection is worse than the
-harness judge it would replace — that number is the promotion gate, alongside
-the shadow-mode divergence logs from real traffic.
+exits 1 on any miss (`--allow-false-negatives` downgrades to a report).
+**Errors are a failing gate in their own right**, judge and router both: a
+run whose requests all errored evaluated nothing, and must never print "0
+false negatives" and exit 0. A screener that is fast and cheap but misses
+prompt injection is worse than the harness judge it would replace — that
+number is the promotion gate, alongside the shadow-mode divergence logs from
+real traffic.
+
+**Calibration evidence (2026-09-20, against the live endpoint):** at the
+harness judge's raw threshold of 80, Jev under-scored subtle attacks
+(calm-tone and non-English injections at 56–78) — System One reserves the
+top deciles for the blatant. The shipped default is therefore
+`JEV_JUDGE_DEFAULT_THRESHOLD = 70`: on the bundled corpus every injection
+scores ≥ 70 while every benign case scores ≤ 24, keeping the harness judge's
+security line with a 46-point false-positive margin. At that threshold the
+corpus runs **0/10 false negatives, 0 false positives, ~300 ms avg**; the
+router corpus runs **10/10 with 0 disagreements**. Shadow mode is the
+ongoing evidence loop for moving either number.
 
 ## Where things live
 
@@ -216,5 +266,5 @@ the shadow-mode divergence logs from real traffic.
 | Router call site | `src/harnesses/pi.ts` (threaded via `src/harnesses/buildChain.ts`) |
 | Config | `[jev]` in `src/config.ts` |
 | CLI wizard + write path | `src/cli/jev.ts` (`applyJevConfig`) |
-| TUI flow | `src/tui/jevFlow.ts` (Jev row on `^s`) |
+| TUI flow | `src/tui/jevFlow.ts` (Decision model row on `^s`) |
 | Eval | `scripts/evalJevJudge.ts`, `tests/fixtures/jev-*.json` |

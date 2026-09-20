@@ -59,8 +59,10 @@ import {
   JEV_OPENROUTER_BASE_URL,
   JEV_TYPESAFE_BASE_URL,
 } from "./lib/jev.ts";
-import { JEV_JUDGE_DEFAULT_TIMEOUT_MS } from "./lib/jevJudge.ts";
-import { THREAT_THRESHOLD } from "./lib/threatJudge.ts";
+import {
+  JEV_JUDGE_DEFAULT_THRESHOLD,
+  JEV_JUDGE_DEFAULT_TIMEOUT_MS,
+} from "./lib/jevJudge.ts";
 import { JEV_ROUTER_DEFAULT_TIMEOUT_MS } from "./lib/jevRouter.ts";
 
 /**
@@ -958,7 +960,11 @@ export interface JevConsumerSettings {
 
 /** The threat judge's Jev settings — the SECURITY control's consumer. */
 export interface JevJudgeSettings extends JevConsumerSettings {
-  /** Hold at/above this score. Defaults to THREAT_THRESHOLD (80). */
+  /**
+   * Hold at/above this score. Defaults to JEV_JUDGE_DEFAULT_THRESHOLD (70)
+   * — calibrated on the bundled corpus for Jev's decile-compressed scale,
+   * deliberately NOT the harness judge's 80 (see lib/jevJudge.ts).
+   */
   threshold: number;
   /**
    * Both-down semantics when Jev is ACTIVE: Jev errored AND the harness
@@ -2622,6 +2628,33 @@ function buildJevConfig(
   const tomlJudge = (tomlJev.judge ?? {}) as Record<string, unknown>;
   const tomlRouter = (tomlJev.router ?? {}) as Record<string, unknown>;
 
+  // The judge threshold and both timeouts are SECURITY-RELEVANT bounds —
+  // reject out-of-range values at parse time rather than letting them
+  // reach the consumers: threshold > 100 makes every Jev verdict pass
+  // (silently disabling holds), threshold < 0 holds everything, and a
+  // non-positive timeout reaches AbortSignal.timeout and can throw.
+  const judgeThreshold =
+    asInt(tomlJudge.threshold) ?? JEV_JUDGE_DEFAULT_THRESHOLD;
+  if (judgeThreshold < 0 || judgeThreshold > 100) {
+    throw new Error(
+      `config: [jev.judge] threshold must be 0..100, got ${judgeThreshold}`,
+    );
+  }
+  const judgeTimeoutMs =
+    asInt(tomlJudge.timeout_ms) ?? JEV_JUDGE_DEFAULT_TIMEOUT_MS;
+  if (judgeTimeoutMs <= 0 || judgeTimeoutMs > 30_000) {
+    throw new Error(
+      `config: [jev.judge] timeout_ms must be 1..30000, got ${judgeTimeoutMs}`,
+    );
+  }
+  const routerTimeoutMs =
+    asInt(tomlRouter.timeout_ms) ?? JEV_ROUTER_DEFAULT_TIMEOUT_MS;
+  if (routerTimeoutMs <= 0 || routerTimeoutMs > 30_000) {
+    throw new Error(
+      `config: [jev.router] timeout_ms must be 1..30000, got ${routerTimeoutMs}`,
+    );
+  }
+
   return {
     provider,
     model:
@@ -2640,9 +2673,8 @@ function buildJevConfig(
         asJevMode(process.env.PHANTOMBOT_JEV_JUDGE_MODE) ??
         asJevMode(tomlJudge.mode) ??
         "shadow",
-      timeoutMs:
-        asInt(tomlJudge.timeout_ms) ?? JEV_JUDGE_DEFAULT_TIMEOUT_MS,
-      threshold: asInt(tomlJudge.threshold) ?? THREAT_THRESHOLD,
+      timeoutMs: judgeTimeoutMs,
+      threshold: judgeThreshold,
       failClosed: asBool(tomlJudge.fail_closed) ?? false,
     },
     router: {
@@ -2654,8 +2686,7 @@ function buildJevConfig(
         asJevMode(process.env.PHANTOMBOT_JEV_ROUTER_MODE) ??
         asJevMode(tomlRouter.mode) ??
         "shadow",
-      timeoutMs:
-        asInt(tomlRouter.timeout_ms) ?? JEV_ROUTER_DEFAULT_TIMEOUT_MS,
+      timeoutMs: routerTimeoutMs,
     },
   };
 }

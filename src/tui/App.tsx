@@ -1562,7 +1562,7 @@ export function App(props: AppProps): React.ReactElement {
           { choose: askChoice, value: askValue },
           {
             existing: config.jev,
-            reusableKeys: findReusableJevKeys(config),
+            reusableKeys: await findReusableJevKeys(config, target.name),
             validate: (settings) => validateJevKey(settings),
           },
         );
