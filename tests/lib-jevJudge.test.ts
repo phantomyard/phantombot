@@ -14,6 +14,7 @@ import {
   jevJudgeThreat,
   jevLevelToScore100,
 } from "../src/lib/jevJudge.ts";
+import { setLogSink } from "../src/lib/logSink.ts";
 import { THREAT_THRESHOLD } from "../src/lib/threatJudge.ts";
 
 const SETTINGS = {
@@ -223,6 +224,27 @@ describe("jevJudgeThreat", () => {
     const r = await jevJudgeThreat("x", { settings: SETTINGS, fetchImpl });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.verdict.score).toBeLessThan(THREAT_THRESHOLD);
+  });
+
+  it("never emits a disagreement at warn (operators saw these on benign traffic)", async () => {
+    // Regression for the Atlas review (PR #601): disagreements are routine
+    // on benign traffic (a cautious choice frame), so warn level trained
+    // operators to ignore it. They now live at debug — invisible at the
+    // default min level, which is exactly what this test observes: the
+    // disagreement happens (verdict hold, score ~3) and NOTHING is emitted.
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      const { fetchImpl } = stubFetch(0.3, "hold");
+      await jevJudgeThreat("x", { settings: SETTINGS, fetchImpl });
+    } finally {
+      restore();
+    }
+    const entries = lines.map((l) => JSON.parse(l));
+    expect(entries.some((e) => e.level === "warn")).toBe(false);
+    expect(
+      entries.some((e) => e.msg === "jev judge verdict/score disagreement"),
+    ).toBe(false);
   });
 
   it("fails closed-schema when the score answer is missing", async () => {

@@ -228,11 +228,16 @@ equivalent:
   of the two mapped back to 0–100 (the one-call ensemble: the live eval's
   false negatives were all calm-tone attacks a single frame under-scored).
 - `verdict` — a choice over `{allow, hold}`, Jev's native typed decision.
+  The choice question is **anchored** with the same semantics the score
+  bands carry: unanchored, Jev answers "hold" for any external content at
+  all, which makes the cross-check useless.
 
 The screener consumes the **score**; a verdict/score disagreement (hold with
-a low score — observed live on routine invoices, whose "payment" framing the
-choice answer reads cautiously) is logged as a calibration signal, never
-silently resolved in either direction. The reason/question strings the
+a low score) is logged at **debug** as a calibration signal, never silently
+resolved in either direction. Debug, not warn, on purpose: a cautious choice
+frame makes disagreements routine on benign traffic (observed live on Atlas),
+and a warn operators learn to ignore is worse than none. The same applies to
+the frame-split line (defender vs red-team ≥ 30 apart). The reason/question strings the
 held-request surface expects are **synthesised** from the typed answers (the
 matched decile band, the choice, the confidence) — grounded in what Jev
 returned, never fabricated prose.
@@ -258,10 +263,12 @@ Two authored corpora (synthetic but representative; multilingual; **no real
 user data**) ship in `tests/fixtures/`:
 
 - `jev-judge-corpus.json` — injections (EN/ES/NL, forged-briefing,
-  calm-and-routine exfiltration, indirect web injection), benign traffic, and
+  calm-and-routine exfiltration, indirect web injection), benign traffic,
   weighted-ruling nuance cases ("invoices from X are fine, bank-detail
   changes always come back to me") that specifically exercise briefing
-  parity.
+  parity, and the conversational personal-data-ask class ("what's on my
+  calendar today?", EN/ES/NL) — added after Atlas's live test scored one
+  such ask at 53/100, 17 points under threshold.
 - `jev-router-corpus.json` — the keyword scorer's known misses in both
   directions, plus follow-up and topic-change cases.
 
@@ -286,9 +293,10 @@ harness judge's raw threshold of 80, Jev under-scored subtle attacks
 top deciles for the blatant. The shipped default is therefore
 `JEV_JUDGE_DEFAULT_THRESHOLD = 70`: on the bundled corpus every injection
 scores ≥ 70 while every benign case scores ≤ 24, keeping the harness judge's
-security line with a 46-point false-positive margin. At that threshold the
-corpus runs **0/10 false negatives, 0 false positives, ~300 ms avg**; the
-router corpus runs **10/10 with 0 disagreements**. Re-running these corpora
+security line with a 40-point false-positive margin (benign ceiling 30,
+from the conversational-ask class). At that threshold the
+corpus runs **27/27: 0/10 false negatives, 0 false positives, ~374 ms avg**;
+the router corpus runs **10/10 with 0 disagreements**. Re-running these corpora
 is the evidence loop for moving either number.
 
 ## Where things live
