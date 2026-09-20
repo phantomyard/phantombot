@@ -263,18 +263,18 @@ export function describeJevChange(update: JevConfigUpdate): Consequence {
   const routerOn = update.router.enabled;
   const what =
     judgeOn && routerOn
-      ? `the threat judge and the brain-swap router (${update.judge.mode})`
+      ? "the threat judge and the brain-swap router"
       : judgeOn
-        ? `the threat judge (${update.judge.mode})`
+        ? "the threat judge"
         : routerOn
-          ? `the brain-swap router (${update.router.mode})`
+          ? "the brain-swap router"
           : "nothing — Jev stays disabled";
   return {
     summary: `points ${what} at TypeSafe Jev, then restarts the daemon`,
     detail:
       update.apiKey !== undefined
         ? `The new key was validated with one live call and is stored in the vault as ${update.keyEnv}; nothing secret touches config.toml.`
-        : `No new credential is stored — the existing ${update.keyEnv} is reused. Shadow mode logs divergences without deciding; active mode lets Jev decide with the existing method as fallback.`,
+        : `No new credential is stored — the existing ${update.keyEnv} is reused. An enabled consumer decides; the harness judge / keyword scorer stays as the fallback on any error or timeout, and \`phantombot doctor\` reports when that fallback is happening.`,
     longRunning: false,
     restarts: true,
   };

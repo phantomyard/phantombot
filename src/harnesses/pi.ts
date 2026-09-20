@@ -54,6 +54,7 @@ import {
 import type { ParseEventResult } from "./reasoningReplay.ts";
 import { CODER_SWAP_MAX_ATTEMPTS, getCoderSwapOverride, resolveSwapModel, type SwapDecision } from "../lib/coderSwap.ts";
 import { jevRoute } from "../lib/jevRouter.ts";
+import { recordJevOutcome } from "../lib/jevHealth.ts";
 import { classifyFailure } from "../lib/harnessAlert.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
@@ -127,14 +128,16 @@ export interface PiHarnessConfig {
    * operator configured [jev] and enabled the ROUTER consumer. The API key
    * is NOT carried here — it is read per-turn from `process.env[keyEnv]`
    * after the persona's vault is reconciled, the same contract as the Pi
-   * API key. Shadow/active semantics live at the call site in invoke().
+   * API key. An enabled router DECIDES — the keyword scorer is the fallback
+   * on any error, and there is no log-only mode (see JevConsumerSettings).
    */
   jevRouter?: {
     baseUrl: string;
     model: string;
     keyEnv: string;
     timeoutMs: number;
-    mode: "shadow" | "active";
+    /** Personas root, for the fallback telemetry `doctor` reports. */
+    personasDir?: string;
   };
   /** Explicit V8 old-space ceiling; never inferred from host memory. */
   maxOldSpaceMb?: number;
@@ -289,9 +292,9 @@ export class PiHarness implements Harness {
             })
           : undefined;
       // The keyword scorer — the DEFAULT and the FALLBACK routing method
-      // (issue #597). Jev only ever advises (shadow) or precedes (active)
-      // this, and a manual /coder override wins over both without Jev even
-      // being consulted.
+      // (issue #597). An enabled Jev router DECIDES and this runs on any
+      // error or missing key, and a manual /coder override wins over both
+      // without Jev even being consulted.
       const scoreRoute = () =>
         resolveSwapModel({
           text: req.userMessage,
@@ -318,68 +321,56 @@ export class PiHarness implements Harness {
           log.warn(
             `pi.invoke jev-router enabled but ${jevRouter.keyEnv} is not set; using the keyword scorer`,
           );
+          // Same telemetry contract as a provider failure: an enabled router
+          // with no key falls back on EVERY turn, and that must read as
+          // DEGRADED in doctor, not as "no calls recorded".
+          void recordJevOutcome({
+            ...(jevRouter.personasDir
+              ? { personasDir: jevRouter.personasDir }
+              : {}),
+            ...(req.persona ? { persona: req.persona } : {}),
+            consumer: "router",
+            ok: false,
+            error: `jev-router enabled but ${jevRouter.keyEnv} is not set`,
+          });
           decision = scoreRoute();
         } else {
           const recentUserTexts = (req.history ?? [])
             .filter((t) => t.role === "user")
             .map((t) => t.text);
-          if (jevRouter.mode === "active") {
-            const r = await jevRoute({
-              settings: {
-                baseUrl: jevRouter.baseUrl,
-                apiKey: jevKey,
-                model: jevRouter.model,
-                timeoutMs: jevRouter.timeoutMs,
-              },
-              text: req.userMessage,
-              history: recentUserTexts,
-            });
-            if (r.ok) {
-              decision = {
-                model: r.route === "coder" ? codingModel : primaryModel,
-                swapped: r.route === "coder",
-                reason: `jev:${r.route}@${r.confidence.toFixed(2)}`,
-                score: 0,
-              };
-            } else {
-              log.warn(
-                `pi.invoke jev-router unavailable, using the keyword scorer: ${r.error}`,
-              );
-              decision = scoreRoute();
-            }
+          const r = await jevRoute({
+            settings: {
+              baseUrl: jevRouter.baseUrl,
+              apiKey: jevKey,
+              model: jevRouter.model,
+              timeoutMs: jevRouter.timeoutMs,
+            },
+            text: req.userMessage,
+            history: recentUserTexts,
+          });
+          // Outcome-only telemetry (never the routed text) so `doctor` can
+          // report that the decision model is falling back to the scorer.
+          void recordJevOutcome({
+            ...(jevRouter.personasDir
+              ? { personasDir: jevRouter.personasDir }
+              : {}),
+            ...(req.persona ? { persona: req.persona } : {}),
+            consumer: "router",
+            ok: r.ok,
+            ...(r.ok ? {} : { error: r.error }),
+          });
+          if (r.ok) {
+            decision = {
+              model: r.route === "coder" ? codingModel : primaryModel,
+              swapped: r.route === "coder",
+              reason: `jev:${r.route}@${r.confidence.toFixed(2)}`,
+              score: 0,
+            };
           } else {
-            // SHADOW: the scorer decides; Jev answers alongside and only the
-            // comparison is logged. Divergences are the promotion evidence.
+            log.warn(
+              `pi.invoke jev-router unavailable, using the keyword scorer: ${r.error}`,
+            );
             decision = scoreRoute();
-            const r = await jevRoute({
-              settings: {
-                baseUrl: jevRouter.baseUrl,
-                apiKey: jevKey,
-                model: jevRouter.model,
-                timeoutMs: jevRouter.timeoutMs,
-              },
-              text: req.userMessage,
-              history: recentUserTexts,
-            });
-            if (r.ok) {
-              const jevSwap = r.route === "coder";
-              const fields = {
-                persona: req.persona,
-                conversation: req.conversation,
-                jevRoute: r.route,
-                jevConfidence: r.confidence,
-                scorerSwapped: decision.swapped,
-                scorerReason: decision.reason,
-                latencyMs: r.latencyMs,
-              };
-              if (jevSwap !== decision.swapped) {
-                log.info("pi.invoke jev-router shadow DIVERGENCE", fields);
-              } else {
-                log.info("pi.invoke jev-router shadow agrees", fields);
-              }
-            } else {
-              log.warn(`pi.invoke jev-router shadow unavailable: ${r.error}`);
-            }
           }
         }
       } else {

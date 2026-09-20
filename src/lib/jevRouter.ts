@@ -12,10 +12,10 @@
  * THE EXISTING SCORER STAYS THE DEFAULT AND THE FALLBACK — this module never
  * replaces it, it advises or precedes it:
  *
- *   - shadow mode: the scorer decides; Jev is asked ALONGSIDE and the two
- *     answers are logged. Divergences are the evidence for promotion.
- *   - active mode: Jev decides; any error, timeout or missing key degrades
- *     to the scorer with no behaviour change beyond a log line.
+ *   When enabled, Jev decides; any error, timeout or missing key degrades
+ *   to the scorer with no behaviour change beyond a log line. Fallbacks are
+ *   recorded and surface in `phantombot doctor` — that telemetry, plus the
+ *   bundled eval corpus, is the evidence loop for trusting Jev further.
  *
  * Two properties keep this safe to sit on the critical path of EVERY turn:
  *
@@ -29,7 +29,7 @@
  *
  * The acceptance bar here is ROUTING QUALITY (a wrong answer is a worse
  * reply), deliberately separate from the threat judge's bar (a wrong answer
- * is an unscreened prompt): separate threshold, separate shadow evidence,
+ * is an unscreened prompt): separate threshold, separate evidence loop,
  * separate rollout gate.
  */
 

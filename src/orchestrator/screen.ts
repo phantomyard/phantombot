@@ -119,6 +119,7 @@ import {
   JEV_JUDGE_BRIEFING_CAP_BYTES,
   jevJudgeThreat,
 } from "../lib/jevJudge.ts";
+import { recordJevOutcome } from "../lib/jevHealth.ts";
 import { runNotify } from "../cli/notify.ts";
 import type { DrawerKind } from "../memory/drawers.ts";
 import { drawerPath } from "../memory/drawerIngest.ts";
@@ -233,7 +234,7 @@ export interface ScreenerDeps {
   /**
    * Override the Jev judge call (tests). Production uses lib/jevJudge.ts —
    * which hits the network — so screen-level tests inject a stub and assert
-   * the shadow/active/fail-closed wiring around it.
+   * the enabled/fail-closed wiring around it.
    */
   jevJudge?: typeof jevJudgeThreat;
 }
@@ -391,10 +392,17 @@ export function makeScreener(
   const jev = config.jev;
   const jevJudgeOn =
     deps.judge === undefined && jev?.judge.enabled === true && !!jev?.apiKey;
+  // An ENABLED judge whose key never resolved is the exact silent-degradation
+  // shape the fallback ledger exists to expose (#516): every untrusted turn
+  // falls back to the harness judge while doctor would otherwise read "no
+  // calls recorded". Counted per screened turn below, in the fallback path.
+  const jevJudgeKeyMissing =
+    deps.judge === undefined && jev?.judge.enabled === true && !jev?.apiKey;
 
   // One Jev judge call. The briefing is the SAME ranked drawer text the
   // harness judge carries (readBriefingDrawers, below), packed to the Jev
-  // budget — briefing parity is what makes a shadow comparison meaningful.
+  // budget — briefing parity is what keeps the two judge backends
+  // comparable on the same content.
   const jevJudgeImpl = deps.jevJudge ?? jevJudgeThreat;
   const runJevJudge = async (
     text: string,
@@ -447,15 +455,26 @@ export function makeScreener(
     let holdThreshold = THREAT_THRESHOLD;
 
     let result: JudgeResult;
-    if (jevJudgeOn && jev!.judge.mode === "active") {
-      // ACTIVE: Jev decides; the harness judge is the fallback on any Jev
-      // error. Both down ⇒ fail open as today UNLESS the operator opted into
-      // fail-closed (affordable exactly because an independent screener
-      // exists — see docs/jev.md).
+    if (jevJudgeOn) {
+      // The decision model DECIDES; the harness judge is the fallback on any
+      // error. There is no log-only mode — see JevConsumerSettings. Both down
+      // ⇒ fail open as today UNLESS the operator opted into fail-closed
+      // (affordable exactly because an independent screener exists — see
+      // docs/jev.md).
       const jevResult = await runJevJudge(content, signal).catch((e) => ({
         ok: false as const,
         error: `jev judge threw: ${(e as Error).message}`,
       }));
+      // Fallback telemetry — outcome only, never the screened text. This is
+      // what `phantombot doctor` reads to say the decision model is degraded
+      // instead of the operator discovering it at the first missed hold.
+      void recordJevOutcome({
+        personasDir: config.personasDir,
+        persona,
+        consumer: "judge",
+        ok: jevResult.ok,
+        ...(jevResult.ok ? {} : { error: jevResult.error }),
+      });
       if (jevResult.ok) {
         // Jev's threshold applies ONLY to a Jev score — the harness judge is
         // calibrated against THREAT_THRESHOLD, so a fallback must be graded
@@ -468,7 +487,7 @@ export function makeScreener(
         result = jevResult;
       } else {
         log.warn(
-          `screen: jev judge unavailable in active mode, falling back to harness judge: ${jevResult.error}`,
+          `screen: jev judge unavailable, falling back to harness judge: ${jevResult.error}`,
         );
         result = await judgeSafely();
         if (!result.ok && jev!.judge.failClosed) {
@@ -488,38 +507,19 @@ export function makeScreener(
           };
         }
       }
-    } else if (jevJudgeOn) {
-      // SHADOW: the harness judge decides; Jev answers ALONGSIDE and only the
-      // comparison is logged. Concurrent so the shadow costs max(), not sum().
-      const [harnessResult, jevResult] = await Promise.all([
-        judgeSafely(),
-        runJevJudge(content, signal).catch((e) => ({
-          ok: false as const,
-          error: `jev judge threw: ${(e as Error).message}`,
-        })),
-      ]);
-      if (jevResult.ok && harnessResult.ok) {
-        const jevHolds = jevResult.verdict.score >= jev!.judge.threshold;
-        const harnessHolds = harnessResult.verdict.score >= THREAT_THRESHOLD;
-        const fields = {
-          jevScore: jevResult.verdict.score,
-          harnessScore: harnessResult.verdict.score,
-          latencyMs: jevResult.latencyMs,
-        };
-        if (jevHolds !== harnessHolds) {
-          log.warn("screen: jev shadow DIVERGENCE", {
-            ...fields,
-            jevReason: jevResult.verdict.reason,
-            harnessReason: harnessResult.verdict.reason,
-          });
-        } else {
-          log.info("screen: jev shadow agrees", fields);
-        }
-      } else if (!jevResult.ok) {
-        log.warn(`screen: jev shadow unavailable: ${jevResult.error}`);
-      }
-      result = harnessResult;
     } else {
+      if (jevJudgeKeyMissing) {
+        // Same telemetry contract as a provider failure: this turn IS falling
+        // back to the harness judge, so doctor must say DEGRADED and name the
+        // missing key, not print "enabled; no calls recorded".
+        void recordJevOutcome({
+          personasDir: config.personasDir,
+          persona,
+          consumer: "judge",
+          ok: false,
+          error: `jev judge enabled but ${jev!.keyEnv} is unresolved (vault/env)`,
+        });
+      }
       result = await judgeSafely();
     }
 

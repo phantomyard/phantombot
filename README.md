@@ -1696,9 +1696,10 @@ self-correcting, no sticky mode. Force it with `/coder`, disable with
 If you have a TypeSafe or OpenRouter key, the routing decision can optionally be
 made by [TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13) — a "System One"
 model that returns a typed `primary | coder` choice in ~300 ms instead of
-matching keywords. The keyword scorer stays the default and the fallback; Jev
-starts in shadow mode (decides alongside, logs divergences, never acts) until
-you promote it. See [docs/jev.md](docs/jev.md).
+matching keywords. The keyword scorer stays the default and the fallback; an
+enabled Jev router decides, and any error or missing key falls back to the
+scorer — `phantombot doctor` reports those fallbacks so the degradation is
+never silent. See [docs/jev.md](docs/jev.md).
 
 Two safety rails keep a swapped turn from ever being *lost*:
 
@@ -2382,10 +2383,12 @@ instead — a dedicated "System One" screener on a vendor and quota pool
 independent of your harness chain, so a fleet-wide harness quota outage no
 longer takes the security control down with it (today that outage fails the
 screen **open**). Jev receives the same ranked drawer briefing
-(decisions/people/norms) as the harness judge, starts in shadow mode, and the
-harness judge remains the fallback. Configure it with `phantombot jev`; the
-full design, including the both-backends-down fail-closed option, is in
-[docs/jev.md](docs/jev.md).
+(decisions/people/norms) as the harness judge; once enabled it **decides**,
+and the harness judge remains the fallback on any error or missing key —
+every fallback is recorded so `phantombot doctor` can say the decision model
+is degraded instead of the revert being invisible. Configure it with
+`phantombot jev`; the full design, including the both-backends-down
+fail-closed option, is in [docs/jev.md](docs/jev.md).
 
 Each harness runs the judge with its CLI's **native** capability-restriction
 flag, not a hand-maintained deny-list (which rots as new tools ship):

@@ -319,8 +319,8 @@ describe("gatherStatusProbes — jev", () => {
       model: "typesafe/jev-1.13",
       baseUrl: "https://openrouter.ai/api/v1",
       keyEnv: "PHANTOMBOT_JEV_API_KEY",
-      judge: { enabled: true, mode: "shadow", timeoutMs: 1500, threshold: 80, failClosed: false },
-      router: { enabled: false, mode: "shadow", timeoutMs: 300 },
+      judge: { enabled: true, timeoutMs: 1500, threshold: 80, failClosed: false },
+      router: { enabled: false, timeoutMs: 300 },
       ...over,
     }) as NonNullable<Config["jev"]>;
 
@@ -336,7 +336,7 @@ describe("gatherStatusProbes — jev", () => {
       stubDeps({ env: {} }),
     );
     expect(r.jev).toContain("no key");
-    expect(r.jev).toContain("judge shadow");
+    expect(r.jev).toContain("judge on");
     expect(r.jev).toContain("router off");
   });
 
@@ -349,7 +349,7 @@ describe("gatherStatusProbes — jev", () => {
         validateJevKey: async () => ({ ok: true }),
       }),
     );
-    expect(ok.jev).toBe("openrouter OK (judge shadow · router off)");
+    expect(ok.jev).toBe("openrouter OK (judge on · router off)");
 
     const bad = await gatherStatusProbes(
       cfg({ jev: jevBlock() }),
@@ -360,6 +360,36 @@ describe("gatherStatusProbes — jev", () => {
       }),
     );
     expect(bad.jev).toContain("ERR (401 Unauthorized)");
+  });
+
+  test("leads with 'off' when neither consumer is enabled, and never probes", async () => {
+    let probed = false;
+    const r = await gatherStatusProbes(
+      cfg({
+        jev: jevBlock({
+          judge: {
+            enabled: false,
+            timeoutMs: 1500,
+            threshold: 70,
+            failClosed: false,
+          },
+          router: { enabled: false, timeoutMs: 800 },
+        }),
+      }),
+      "phantom",
+      stubDeps({
+        env: { PHANTOMBOT_JEV_API_KEY: "sk-test" },
+        validateJevKey: async () => {
+          probed = true;
+          return { ok: true };
+        },
+      }),
+    );
+    // The settings badge keys off this prefix: a stored credential with both
+    // consumers disabled must read "optional", not "configured".
+    expect(r.jev?.startsWith("off")).toBe(true);
+    expect(r.jev).toContain("harness judge");
+    expect(probed).toBe(false);
   });
 });
 

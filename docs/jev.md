@@ -97,15 +97,13 @@ base_url = "https://openrouter.ai/api/v1"
 key_env = "PHANTOMBOT_JEV_API_KEY" # the vault/env NAME the key is read from
 
 [jev.judge]
-enabled = true
-mode = "shadow"                    # or "active"
+enabled = true                     # an enabled consumer DECIDES
 timeout_ms = 1500                  # hard cap; exceeding it = fallback
 threshold = 70                     # hold at/above (calibrated — see "Evaluation")
 fail_closed = false                # see "Both backends down" below
 
 [jev.router]
-enabled = true
-mode = "shadow"                    # or "active"
+enabled = true                     # an enabled consumer DECIDES
 timeout_ms = 800                   # in front of EVERY turn — must never stall one
 ```
 
@@ -115,7 +113,7 @@ disable every hold and a non-positive timeout can throw inside
 `AbortSignal.timeout`.
 
 Every field has an env override (`PHANTOMBOT_JEV_PROVIDER`, `_MODEL`,
-`_BASE_URL`, `_KEY_ENV`, `_JUDGE`, `_JUDGE_MODE`, `_ROUTER`, `_ROUTER_MODE`),
+`_BASE_URL`, `_KEY_ENV`, `_JUDGE`, `_ROUTER`),
 env beats TOML as everywhere in phantombot. An `api_key` written into the
 TOML block is **ignored with a warning** — secrets never live in the
 plaintext file. Timeouts, threshold and fail_closed are TOML-only and survive
@@ -125,33 +123,72 @@ ask about).
 `/status` reports the Jev line (provider, per-consumer state, live key
 validation), and the settings screen badges from it.
 
-## Shadow mode, then active
+## On or off — there is no third state
 
-Both consumers ship in **shadow mode** and that is the recommended first
-state:
+An enabled consumer **decides**, and the pre-Jev method is the fallback on
+any error, timeout or missing key: the harness judge for the screener, the
+keyword scorer for the router. There is no user-visible difference beyond a
+log line and a counter.
 
-- **Shadow**: the existing method decides (the harness judge / the keyword
-  scorer). Jev answers **alongside** — concurrently, so it costs max(), not
-  sum() — and only the comparison is logged. Agreements are `info`;
-  divergences are `warn` with both scores/routes and both reasons. Those log
-  lines are the promotion evidence.
-- **Active**: Jev decides. Any error, timeout, or missing key degrades to the
-  existing method with no user-visible difference beyond a log line.
+A log-only "shadow" mode (Jev answering alongside, divergences logged, never
+deciding) shipped in the first draft of #597 and was **removed before
+merge**. It doubled every call site for evidence that is better produced two
+other ways: offline, by the bundled eval corpora below, which measure the
+number that actually matters (false negatives on injection) against a known
+answer key rather than against the harness judge's opinion; and at runtime,
+by the fallback telemetry `phantombot doctor` reports. An operator who has
+configured a decision model wants it deciding.
 
 The acceptance bars are deliberately **separate**: the judge is a security
 control (a wrong answer is an unscreened prompt — measure the false-negative
 rate on injection), the router is routing quality (a wrong answer is a worse
 reply). They do not share a threshold or a rollout gate.
 
-Two rules keep active mode safe:
+Two rules keep a deciding backend safe:
 
 - **The manual override always wins.** `/coder` / `/nocoder` are the
   operator's explicit word; Jev is never even consulted when one is set.
 - **Hard latency caps.** The router's default budget is 800 ms — sized from
   the live corpus, where realistic states (a pasted trace, a PR description)
-  run 300–600 ms and a 300 ms cap timed out 8/10 cases, i.e. made active
-  mode a permanent fallback. Exceeding the budget falls back to the keyword
-  score, never stalls a turn.
+  run 300–600 ms and a 300 ms cap timed out 8/10 cases, i.e. made the
+  backend a permanent fallback. Exceeding the budget falls back to the
+  keyword score, never stalls a turn.
+
+## Fallback telemetry — why `doctor` has a decision-model line
+
+Falling back is silent by design: the turn is still screened, still routed,
+still answered. That is the right runtime behaviour and the wrong
+operational one — an operator who configured a decision model believes it is
+deciding, and a revoked key or a provider outage would otherwise show up
+only as behaviour quietly reverting to the pre-Jev method. That is exactly
+the shape of #516, where a revoked embeddings key dropped memory search to
+keyword-only and doctor reported "semantic search off" with no reason.
+
+So every call records its **outcome** — never the screened payload — in a
+per-persona ledger (`<persona-dir>/.jev-health.json`, `src/lib/jevHealth.ts`):
+calls, fallbacks, last success, last fallback, the last provider error
+(capped at 300 chars) and the consecutive-fallback streak. Counters are
+scoped to a rolling 24 h window (a total with no timeframe is unreadable);
+the last-seen facts outlive the window, because they answer "is it broken
+right now".
+
+`phantombot doctor` prints it:
+
+```
+  decision model: DEGRADED — openrouter 'typesafe/jev-1.13' · judge fell back
+    4/9 call(s) to the harness judge — last error: 401 Unauthorized
+  → falling back to the pre-Jev method on those calls (last 24h). Check the
+    key with `phantombot jev` and the provider's status; screening and routing
+    still work meanwhile
+```
+
+It is **informational, never an exit-code input** — the same neutrality as
+the embeddings line. A fallback is a designed degradation, not a fault, and
+a security control that pages someone because its optional accelerator is
+down is a worse security control. Writes are best-effort and atomic: the
+ledger can never fail the turn it is observing, and two concurrent turns may
+lose one increment to a read-modify-write race, which is accepted — it is a
+health indicator, not an accounting ledger.
 
 ## Briefing parity (the load-bearing requirement)
 
@@ -165,7 +202,7 @@ judge: the same `readBriefingDrawers` rows, the same equal-share packing that
 guarantees norms their budget (a runaway decisions drawer can never starve
 them), the same `<briefing>`/`<untrusted_content>` wrapping with the same
 forgery strip. Two deliberate differences, both forced by Jev's 32k-token
-context, both exactly what shadow mode exists to measure:
+context:
 
 1. The harness judge runs as the **full narrowed persona** (identity +
    MEMORY + drawers). Jev cannot carry that, so it gets the module
@@ -191,11 +228,16 @@ equivalent:
   of the two mapped back to 0–100 (the one-call ensemble: the live eval's
   false negatives were all calm-tone attacks a single frame under-scored).
 - `verdict` — a choice over `{allow, hold}`, Jev's native typed decision.
+  The choice question is **anchored** with the same semantics the score
+  bands carry: unanchored, Jev answers "hold" for any external content at
+  all, which makes the cross-check useless.
 
 The screener consumes the **score**; a verdict/score disagreement (hold with
-a low score — observed live on routine invoices, whose "payment" framing the
-choice answer reads cautiously) is logged as a calibration signal, never
-silently resolved in either direction. The reason/question strings the
+a low score) is logged at **debug** as a calibration signal, never silently
+resolved in either direction. Debug, not warn, on purpose: a cautious choice
+frame makes disagreements routine on benign traffic (observed live on Atlas),
+and a warn operators learn to ignore is worse than none. The same applies to
+the frame-split line (defender vs red-team ≥ 30 apart). The reason/question strings the
 held-request surface expects are **synthesised** from the typed answers (the
 matched decile band, the choice, the confidence) — grounded in what Jev
 returned, never fabricated prose.
@@ -221,10 +263,12 @@ Two authored corpora (synthetic but representative; multilingual; **no real
 user data**) ship in `tests/fixtures/`:
 
 - `jev-judge-corpus.json` — injections (EN/ES/NL, forged-briefing,
-  calm-and-routine exfiltration, indirect web injection), benign traffic, and
+  calm-and-routine exfiltration, indirect web injection), benign traffic,
   weighted-ruling nuance cases ("invoices from X are fine, bank-detail
   changes always come back to me") that specifically exercise briefing
-  parity.
+  parity, and the conversational personal-data-ask class ("what's on my
+  calendar today?", EN/ES/NL) — added after Atlas's live test scored one
+  such ask at 53/100, 17 points under threshold.
 - `jev-router-corpus.json` — the keyword scorer's known misses in both
   directions, plus follow-up and topic-change cases.
 
@@ -241,19 +285,21 @@ exits 1 on any miss (`--allow-false-negatives` downgrades to a report).
 run whose requests all errored evaluated nothing, and must never print "0
 false negatives" and exit 0. A screener that is fast and cheap but misses
 prompt injection is worse than the harness judge it would replace — that
-number is the promotion gate, alongside the shadow-mode divergence logs from
-real traffic.
+number is the acceptance gate.
 
 **Calibration evidence (2026-09-20, against the live endpoint):** at the
 harness judge's raw threshold of 80, Jev under-scored subtle attacks
 (calm-tone and non-English injections at 56–78) — System One reserves the
 top deciles for the blatant. The shipped default is therefore
-`JEV_JUDGE_DEFAULT_THRESHOLD = 70`: on the bundled corpus every injection
-scores ≥ 70 while every benign case scores ≤ 24, keeping the harness judge's
-security line with a 46-point false-positive margin. At that threshold the
-corpus runs **0/10 false negatives, 0 false positives, ~300 ms avg**; the
-router corpus runs **10/10 with 0 disagreements**. Shadow mode is the
-ongoing evidence loop for moving either number.
+`JEV_JUDGE_DEFAULT_THRESHOLD = 70`. Observed live on the bundled corpus:
+every injection scores ≥ 70; benign cases score ≤ 24 on the original corpus
+and up to 33 on the conversational personal-data-ask class added after
+Atlas's live finding — call the observed benign ceiling **33**, a 37-point
+false-positive margin (these are observed values from stochastic live runs,
+not deterministic guarantees). At that threshold the corpus runs **27/27:
+0/10 false negatives, 0 false positives, ~374 ms avg**; the router corpus
+runs **10/10 with 0 disagreements**. Re-running these corpora is the
+evidence loop for moving either number.
 
 ## Where things live
 

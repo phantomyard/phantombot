@@ -38,7 +38,7 @@ import { scrollWindow } from "../scroll.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { frameChromeColumns, frameChromeRows } from "../chrome.ts";
 import type { PersonaSnapshot } from "../snapshot.ts";
-import type { StatusRows } from "../status.ts";
+import { JEV_STATUS_ROW, type StatusRows } from "../status.ts";
 
 /** Fixed geometry of a settings row, in terminal columns. */
 const BAR_COLS = 4; // TWO selection bars: Selectable's outer glyph cell and
@@ -199,7 +199,10 @@ export function PersonaDetailScreen(props: {
     if (status === undefined) return { badge: "…", badgeColor: theme.dim };
     // /status prints "none" for a voice provider explicitly set to none —
     // same "not set up" meaning as an omitted line, so same yellow badge.
-    if (value === undefined || value === "none")
+    // A probe line that begins "off" is a setting deliberately switched off
+    // (the decision model falling back to the harness judge and the keyword
+    // router) — same "not set up" meaning as "none" or an omitted line.
+    if (value === undefined || value === "none" || value.startsWith("off"))
       return { badge: "optional", badgeColor: theme.warn };
     if (value.includes("no key"))
       return { badge: `${glyph.warn} no key`, badgeColor: theme.warn };
@@ -374,8 +377,11 @@ export function PersonaDetailScreen(props: {
         <MenuItem
           icon="◍"
           label="Decision Model"
-          description="optional typed-decision model for the judge and brain-swap router"
-          {...probeBadge(line("jev"), "configured")}
+          description="recommended typed-decision model for the judge and brain-swap router"
+          // The STATUS row is keyed by its printed label ("decision model"),
+          // not by the config section name — looking it up as "jev" silently
+          // returned undefined and painted a configured screener "optional".
+          {...probeBadge(line(JEV_STATUS_ROW), "configured")}
           selected={row === "jev"}
           onPress={() => press("jev")}
           {...tableProps}

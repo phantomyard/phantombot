@@ -83,7 +83,7 @@ export function buildHarness(config: Config, id: string): Harness | undefined {
             model: config.jev.model,
             keyEnv: config.jev.keyEnv,
             timeoutMs: config.jev.router.timeoutMs,
-            mode: config.jev.router.mode,
+            personasDir: config.personasDir,
           },
         }
       : {}),

@@ -3,8 +3,8 @@
  * #597) for the threat judge and/or the brain-swap router.
  *
  * The walkthrough itself lives in `src/tui/jevFlow.ts` (provider picker,
- * frictionless reuse of an existing OpenRouter key, consumer and mode
- * pickers) and is asked on TUI screens — standalone here, or from the
+ * frictionless reuse of an existing OpenRouter key, consumer picker) and is
+ * asked on TUI screens — standalone here, or from the
  * PersonaDetail Jev row. This module owns the WRITE path
  * (`applyJevConfig`) so the two surfaces can never drift, plus the
  * supporting pieces both sides share: the live key probe, the reusable-key
@@ -48,7 +48,6 @@ import { maybePromptRestart } from "./harness.ts";
 /** One consumer's wizard outcome. Timeouts/thresholds keep their defaults. */
 export interface JevConsumerUpdate {
   enabled: boolean;
-  mode: "shadow" | "active";
 }
 
 export interface JevConfigUpdate {
@@ -138,9 +137,12 @@ export async function applyJevConfig(
     );
     setIn(toml, ["jev", "key_env"], update.keyEnv);
     setIn(toml, ["jev", "judge", "enabled"], update.judge.enabled);
-    setIn(toml, ["jev", "judge", "mode"], update.judge.mode);
     setIn(toml, ["jev", "router", "enabled"], update.router.enabled);
-    setIn(toml, ["jev", "router", "mode"], update.router.mode);
+    // `mode` was a pre-merge draft key (shadow/active). An enabled consumer
+    // now always decides, so a stale copy left in the file would read as a
+    // live setting that nothing honours — scrub it on every write.
+    deleteIn(toml, ["jev", "judge", "mode"]);
+    deleteIn(toml, ["jev", "router", "mode"]);
     // A key in the plaintext file is never right, whatever it came from.
     deleteIn(toml, ["jev", "api_key"]);
   });
@@ -170,9 +172,7 @@ export function jevUpdateEquals(
     existing.baseUrl === expectBaseUrl &&
     existing.keyEnv === update.keyEnv &&
     existing.judge.enabled === update.judge.enabled &&
-    existing.judge.mode === update.judge.mode &&
-    existing.router.enabled === update.router.enabled &&
-    existing.router.mode === update.router.mode
+    existing.router.enabled === update.router.enabled
   );
 }
 
@@ -369,7 +369,7 @@ export default defineCommand({
   meta: {
     name: "jev",
     description:
-      "Configure the optional TypeSafe Jev screener (threat judge and/or brain-swap router). Validates the key before saving.",
+      "Configure the recommended decision model (TypeSafe Jev) for the threat judge and/or brain-swap router. Validates the key before saving.",
   },
   args: {
     persona: {
