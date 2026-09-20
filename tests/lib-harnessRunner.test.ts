@@ -1203,3 +1203,156 @@ describe("runHarnessProcess — Retry-After producer (issue #559, review on #561
     expect(errorChunk.retryAfterMs).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Post-tool-text guard (issue #598, the pi case): a turn whose completion
+// marker fired even though the stream ran tools and never produced reply
+// text after the last tool boundary is a truncated turn, not a success.
+// Directly against runHarnessProcess with a minimal inline spec so the
+// generic engine rules (not pi's specific protocol) are what's exercised.
+// ---------------------------------------------------------------------------
+
+describe("runHarnessProcess — post-tool-text guard", () => {
+  type Ev = { t: string };
+
+  const mkSpec = (
+    lines: string[],
+    opts?: { requireCompletion?: boolean },
+  ) => ({
+    proc: spawnInNewSession(
+      [
+        "sh",
+        "-c",
+        `printf '%s\\n' ${lines.map((l) => `'${l}'`).join(" ")}`,
+      ],
+      { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+    ),
+    harnessId: "guard-test",
+    req: {
+      idleTimeoutMs: 10_000,
+      hardTimeoutMs: 10_000,
+      workingDir: process.cwd(),
+      persona: "test",
+      trusted: true,
+      conversation: "test",
+      userMessage: "test",
+    } as any,
+    stdinPayload: "hi",
+    parseEvent: (p: unknown) => {
+      const ev = p as Ev;
+      if (ev.t === "text") return { type: "text", text: "narration" };
+      if (ev.t === "reply") return { type: "text", text: "the answer" };
+      if (ev.t === "done") return { type: "done", finalText: "" };
+      if (ev.t === "error") {
+        return { type: "error", error: "provider died", recoverable: true };
+      }
+      return undefined;
+    },
+    activity: () => "productive" as const,
+    buildDoneMeta: () => ({}),
+    toolBoundary: (p: unknown) => {
+      const ev = p as Ev;
+      if (ev.t === "tool-start") return { phase: "start" as const, id: "t1" };
+      if (ev.t === "tool-end") return { phase: "end" as const, id: "t1" };
+      return undefined;
+    },
+    ...(opts?.requireCompletion === undefined
+      ? { requireCompletion: true }
+      : { requireCompletion: opts.requireCompletion }),
+  });
+
+  const run = async (spec: ReturnType<typeof mkSpec>) => {
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess(spec as any)) {
+      chunks.push(chunk);
+    }
+    return chunks;
+  };
+
+  test("completion marker after tools with no text after them → recoverable error, NOT done", async () => {
+    // The TUI incident shape: narration text BEFORE the tools, tool round,
+    // then the completion marker. The gate must reject this turn.
+    const spec = mkSpec([
+      JSON.stringify({ t: "text" }),
+      JSON.stringify({ t: "tool-start" }),
+      JSON.stringify({ t: "tool-end" }),
+      JSON.stringify({ t: "done" }),
+    ]);
+    const chunks = await run(spec);
+    expect(chunks.some((c) => c.type === "done")).toBe(false);
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.recoverable).toBe(true);
+    expect(err.error).toContain(
+      "completed without reply text after its last tool call",
+    );
+  });
+
+  test("reply text after the last tool boundary → done (guard passes)", async () => {
+    const spec = mkSpec([
+      JSON.stringify({ t: "text" }),
+      JSON.stringify({ t: "tool-start" }),
+      JSON.stringify({ t: "tool-end" }),
+      JSON.stringify({ t: "reply" }),
+      JSON.stringify({ t: "done" }),
+    ]);
+    const chunks = await run(spec);
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+    const dones = chunks.filter((c) => c.type === "done");
+    expect(dones).toHaveLength(1);
+    expect(dones[0].finalText).toBe("narrationthe answer");
+  });
+
+  test("tool round with NO end boundary then completion marker → guard still fires", async () => {
+    // A start with no end (stream died mid-tool, marker fired anyway) is the
+    // same truncation shape — both phases reset the text tracker.
+    const spec = mkSpec([
+      JSON.stringify({ t: "text" }),
+      JSON.stringify({ t: "tool-start" }),
+      JSON.stringify({ t: "done" }),
+    ]);
+    const chunks = await run(spec);
+    expect(chunks.some((c) => c.type === "done")).toBe(false);
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.recoverable).toBe(true);
+    expect(err.error).toContain(
+      "completed without reply text after its last tool call",
+    );
+  });
+
+  test("error chunk earlier on the stream → guard stays quiet (no double report)", async () => {
+    // A recoverable parser error was already yielded; the guard must not add
+    // a second error for the same truncation. The orchestrator has already
+    // failed over on the first one (issue #598 quiet rule, same as the gate).
+    const spec = mkSpec([
+      JSON.stringify({ t: "error" }),
+      JSON.stringify({ t: "text" }),
+      JSON.stringify({ t: "tool-start" }),
+      JSON.stringify({ t: "tool-end" }),
+      JSON.stringify({ t: "done" }),
+    ]);
+    const chunks = await run(spec);
+    const errs = chunks.filter((c) => c.type === "error");
+    expect(errs).toHaveLength(1);
+    expect(errs[0].error).toBe("provider died");
+    expect(chunks.some((c) => c.type === "done")).toBe(false);
+  });
+
+  test("legacy spec without requireCompletion keeps exit-0-accepts-done", async () => {
+    // Ungated harnesses keep the old contract: marker + exit 0 → done, even
+    // with the truncated tool shape. The guard only tightens gated specs.
+    const spec = mkSpec(
+      [
+        JSON.stringify({ t: "text" }),
+        JSON.stringify({ t: "tool-start" }),
+        JSON.stringify({ t: "tool-end" }),
+        JSON.stringify({ t: "done" }),
+      ],
+      { requireCompletion: false },
+    );
+    const chunks = await run(spec);
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+    expect(chunks.filter((c) => c.type === "done")).toHaveLength(1);
+  });
+});

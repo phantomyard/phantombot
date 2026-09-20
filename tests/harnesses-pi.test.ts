@@ -480,6 +480,38 @@ describe("PiHarness.invoke (subprocess)", () => {
     expect(err!.error).toContain("without a completion signal");
   });
 
+  test("turn_end after tools with no text after them → recoverable error, NOT done (issue #598, the TUI incident)", async () => {
+    // The 2026-09-20 TUI stall: narration BEFORE the tools, two tool rounds,
+    // then turn_end fires anyway — pi treated the truncated turn as finished.
+    // The completion gate alone cannot catch this (turn_end IS the marker),
+    // so the post-tool-text guard must: recoverable error, no done.
+    process.env.FAKE_PI_MODE = "stallaftertools";
+    const chunks = await collect(mkHarness().invoke(newRequest()));
+    expect(chunks.some((c) => c.type === "done")).toBe(false);
+    const err = chunks.find((c) => c.type === "error") as
+      | { type: "error"; error: string; recoverable: boolean }
+      | undefined;
+    expect(err).toBeDefined();
+    expect(err!.recoverable).toBe(true);
+    expect(err!.error).toContain("without reply text after its last tool call");
+  });
+
+  test("tool turn with reply text AFTER the last tool result → done (guard passes)", async () => {
+    // Healthy control for the post-tool-text guard: tools run, then the model
+    // answers with text after the tool result, then turn_end. The narration
+    // before the tools plus the reply after both accumulate into finalText.
+    process.env.FAKE_PI_MODE = "toolsdone";
+    const chunks = await collect(mkHarness().invoke(newRequest()));
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+    const dones = chunks.filter((c) => c.type === "done");
+    expect(dones).toHaveLength(1);
+    expect(dones[0]).toMatchObject({
+      type: "done",
+      finalText: "Checking...Here is the answer.",
+      meta: { harnessId: "native" },
+    });
+  });
+
   test("toolsMode 'none' passes pi's native --no-tools (true zero-tools)", async () => {
     process.env.FAKE_PI_MODE = "argv";
     const chunks = await collect(mkHarness().invoke(newRequest({ toolsMode: "none" })));

@@ -719,6 +719,16 @@ export async function* runHarnessProcess(
   // error on the same stream would only be noise (issue #598 — a result
   // envelope with is_error:true yields its own error and then exits 0).
   let sawErrorChunk = false;
+  // Post-tool-text guard state (issue #598, the pi case): whether any tool
+  // boundary was crossed in this stream, and whether reply text arrived after
+  // the MOST RECENT one. A completed turn that ran tools but produced no text
+  // after the last tool boundary is a truncated turn wearing the completion
+  // marker's shape — pi can fire turn_end after a stream that died right after
+  // the tool results (observed 2026-09-20: TUI turn 60642dab, two bash calls,
+  // turn_end ~3s later, zero text after). Text BEFORE tools is narration and
+  // must not satisfy the guard.
+  let sawTool = false;
+  let textAfterLastTool = false;
   // Set when a parser returns a terminal policy error (e.g. the subagent
   // tripwire). The error chunk is yielded, the subprocess is killed NOW,
   // and every line after it — same batch or later — is dropped: nothing a
@@ -743,6 +753,12 @@ export async function* runHarnessProcess(
     for (const boundary of boundaries) {
       if (boundary.phase === "start") killer.toolStart(boundary.id);
       else killer.toolEnd(boundary.id);
+      // Any tool boundary invalidates earlier text as the final reply: a
+      // completed turn must produce text AFTER its last tool boundary
+      // (issue #598). Both phases reset — a start with no end is the same
+      // truncation shape as an end with no reply after it.
+      sawTool = true;
+      textAfterLastTool = false;
     }
     const res = spec.parseEvent(parsed);
     if (!res) return;
@@ -768,7 +784,10 @@ export async function* runHarnessProcess(
     // deliberately do not — only user-visible output means "not quiet".
     if (c.type === "text") replay?.visible("text", c.text);
     else if (c.type === "progress") replay?.visible("progress", c.note);
-    if (c.type === "text") finalText += c.text;
+    if (c.type === "text") {
+      finalText += c.text;
+      textAfterLastTool = true;
+    }
     if (c.type === "done") {
       captured = c.meta;
       sawCompletion = true;
@@ -1014,6 +1033,32 @@ export async function* runHarnessProcess(
       yield {
         type: "error",
         error: `${harnessId} exited 0 without a completion signal (only partial/tool output — likely stopped mid-turn)`,
+        recoverable: true,
+        stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
+      };
+    }
+    return;
+  }
+
+  // Post-tool-text guard (issue #598, the pi case): the completion marker
+  // fired and the turn exited 0, BUT the stream ran tools and never produced
+  // reply text after the last tool boundary — the model's stream died right
+  // after the tool results and pi treated the truncated turn as finished
+  // (turn_end still fires; observed on the TUI twice on 2026-09-20). The
+  // pre-tool text is narration, not an answer: storing it as the reply is
+  // exactly the bug. Same contract as the gate above — recoverable, so the
+  // orchestrator retries/falls through, and quiet when an error chunk was
+  // already surfaced so we never report one truncation twice. Only applies
+  // to gated harnesses (requireCompletion); the legacy exit-0-accepts-done
+  // harnesses keep their old contract.
+  if (
+    spec.requireCompletion && sawCompletion && sawTool && !textAfterLastTool
+  ) {
+    await awaitStderrDrained();
+    if (!sawErrorChunk) {
+      yield {
+        type: "error",
+        error: `${harnessId} completed without reply text after its last tool call (likely stopped mid-turn)`,
         recoverable: true,
         stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
       };
