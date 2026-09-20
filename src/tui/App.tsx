@@ -1576,7 +1576,7 @@ export function App(props: AppProps): React.ReactElement {
         // cancelled confirm must not fire it.
         let saved = false;
         await askConfirm({
-          title: `Set ${target.name}'s Jev screener to ${chosen.summary}?`,
+          title: `Set ${target.name}'s decision model to ${chosen.summary}?`,
           consequence: describeJevChange(chosen.update),
           run: async () => {
             const r = await applyJev({

@@ -369,12 +369,12 @@ export function PersonaDetailScreen(props: {
     },
     {
       id: "jev",
-      height: h("optional TypeSafe screener for the judge and brain-swap router"),
+      height: h("optional typed-decision model for the judge and brain-swap router"),
       node: (
         <MenuItem
           icon="◍"
-          label="Jev"
-          description="optional TypeSafe screener for the judge and brain-swap router"
+          label="Decision Model"
+          description="optional typed-decision model for the judge and brain-swap router"
           {...probeBadge(line("jev"), "configured")}
           selected={row === "jev"}
           onPress={() => press("jev")}

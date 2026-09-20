@@ -95,7 +95,7 @@ describe("configureJev — frictionless OpenRouter reuse", () => {
     // value (token/URL) prompt anywhere.
     expect(asked.values).toHaveLength(0);
     expect(asked.chooses.map((c) => c.title)).toEqual([
-      "Jev screener for robbie",
+      "Decision model for robbie",
       "OpenRouter credential for robbie",
       "What should Jev do for robbie?",
       "Shadow mode first?",

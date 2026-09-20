@@ -62,9 +62,9 @@ export async function configureJev(
   //    credential conversation follows. "Off" is always offered — disabling
   //    keeps the block so re-enabling later is one choice.
   const provider = await q.choose({
-    title: `Jev screener for ${persona}`,
+    title: `Decision model for ${persona}`,
     description:
-      "an optional TypeSafe System One backend for the threat judge and the primary/coder router — cheap, fast, independent of the harness chain",
+      "an optional typed-decision model (today: TypeSafe's Jev) for the threat judge and the primary/coder router — cheap, fast, independent of the harness chain",
     options: [
       {
         value: "openrouter",
