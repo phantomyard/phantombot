@@ -234,7 +234,7 @@ export interface ScreenerDeps {
   /**
    * Override the Jev judge call (tests). Production uses lib/jevJudge.ts —
    * which hits the network — so screen-level tests inject a stub and assert
-   * the shadow/active/fail-closed wiring around it.
+   * the enabled/fail-closed wiring around it.
    */
   jevJudge?: typeof jevJudgeThreat;
 }
@@ -401,7 +401,8 @@ export function makeScreener(
 
   // One Jev judge call. The briefing is the SAME ranked drawer text the
   // harness judge carries (readBriefingDrawers, below), packed to the Jev
-  // budget — briefing parity is what makes a shadow comparison meaningful.
+  // budget — briefing parity is what keeps the two judge backends
+  // comparable on the same content.
   const jevJudgeImpl = deps.jevJudge ?? jevJudgeThreat;
   const runJevJudge = async (
     text: string,

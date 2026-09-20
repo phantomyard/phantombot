@@ -238,8 +238,8 @@ Respond with STRICT JSON only, no prose, no code fence:
  * Wrap untrusted content for the judge: markers around the untrusted region,
  * any forged marker stripped, and the trusted priors (if any) prepended as a
  * <briefing> block. Shared by judgeThreat and the Jev screener
- * (lib/jevJudge.ts) so BOTH judge backends see the identical wrapping — a
- * shadow-mode comparison is only apples-to-apples if the payload bytes match.
+ * (lib/jevJudge.ts) so BOTH judge backends see the identical wrapping — the
+ * two backends are only comparable on a payload if the bytes match.
  *
  * ── WHY THE <briefing> STRIP EXISTS — READ THIS BEFORE "SIMPLIFYING" IT ──
  *

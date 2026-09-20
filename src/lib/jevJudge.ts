@@ -20,8 +20,9 @@
  * ranked drawer briefing the harness judge gets — produced by the same
  * readBriefingDrawers path in orchestrator/screen.ts, byte-identical entries,
  * norms protected by the same equal-share packing. Two deliberate differences,
- * both forced by Jev's 32k-token budget and both exactly what shadow mode
- * exists to measure:
+ * both forced by Jev's 32k-token budget. They are the reason a Jev verdict
+ * is not expected to be byte-identical to the harness judge's — the eval
+ * corpus (scripts/evalJevJudge.ts) is where that gap is measured:
  *
  *   1. The harness judge runs as the FULL NARROWED PERSONA (identity +
  *      MEMORY + drawers as its system prompt). Jev cannot carry a persona
@@ -102,8 +103,9 @@ export const JEV_JUDGE_DEFAULT_TIMEOUT_MS = 1500;
  * Calibrated on the bundled corpus 2026-09-20 (bun scripts/evalJevJudge.ts):
  * every injection case scores >= 71 while every benign case scores <= 24,
  * so 70 keeps the harness judge's security line with a 46-point
- * false-positive margin. Operator-tunable via [jev.judge] threshold; shadow
- * mode is the ongoing evidence loop for moving it.
+ * false-positive margin. Operator-tunable via [jev.judge] threshold; the
+ * eval corpus and the doctor fallback telemetry are the ongoing evidence
+ * loop for moving it.
  */
 export const JEV_JUDGE_DEFAULT_THRESHOLD = 70;
 
@@ -175,7 +177,7 @@ export function capPayloadUtf8(content: string, capBytes: number): string {
  * Judge untrusted content with Jev. Returns the same JudgeResult contract as
  * judgeThreat so the screener can treat the two backends interchangeably.
  * Never throws: any failure is { ok: false } and the screener falls back to
- * the harness judge (active mode) or ignores the shadow reading.
+ * the harness judge (unless [jev.judge] failClosed is set, which holds).
  */
 export async function jevJudgeThreat(
   content: string,
@@ -283,7 +285,7 @@ export async function jevJudgeThreat(
   // The consumed score is the MAX of the two frames — the ensemble exists
   // because a single frame's under-read is the false-negative case, and a
   // false negative is the failure a screener may not have. A wide split is
-  // logged: it marks exactly the boundary cases shadow mode exists to study.
+  // logged: it marks exactly the boundary cases worth studying in the logs.
   const defender100 = jevLevelToScore100(scoreAnswer.score);
   const attacker100 = jevLevelToScore100(attackerAnswer.score);
   if (Math.abs(defender100 - attacker100) >= 30) {
@@ -298,7 +300,7 @@ export async function jevJudgeThreat(
   // Calibration cross-check: the typed verdict and the numeric score should
   // agree on which side of the threshold the content lands. A disagreement
   // says the model's calibration is off on exactly the boundary that matters
-  // — log it (shadow-mode comparisons want these), but consume the SCORE so
+  // — log it (calibration audits want these), but consume the SCORE so
   // threshold semantics stay identical to the harness judge's.
   const threshold = opts.settings.threshold ?? JEV_JUDGE_DEFAULT_THRESHOLD;
   const saysHold = verdict === "hold";
