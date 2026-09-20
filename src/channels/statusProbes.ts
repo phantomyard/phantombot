@@ -42,6 +42,7 @@ import {
   type EditorConnectorResult,
 } from "../connectors/acp/autoInstall.ts";
 import { isPhantombotBinary as realIsPhantombotBinary } from "../lib/binaryIdentity.ts";
+import { validateJevKey as realValidateJevKey } from "../cli/jev.ts";
 
 /** Cap probe error detail so one bad line can't blow up the /status reply. */
 const ERR_MAX = 60;
@@ -73,6 +74,8 @@ export interface StatusProbeLines {
    * "RUNNING (2/5 dates, on 2026-06-02)" or "WARN (2 dates pending, …)".
    */
   dreaming?: string;
+  /** e.g. "openrouter OK (judge shadow · router off)" or "typesafe — no key". */
+  jev?: string;
 }
 
 /**
@@ -88,6 +91,7 @@ export interface StatusProbeDeps {
   reconcileEditorConnectors?: typeof realReconcileEditorConnectors;
   isPhantombotBinary?: typeof realIsPhantombotBinary;
   nightlyHealth?: typeof realNightlyHealth;
+  validateJevKey?: typeof realValidateJevKey;
   env?: Record<string, string | undefined>;
   /** Override the shared probe deadline (ms). Production omits it; tests use
    *  a tiny value to exercise the cap without waiting the real 5s. */
@@ -240,6 +244,34 @@ async function probeDreaming(
 }
 
 /**
+ * The optional Jev screener (issue #597): provider + per-consumer state, plus
+ * a live forced-tool validation call when a key resolves. A configured block
+ * with no resolvable key reads "— no key" (the badge's yellow state), never
+ * ERR — the consumers degrade to the existing methods by design.
+ */
+async function probeJev(
+  config: Config | undefined,
+  validate: typeof realValidateJevKey,
+  env: Record<string, string | undefined>,
+): Promise<string | undefined> {
+  const jev = config?.jev;
+  if (!jev) return undefined;
+  const consumers =
+    `judge ${jev.judge.enabled ? jev.judge.mode : "off"} · ` +
+    `router ${jev.router.enabled ? jev.router.mode : "off"}`;
+  const key = jev.apiKey ?? env[jev.keyEnv]?.trim();
+  if (!key) return `${jev.provider} — no key (${consumers})`;
+  const r = await validate({
+    baseUrl: jev.baseUrl,
+    apiKey: key,
+    model: jev.model,
+  });
+  return r.ok
+    ? `${jev.provider} OK (${consumers})`
+    : `${jev.provider} ERR (${shortErr(r.error ?? "validation failed")}) (${consumers})`;
+}
+
+/**
  * Run all live probes concurrently and return their one-line summaries.
  * Any probe that throws or has no config surface is omitted (undefined).
  */
@@ -258,6 +290,7 @@ export async function gatherStatusProbes(
   const env = deps.env ?? process.env;
   const validateEl = deps.validateElevenLabsKey ?? realValidateElevenLabsKey;
   const validateOa = deps.validateOpenAIKey ?? realValidateOpenAIKey;
+  const validateJev = deps.validateJevKey ?? realValidateJevKey;
   const nightly = deps.nightlyHealth ?? realNightlyHealth;
 
   // One shared deadline for the whole fan-out. Threaded into every client that
@@ -281,7 +314,7 @@ export async function gatherStatusProbes(
     }
   };
 
-  const [telegram, memory, voice, dreaming] = await Promise.all([
+  const [telegram, memory, voice, dreaming, jev] = await Promise.all([
     settle(probeTelegram(config, persona, getMe, deadline)),
     settle(probeMemory(config, embed, openaiEmbed, deadline)),
     settle(
@@ -293,6 +326,7 @@ export async function gatherStatusProbes(
       }),
     ),
     settle(probeDreaming(config, persona, nightly)),
+    settle(probeJev(config, validateJev, env)),
   ]);
   // ACP probe is synchronous local file reads — no need to race it.
   let acp: string | undefined;
@@ -302,5 +336,5 @@ export async function gatherStatusProbes(
     acp = undefined;
   }
 
-  return { telegram, acp, memory, voice, dreaming };
+  return { telegram, acp, memory, voice, dreaming, jev };
 }

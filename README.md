@@ -276,6 +276,7 @@ phantombot telegram    # BotFather token + allowed Telegram user IDs
 
 phantombot voice       # optional TTS/STT setup
 phantombot embedding   # optional semantic-memory provider setup
+phantombot jev         # optional TypeSafe Jev screener (judge + router)
 
 phantombot run         # foreground host runtime for configured chat channels + P2P
 phantombot run --if-not-running  # supervisor keep-alive; quiet success if already running
@@ -1026,6 +1027,7 @@ Setup and channels:
 | `phantombot phantomchat [--persona <name>]` | Configure PhantomChat identity, relays, and allowlist |
 | `phantombot voice [--persona <name>]` | Configure TTS/STT |
 | `phantombot embedding` | Configure optional Gemini/OpenAI-compatible embeddings, or none |
+| `phantombot jev [--persona <name>]` | Configure the optional TypeSafe Jev screener for the threat judge and/or the brain-swap router |
 | `phantombot acp install zed|jetbrains|vscode` | Register the ACP agent with an editor |
 
 `phantombot persona <name>` switches the daemon-wide default persona.
@@ -1690,6 +1692,13 @@ That keeps a Phantom on the coding brain through natural follow-ups in a review,
 then releases it the moment the topic moves off code — stateless and
 self-correcting, no sticky mode. Force it with `/coder`, disable with
 `/coder off`, or clear back to scoring with `/coder default`.
+
+If you have a TypeSafe or OpenRouter key, the routing decision can optionally be
+made by [TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13) — a "System One"
+model that returns a typed `primary | coder` choice in ~200 ms instead of
+matching keywords. The keyword scorer stays the default and the fallback; Jev
+starts in shadow mode (decides alongside, logs divergences, never acts) until
+you promote it. See [docs/jev.md](docs/jev.md).
 
 Two safety rails keep a swapped turn from ever being *lost*:
 
@@ -2367,6 +2376,16 @@ a particular CLI is installed: if you install only one of the three, screening
 still runs on that one. It is not a keyword engine and not a separate API key.
 Its only job is to *read* the incoming content and score it 0–100 for threat.
 The screener consumes only that number.
+
+Optionally, the judge can be backed by [TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13)
+instead — a dedicated "System One" screener on a vendor and quota pool
+independent of your harness chain, so a fleet-wide harness quota outage no
+longer takes the security control down with it (today that outage fails the
+screen **open**). Jev receives the same ranked drawer briefing
+(decisions/people/norms) as the harness judge, starts in shadow mode, and the
+harness judge remains the fallback. Configure it with `phantombot jev`; the
+full design, including the both-backends-down fail-closed option, is in
+[docs/jev.md](docs/jev.md).
 
 Each harness runs the judge with its CLI's **native** capability-restriction
 flag, not a hand-maintained deny-list (which rots as new tools ship):

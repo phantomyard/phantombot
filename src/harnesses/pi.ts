@@ -52,7 +52,8 @@ import {
   type PiRoutingConfig,
 } from "../lib/piRouting.ts";
 import type { ParseEventResult } from "./reasoningReplay.ts";
-import { CODER_SWAP_MAX_ATTEMPTS, getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
+import { CODER_SWAP_MAX_ATTEMPTS, getCoderSwapOverride, resolveSwapModel, type SwapDecision } from "../lib/coderSwap.ts";
+import { jevRoute } from "../lib/jevRouter.ts";
 import { classifyFailure } from "../lib/harnessAlert.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
@@ -121,6 +122,20 @@ export interface PiHarnessConfig {
   /** Runtime identity and vault key for a named Pi instance. */
   id?: string;
   apiKeyEnv?: string;
+  /**
+   * The optional Jev brain-swap router (issue #597). Present only when the
+   * operator configured [jev] and enabled the ROUTER consumer. The API key
+   * is NOT carried here — it is read per-turn from `process.env[keyEnv]`
+   * after the persona's vault is reconciled, the same contract as the Pi
+   * API key. Shadow/active semantics live at the call site in invoke().
+   */
+  jevRouter?: {
+    baseUrl: string;
+    model: string;
+    keyEnv: string;
+    timeoutMs: number;
+    mode: "shadow" | "active";
+  };
   /** Explicit V8 old-space ceiling; never inferred from host memory. */
   maxOldSpaceMb?: number;
   /**
@@ -273,17 +288,103 @@ export class PiHarness implements Harness {
               conversation: req.conversation,
             })
           : undefined;
-      const decision = resolveSwapModel({
-        text: req.userMessage,
-        override,
-        primaryModel,
-        codingModel,
-        // Pass conversation history so the current message is judged IN CONTEXT
-        // (recency-decayed ratio over recent USER turns) rather than alone — a
-        // natural-language follow-up mid-review no longer drops the coding brain.
-        // History is already rebuilt for buildPayload() below, so this is free.
-        history: req.history,
-      });
+      // The keyword scorer — the DEFAULT and the FALLBACK routing method
+      // (issue #597). Jev only ever advises (shadow) or precedes (active)
+      // this, and a manual /coder override wins over both without Jev even
+      // being consulted.
+      const scoreRoute = () =>
+        resolveSwapModel({
+          text: req.userMessage,
+          override,
+          primaryModel,
+          codingModel,
+          // Pass conversation history so the current message is judged IN CONTEXT
+          // (recency-decayed ratio over recent USER turns) rather than alone — a
+          // natural-language follow-up mid-review no longer drops the coding brain.
+          // History is already rebuilt for buildPayload() below, so this is free.
+          history: req.history,
+        });
+
+      const jevRouter = this.config.jevRouter;
+      let decision: SwapDecision | undefined;
+      if (override === undefined && jevRouter) {
+        // Resolve the router key per-turn from the env (vault-injected), the
+        // same contract as the Pi API key below. reloadVaultForPersona is
+        // idempotent; calling it here too keeps the router working on turns
+        // where Pi's own key comes from Pi's local store instead.
+        await reloadVaultForPersona(req.persona);
+        const jevKey = process.env[jevRouter.keyEnv]?.trim();
+        if (!jevKey) {
+          log.warn(
+            `pi.invoke jev-router enabled but ${jevRouter.keyEnv} is not set; using the keyword scorer`,
+          );
+          decision = scoreRoute();
+        } else {
+          const recentUserTexts = (req.history ?? [])
+            .filter((t) => t.role === "user")
+            .map((t) => t.text);
+          if (jevRouter.mode === "active") {
+            const r = await jevRoute({
+              settings: {
+                baseUrl: jevRouter.baseUrl,
+                apiKey: jevKey,
+                model: jevRouter.model,
+                timeoutMs: jevRouter.timeoutMs,
+              },
+              text: req.userMessage,
+              history: recentUserTexts,
+            });
+            if (r.ok) {
+              decision = {
+                model: r.route === "coder" ? codingModel : primaryModel,
+                swapped: r.route === "coder",
+                reason: `jev:${r.route}@${r.confidence.toFixed(2)}`,
+                score: 0,
+              };
+            } else {
+              log.warn(
+                `pi.invoke jev-router unavailable, using the keyword scorer: ${r.error}`,
+              );
+              decision = scoreRoute();
+            }
+          } else {
+            // SHADOW: the scorer decides; Jev answers alongside and only the
+            // comparison is logged. Divergences are the promotion evidence.
+            decision = scoreRoute();
+            const r = await jevRoute({
+              settings: {
+                baseUrl: jevRouter.baseUrl,
+                apiKey: jevKey,
+                model: jevRouter.model,
+                timeoutMs: jevRouter.timeoutMs,
+              },
+              text: req.userMessage,
+              history: recentUserTexts,
+            });
+            if (r.ok) {
+              const jevSwap = r.route === "coder";
+              const fields = {
+                persona: req.persona,
+                conversation: req.conversation,
+                jevRoute: r.route,
+                jevConfidence: r.confidence,
+                scorerSwapped: decision.swapped,
+                scorerReason: decision.reason,
+                latencyMs: r.latencyMs,
+              };
+              if (jevSwap !== decision.swapped) {
+                log.info("pi.invoke jev-router shadow DIVERGENCE", fields);
+              } else {
+                log.info("pi.invoke jev-router shadow agrees", fields);
+              }
+            } else {
+              log.warn(`pi.invoke jev-router shadow unavailable: ${r.error}`);
+            }
+          }
+        }
+      } else {
+        decision = scoreRoute();
+      }
       swapped = decision.swapped;
       swapModel = decision.model;
       if (decision.swapped) {

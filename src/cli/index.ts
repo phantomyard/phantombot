@@ -49,6 +49,7 @@ import tickCmd from "./tick.ts";
 import updateCmd from "./update.ts";
 import fixSigningCmd from "./fix-signing.ts";
 import voiceCmd from "./voice.ts";
+import jevCmd from "./jev.ts";
 import replyModeCmd from "./replyMode.ts";
 import p2pCmd from "./p2p.ts";
 
@@ -89,6 +90,7 @@ export const mainCommand = defineCommand({
     update: updateCmd,
     "fix-signing": fixSigningCmd,
     voice: voiceCmd,
+    jev: jevCmd,
     "reply-mode": replyModeCmd,
     p2p: p2pCmd,
     workspace: workspaceCmd,

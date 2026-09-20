@@ -34,6 +34,7 @@ import { type Config, personaDir, servedPersonasOf } from "../config.ts";
 import { applyEmbeddingConfig } from "../cli/embedding.ts";
 import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { applyVoiceConfig } from "../cli/voice.ts";
+import { applyJevConfig, type JevConfigUpdate } from "../cli/jev.ts";
 import { runMemoryIndex } from "../cli/memory.ts";
 import type { EmbedProgress } from "../lib/embedJob.ts";
 import {
@@ -249,6 +250,55 @@ export async function applyVoice(
   const svc = input.serviceControl ?? defaultServiceControl();
   const r = await svc.restart();
   return r.ok ? { ok: true } : { ok: false, error: r.stderr ?? "restart failed" };
+}
+
+export interface ApplyJevInputTui {
+  config: Config;
+  persona: string;
+  update: JevConfigUpdate;
+}
+
+export function describeJevChange(update: JevConfigUpdate): Consequence {
+  const judgeOn = update.judge.enabled;
+  const routerOn = update.router.enabled;
+  const what =
+    judgeOn && routerOn
+      ? `the threat judge and the brain-swap router (${update.judge.mode})`
+      : judgeOn
+        ? `the threat judge (${update.judge.mode})`
+        : routerOn
+          ? `the brain-swap router (${update.router.mode})`
+          : "nothing — Jev stays disabled";
+  return {
+    summary: `points ${what} at TypeSafe Jev, then restarts the daemon`,
+    detail:
+      update.apiKey !== undefined
+        ? `The new key was validated with one live call and is stored in the vault as ${update.keyEnv}; nothing secret touches config.toml.`
+        : `No new credential is stored — the existing ${update.keyEnv} is reused. Shadow mode logs divergences without deciding; active mode lets Jev decide with the existing method as fallback.`,
+    longRunning: false,
+    restarts: true,
+  };
+}
+
+/**
+ * The Jev row's write path — the same `applyJevConfig` the CLI calls, so the
+ * TUI and `phantombot jev` can never write different shapes of `[jev]`.
+ * Unlike voice there is no listener to bounce here; the daemon picks [jev]
+ * up on its next start, which is why the callers offer the restart.
+ */
+export async function applyJev(
+  input: ApplyJevInputTui,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await applyJevConfig({
+      config: input.config,
+      persona: input.persona,
+      update: input.update,
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
 }
 
 export function describeAutostartChange(

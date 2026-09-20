@@ -223,6 +223,7 @@
                 </div>
             </div>
             <p class="shot-cap">The Phantom editing its own routing logic: the scorer that decides when to swap in the Coder brain.</p>
+            <p class="shot-cap">With a TypeSafe or OpenRouter key, that routing choice can optionally be made by <a href="https://openrouter.ai/typesafe/jev-1.13" rel="noopener">TypeSafe&nbsp;Jev</a> — a typed <code>primary&nbsp;|&nbsp;coder</code> decision in ~200&nbsp;ms, shadowing the keyword scorer until the evidence says promote it.</p>
 
             <div class="features-detailed pi-principles">
                 <div class="feature">
@@ -255,7 +256,7 @@
                         </svg>
                     </span>
                     <h3>A firewall in front of the model</h3>
-                    <p>A bare harness acts on whatever reaches it, including text from email, web pages, and webhooks trying to <em>instruct</em> it. Phantombot sits in front as a capability-and-trust perimeter: a <strong>two-tier trust model</strong> that judges input by origin, and a <strong>tool-less threat judge</strong> that reads every untrusted turn <em>before any memory is loaded into a prompt</em> and holds anything dangerous for you to talk through.</p>
+                    <p>A bare harness acts on whatever reaches it, including text from email, web pages, and webhooks trying to <em>instruct</em> it. Phantombot sits in front as a capability-and-trust perimeter: a <strong>two-tier trust model</strong> that judges input by origin, and a <strong>tool-less threat judge</strong> that reads every untrusted turn <em>before any memory is loaded into a prompt</em> and holds anything dangerous for you to talk through. Optionally, the judge can be backed by <a href="https://openrouter.ai/typesafe/jev-1.13" rel="noopener">TypeSafe&nbsp;Jev</a> — a dedicated &ldquo;System&nbsp;One&rdquo; screener on a vendor and quota pool independent of your harness chain, so a model-provider outage never takes the security control down with it.</p>
                 </div>
 
                 <div class="why-card">

@@ -115,6 +115,10 @@ import {
   THREAT_THRESHOLD,
   type JudgeResult,
 } from "../lib/threatJudge.ts";
+import {
+  JEV_JUDGE_BRIEFING_CAP_BYTES,
+  jevJudgeThreat,
+} from "../lib/jevJudge.ts";
 import { runNotify } from "../cli/notify.ts";
 import type { DrawerKind } from "../memory/drawers.ts";
 import { drawerPath } from "../memory/drawerIngest.ts";
@@ -226,6 +230,12 @@ export interface ScreenerDeps {
    * tests inject a stub to assert what would be written without a real store.
    */
   recordHeld?: (episode: HeldEpisode) => Promise<void>;
+  /**
+   * Override the Jev judge call (tests). Production uses lib/jevJudge.ts —
+   * which hits the network — so screen-level tests inject a stub and assert
+   * the shadow/active/fail-closed wiring around it.
+   */
+  jevJudge?: typeof jevJudgeThreat;
 }
 
 /**
@@ -374,6 +384,39 @@ export function makeScreener(
       });
     });
 
+  // The optional Jev screener (issue #597). Engaged only when the operator
+  // configured [jev], enabled the JUDGE consumer, and a key resolved — an
+  // unconfigured user takes the harness-judge path below untouched. Never
+  // engaged when a test injects its own judge: the override IS the judge.
+  const jev = config.jev;
+  const jevJudgeOn =
+    deps.judge === undefined && jev?.judge.enabled === true && !!jev?.apiKey;
+
+  // One Jev judge call. The briefing is the SAME ranked drawer text the
+  // harness judge carries (readBriefingDrawers, below), packed to the Jev
+  // budget — briefing parity is what makes a shadow comparison meaningful.
+  const jevJudgeImpl = deps.jevJudge ?? jevJudgeThreat;
+  const runJevJudge = async (
+    text: string,
+    sig?: AbortSignal,
+  ): Promise<JudgeResult & { latencyMs?: number }> => {
+    const drawersText = await readBriefingDrawersCapped(
+      config,
+      persona,
+      JEV_JUDGE_BRIEFING_CAP_BYTES,
+    );
+    return jevJudgeImpl(text, {
+      settings: {
+        baseUrl: jev!.baseUrl,
+        apiKey: jev!.apiKey!,
+        model: jev!.model,
+        timeoutMs: jev!.judge.timeoutMs,
+      },
+      priors: drawersText,
+      signal: sig,
+    });
+  };
+
   return async (content: string, signal?: AbortSignal): Promise<ScreenVerdict> => {
     // 1. Optional legacy recall (best-effort; never throws → ""). Production
     //    leaves recall unset; the persona context is the briefing now.
@@ -389,20 +432,100 @@ export function makeScreener(
     // 2. Judge (fail-open on any judge error). The default judge runs as the
     //    narrowed persona (it closes over _conversation for its channel
     //    context); an injected test judge uses the legacy 3-arg shape.
+    const judgeSafely = async (): Promise<JudgeResult> => {
+      try {
+        return await judge(content, priors, signal);
+      } catch (e) {
+        return { ok: false, error: `judge threw: ${(e as Error).message}` };
+      }
+    };
+
+    // The hold threshold this screen applies. THREAT_THRESHOLD normally; the
+    // operator's jev.judge.threshold when Jev actively decides (the judge is
+    // a security control — its bar is the operator's to set, per consumer).
+    let holdThreshold = THREAT_THRESHOLD;
+
     let result: JudgeResult;
-    try {
-      result = await judge(content, priors, signal);
-    } catch (e) {
-      log.warn(`screen: judge threw, failing open: ${(e as Error).message}`);
-      return PASS_ON_ERROR(0, "screen error (failed open)");
+    if (jevJudgeOn && jev!.judge.mode === "active") {
+      holdThreshold = jev!.judge.threshold;
+      // ACTIVE: Jev decides; the harness judge is the fallback on any Jev
+      // error. Both down ⇒ fail open as today UNLESS the operator opted into
+      // fail-closed (affordable exactly because an independent screener
+      // exists — see docs/jev.md).
+      const jevResult = await runJevJudge(content, signal).catch((e) => ({
+        ok: false as const,
+        error: `jev judge threw: ${(e as Error).message}`,
+      }));
+      if (jevResult.ok) {
+        log.info("screen: jev judge decided", {
+          score: jevResult.verdict.score,
+          latencyMs: jevResult.latencyMs,
+        });
+        result = jevResult;
+      } else {
+        log.warn(
+          `screen: jev judge unavailable in active mode, falling back to harness judge: ${jevResult.error}`,
+        );
+        result = await judgeSafely();
+        if (!result.ok && jev!.judge.failClosed) {
+          log.warn("screen: both judges down, failing CLOSED (operator opt-in)");
+          result = {
+            ok: true,
+            verdict: {
+              score: Math.max(holdThreshold, 1),
+              reason:
+                `threat screening is down on both backends (jev: ${jevResult.error}; ` +
+                `harness: ${result.error}) and this persona fails closed`,
+              question:
+                "Screening is unavailable and this persona is set to hold rather " +
+                "than pass unscreened input. Talk it through, or retry once the " +
+                "judge is back.",
+            },
+          };
+        }
+      }
+    } else if (jevJudgeOn) {
+      // SHADOW: the harness judge decides; Jev answers ALONGSIDE and only the
+      // comparison is logged. Concurrent so the shadow costs max(), not sum().
+      const [harnessResult, jevResult] = await Promise.all([
+        judgeSafely(),
+        runJevJudge(content, signal).catch((e) => ({
+          ok: false as const,
+          error: `jev judge threw: ${(e as Error).message}`,
+        })),
+      ]);
+      if (jevResult.ok && harnessResult.ok) {
+        const jevHolds = jevResult.verdict.score >= jev!.judge.threshold;
+        const harnessHolds = harnessResult.verdict.score >= THREAT_THRESHOLD;
+        const fields = {
+          jevScore: jevResult.verdict.score,
+          harnessScore: harnessResult.verdict.score,
+          latencyMs: jevResult.latencyMs,
+        };
+        if (jevHolds !== harnessHolds) {
+          log.warn("screen: jev shadow DIVERGENCE", {
+            ...fields,
+            jevReason: jevResult.verdict.reason,
+            harnessReason: harnessResult.verdict.reason,
+          });
+        } else {
+          log.info("screen: jev shadow agrees", fields);
+        }
+      } else if (!jevResult.ok) {
+        log.warn(`screen: jev shadow unavailable: ${jevResult.error}`);
+      }
+      result = harnessResult;
+    } else {
+      result = await judgeSafely();
     }
+
     if (!result.ok) {
       log.warn(`screen: judge unavailable, failing open: ${result.error}`);
       return PASS_ON_ERROR(0, `screen unavailable (failed open): ${result.error}`);
     }
 
     const v = result.verdict;
-    if (v.score < THREAT_THRESHOLD) {
+    if (v.score < holdThreshold) {
       return { action: "pass", score: v.score, reason: v.reason };
     }
 
@@ -543,6 +666,20 @@ async function readBriefingDrawers(
   config: Config,
   persona: string,
 ): Promise<string | undefined> {
+  return readBriefingDrawersCapped(config, persona, DRAWERS_CAP_BYTES);
+}
+
+/**
+ * The briefing reader with an explicit cap, shared by the harness judge
+ * (DRAWERS_CAP_BYTES) and the Jev judge (JEV_JUDGE_BRIEFING_CAP_BYTES) so
+ * both backends brief from the SAME ranked rows, differing only in how much
+ * of the tail their context budget can carry.
+ */
+async function readBriefingDrawersCapped(
+  config: Config,
+  persona: string,
+  capBytes: number,
+): Promise<string | undefined> {
   let dir: string;
   try {
     dir = personaDir(config, persona);
@@ -552,7 +689,7 @@ async function readBriefingDrawers(
 
   const sections = await collectBriefingSections(config, dir, persona);
   if (sections.length === 0) return undefined;
-  return packBriefing(sections, DRAWERS_CAP_BYTES);
+  return packBriefing(sections, capBytes);
 }
 
 async function collectBriefingSections(

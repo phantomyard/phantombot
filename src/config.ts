@@ -53,6 +53,15 @@ import {
   isVaultInjectedEnvKey,
   isVaultLoadedPersonaDir,
 } from "./lib/vaultEnvTracking.ts";
+import {
+  JEV_DEFAULT_KEY_ENV,
+  JEV_DEFAULT_MODEL,
+  JEV_OPENROUTER_BASE_URL,
+  JEV_TYPESAFE_BASE_URL,
+} from "./lib/jev.ts";
+import { JEV_JUDGE_DEFAULT_TIMEOUT_MS } from "./lib/jevJudge.ts";
+import { THREAT_THRESHOLD } from "./lib/threatJudge.ts";
+import { JEV_ROUTER_DEFAULT_TIMEOUT_MS } from "./lib/jevRouter.ts";
 
 /**
  * Read the legacy `turn_timeout_s` (TOML) or `PHANTOMBOT_TURN_TIMEOUT_MS`
@@ -908,6 +917,17 @@ export interface Config {
   voice: import("./lib/voice.ts").VoiceConfig;
 
   /**
+   * Optional TypeSafe Jev backend (issue #597, see docs/jev.md): a cheap,
+   * independent System One screener for the threat judge and/or the
+   * primary|coder brain-swap router. UNDEFINED unless a `[jev]` block (or a
+   * PHANTOMBOT_JEV_* env var) configures it — a user with neither token sees
+   * no behaviour change whatsoever. When present, each consumer is still
+   * individually disabled by default; the wizard (`phantombot jev`) flips
+   * them on. Jev is never a harness and can never serve a turn.
+   */
+  jev?: JevSettings;
+
+  /**
    * P2P transport (phantombot#258, rewritten in #61): werift WebRTC channels to
    * peer nodes, NAT-traversed via public STUN, with Nostr carrying only the
    * signaling handshake and acting as the delivery fallback. On by default;
@@ -919,6 +939,55 @@ export interface Config {
    * `loadConfig` always populates it; consumers treat absence as `DEFAULT_P2P`.
    */
   p2p?: P2PSettings;
+}
+
+/** One Jev consumer's enablement. See docs/jev.md. */
+export interface JevConsumerSettings {
+  /** Master switch for this consumer. Default false — opt-in per consumer. */
+  enabled: boolean;
+  /**
+   * "shadow": Jev decides ALONGSIDE the existing method and only logs
+   * divergences — the shipped default, and the evidence-gathering state.
+   * "active": Jev decides; the existing method is the fallback on any
+   * error/timeout.
+   */
+  mode: "shadow" | "active";
+  /** Hard wall-clock cap; exceeding it degrades to the existing method. */
+  timeoutMs: number;
+}
+
+/** The threat judge's Jev settings — the SECURITY control's consumer. */
+export interface JevJudgeSettings extends JevConsumerSettings {
+  /** Hold at/above this score. Defaults to THREAT_THRESHOLD (80). */
+  threshold: number;
+  /**
+   * Both-down semantics when Jev is ACTIVE: Jev errored AND the harness
+   * judge errored. false (default) = fail open exactly as today; true =
+   * hold the turn and notify. Fail-closed only becomes affordable with a
+   * cheap independent screener in front, and even then it is the operator's
+   * call — see docs/jev.md for the analysis.
+   */
+  failClosed: boolean;
+}
+
+/** The `[jev]` block, resolved. The API key is vault/env-only — never TOML. */
+export interface JevSettings {
+  /** "openrouter" (reuse an OpenRouter key) or "typesafe" (direct token). */
+  provider: "typesafe" | "openrouter";
+  /** Model id — default `typesafe/jev-1.13`. */
+  model: string;
+  /** OpenAI-compatible base URL for the chosen provider. */
+  baseUrl: string;
+  /** The vault/env NAME the API key is read from (default PHANTOMBOT_JEV_API_KEY). */
+  keyEnv: string;
+  /**
+   * The resolved API key, vault-first then env (mirroring the embeddings
+   * resolver). Loaded at config time so a secondary persona on a
+   * multi-persona daemon reads its OWN vault, not the injected one.
+   */
+  apiKey?: string;
+  judge: JevJudgeSettings;
+  router: JevConsumerSettings;
 }
 
 /** Settings for the P2P WebRTC transport node (phantombot#258, #61). */
@@ -1267,6 +1336,22 @@ export async function loadConfig(persona?: string): Promise<Config> {
   >;
   const tomlVoice = (toml.voice ?? {}) as Record<string, unknown>;
   const tomlPromptCache = (toml.prompt_cache ?? {}) as Record<string, unknown>;
+  const tomlJev = (toml.jev ?? {}) as Record<string, unknown>;
+
+  // Jev API keys resolve VAULT-FIRST under the configured key_env name (and
+  // the default name), exactly like the embedding keys above — a secondary
+  // persona on a multi-persona daemon must read its OWN vault, not the one
+  // injected at startup. Only read the vault at all when Jev is configured.
+  const jevKeyEnv =
+    asString(process.env.PHANTOMBOT_JEV_KEY_ENV) ??
+    asString(tomlJev.key_env) ??
+    JEV_DEFAULT_KEY_ENV;
+  const vaultJevSecrets =
+    Object.keys(tomlJev).length > 0 || hasJevEnv()
+      ? await readJevSecretsFromVault(personaDirPath, [
+          ...new Set([jevKeyEnv, JEV_DEFAULT_KEY_ENV]),
+        ])
+      : {};
 
   const configuredChain =
     harnessEnv("PHANTOMBOT_HARNESS_CHAIN", ["chain"])
@@ -1584,6 +1669,11 @@ export async function loadConfig(persona?: string): Promise<Config> {
     ),
 
     voice: buildVoiceConfig(tomlVoice),
+
+    jev: buildJevConfig(tomlJev, {
+      personaDirPath,
+      vaultSecrets: vaultJevSecrets,
+    }),
 
     p2p: buildP2PConfig(tomlP2p),
   };
@@ -2415,6 +2505,157 @@ function buildEmbeddingsConfig(
       apiKey: apiKey ?? "",
       model: asString(tomlGemini.model) ?? "gemini-embedding-001",
       dims: asInt(tomlGemini.dims) ?? 1536,
+    },
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Jev (issue #597) — optional TypeSafe System One backend for the threat
+// judge and the brain-swap router. Docs: docs/jev.md.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** True when any PHANTOMBOT_JEV_* env var marks Jev as configured. */
+function hasJevEnv(): boolean {
+  return Object.keys(process.env).some(
+    (k) => k.startsWith("PHANTOMBOT_JEV_") && k !== JEV_DEFAULT_KEY_ENV,
+  );
+}
+
+/**
+ * Read this persona's Jev API keys straight out of ITS OWN vault — the same
+ * multi-persona rule as readEmbeddingSecretsFromVault: a persona whose vault
+ * was never injected still has its key on disk, and without this read the
+ * Jev consumers would silently use the DEFAULT persona's credential. Never
+ * throws — an unopenable or absent vault is "no key", never a failed load.
+ */
+async function readJevSecretsFromVault(
+  personaDirPath: string,
+  names: readonly string[],
+): Promise<Record<string, string>> {
+  if (isVaultLoadedPersonaDir(personaDirPath)) return {};
+  try {
+    const { vaultPath, openPersonaVault } = await import("./lib/vault.ts");
+    if (!existsSync(vaultPath(personaDirPath))) return {};
+    const vault = await openPersonaVault(personaDirPath);
+    try {
+      const out: Record<string, string> = {};
+      for (const name of names) {
+        const v = vault.get(name);
+        if (v !== undefined && v !== "") out[name] = v;
+      }
+      return out;
+    } finally {
+      vault.close();
+    }
+  } catch (e) {
+    log.warn("config: jev vault read failed", {
+      error: (e as Error).message,
+    });
+    return {};
+  }
+}
+
+export interface BuildJevOptions {
+  personaDirPath: string;
+  vaultSecrets: Record<string, string>;
+}
+
+function asJevMode(value: unknown): "shadow" | "active" | undefined {
+  return value === "shadow" || value === "active" ? value : undefined;
+}
+
+/**
+ * Build the `[jev]` block. UNDEFINED when nothing configures Jev — no block,
+ * no PHANTOMBOT_JEV_* env — so an unconfigured user sees zero behaviour
+ * change. When present, both consumers still default to disabled; the wizard
+ * (`phantombot jev` / the TUI Jev row) flips them on.
+ *
+ * The API key is vault/env-only. An `api_key` key in the TOML block is
+ * IGNORED with a warning — secrets never belong in the plaintext file.
+ */
+function buildJevConfig(
+  tomlJev: Record<string, unknown>,
+  opts: BuildJevOptions,
+): JevSettings | undefined {
+  if (Object.keys(tomlJev).length === 0 && !hasJevEnv()) return undefined;
+
+  if (tomlJev.api_key !== undefined) {
+    log.warn(
+      "config: [jev] api_key in config.toml is ignored — Jev keys live in " +
+        `the vault (${JEV_DEFAULT_KEY_ENV} or the configured key_env). ` +
+        "Run `phantombot jev` to store it properly, and remove it from the file.",
+    );
+  }
+
+  const provider =
+    (asString(process.env.PHANTOMBOT_JEV_PROVIDER) ??
+    asString(tomlJev.provider)) === "typesafe"
+      ? ("typesafe" as const)
+      : ("openrouter" as const);
+
+  const keyEnv =
+    asString(process.env.PHANTOMBOT_JEV_KEY_ENV) ??
+    asString(tomlJev.key_env) ??
+    JEV_DEFAULT_KEY_ENV;
+
+  const baseUrl =
+    asString(process.env.PHANTOMBOT_JEV_BASE_URL) ??
+    asString(tomlJev.base_url) ??
+    (provider === "openrouter"
+      ? JEV_OPENROUTER_BASE_URL
+      : JEV_TYPESAFE_BASE_URL);
+
+  // Vault first, then env with the vault-injection guard — the same
+  // precedence personaEmbeddingKey applies, minus the TOML tier (a Jev key
+  // has no business in the plaintext file at all).
+  const fromVault = opts.vaultSecrets[keyEnv];
+  const fromEnv = process.env[keyEnv];
+  const apiKey =
+    fromVault ??
+    (fromEnv !== undefined &&
+    fromEnv !== "" &&
+    (!isVaultInjectedEnvKey(keyEnv) ||
+      isVaultLoadedPersonaDir(opts.personaDirPath))
+      ? fromEnv
+      : undefined);
+
+  const tomlJudge = (tomlJev.judge ?? {}) as Record<string, unknown>;
+  const tomlRouter = (tomlJev.router ?? {}) as Record<string, unknown>;
+
+  return {
+    provider,
+    model:
+      asString(process.env.PHANTOMBOT_JEV_MODEL) ??
+      asString(tomlJev.model) ??
+      JEV_DEFAULT_MODEL,
+    baseUrl,
+    keyEnv,
+    ...(apiKey !== undefined ? { apiKey } : {}),
+    judge: {
+      enabled:
+        asBool(process.env.PHANTOMBOT_JEV_JUDGE) ??
+        asBool(tomlJudge.enabled) ??
+        false,
+      mode:
+        asJevMode(process.env.PHANTOMBOT_JEV_JUDGE_MODE) ??
+        asJevMode(tomlJudge.mode) ??
+        "shadow",
+      timeoutMs:
+        asInt(tomlJudge.timeout_ms) ?? JEV_JUDGE_DEFAULT_TIMEOUT_MS,
+      threshold: asInt(tomlJudge.threshold) ?? THREAT_THRESHOLD,
+      failClosed: asBool(tomlJudge.fail_closed) ?? false,
+    },
+    router: {
+      enabled:
+        asBool(process.env.PHANTOMBOT_JEV_ROUTER) ??
+        asBool(tomlRouter.enabled) ??
+        false,
+      mode:
+        asJevMode(process.env.PHANTOMBOT_JEV_ROUTER_MODE) ??
+        asJevMode(tomlRouter.mode) ??
+        "shadow",
+      timeoutMs:
+        asInt(tomlRouter.timeout_ms) ?? JEV_ROUTER_DEFAULT_TIMEOUT_MS,
     },
   };
 }
