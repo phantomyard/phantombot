@@ -23,6 +23,7 @@ import {
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
 import * as vault from "../src/lib/vault.ts";
+import { loadJevHealth } from "../src/lib/jevHealth.ts";
 
 const FAKE_PI = resolve(__dirname, "fixtures/fake-pi.sh");
 
@@ -719,6 +720,48 @@ describe("PiHarness routing (subprocess)", () => {
       .join("");
     expect(argv).toContain("--provider openrouter");
     expect(argv).toContain("--model z-ai/glm-5.2");
+  });
+
+  test("jev-router with an UNSET key falls back to the scorer AND records it for doctor", async () => {
+    // An enabled router whose key never resolved falls back on EVERY turn —
+    // the #516 silent-degradation shape. The keyword scorer deciding is
+    // correct; doctor printing "no calls recorded" for it is not, so the
+    // fallback must land in the per-persona ledger naming the missing key.
+    process.env.FAKE_PI_MODE = "normal";
+    delete process.env.PHANTOMBOT_JEV_TEST_KEY;
+    const personasDir = await mkdtemp(join(tmpdir(), "phantombot-pi-jev-"));
+    await Bun.write(join(personasDir, "robbie", ".keep"), "");
+    try {
+      const h = new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+        jevRouter: {
+          baseUrl: "https://jev.test/api/v1",
+          model: "typesafe/jev-1.13",
+          keyEnv: "PHANTOMBOT_JEV_TEST_KEY",
+          timeoutMs: 800,
+          personasDir,
+        },
+      });
+      const chunks = await collect(
+        h.invoke(
+          newRequest({ persona: "robbie", conversation: "cli:test" }),
+        ),
+      );
+      // The turn still completes on the keyword scorer — fallback is by design.
+      expect(chunks.some((c) => c.type === "done")).toBe(true);
+      // The write is fire-and-forget on the turn's critical path.
+      await Bun.sleep(20);
+      const health = await loadJevHealth(join(personasDir, "robbie"));
+      expect(health.router!.calls).toBe(1);
+      expect(health.router!.fallbacks).toBe(1);
+      expect(health.router!.last_error).toContain("PHANTOMBOT_JEV_TEST_KEY");
+      expect(health.router!.last_error).toContain("not set");
+    } finally {
+      await rm(personasDir, { recursive: true, force: true });
+    }
   });
 
   test("no routing → no --model flag", async () => {

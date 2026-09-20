@@ -292,9 +292,9 @@ export class PiHarness implements Harness {
             })
           : undefined;
       // The keyword scorer — the DEFAULT and the FALLBACK routing method
-      // (issue #597). Jev only ever advises (shadow) or precedes (active)
-      // this, and a manual /coder override wins over both without Jev even
-      // being consulted.
+      // (issue #597). An enabled Jev router DECIDES and this runs on any
+      // error or missing key, and a manual /coder override wins over both
+      // without Jev even being consulted.
       const scoreRoute = () =>
         resolveSwapModel({
           text: req.userMessage,
@@ -321,6 +321,18 @@ export class PiHarness implements Harness {
           log.warn(
             `pi.invoke jev-router enabled but ${jevRouter.keyEnv} is not set; using the keyword scorer`,
           );
+          // Same telemetry contract as a provider failure: an enabled router
+          // with no key falls back on EVERY turn, and that must read as
+          // DEGRADED in doctor, not as "no calls recorded".
+          void recordJevOutcome({
+            ...(jevRouter.personasDir
+              ? { personasDir: jevRouter.personasDir }
+              : {}),
+            ...(req.persona ? { persona: req.persona } : {}),
+            consumer: "router",
+            ok: false,
+            error: `jev-router enabled but ${jevRouter.keyEnv} is not set`,
+          });
           decision = scoreRoute();
         } else {
           const recentUserTexts = (req.history ?? [])

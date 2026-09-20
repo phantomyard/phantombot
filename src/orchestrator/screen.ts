@@ -392,6 +392,12 @@ export function makeScreener(
   const jev = config.jev;
   const jevJudgeOn =
     deps.judge === undefined && jev?.judge.enabled === true && !!jev?.apiKey;
+  // An ENABLED judge whose key never resolved is the exact silent-degradation
+  // shape the fallback ledger exists to expose (#516): every untrusted turn
+  // falls back to the harness judge while doctor would otherwise read "no
+  // calls recorded". Counted per screened turn below, in the fallback path.
+  const jevJudgeKeyMissing =
+    deps.judge === undefined && jev?.judge.enabled === true && !jev?.apiKey;
 
   // One Jev judge call. The briefing is the SAME ranked drawer text the
   // harness judge carries (readBriefingDrawers, below), packed to the Jev
@@ -501,6 +507,18 @@ export function makeScreener(
         }
       }
     } else {
+      if (jevJudgeKeyMissing) {
+        // Same telemetry contract as a provider failure: this turn IS falling
+        // back to the harness judge, so doctor must say DEGRADED and name the
+        // missing key, not print "enabled; no calls recorded".
+        void recordJevOutcome({
+          personasDir: config.personasDir,
+          persona,
+          consumer: "judge",
+          ok: false,
+          error: `jev judge enabled but ${jev!.keyEnv} is unresolved (vault/env)`,
+        });
+      }
       result = await judgeSafely();
     }
 

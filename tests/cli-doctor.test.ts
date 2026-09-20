@@ -2137,6 +2137,7 @@ describe("runDoctor — decision model (issue #597)", () => {
         model: "typesafe/jev-1.13",
         baseUrl: "https://openrouter.ai/api/v1",
         keyEnv: "PHANTOMBOT_JEV_API_KEY",
+        apiKey: "sk-test",
         judge: {
           enabled: judge,
           timeoutMs: 1500,
@@ -2216,5 +2217,47 @@ describe("runDoctor — decision model (issue #597)", () => {
     await runDoctor({ config: withJev(false, false), out, ...DISABLED });
     expect(out.text).toContain("no consumer enabled");
     expect(out.text).toContain("harness judge");
+  });
+
+  test("enabled with an UNRESOLVED key reads DEGRADED even with an empty ledger", async () => {
+    // The #516 shape this section exists to kill: a revoked/missing key
+    // falls back on every call while an empty ledger would otherwise print
+    // "no calls recorded". Doctor derives the degraded state from
+    // enabled + no key; it must not wait for the first screened turn.
+    const cfg = withJev() as unknown as { jev: { apiKey?: string } } & Config;
+    delete cfg.jev.apiKey;
+    const out = new CaptureStream();
+    const code = await runDoctor({ config: cfg, out, ...DISABLED });
+    expect(code).toBe(0);
+    expect(out.text).toContain("decision model: DEGRADED");
+    expect(out.text).toContain("PHANTOMBOT_JEV_API_KEY");
+    expect(out.text).toContain("unresolved");
+    expect(out.text).toContain("every call falls back");
+  });
+
+  test("an EXPIRED window stops reading as degraded (idle after an outage)", async () => {
+    // The ledger only rolls its window on the next write; a persona whose
+    // last Jev call was a fallback three days ago has no write coming, so
+    // without report-time expiry doctor prints "DEGRADED (last 24h)"
+    // forever. The last-seen facts survive — as facts, not as an alarm.
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 3_600_000).toISOString();
+    await writeHealth({
+      judge: {
+        calls: 7,
+        fallbacks: 7,
+        window_started_at: threeDaysAgo,
+        last_fallback_at: threeDaysAgo,
+        last_error: "401 Unauthorized",
+        consecutive_fallbacks: 7,
+      },
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({ config: withJev(), out, ...DISABLED });
+    expect(code).toBe(0);
+    expect(out.text).toContain("decision model: ok");
+    expect(out.text).not.toContain("DEGRADED");
+    expect(out.text).not.toContain("fell back 7/7");
+    expect(out.text).toContain("last fallback");
+    expect(out.text).toContain("outside the current window");
   });
 });

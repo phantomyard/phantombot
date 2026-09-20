@@ -63,6 +63,7 @@ import {
   JEV_HEALTH_WINDOW_HOURS,
   type JevConsumerId,
   loadJevHealth,
+  windowExpired,
 } from "../lib/jevHealth.ts";
 import {
   loadNightlyState,
@@ -323,8 +324,10 @@ export interface DoctorReport {
     /** Consumers the operator turned on. Neither = configured but idle. */
     judge_enabled: boolean;
     router_enabled: boolean;
-    /** An enabled consumer fell back at least once in the health window. */
+    /** An enabled consumer fell back in the health window, or its key is unresolved. */
     degraded: boolean;
+    /** Enabled but the API key never resolved — every call falls back. */
+    key_missing?: boolean;
     /** Per-consumer counters from `.jev-health.json`, window-scoped. */
     consumers: Array<{
       consumer: JevConsumerId;
@@ -942,6 +945,7 @@ async function buildDecisionModelReport(
   const jev = config.jev;
   if (!jev) return undefined;
   const health = await loadJevHealth(personaPath);
+  const now = new Date();
   const enabled: Array<[JevConsumerId, boolean]> = [
     ["judge", jev.judge.enabled],
     ["router", jev.router.enabled],
@@ -950,41 +954,68 @@ async function buildDecisionModelReport(
     .filter(([, on]) => on)
     .map(([consumer]) => {
       const h = health[consumer];
+      // The window only rolls on the next WRITE. An idle persona whose last
+      // call was a fallback days ago must NOT keep reading "DEGRADED (last
+      // 24h)" — expire the counters at report time too, while the last-seen
+      // facts (which exist to answer "is it broken right now") carry over.
+      const expired = h !== undefined && windowExpired(h, now);
       return {
         consumer,
-        calls: h?.calls ?? 0,
-        fallbacks: h?.fallbacks ?? 0,
+        calls: expired ? 0 : (h?.calls ?? 0),
+        fallbacks: expired ? 0 : (h?.fallbacks ?? 0),
         ...(h?.last_ok_at ? { last_ok_at: h.last_ok_at } : {}),
         ...(h?.last_fallback_at ? { last_fallback_at: h.last_fallback_at } : {}),
         ...(h?.last_error ? { last_error: h.last_error } : {}),
         consecutive_fallbacks: h?.consecutive_fallbacks ?? 0,
       };
     });
-  const degraded = consumers.some((c) => c.fallbacks > 0);
+  // Enabled but the key never resolved: every call falls back, so this is
+  // degraded EVEN WITH an empty ledger — the alternative is doctor printing
+  // "no calls recorded" for the exact silent-failure shape (#516) this
+  // section exists to expose. (Runtime also records these as fallbacks; this
+  // check covers the window before the first screened/routed turn.)
+  const keyMissing = consumers.length > 0 && !jev.apiKey;
+  const degraded = keyMissing || consumers.some((c) => c.fallbacks > 0);
   const off = !jev.judge.enabled && !jev.router.enabled;
+  const staleFallback = consumers.find(
+    (c) => c.calls === 0 && c.last_fallback_at !== undefined,
+  );
   const detail = off
     ? `configured (${jev.provider}) but no consumer enabled — harness judge · keyword router deciding`
-    : degraded
-      ? consumers
-          .filter((c) => c.fallbacks > 0)
+    : keyMissing
+      ? `enabled but the key (${jev.keyEnv}) is unresolved in vault/env — ` +
+        consumers
           .map(
             (c) =>
-              `${c.consumer} fell back ${c.fallbacks}/${c.calls} call(s) to the ` +
-              `${c.consumer === "judge" ? "harness judge" : "keyword scorer"}` +
-              (c.last_error ? ` — last error: ${c.last_error}` : ""),
+              `${c.consumer} falling back to the ` +
+              `${c.consumer === "judge" ? "harness judge" : "keyword scorer"} on every call`,
           )
           .join("; ")
-      : consumers.every((c) => c.calls === 0)
-        ? "enabled; no calls recorded in this window yet"
-        : consumers
-            .map((c) => `${c.consumer} decided ${c.calls}/${c.calls} call(s)`)
-            .join("; ");
+      : consumers.some((c) => c.fallbacks > 0)
+        ? consumers
+            .filter((c) => c.fallbacks > 0)
+            .map(
+              (c) =>
+                `${c.consumer} fell back ${c.fallbacks}/${c.calls} call(s) to the ` +
+                `${c.consumer === "judge" ? "harness judge" : "keyword scorer"}` +
+                (c.last_error ? ` — last error: ${c.last_error}` : ""),
+            )
+            .join("; ")
+        : consumers.every((c) => c.calls === 0)
+          ? "enabled; no calls recorded in this window yet" +
+            (staleFallback?.last_fallback_at
+              ? ` (last fallback ${staleFallback.last_fallback_at}, outside the current window)`
+              : "")
+          : consumers
+              .map((c) => `${c.consumer} decided ${c.calls}/${c.calls} call(s)`)
+              .join("; ");
   return {
     provider: jev.provider,
     model: jev.model,
     judge_enabled: jev.judge.enabled,
     router_enabled: jev.router.enabled,
     degraded,
+    ...(keyMissing ? { key_missing: true } : {}),
     consumers,
     window_hours: JEV_HEALTH_WINDOW_HOURS,
     detail,
@@ -1701,9 +1732,13 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     );
     if (dm.degraded) {
       out.write(
-        `  → falling back to the pre-Jev method on those calls ` +
-          `(last ${dm.window_hours}h). Check the key with \`phantombot jev\` ` +
-          "and the provider's status; screening and routing still work meanwhile\n",
+        dm.key_missing
+          ? "  → every call falls back to the pre-Jev method until the key " +
+              "resolves. Store it with `phantombot jev`; screening and " +
+              "routing still work meanwhile\n"
+          : `  → falling back to the pre-Jev method on those calls ` +
+              `(last ${dm.window_hours}h). Check the key with \`phantombot jev\` ` +
+              "and the provider's status; screening and routing still work meanwhile\n",
       );
     }
   }

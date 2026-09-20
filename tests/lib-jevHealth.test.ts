@@ -59,6 +59,23 @@ describe("jev health ledger", () => {
     expect(h.router!.last_error).toBe("timeout after 800ms");
   });
 
+  test("concurrent outcomes are serialized: 20 parallel records count 20 calls", async () => {
+    // The calls are fire-and-forget on the turn's critical path, so parallel
+    // turns of one persona hit the ledger at once. Before the per-ledger
+    // queue this read-modify-write raced and 20 records produced {calls:1} —
+    // the N/M doctor prints was meaningless exactly when a provider outage
+    // made it matter.
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        rec(i % 2 === 0 ? { ok: false, error: `e${i}` } : {}),
+      ),
+    );
+    const h = await loadJevHealth(dir());
+    expect(h.judge!.calls).toBe(20);
+    expect(h.judge!.fallbacks).toBe(10);
+    expect(h.judge!.consecutive_fallbacks).toBe(0);
+  });
+
   test("a success clears the consecutive streak but keeps the history", async () => {
     await rec({ ok: false, error: "boom" });
     await rec({ ok: false, error: "boom again" });

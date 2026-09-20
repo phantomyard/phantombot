@@ -303,4 +303,23 @@ describe("screener + Jev — fallback telemetry", () => {
     await Bun.sleep(20);
     expect(await loadJevHealth(join(personasDir, "robbie"))).toEqual({});
   });
+
+  it("an ENABLED judge with an unresolved key records the fallback and still screens", async () => {
+    // The silent-degradation case the ledger exists for (#516): with no key
+    // the harness judge decides every turn while doctor would otherwise
+    // print "no calls recorded". Each screened turn must count as a
+    // fallback naming the unresolved key.
+    const noKey = jevSettings();
+    delete noKey.apiKey;
+    const { screen, harnessCalls } = mk(noKey, ALLOW_JSON);
+    const verdict = await screen("hello");
+    await Bun.sleep(20);
+    expect(verdict.action).toBe("pass");
+    expect(harnessCalls).toHaveLength(1);
+    const h = await loadJevHealth(join(personasDir, "robbie"));
+    expect(h.judge!.calls).toBe(1);
+    expect(h.judge!.fallbacks).toBe(1);
+    expect(h.judge!.last_error).toContain("PHANTOMBOT_JEV_API_KEY");
+    expect(h.judge!.last_error).toContain("unresolved");
+  });
 });

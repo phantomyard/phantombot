@@ -31,9 +31,14 @@
  *     (last ok, last failure, last error, consecutive failures) persist
  *     across resets because they answer "is it broken right now".
  *
- * Two concurrent turns can lose one increment to a read-modify-write race.
- * That is accepted: this is a health indicator, not an accounting ledger, and
- * a lock would put a contention point in front of a security control.
+ * Concurrent turns of one persona share the daemon process and the calls are
+ * deliberately fire-and-forget, so the read-modify-write below is SERIALIZED
+ * PER LEDGER with an in-process promise queue — 20 parallel outcomes must
+ * record 20 calls, or the N/M doctor prints is meaningless. The queue is not
+ * a contention point in front of the security control because callers never
+ * await it. A cross-PROCESS pair (the daemon and a one-off CLI writing in the
+ * same instant) can still lose one increment; that is accepted — this is a
+ * health indicator, not an accounting ledger.
  */
 
 import { existsSync } from "node:fs";
@@ -126,14 +131,44 @@ export interface RecordJevOutcomeInput {
  * Record one decision-model outcome. Best effort: any failure is logged at
  * debug and swallowed.
  */
+/**
+ * One in-flight write chain per ledger file. Concurrent outcomes for the same
+ * persona append to the tail, so each read-modify-write sees the previous
+ * one's result instead of racing it (a `Promise.all` of 20 records produced
+ * `{calls:1}` before this — every writer read the same pre-image).
+ */
+const ledgerQueues = new Map<string, Promise<void>>();
+/** Disambiguates tmp names for writers in the same process (see below). */
+let tmpCounter = 0;
+
 export async function recordJevOutcome(
   input: RecordJevOutcomeInput,
 ): Promise<void> {
-  const { personasDir, persona, consumer, ok } = input;
+  const { personasDir, persona } = input;
   if (!personasDir || !persona) return;
+  const target = jevHealthPath(join(personasDir, persona));
+  const tail = ledgerQueues.get(target) ?? Promise.resolve();
+  // A rejected link must never stall the chain (writeOutcome swallows its own
+  // errors; the catch is belt-and-suspenders).
+  const run = tail.catch(() => {}).then(() => writeOutcome(target, input));
+  ledgerQueues.set(target, run);
+  try {
+    await run;
+  } finally {
+    // Drop the tail entry once it settles so a quiet box does not accumulate
+    // map entries; a later writer simply starts a new chain.
+    if (ledgerQueues.get(target) === run) ledgerQueues.delete(target);
+  }
+}
+
+async function writeOutcome(
+  target: string,
+  input: RecordJevOutcomeInput,
+): Promise<void> {
+  const { personasDir, persona, consumer, ok } = input;
   const now = input.now ?? new Date();
   const nowIso = now.toISOString();
-  const dir = join(personasDir, persona);
+  const dir = join(personasDir!, persona!);
   try {
     const state = await loadJevHealth(dir);
     const prior = state[consumer];
@@ -166,8 +201,12 @@ export async function recordJevOutcome(
       if (input.error) entry.last_error = input.error.slice(0, 300);
     }
     const next: JevHealthState = { ...state, [consumer]: entry };
-    const target = jevHealthPath(dir);
-    const tmp = `${target}.${process.pid}.tmp`;
+    // Unique tmp name: pid alone collides for two writers in one process
+    // (the in-process queue serializes same-ledger writers, but judge and
+    // router ledgers share the file — the queue is keyed on the FILE, so
+    // this is belt-and-suspenders against any future caller that writes
+    // without queueing).
+    const tmp = `${target}.${process.pid}.${tmpCounter++}.tmp`;
     await writeFile(tmp, JSON.stringify(next, null, 2) + "\n", "utf8");
     await rename(tmp, target);
   } catch (e) {
