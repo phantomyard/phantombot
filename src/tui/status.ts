@@ -68,6 +68,7 @@ export async function gatherStatus(input: {
   if (probes.acp) rows.push(["acp", probes.acp]);
   if (probes.memory) rows.push(["memory", probes.memory]);
   if (probes.voice) rows.push(["voice", probes.voice]);
+  if (probes.jev) rows.push(["decision model", probes.jev]);
   if (probes.dreaming) rows.push(["dreaming", probes.dreaming]);
   return rows;
 }

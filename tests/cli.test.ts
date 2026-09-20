@@ -31,6 +31,7 @@ describe("phantombot CLI dispatcher", () => {
       "heartbeat",
       "init",
       "install",
+      "jev",
       "logs",
       "mcp",
       "memory",

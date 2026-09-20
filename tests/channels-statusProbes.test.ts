@@ -16,6 +16,7 @@ function cfg(partial: {
   telegramPersonas?: Record<string, { token: string }>;
   embeddings?: Config["embeddings"];
   voice?: Config["voice"];
+  jev?: Config["jev"];
   personasDir?: string;
 }): Config {
   return {
@@ -25,6 +26,7 @@ function cfg(partial: {
     },
     embeddings: partial.embeddings ?? { provider: "none" },
     voice: partial.voice ?? { provider: "none" },
+    jev: partial.jev,
     personasDir: partial.personasDir,
   } as unknown as Config;
 }
@@ -307,6 +309,57 @@ describe("gatherStatusProbes — voice", () => {
       stubDeps(),
     );
     expect(r.voice).toContain("azure_edge en-US-JennyNeural");
+  });
+});
+
+describe("gatherStatusProbes — jev", () => {
+  const jevBlock = (over: Partial<NonNullable<Config["jev"]>> = {}) =>
+    ({
+      provider: "openrouter",
+      model: "typesafe/jev-1.13",
+      baseUrl: "https://openrouter.ai/api/v1",
+      keyEnv: "PHANTOMBOT_JEV_API_KEY",
+      judge: { enabled: true, mode: "shadow", timeoutMs: 1500, threshold: 80, failClosed: false },
+      router: { enabled: false, mode: "shadow", timeoutMs: 300 },
+      ...over,
+    }) as NonNullable<Config["jev"]>;
+
+  test("omitted when [jev] is not configured", async () => {
+    const r = await gatherStatusProbes(cfg({}), "phantom", stubDeps());
+    expect(r.jev).toBeUndefined();
+  });
+
+  test("reads '— no key' (never ERR) when the key doesn't resolve", async () => {
+    const r = await gatherStatusProbes(
+      cfg({ jev: jevBlock() }),
+      "phantom",
+      stubDeps({ env: {} }),
+    );
+    expect(r.jev).toContain("no key");
+    expect(r.jev).toContain("judge shadow");
+    expect(r.jev).toContain("router off");
+  });
+
+  test("validates a resolved key live and reports OK or ERR", async () => {
+    const ok = await gatherStatusProbes(
+      cfg({ jev: jevBlock() }),
+      "phantom",
+      stubDeps({
+        env: { PHANTOMBOT_JEV_API_KEY: "sk-test" },
+        validateJevKey: async () => ({ ok: true }),
+      }),
+    );
+    expect(ok.jev).toBe("openrouter OK (judge shadow · router off)");
+
+    const bad = await gatherStatusProbes(
+      cfg({ jev: jevBlock() }),
+      "phantom",
+      stubDeps({
+        env: { PHANTOMBOT_JEV_API_KEY: "sk-test" },
+        validateJevKey: async () => ({ ok: false, error: "401 Unauthorized" }),
+      }),
+    );
+    expect(bad.jev).toContain("ERR (401 Unauthorized)");
   });
 });
 

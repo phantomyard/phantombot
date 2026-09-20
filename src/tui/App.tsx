@@ -28,8 +28,10 @@ import {
   applyEmbedding,
   applyUpdateChannel,
   applyVoice,
+  applyJev,
   describeDefaultPersonaChange,
   describeEmbeddingChange,
+  describeJevChange,
   describePersonaRemoval,
   applyRemovePersona,
   describeUpdateChannelChange,
@@ -1538,6 +1540,89 @@ export function App(props: AppProps): React.ReactElement {
   );
 
   /**
+   * The Jev row, as a flow (`jevFlow.ts`) — provider first, frictionless
+   * reuse of an existing OpenRouter key, independent judge/router consumers,
+   * shadow mode by default. The WRITE path stays the CLI's
+   * (`applyJevConfig` via `applyJev` in actions.ts). Idempotent: esc or
+   * keeping every offered default writes nothing.
+   */
+  const changeJev = useCallback(
+    async (target: PersonaSnapshot) => {
+      setPrompting(true);
+      try {
+        const { configureJev } = await import("./jevFlow.ts");
+        const { jevUpdateEquals, findReusableJevKeys, validateJevKey } =
+          await import("../cli/jev.ts");
+        const { maybePromptRestart } = await import("../cli/harness.ts");
+        const { defaultServiceControl } = await import("../lib/platform.ts");
+        const { config } = await loadConfigForPersona(target.name);
+
+        const chosen = await configureJev(
+          target.name,
+          { choose: askChoice, value: askValue },
+          {
+            existing: config.jev,
+            reusableKeys: await findReusableJevKeys(config, target.name),
+            validate: (settings) => validateJevKey(settings),
+          },
+        );
+        if (!chosen) return setNotice("jev unchanged");
+        if ("rejected" in chosen)
+          return setNotice(`jev unchanged — rejected: ${chosen.rejected}`);
+        if (jevUpdateEquals(config.jev, chosen.update))
+          return setNotice("jev unchanged — already set");
+
+        // The restart offer below belongs to a SAVE, not to a visit — a
+        // cancelled confirm must not fire it.
+        let saved = false;
+        await askConfirm({
+          title: `Set ${target.name}'s decision model to ${chosen.summary}?`,
+          consequence: describeJevChange(chosen.update),
+          run: async () => {
+            const r = await applyJev({
+              config,
+              persona: target.name,
+              update: chosen.update,
+            });
+            saved = r.ok;
+            setNotice(
+              r.ok ? `jev saved: ${chosen.summary}` : `failed: ${r.error}`,
+            );
+            await refresh();
+          },
+        });
+
+        // Same post-apply hook the CLI runs: [jev] is read at service start,
+        // so offer the restart when something was saved.
+        if (saved)
+          await maybePromptRestart(
+            defaultServiceControl(),
+            async (message) =>
+              await askConfirmValue({
+                title: message,
+                consequence: {
+                  summary: "",
+                  detail: "",
+                  longRunning: false,
+                  restarts: true,
+                },
+              }),
+            {
+              note: (body: string, title?: string) =>
+                setNotice(title ? `${title}: ${body.split("\n")[0]}` : body),
+            } as never,
+          );
+      } catch (e) {
+        setNotice(`jev failed: ${(e as Error).message}`);
+      } finally {
+        setPrompting(false);
+        await refresh();
+      }
+    },
+    [refresh, askChoice, askValue, askConfirmValue],
+  );
+
+  /**
    * Offer the service restart a persona-adding route needs. Shared by import
    * and restore — the same post-apply hook the Brain/Voice/Channels flows run
    * inline, factored out here because those flows predate the pattern's third
@@ -2157,6 +2242,7 @@ export function App(props: AppProps): React.ReactElement {
             // walkthroughs the Brain and Channels rows run. MCP is a real
             // screen: it lists rows, probes them and deletes them.
             if (target === "memory") void changeMemory(persona);
+            else if (target === "jev") void changeJev(persona);
             else if (target === "mcp") {
               // Clear first: a previous persona's servers flashing as this
               // one's is the same staleness bug the Doctor row guards against.

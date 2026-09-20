@@ -1,0 +1,73 @@
+{
+  "description": "Evaluation corpus for the Jev brain-swap router (issue #597). AUTHORED cases. `expect` is the route: \"coder\" = a substantial coding job, \"primary\" = conversation/general. Optional `history` supplies recent user turns (oldest first) for the follow-up cases the keyword scorer gets wrong. Run: bun scripts/evalJevJudge.ts --router",
+  "cases": [
+    {
+      "id": "router-stack-trace",
+      "expect": "coder",
+      "text": "any idea why this is failing? TypeError: Cannot read properties of undefined (reading 'map') at drawRows (src/tui/screens/PersonaDetail.tsx:412:19)",
+      "note": "The keyword scorer's known miss: a stack trace with no code vocabulary scores 0."
+    },
+    {
+      "id": "router-casual-merge",
+      "expect": "primary",
+      "text": "ha, the motorway merge near Arnhem was chaos this morning. anyway, what's for dinner?",
+      "note": "\"merge\" in chat must NOT hard-trigger the coding brain."
+    },
+    {
+      "id": "router-pr-review",
+      "expect": "coder",
+      "text": "can you review https://github.com/phantomyard/phantombot/pull/584 and tell me if the retry ladder is sound?",
+      "note": "Unambiguous PR work."
+    },
+    {
+      "id": "router-follow-up",
+      "expect": "coder",
+      "history": [
+        "refactor the retry ladder in src/lib/cooldown.ts so the backoff is per-provider",
+        "looks good, but the third attempt still fires too early"
+      ],
+      "text": "what about the error handling in the second commit?",
+      "note": "Natural-language follow-up INSIDE an active coding job stays coder."
+    },
+    {
+      "id": "router-topic-moved",
+      "expect": "primary",
+      "history": [
+        "fix the type error in src/config.ts",
+        "great, that works now"
+      ],
+      "text": "what's the weather supposed to be like tomorrow?",
+      "note": "Topic genuinely moved off code — flip back to primary."
+    },
+    {
+      "id": "router-write-code",
+      "expect": "coder",
+      "text": "write a small bash script that rotates the logs in /var/log/phantombot daily and keeps 14 days",
+      "note": "Explicit code-writing ask."
+    },
+    {
+      "id": "router-explain-concept",
+      "expect": "primary",
+      "text": "what's the difference between a mutex and a semaphore? just curious, explain it simply",
+      "note": "Conceptual question, conversational register — no code to produce or act on."
+    },
+    {
+      "id": "router-ci-failure",
+      "expect": "coder",
+      "text": "CI is red on main again — the typecheck job. can you dig in and fix it?",
+      "note": "Acting on a build failure is coding work even without pasting code."
+    },
+    {
+      "id": "router-spanish-admin",
+      "expect": "primary",
+      "text": "recuérdame mañana pagar la factura del fontanero, porfa",
+      "note": "Spanish admin request — no coding content."
+    },
+    {
+      "id": "router-planning-chat",
+      "expect": "primary",
+      "text": "should we migrate the docs site to Astro eventually? just thinking out loud about options, no rush",
+      "note": "Planning/opinion chat about code-adjacent topics is still chat."
+    }
+  ]
+}

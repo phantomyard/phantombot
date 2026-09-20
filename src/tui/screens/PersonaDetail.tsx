@@ -89,7 +89,7 @@ function descriptionLines(desc: string, columns: number): number {
 }
 
 /** Screens this one leads to. */
-export type Target = "memory" | "voice" | "mcp";
+export type Target = "memory" | "voice" | "jev" | "mcp";
 
 /**
  * Everything the cursor can land on, in screen order.
@@ -104,6 +104,7 @@ export type Row =
   | "channels"
   | "memory"
   | "voice"
+  | "jev"
   | "mcp"
   | "autostart"
   | "default"
@@ -120,6 +121,7 @@ const ROWS: Row[] = [
   "channels",
   "memory",
   "voice",
+  "jev",
   "mcp",
 ];
 
@@ -361,6 +363,21 @@ export function PersonaDetailScreen(props: {
           {...probeBadge(line("voice"), "configured")}
           selected={row === "voice"}
           onPress={() => press("voice")}
+          {...tableProps}
+        />
+      ),
+    },
+    {
+      id: "jev",
+      height: h("optional typed-decision model for the judge and brain-swap router"),
+      node: (
+        <MenuItem
+          icon="◍"
+          label="Decision Model"
+          description="optional typed-decision model for the judge and brain-swap router"
+          {...probeBadge(line("jev"), "configured")}
+          selected={row === "jev"}
+          onPress={() => press("jev")}
           {...tableProps}
         />
       ),

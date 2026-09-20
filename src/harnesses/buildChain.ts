@@ -74,6 +74,19 @@ export function buildHarness(config: Config, id: string): Harness | undefined {
     mode: engine === "native" ? "native" : "host",
     maxOldSpaceMb: instance?.maxOldSpaceMb ?? config.harnesses.pi.maxOldSpaceMb,
     ...(instance ? { apiKeyEnv: piInstanceSecretName(id) } : {}),
+    // The Jev brain-swap router (issue #597): threaded only when the ROUTER
+    // consumer is enabled; the key itself is resolved per-turn from the env.
+    ...(config.jev?.router.enabled
+      ? {
+          jevRouter: {
+            baseUrl: config.jev.baseUrl,
+            model: config.jev.model,
+            keyEnv: config.jev.keyEnv,
+            timeoutMs: config.jev.router.timeoutMs,
+            mode: config.jev.router.mode,
+          },
+        }
+      : {}),
   });
 }
 

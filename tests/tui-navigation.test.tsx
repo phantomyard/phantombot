@@ -518,7 +518,7 @@ function personaWithServers(): string {
 async function openMcpScreen(app: { press: (b: string) => Promise<void> }) {
   await app.press("\x13"); // ^s -> the table
   await app.press("c"); // -> alice's settings
-  for (let i = 0; i < 8; i++) await app.press("\x1b[B"); // MCP is the last row
+  for (let i = 0; i < 9; i++) await app.press("\x1b[B"); // MCP is the last row
   await app.press("\r");
   // The registry read happens behind a dynamic import of the whole MCP stack;
   // one keypress tick is not always enough for the first frame to carry rows.
