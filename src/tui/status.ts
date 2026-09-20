@@ -21,6 +21,14 @@ import { VERSION } from "../version.ts";
 /** Label/value pairs, in display order. */
 export type StatusRows = Array<[string, string]>;
 
+/**
+ * The STATUS row label for the decision-model probe. PersonaDetail looks its
+ * badge up BY THIS LABEL, so the two must never spell it out separately:
+ * renaming the row "jev" → "decision model" once already turned a live
+ * screener's badge into a silent "optional".
+ */
+export const JEV_STATUS_ROW = "decision model";
+
 export async function gatherStatus(input: {
   persona: string;
   /** The persona's harness chain, as the settings screen already resolved it. */
@@ -68,7 +76,7 @@ export async function gatherStatus(input: {
   if (probes.acp) rows.push(["acp", probes.acp]);
   if (probes.memory) rows.push(["memory", probes.memory]);
   if (probes.voice) rows.push(["voice", probes.voice]);
-  if (probes.jev) rows.push(["decision model", probes.jev]);
+  if (probes.jev) rows.push([JEV_STATUS_ROW, probes.jev]);
   if (probes.dreaming) rows.push(["dreaming", probes.dreaming]);
   return rows;
 }

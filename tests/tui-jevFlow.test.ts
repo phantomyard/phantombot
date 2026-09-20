@@ -2,7 +2,7 @@
  * The Jev flow (issue #597): the frictionless rule is the headline — a user
  * with an existing OpenRouter key configures Jev with NO token prompt and
  * nothing new stored. Also: provider-first ordering, independent consumers,
- * shadow-by-default, validation gating, and esc-cancels-everything.
+ * validation gating, and esc-cancels-everything.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -78,7 +78,6 @@ describe("configureJev — frictionless OpenRouter reuse", () => {
       "openrouter",
       `reuse:${EMBED_KEY_ENV}`,
       "both",
-      "shadow",
     ]);
     const r = await configureJev("robbie", q as never, deps());
     expect(r).toBeDefined();
@@ -87,18 +86,18 @@ describe("configureJev — frictionless OpenRouter reuse", () => {
       expect(r.update.provider).toBe("openrouter");
       expect(r.update.keyEnv).toBe(EMBED_KEY_ENV);
       expect(r.update.apiKey).toBeUndefined(); // nothing new stored
-      expect(r.update.judge).toEqual({ enabled: true, mode: "shadow" });
-      expect(r.update.router).toEqual({ enabled: true, mode: "shadow" });
+      expect(r.update.judge).toEqual({ enabled: true });
+      expect(r.update.router).toEqual({ enabled: true });
       expect(r.summary).toContain(`reusing ${EMBED_KEY_ENV}`);
     }
-    // Provider FIRST, then credential, consumers, mode — and not a single
-    // value (token/URL) prompt anywhere.
+    // Provider FIRST, then credential, then consumers — three screens, no
+    // mode step (an enabled consumer decides), and not a single value
+    // (token/URL) prompt anywhere.
     expect(asked.values).toHaveLength(0);
     expect(asked.chooses.map((c) => c.title)).toEqual([
       "Decision model for robbie",
       "OpenRouter credential for robbie",
       "What should Jev do for robbie?",
-      "Shadow mode first?",
     ]);
     // The reusable key is the DEFAULT.
     expect(asked.chooses[1]!.initial).toBe(`reuse:${EMBED_KEY_ENV}`);
@@ -106,7 +105,7 @@ describe("configureJev — frictionless OpenRouter reuse", () => {
 
   test("with nothing to reuse, the token prompt appears and the key is stored", async () => {
     const { q, asked } = fakeQ(
-      ["openrouter", "new", "router", "shadow"],
+      ["openrouter", "new", "router"],
       ["sk-or-typed"],
     );
     const r = await configureJev(
@@ -119,14 +118,14 @@ describe("configureJev — frictionless OpenRouter reuse", () => {
       expect(r.update.apiKey).toBe("sk-or-typed");
       expect(r.update.keyEnv).toBe("PHANTOMBOT_JEV_API_KEY");
       expect(r.update.judge.enabled).toBe(false);
-      expect(r.update.router).toEqual({ enabled: true, mode: "shadow" });
+      expect(r.update.router).toEqual({ enabled: true });
     }
     expect(asked.values).toHaveLength(1);
   });
 
   test("validation runs even on a reused key, and a failure rejects", async () => {
     let validatedWith = "";
-    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "both", "shadow"]);
+    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "both"]);
     const r = await configureJev(
       "robbie",
       q as never,
@@ -145,7 +144,7 @@ describe("configureJev — frictionless OpenRouter reuse", () => {
 describe("configureJev — direct TypeSafe", () => {
   test("asks for endpoint and token on a fresh setup", async () => {
     const { q, asked } = fakeQ(
-      ["typesafe", "both", "active"],
+      ["typesafe", "both"],
       ["https://ts.example/v1", "ts-token-1"],
     );
     const r = await configureJev("robbie", q as never, deps());
@@ -154,7 +153,7 @@ describe("configureJev — direct TypeSafe", () => {
       expect(r.update.provider).toBe("typesafe");
       expect(r.update.baseUrl).toBe("https://ts.example/v1");
       expect(r.update.apiKey).toBe("ts-token-1");
-      expect(r.update.judge.mode).toBe("active");
+      expect(r.update.judge.enabled).toBe(true);
     }
     expect(asked.values).toHaveLength(2);
   });
@@ -165,11 +164,11 @@ describe("configureJev — direct TypeSafe", () => {
       model: "typesafe/jev-1.13",
       baseUrl: "https://api.typesafe.ai/v1",
       keyEnv: "PHANTOMBOT_JEV_API_KEY",
-      judge: { enabled: true, mode: "shadow", timeoutMs: 1500, threshold: 80, failClosed: false },
-      router: { enabled: false, mode: "shadow", timeoutMs: 300 },
+      judge: { enabled: true, timeoutMs: 1500, threshold: 80, failClosed: false },
+      router: { enabled: false, timeoutMs: 300 },
     };
     const { q, asked } = fakeQ(
-      ["typesafe", "keep", "judge", "shadow"],
+      ["typesafe", "keep", "judge"],
       ["https://api.typesafe.ai/v1"],
     );
     const r = await configureJev("robbie", q as never, deps({ existing }));
@@ -190,8 +189,8 @@ describe("configureJev — off, consumers and cancel", () => {
       model: "typesafe/jev-1.13",
       baseUrl: "https://openrouter.ai/api/v1",
       keyEnv: "PHANTOMBOT_JEV_API_KEY",
-      judge: { enabled: true, mode: "active", timeoutMs: 1500, threshold: 80, failClosed: false },
-      router: { enabled: true, mode: "active", timeoutMs: 300 },
+      judge: { enabled: true, timeoutMs: 1500, threshold: 80, failClosed: false },
+      router: { enabled: true, timeoutMs: 300 },
     };
     const { q } = fakeQ(["off"]);
     const r = await configureJev("robbie", q as never, deps({ existing }));
@@ -199,14 +198,12 @@ describe("configureJev — off, consumers and cancel", () => {
     if (r && "update" in r) {
       expect(r.update.judge.enabled).toBe(false);
       expect(r.update.router.enabled).toBe(false);
-      // Modes are remembered, not reset — re-enabling is one choice.
-      expect(r.update.judge.mode).toBe("active");
       expect(r.summary).toContain("off");
     }
   });
 
   test("consumers are independent: judge only, no router", async () => {
-    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "judge", "shadow"]);
+    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "judge"]);
     const r = await configureJev("robbie", q as never, deps());
     if (r && "update" in r) {
       expect(r.update.judge.enabled).toBe(true);

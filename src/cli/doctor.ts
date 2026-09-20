@@ -60,6 +60,11 @@ import {
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
+  JEV_HEALTH_WINDOW_HOURS,
+  type JevConsumerId,
+  loadJevHealth,
+} from "../lib/jevHealth.ts";
+import {
   loadNightlyState,
   type NightlyHealth,
   nightlyHealth,
@@ -299,6 +304,39 @@ export interface DoctorReport {
     provider: "gemini" | "openai-compatible" | "none";
     /** Configured provider has enough settings for vector/semantic search. */
     semantic_search: boolean;
+  };
+  /**
+   * The optional DECISION MODEL (issue #597) — TypeSafe Jev today — in front
+   * of the threat judge and/or the brain-swap router. Absent when no [jev]
+   * block is configured.
+   *
+   * Informational, never an exit-code input: falling back to the harness
+   * judge / keyword scorer is a DESIGNED degradation, not a fault. But it is
+   * a silent one, and that is why this section exists — an operator who
+   * configured a decision model believes it is deciding, and without this
+   * the only symptom of a revoked key or a provider outage is behaviour
+   * quietly reverting to the pre-Jev method (the #516 embeddings shape).
+   */
+  decision_model?: {
+    provider: "typesafe" | "openrouter";
+    model: string;
+    /** Consumers the operator turned on. Neither = configured but idle. */
+    judge_enabled: boolean;
+    router_enabled: boolean;
+    /** An enabled consumer fell back at least once in the health window. */
+    degraded: boolean;
+    /** Per-consumer counters from `.jev-health.json`, window-scoped. */
+    consumers: Array<{
+      consumer: JevConsumerId;
+      calls: number;
+      fallbacks: number;
+      last_ok_at?: string;
+      last_fallback_at?: string;
+      last_error?: string;
+      consecutive_fallbacks: number;
+    }>;
+    window_hours: number;
+    detail: string;
   };
   /**
    * Release ring this host follows (#432) plus the version it is on now.
@@ -892,6 +930,67 @@ async function defaultCheckVault(host: Config): Promise<DoctorReport["vault"]> {
   };
 }
 
+/**
+ * Assemble the decision-model section from config + the per-persona fallback
+ * ledger. Returns undefined when no [jev] block is configured — an absent
+ * section reads as "not configured", which is a valid, fully-working state.
+ */
+async function buildDecisionModelReport(
+  config: Config,
+  personaPath: string,
+): Promise<DoctorReport["decision_model"]> {
+  const jev = config.jev;
+  if (!jev) return undefined;
+  const health = await loadJevHealth(personaPath);
+  const enabled: Array<[JevConsumerId, boolean]> = [
+    ["judge", jev.judge.enabled],
+    ["router", jev.router.enabled],
+  ];
+  const consumers = enabled
+    .filter(([, on]) => on)
+    .map(([consumer]) => {
+      const h = health[consumer];
+      return {
+        consumer,
+        calls: h?.calls ?? 0,
+        fallbacks: h?.fallbacks ?? 0,
+        ...(h?.last_ok_at ? { last_ok_at: h.last_ok_at } : {}),
+        ...(h?.last_fallback_at ? { last_fallback_at: h.last_fallback_at } : {}),
+        ...(h?.last_error ? { last_error: h.last_error } : {}),
+        consecutive_fallbacks: h?.consecutive_fallbacks ?? 0,
+      };
+    });
+  const degraded = consumers.some((c) => c.fallbacks > 0);
+  const off = !jev.judge.enabled && !jev.router.enabled;
+  const detail = off
+    ? `configured (${jev.provider}) but no consumer enabled — harness judge · keyword router deciding`
+    : degraded
+      ? consumers
+          .filter((c) => c.fallbacks > 0)
+          .map(
+            (c) =>
+              `${c.consumer} fell back ${c.fallbacks}/${c.calls} call(s) to the ` +
+              `${c.consumer === "judge" ? "harness judge" : "keyword scorer"}` +
+              (c.last_error ? ` — last error: ${c.last_error}` : ""),
+          )
+          .join("; ")
+      : consumers.every((c) => c.calls === 0)
+        ? "enabled; no calls recorded in this window yet"
+        : consumers
+            .map((c) => `${c.consumer} decided ${c.calls}/${c.calls} call(s)`)
+            .join("; ");
+  return {
+    provider: jev.provider,
+    model: jev.model,
+    judge_enabled: jev.judge.enabled,
+    router_enabled: jev.router.enabled,
+    degraded,
+    consumers,
+    window_hours: JEV_HEALTH_WINDOW_HOURS,
+    detail,
+  };
+}
+
 export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
@@ -1006,6 +1105,14 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     (embProvider === "openai-compatible" &&
       !!config.embeddings.openaiCompatible?.baseUrl &&
       !!config.embeddings.openaiCompatible.model);
+
+  // Decision model (issue #597): configuration + the fallback ledger the
+  // judge and router write on every call. Read-only and best-effort — an
+  // unreadable ledger reports "no calls recorded", never a fault.
+  const decisionModelReport = await buildDecisionModelReport(
+    config,
+    join(host.personasDir, persona),
+  );
 
   // Timer "last fired" check — catches the long-uptime failure mode
   // where systemd thinks a timer is active but it hasn't fired in
@@ -1335,6 +1442,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       provider: embProvider,
       semantic_search: semanticSearch,
     },
+    ...(decisionModelReport ? { decision_model: decisionModelReport } : {}),
     update: {
       channel: updateChannel,
       version: VERSION,
@@ -1580,6 +1688,25 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       : "  embeddings: semantic (vector) search off — OKF field-weighted BM25 " +
         "+ link-graph expansion active. Optional: run `phantombot embedding`\n",
   );
+  // Decision model (#597). Same neutrality as the embeddings line — a
+  // fallback is a designed degradation, never an exit-code input — but it is
+  // NOT silent: a degraded line names the consumer, the count and the last
+  // provider error, because the whole point of the section is that reverting
+  // to the harness judge / keyword scorer is otherwise invisible.
+  if (report.decision_model) {
+    const dm = report.decision_model;
+    out.write(
+      `  decision model: ${dm.degraded ? "DEGRADED" : "ok"} — ` +
+        `${dm.provider} '${dm.model}' · ${dm.detail}\n`,
+    );
+    if (dm.degraded) {
+      out.write(
+        `  → falling back to the pre-Jev method on those calls ` +
+          `(last ${dm.window_hours}h). Check the key with \`phantombot jev\` ` +
+          "and the provider's status; screening and routing still work meanwhile\n",
+      );
+    }
+  }
   // Same neutrality as the embeddings line: a ring is a choice, not a fault.
   out.write(
     `  update: on ${VERSION}, ${updateChannel} channel — ` +

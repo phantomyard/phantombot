@@ -1,12 +1,18 @@
 /**
- * The Jev judge wiring in the screener (issue #597): shadow mode lets the
- * harness judge decide while Jev answers alongside; active mode lets Jev
- * decide with the harness judge as fallback; both-down fails open unless the
- * operator opted into fail-closed. The Jev call itself is injected — its
- * schema mapping is covered in lib-jevJudge.test.ts.
+ * The Jev judge wiring in the screener (issue #597): an enabled judge
+ * DECIDES, with the harness judge as the fallback on any error (there is no
+ * log-only mode); both-down fails open unless the operator opted into
+ * fail-closed; every call records its outcome in the fallback ledger doctor
+ * reads. The Jev call itself is injected — its schema mapping is covered in
+ * lib-jevJudge.test.ts.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { loadJevHealth } from "../src/lib/jevHealth.ts";
 
 import { makeScreener, type ScreenerDeps } from "../src/orchestrator/screen.ts";
 import type { Config, JevSettings } from "../src/config.ts";
@@ -60,18 +66,29 @@ function jevSettings(overrides: Partial<JevSettings["judge"]> = {}): JevSettings
     apiKey: "sk-test",
     judge: {
       enabled: true,
-      mode: "shadow",
       timeoutMs: 1500,
       threshold: 80,
       failClosed: false,
       ...overrides,
     },
-    router: { enabled: false, mode: "shadow", timeoutMs: 300 },
+    router: { enabled: false, timeoutMs: 300 },
   };
 }
 
+/** A real personas root, so the fallback ledger is actually written. */
+let personasDir = "";
+
+beforeEach(async () => {
+  personasDir = await mkdtemp(join(tmpdir(), "phantombot-screen-jev-"));
+  await Bun.write(join(personasDir, "robbie", ".keep"), "");
+});
+afterEach(async () => {
+  await rm(personasDir, { recursive: true, force: true });
+});
+
 function cfg(jev?: JevSettings): Config {
   return {
+    personasDir,
     embeddings: { provider: "none" },
     channels: {
       telegram: {
@@ -116,41 +133,13 @@ function mk(
 
 const ALLOW_JSON = JSON.stringify({ score: 5, reason: "benign", question: "" });
 
-describe("screener + Jev (shadow mode)", () => {
-  it("the harness judge decides; Jev only answers alongside", async () => {
-    const jev = jevStub({
-      ok: true,
-      verdict: { score: 99, reason: "jev says evil", question: "q" },
-    });
-    const { screen, harnessCalls } = mk(jevSettings({ mode: "shadow" }), ALLOW_JSON, {
-      jevJudge: jev.impl,
-    });
-    const v = await screen("hello there");
-    // Harness said allow (5) — the PASS is the harness's, not Jev's 99.
-    expect(v.action).toBe("pass");
-    expect(v.score).toBe(5);
-    expect(harnessCalls).toHaveLength(1);
-    expect(jev.calls).toHaveLength(1);
-  });
-
-  it("a Jev shadow outage never touches the outcome", async () => {
-    const jev = jevStub({ ok: false, error: "jev down" });
-    const { screen } = mk(jevSettings({ mode: "shadow" }), ALLOW_JSON, {
-      jevJudge: jev.impl,
-    });
-    const v = await screen("hello");
-    expect(v.action).toBe("pass");
-    expect(v.score).toBe(5);
-  });
-});
-
-describe("screener + Jev (active mode)", () => {
+describe("screener + Jev", () => {
   it("Jev decides — the harness judge is not even consulted on success", async () => {
     const jev = jevStub({
       ok: true,
       verdict: { score: 91, reason: "jev holds it", question: "sure about this?" },
     });
-    const { screen, harnessCalls } = mk(jevSettings({ mode: "active" }), ALLOW_JSON, {
+    const { screen, harnessCalls } = mk(jevSettings(), ALLOW_JSON, {
       jevJudge: jev.impl,
     });
     const v = await screen("do the thing");
@@ -162,7 +151,7 @@ describe("screener + Jev (active mode)", () => {
 
   it("a Jev error falls back to the harness judge", async () => {
     const jev = jevStub({ ok: false, error: "jev timeout after 1500ms" });
-    const { screen, harnessCalls } = mk(jevSettings({ mode: "active" }), ALLOW_JSON, {
+    const { screen, harnessCalls } = mk(jevSettings(), ALLOW_JSON, {
       jevJudge: jev.impl,
     });
     const v = await screen("hello");
@@ -175,7 +164,7 @@ describe("screener + Jev (active mode)", () => {
     const jev = jevStub({ ok: false, error: "jev down" });
     // Empty harness chain ⇒ the harness judge errors too.
     const screen = makeScreener(
-      cfg(jevSettings({ mode: "active" })),
+      cfg(jevSettings()),
       "robbie",
       "cli:ask",
       [],
@@ -191,7 +180,7 @@ describe("screener + Jev (active mode)", () => {
     const jev = jevStub({ ok: false, error: "jev down" });
     let notified = "";
     const screen = makeScreener(
-      cfg(jevSettings({ mode: "active", failClosed: true })),
+      cfg(jevSettings({ failClosed: true })),
       "robbie",
       "cli:ask",
       [],
@@ -211,13 +200,13 @@ describe("screener + Jev (active mode)", () => {
     expect(notified).toContain("held an untrusted request");
   });
 
-  it("the operator's threshold is the active-mode bar", async () => {
+  it("the operator's threshold is the hold bar when Jev decides", async () => {
     const jev = jevStub({
       ok: true,
       verdict: { score: 60, reason: "middling", question: "hmm?" },
     });
     const { screen } = mk(
-      jevSettings({ mode: "active", threshold: 50 }),
+      jevSettings({ threshold: 50 }),
       ALLOW_JSON,
       { jevJudge: jev.impl },
     );
@@ -233,7 +222,7 @@ describe("screener + Jev (active mode)", () => {
     // against Jev's bar of 70 on every Jev outage.
     const jev = jevStub({ ok: false, error: "jev timeout" });
     const { screen, harnessCalls } = mk(
-      jevSettings({ mode: "active", threshold: 70 }),
+      jevSettings({ threshold: 70 }),
       JSON.stringify({ score: 75, reason: "borderline", question: "hmm?" }),
       { jevJudge: jev.impl },
     );
@@ -244,7 +233,7 @@ describe("screener + Jev (active mode)", () => {
   });
 
   it("no resolved key ⇒ the Jev path never engages", async () => {
-    const noKey = jevSettings({ mode: "active" });
+    const noKey = jevSettings();
     delete noKey.apiKey;
     const jev = jevStub({
       ok: true,
@@ -264,7 +253,7 @@ describe("screener + Jev (active mode)", () => {
       ok: true,
       verdict: { score: 99, reason: "x", question: "y" },
     });
-    const { screen } = mk(jevSettings({ mode: "active" }), ALLOW_JSON, {
+    const { screen } = mk(jevSettings(), ALLOW_JSON, {
       jevJudge: jev.impl,
       judge: async () => ({
         ok: true,
@@ -275,5 +264,43 @@ describe("screener + Jev (active mode)", () => {
     expect(v.action).toBe("pass");
     expect(v.score).toBe(3);
     expect(jev.calls).toHaveLength(0);
+  });
+});
+
+describe("screener + Jev — fallback telemetry", () => {
+  // Falling back is silent BY DESIGN: the turn still gets screened, so
+  // nothing surfaces in chat. That is exactly why it is recorded — doctor
+  // reads this ledger to say the decision model is degraded, instead of the
+  // operator finding out when a hold they expected never happens.
+  it("records a fallback with the provider error", async () => {
+    const jev = jevStub({ ok: false, error: "jev timeout after 1500ms" });
+    const { screen } = mk(jevSettings(), ALLOW_JSON, { jevJudge: jev.impl });
+    await screen("hello");
+    // The write is fire-and-forget on the turn's critical path.
+    await Bun.sleep(20);
+    const h = await loadJevHealth(join(personasDir, "robbie"));
+    expect(h.judge!.calls).toBe(1);
+    expect(h.judge!.fallbacks).toBe(1);
+    expect(h.judge!.last_error).toContain("timeout after 1500ms");
+  });
+
+  it("records a success as a NON-fallback", async () => {
+    const jev = jevStub({
+      ok: true,
+      verdict: { score: 2, reason: "fine", question: "" },
+    });
+    const { screen } = mk(jevSettings(), ALLOW_JSON, { jevJudge: jev.impl });
+    await screen("hello");
+    await Bun.sleep(20);
+    const h = await loadJevHealth(join(personasDir, "robbie"));
+    expect(h.judge!.calls).toBe(1);
+    expect(h.judge!.fallbacks).toBe(0);
+  });
+
+  it("writes nothing at all when the decision model is not enabled", async () => {
+    const { screen } = mk(undefined, ALLOW_JSON);
+    await screen("hello");
+    await Bun.sleep(20);
+    expect(await loadJevHealth(join(personasDir, "robbie"))).toEqual({});
   });
 });

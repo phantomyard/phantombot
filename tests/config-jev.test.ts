@@ -54,7 +54,7 @@ describe("config [jev]", () => {
     expect(config.jev).toBeUndefined();
   });
 
-  test("a bare block parses with safe defaults: consumers disabled, shadow mode", async () => {
+  test("a bare block parses with safe defaults: both consumers disabled", async () => {
     let config = await loadConfig();
     await writePersonaToml(config, '[jev]\nprovider = "openrouter"\n');
     config = await loadConfig();
@@ -65,31 +65,28 @@ describe("config [jev]", () => {
     expect(config.jev!.keyEnv).toBe("PHANTOMBOT_JEV_API_KEY");
     expect(config.jev!.judge).toEqual({
       enabled: false,
-      mode: "shadow",
       timeoutMs: 1500,
       threshold: 70,
       failClosed: false,
     });
     expect(config.jev!.router).toEqual({
       enabled: false,
-      mode: "shadow",
       timeoutMs: 800,
     });
   });
 
-  test("parses consumers, modes and the typesafe provider with its endpoint", async () => {
+  test("parses consumers and the typesafe provider with its endpoint", async () => {
     let config = await loadConfig();
     await writePersonaToml(
       config,
       '[jev]\nprovider = "typesafe"\nbase_url = "https://ts.example/v1"\n\n' +
-        '[jev.judge]\nenabled = true\nmode = "active"\nthreshold = 65\nfail_closed = true\n\n' +
-        '[jev.router]\nenabled = true\nmode = "shadow"\ntimeout_ms = 250\n',
+        '[jev.judge]\nenabled = true\nthreshold = 65\nfail_closed = true\n\n' +
+        '[jev.router]\nenabled = true\ntimeout_ms = 250\n',
     );
     config = await loadConfig();
     expect(config.jev!.provider).toBe("typesafe");
     expect(config.jev!.baseUrl).toBe("https://ts.example/v1");
     expect(config.jev!.judge.enabled).toBe(true);
-    expect(config.jev!.judge.mode).toBe("active");
     expect(config.jev!.judge.threshold).toBe(65);
     expect(config.jev!.judge.failClosed).toBe(true);
     expect(config.jev!.router.enabled).toBe(true);
@@ -101,11 +98,24 @@ describe("config [jev]", () => {
     await writePersonaToml(config, '[jev]\nprovider = "typesafe"\n');
     process.env.PHANTOMBOT_JEV_PROVIDER = "openrouter";
     process.env.PHANTOMBOT_JEV_JUDGE = "true";
-    process.env.PHANTOMBOT_JEV_JUDGE_MODE = "active";
     config = await loadConfig();
     expect(config.jev!.provider).toBe("openrouter");
     expect(config.jev!.judge.enabled).toBe(true);
-    expect(config.jev!.judge.mode).toBe("active");
+  });
+
+  test("a legacy mode key is INERT — an enabled consumer always decides", async () => {
+    // `mode = "shadow"` shipped in a pre-merge draft. A host that still has
+    // it in config.toml must not read as configured-but-not-deciding: the
+    // key is ignored, not honoured, and never resurfaces on the type.
+    let config = await loadConfig();
+    await writePersonaToml(
+      config,
+      '[jev]\nprovider = "openrouter"\n\n' +
+        '[jev.judge]\nenabled = true\nmode = "shadow"\n',
+    );
+    config = await loadConfig();
+    expect(config.jev!.judge.enabled).toBe(true);
+    expect("mode" in config.jev!.judge).toBe(false);
   });
 
   test("REJECTS an out-of-range judge threshold — 101 would silently disable every hold", async () => {

@@ -74,7 +74,7 @@ export interface StatusProbeLines {
    * "RUNNING (2/5 dates, on 2026-06-02)" or "WARN (2 dates pending, …)".
    */
   dreaming?: string;
-  /** e.g. "openrouter OK (judge shadow · router off)" or "typesafe — no key". */
+  /** e.g. "openrouter OK (judge on · router off)" or "typesafe — no key". */
   jev?: string;
 }
 
@@ -257,8 +257,14 @@ async function probeJev(
   const jev = config?.jev;
   if (!jev) return undefined;
   const consumers =
-    `judge ${jev.judge.enabled ? jev.judge.mode : "off"} · ` +
-    `router ${jev.router.enabled ? jev.router.mode : "off"}`;
+    `judge ${jev.judge.enabled ? "on" : "off"} · ` +
+    `router ${jev.router.enabled ? "on" : "off"}`;
+  // Neither consumer enabled is not a configured screener: the harness judge
+  // and the keyword router are deciding, exactly as if no [jev] block existed.
+  // Lead the line with "off" so the settings badge reads it as such without a
+  // second opinion of its own.
+  if (!jev.judge.enabled && !jev.router.enabled)
+    return `off — harness judge · keyword router (${jev.provider} configured)`;
   const key = jev.apiKey ?? env[jev.keyEnv]?.trim();
   if (!key) return `${jev.provider} — no key (${consumers})`;
   const r = await validate({

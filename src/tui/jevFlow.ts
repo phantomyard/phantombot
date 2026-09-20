@@ -64,15 +64,15 @@ export async function configureJev(
   const provider = await q.choose({
     title: `Decision model for ${persona}`,
     description:
-      "an optional typed-decision model (today: TypeSafe's Jev) for the threat judge and the primary/coder router — cheap, fast, independent of the harness chain",
+      "a recommended typed-decision model (today: TypeSafe's Jev) for the threat judge and the primary/coder router — cheap, fast, independent of the harness chain",
     options: [
       {
         value: "openrouter",
         label: "OpenRouter",
         hint:
           existing?.provider === "openrouter"
-            ? "current · reuses an existing OpenRouter key"
-            : "reuses an existing OpenRouter key",
+            ? "recommended · current · reuses an existing OpenRouter key"
+            : "recommended · reuses an existing OpenRouter key",
       },
       {
         value: "typesafe",
@@ -100,8 +100,8 @@ export async function configureJev(
         model: existing?.model,
         baseUrl: existing?.baseUrl,
         keyEnv: existing?.keyEnv ?? JEV_DEFAULT_KEY_ENV,
-        judge: { enabled: false, mode: existing?.judge.mode ?? "shadow" },
-        router: { enabled: false, mode: existing?.router.mode ?? "shadow" },
+        judge: { enabled: false },
+        router: { enabled: false },
       },
       summary: "off (settings kept)",
     };
@@ -246,44 +246,7 @@ export async function configureJev(
   });
   if (!consumers) return undefined;
 
-  // 4. MODE — shadow is the shipped default for a reason: it gathers
-  //    divergence evidence on real traffic before Jev may decide anything.
-  let mode: "shadow" | "active" = "shadow";
-  if (consumers !== "neither") {
-    const picked = await q.choose({
-      title: "Shadow mode first?",
-      description:
-        "shadow: Jev decides alongside the existing method and only logs divergences · active: Jev decides, the existing method is the fallback",
-      options: [
-        {
-          value: "shadow",
-          label: "Shadow — log-only, gather evidence (recommended)",
-          hint:
-            existing && !existing.judge.enabled
-              ? undefined
-              : existing?.judge.mode === "shadow"
-                ? "current"
-                : undefined,
-        },
-        {
-          value: "active",
-          label: "Active — Jev decides",
-          hint:
-            existing?.judge.mode === "active" || existing?.router.mode === "active"
-              ? "current"
-              : undefined,
-        },
-      ],
-      initial:
-        existing?.judge.mode === "active" || existing?.router.mode === "active"
-          ? "active"
-          : "shadow",
-    });
-    if (!picked) return undefined;
-    mode = picked as "shadow" | "active";
-  }
-
-  // 5. VALIDATE — even a reused key: a revoked credential must fail here,
+  // 4. VALIDATE — even a reused key: a revoked credential must fail here,
   //    not at the first held message.
   const v = await deps.validate({
     baseUrl,
@@ -301,11 +264,11 @@ export async function configureJev(
       baseUrl,
       keyEnv,
       ...(apiKey !== undefined ? { apiKey } : {}),
-      judge: { enabled: judgeOn, mode },
-      router: { enabled: routerOn, mode },
+      judge: { enabled: judgeOn },
+      router: { enabled: routerOn },
     },
     summary:
-      `${provider} · judge ${judgeOn ? mode : "off"} · router ${routerOn ? mode : "off"}` +
+      `${provider} · judge ${judgeOn ? "on" : "off"} · router ${routerOn ? "on" : "off"}` +
       (apiKey !== undefined ? ` · key stored as ${keyEnv}` : ` · reusing ${keyEnv}`),
   };
 }

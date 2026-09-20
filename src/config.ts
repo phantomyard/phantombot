@@ -948,12 +948,15 @@ export interface JevConsumerSettings {
   /** Master switch for this consumer. Default false — opt-in per consumer. */
   enabled: boolean;
   /**
-   * "shadow": Jev decides ALONGSIDE the existing method and only logs
-   * divergences — the shipped default, and the evidence-gathering state.
-   * "active": Jev decides; the existing method is the fallback on any
-   * error/timeout.
+   * There is deliberately NO mode switch here. An enabled consumer DECIDES,
+   * and the pre-Jev method (harness judge / keyword scorer) is the fallback
+   * on any error or timeout. A log-only "shadow" mode shipped in the first
+   * draft of #597 and was removed before merge: it doubled every call site,
+   * and an operator who has configured a decision model wants it deciding —
+   * the evidence it was meant to gather is produced instead by the bundled
+   * eval corpora (`scripts/evalJevJudge.ts`) offline, and by the fallback
+   * telemetry `phantombot doctor` reports at runtime.
    */
-  mode: "shadow" | "active";
   /** Hard wall-clock cap; exceeding it degrades to the existing method. */
   timeoutMs: number;
 }
@@ -2566,10 +2569,6 @@ export interface BuildJevOptions {
   vaultSecrets: Record<string, string>;
 }
 
-function asJevMode(value: unknown): "shadow" | "active" | undefined {
-  return value === "shadow" || value === "active" ? value : undefined;
-}
-
 /**
  * Build the `[jev]` block. UNDEFINED when nothing configures Jev — no block,
  * no PHANTOMBOT_JEV_* env — so an unconfigured user sees zero behaviour
@@ -2669,10 +2668,6 @@ function buildJevConfig(
         asBool(process.env.PHANTOMBOT_JEV_JUDGE) ??
         asBool(tomlJudge.enabled) ??
         false,
-      mode:
-        asJevMode(process.env.PHANTOMBOT_JEV_JUDGE_MODE) ??
-        asJevMode(tomlJudge.mode) ??
-        "shadow",
       timeoutMs: judgeTimeoutMs,
       threshold: judgeThreshold,
       failClosed: asBool(tomlJudge.fail_closed) ?? false,
@@ -2682,10 +2677,6 @@ function buildJevConfig(
         asBool(process.env.PHANTOMBOT_JEV_ROUTER) ??
         asBool(tomlRouter.enabled) ??
         false,
-      mode:
-        asJevMode(process.env.PHANTOMBOT_JEV_ROUTER_MODE) ??
-        asJevMode(tomlRouter.mode) ??
-        "shadow",
       timeoutMs: routerTimeoutMs,
     },
   };

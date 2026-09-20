@@ -32,8 +32,8 @@ const ENV_NAMES = [
 const BASE_UPDATE: JevConfigUpdate = {
   provider: "openrouter",
   keyEnv: "PHANTOMBOT_JEV_API_KEY",
-  judge: { enabled: true, mode: "shadow" },
-  router: { enabled: true, mode: "shadow" },
+  judge: { enabled: true },
+  router: { enabled: true },
 };
 
 beforeEach(async () => {
@@ -129,21 +129,37 @@ describe("applyJevConfig", () => {
       "[jev.judge]\nthreshold = 65\ntimeout_ms = 900\nfail_closed = true",
     );
     await writeFile(path, tuned);
-    // Re-run the wizard flipping only consumers/mode.
+    // Re-run the wizard flipping only the consumers.
     await applyJevConfig({
       config,
       persona,
       update: {
         ...BASE_UPDATE,
-        judge: { enabled: true, mode: "active" },
-        router: { enabled: false, mode: "shadow" },
+        judge: { enabled: true },
+        router: { enabled: false },
       },
     });
     const text = await readFile(path, "utf8");
     expect(text).toContain("threshold = 65");
     expect(text).toContain("timeout_ms = 900");
     expect(text).toContain("fail_closed = true");
-    expect(text).toContain('mode = "active"');
+    expect(text).toContain("enabled = false");
+  });
+
+  test("scrubs a legacy `mode` key — a draft setting nothing honours", async () => {
+    // Pre-merge drafts wrote mode = "shadow"/"active". Leaving it behind
+    // would read on-disk as a live switch between deciding and not; the
+    // write path deletes it so the file says exactly what the code does.
+    await mkdir(join(config.personasDir, persona), { recursive: true });
+    await writeFile(
+      personaTomlPath(),
+      '[jev]\nprovider = "openrouter"\n\n[jev.judge]\nmode = "shadow"\n\n' +
+        '[jev.router]\nmode = "shadow"\n',
+    );
+    await applyJevConfig({ config, persona, update: BASE_UPDATE });
+    const text = await readFile(personaTomlPath(), "utf8");
+    // A bare `mode` KEY, not the substring — `model =` legitimately contains it.
+    expect(text).not.toMatch(/^\s*mode\s*=/m);
   });
 
   test("scrubs a plaintext api_key if one ever lands in the file", async () => {
@@ -198,20 +214,20 @@ describe("jevUpdateEquals — the idempotence check", () => {
     ).toBe(false);
   });
 
-  test("flipping a consumer or a mode is a change", async () => {
+  test("flipping a consumer is a change", async () => {
     await applyJevConfig({ config, persona, update: BASE_UPDATE });
     process.env.PHANTOMBOT_JEV_API_KEY = "sk-stored";
     const reloaded = await loadConfig();
     expect(
       jevUpdateEquals(reloaded.jev, {
         ...BASE_UPDATE,
-        judge: { enabled: true, mode: "active" },
+        judge: { enabled: false },
       }),
     ).toBe(false);
     expect(
       jevUpdateEquals(reloaded.jev, {
         ...BASE_UPDATE,
-        router: { enabled: false, mode: "shadow" },
+        router: { enabled: false },
       }),
     ).toBe(false);
   });
