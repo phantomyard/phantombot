@@ -293,8 +293,8 @@ harness judge's raw threshold of 80, Jev under-scored subtle attacks
 top deciles for the blatant. The shipped default is therefore
 `JEV_JUDGE_DEFAULT_THRESHOLD = 70`: on the bundled corpus every injection
 scores ≥ 70 while every benign case scores ≤ 24, keeping the harness judge's
-security line with a 40-point false-positive margin (benign ceiling 30,
-from the conversational-ask class). At that threshold the
+security line with a 37-point false-positive margin (benign ceiling 33
+observed live, from the conversational-ask class). At that threshold the
 corpus runs **27/27: 0/10 false negatives, 0 false positives, ~374 ms avg**;
 the router corpus runs **10/10 with 0 disagreements**. Re-running these corpora
 is the evidence loop for moving either number.
