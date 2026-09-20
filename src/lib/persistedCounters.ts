@@ -53,9 +53,13 @@ export function countersFilePath(): string {
 
 /** One more unit on each named key. Fire-and-forget; never throws. */
 export function bumpCounters(bumps: Record<string, number>): void {
-  // Serialise read-modify-write cycles: two bumps racing the same file
-  // would otherwise read the same baseline and one update would vanish.
-  chain = chain.then(() => applyBumps(bumps)).catch(() => undefined);
+  // A bump records a fact about NOW, so capture the store path at enqueue
+  // time. Resolving it inside applyBumps let a still-queued write land in
+  // whatever XDG_STATE_HOME was current when the chain flushed — the #588
+  // test suites swap that env per test, so a late bump from one test
+  // contaminated the next test's fresh store (CI flake on #599's 2bbb7cd).
+  const path = countersFilePath();
+  chain = chain.then(() => applyBumps(bumps, path)).catch(() => undefined);
 }
 
 /** Snapshot of every counter, for tests and future surfacing (doctor, CLI). */
@@ -66,8 +70,10 @@ export async function readCounters(): Promise<Record<string, number>> {
 
 let chain: Promise<unknown> = Promise.resolve();
 
-async function applyBumps(bumps: Record<string, number>): Promise<void> {
-  const path = countersFilePath();
+async function applyBumps(
+  bumps: Record<string, number>,
+  path: string,
+): Promise<void> {
   const current = await parseFile(path);
   for (const [key, by] of Object.entries(bumps)) {
     if (!Number.isFinite(by) || by <= 0) continue;

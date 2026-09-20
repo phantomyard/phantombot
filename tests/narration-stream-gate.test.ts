@@ -1,5 +1,6 @@
 import {
   afterAll,
+  afterEach,
   beforeEach,
   describe,
   expect,
@@ -433,10 +434,15 @@ describe("narration stream gate — the #585 counters", () => {
     workdir = mkdtempSync(join(tmpdir(), "gate-counters-"));
     process.env.XDG_STATE_HOME = workdir;
   });
+  afterEach(() => {
+    // beforeEach hands out a fresh sandbox per test; without this only the
+    // last one got cleaned and the rest leaked in /tmp.
+    if (workdir) rmSync(workdir, { recursive: true, force: true });
+    workdir = "";
+  });
   afterAll(() => {
     if (prevState === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = prevState;
-    if (workdir) rmSync(workdir, { recursive: true, force: true });
   });
 
   test("a drop is counted per (expected, actual) pair", async () => {
