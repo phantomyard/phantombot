@@ -183,6 +183,41 @@ describe("jevDecide", () => {
     expect(r.ok).toBe(false);
   });
 
+  it("rejects a null score answer instead of reading it as level 0", async () => {
+    // Regression: Number(null) is 0, so a null score used to parse as the
+    // most benign level on the scale — in active judge mode that turns a
+    // malformed provider response into a silent "benign" verdict.
+    for (const bad of [null, "", undefined]) {
+      const r = await jevDecide({
+        ...BASE,
+        fetchImpl: async () =>
+          jsonResponse({
+            answers: {
+              verdict: { type: "choice", choice: "allow", confidence: 1 },
+              score: { type: "score", score: bad },
+            },
+          }),
+      });
+      expect(r.ok).toBe(false);
+    }
+  });
+
+  it("rejects a score answer outside the question's ordinal range", async () => {
+    for (const bad of [-1, 3, 99]) {
+      const r = await jevDecide({
+        ...BASE,
+        fetchImpl: async () =>
+          jsonResponse({
+            answers: {
+              verdict: { type: "choice", choice: "allow", confidence: 1 },
+              score: { type: "score", score: bad },
+            },
+          }),
+      });
+      expect(r.ok).toBe(false);
+    }
+  });
+
   it("maps an HTTP error to { ok: false } with the status and detail", async () => {
     const r = await jevDecide({
       ...BASE,

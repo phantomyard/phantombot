@@ -214,7 +214,8 @@ function asNumberRecord(value: unknown): Record<string, number> {
 
 /**
  * Parse one answer against the QUESTION that produced it — a choice answer
- * must name one of the criteria keys, a score answer a finite number. The
+ * must name one of the criteria keys, a score answer a finite number
+ * inside the question's ordinal range. The
  * wire is trusted to be JSON, nothing more.
  */
 function parseAnswer(q: JevQuestion, raw: unknown): JevAnswer | undefined {
@@ -231,8 +232,12 @@ function parseAnswer(q: JevQuestion, raw: unknown): JevAnswer | undefined {
     };
   }
   if (a.type !== "score") return undefined;
-  const score = Number(a.score);
-  if (!Number.isFinite(score)) return undefined;
+  // Number(null) and Number("") are both 0, so a malformed provider answer
+  // would otherwise read as the most benign level on the scale. Demand an
+  // actual finite number, inside the ordinal range this question defines.
+  if (typeof a.score !== "number" || !Number.isFinite(a.score)) return undefined;
+  const score = a.score;
+  if (score < 0 || score > q.criteria.length - 1) return undefined;
   return {
     type: "score",
     score,

@@ -448,7 +448,6 @@ export function makeScreener(
 
     let result: JudgeResult;
     if (jevJudgeOn && jev!.judge.mode === "active") {
-      holdThreshold = jev!.judge.threshold;
       // ACTIVE: Jev decides; the harness judge is the fallback on any Jev
       // error. Both down ⇒ fail open as today UNLESS the operator opted into
       // fail-closed (affordable exactly because an independent screener
@@ -458,6 +457,10 @@ export function makeScreener(
         error: `jev judge threw: ${(e as Error).message}`,
       }));
       if (jevResult.ok) {
+        // Jev's threshold applies ONLY to a Jev score — the harness judge is
+        // calibrated against THREAT_THRESHOLD, so a fallback must be graded
+        // on its own scale or every Jev outage shifts the hold bar.
+        holdThreshold = jev!.judge.threshold;
         log.info("screen: jev judge decided", {
           score: jevResult.verdict.score,
           latencyMs: jevResult.latencyMs,

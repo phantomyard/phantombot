@@ -226,6 +226,23 @@ describe("screener + Jev (active mode)", () => {
     expect(v.score).toBe(60);
   });
 
+  it("a Jev fallback is graded on the HARNESS threshold, not Jev's", async () => {
+    // Regression: the Jev threshold used to be set before the call and left
+    // in place when the harness judge supplied the verdict, so a harness
+    // score of 75 — benign by its own calibration (bar 80) — was held
+    // against Jev's bar of 70 on every Jev outage.
+    const jev = jevStub({ ok: false, error: "jev timeout" });
+    const { screen, harnessCalls } = mk(
+      jevSettings({ mode: "active", threshold: 70 }),
+      JSON.stringify({ score: 75, reason: "borderline", question: "hmm?" }),
+      { jevJudge: jev.impl },
+    );
+    const v = await screen("borderline");
+    expect(harnessCalls).toHaveLength(1);
+    expect(v.score).toBe(75);
+    expect(v.action).toBe("pass");
+  });
+
   it("no resolved key ⇒ the Jev path never engages", async () => {
     const noKey = jevSettings({ mode: "active" });
     delete noKey.apiKey;
