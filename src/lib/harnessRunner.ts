@@ -713,6 +713,12 @@ export async function* runHarnessProcess(
   // finished this turn" marker (pi's turn_end, codex's turn.completed). Only
   // consulted when spec.requireCompletion is set; see the exit-0 gate below.
   let sawCompletion = false;
+  // Set once the parser surfaced an error chunk (terminal or recoverable).
+  // The completion gate below stays quiet then: the orchestrator has already
+  // failed over on that error, so a second "without a completion signal"
+  // error on the same stream would only be noise (issue #598 — a result
+  // envelope with is_error:true yields its own error and then exits 0).
+  let sawErrorChunk = false;
   // Set when a parser returns a terminal policy error (e.g. the subagent
   // tripwire). The error chunk is yielded, the subprocess is killed NOW,
   // and every line after it — same batch or later — is dropped: nothing a
@@ -749,6 +755,7 @@ export async function* runHarnessProcess(
     } else {
       c = res;
     }
+    if (c.type === "error") sawErrorChunk = true;
     if (c.type === "error" && c.terminal) {
       terminalError = c;
       killer.terminate(); // SIGTERM → grace → SIGKILL the whole group
@@ -989,21 +996,28 @@ export async function* runHarnessProcess(
   }
 
   // Completion gate (opt-in via spec.requireCompletion): an exit-0 run that
-  // never emitted the harness's completion marker (pi's turn_end) is a
-  // "stopped mid-turn" state, not a finished answer — the accumulated text is
-  // only partial output / tool narration. Yield a recoverable error so the
-  // orchestrator falls through to the next harness instead of storing the
-  // fragment as the reply. See issue #352. Note `finalText` may be non-empty
-  // here (narration IS text), so the existing empty-done fall-through in
-  // runWithFallback cannot catch this case — the completion marker can.
+  // never emitted the harness's completion marker (pi's turn_end, claude's
+  // result envelope, codex's turn.completed) is a "stopped mid-turn" state,
+  // not a finished answer — the accumulated text is only partial output /
+  // tool narration. Yield a recoverable error so the orchestrator falls
+  // through to the next harness instead of storing the fragment as the reply.
+  // See issues #352 and #598. Note `finalText` may be non-empty here (narration
+  // IS text), so the existing empty-done fall-through in runWithFallback
+  // cannot catch this case — the completion marker can.
   if (spec.requireCompletion && !sawCompletion) {
     await awaitStderrDrained();
-    yield {
-      type: "error",
-      error: `${harnessId} exited 0 without a completion signal (only partial/tool output — likely stopped mid-turn)`,
-      recoverable: true,
-      stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
-    };
+    // A parser error chunk was already surfaced on this stream (e.g. a
+    // result envelope with is_error:true, or a mid-stream api error): the
+    // orchestrator has already failed over on it. Stay quiet — a second
+    // error would be noise, and a done would lie (issue #598).
+    if (!sawErrorChunk) {
+      yield {
+        type: "error",
+        error: `${harnessId} exited 0 without a completion signal (only partial/tool output — likely stopped mid-turn)`,
+        recoverable: true,
+        stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
+      };
+    }
     return;
   }
 

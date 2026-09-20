@@ -246,6 +246,13 @@ export class ClaudeHarness implements Harness {
       toolBoundary: claudeToolBoundaries,
       activity: claudeActivity,
       reasoningReplay: this.config.reasoningReplay ?? DEFAULT_REASONING_REPLAY,
+      // Issue #598: claude's stream-json always ends with a `result` envelope
+      // (mapped to the done marker in parseStreamJson). Narration is now
+      // expected user-visible output mid-turn (#580/#587), so exit-code 0
+      // alone can no longer distinguish "mid-turn" from "finished" — an
+      // exit-0 run without the marker is a truncated stream that must fall
+      // through to the next harness, not a succeeded narration-only turn.
+      requireCompletion: true,
       buildDoneMeta: () => ({
         harnessId: this.id,
         model: this.config.model,
@@ -620,6 +627,39 @@ export function parseStreamJson(parsed: unknown): ParseEventResult {
       recoverable: true,
       terminal: true,
     };
+  }
+
+  // Completion marker (issue #598). The CLI's stream-json always ends with a
+  // `result` envelope — the "the model finished this turn" signal. Map it to
+  // the engine's done marker so `requireCompletion` can tell a finished turn
+  // from a stream that died mid-turn (narration + tool call, then the CLI
+  // truncates and still exits 0): the gate turns that state into a recoverable
+  // error instead of a succeeded turn with narration-only text. An `is_error`
+  // result envelope (observed on the wire alongside exit 0, see the
+  // apiErrorStatus note) is a failure, never a completion.
+  if (obj.type === "result") {
+    // Same classification as assistant envelopes: a `max_output_tokens` stop
+    // is a real (truncated) reply, not a failure — every other stamped error
+    // status is. The CLI has been observed exiting 0 alongside
+    // is_error:true (see the apiErrorStatus wire note), so the flag — not the
+    // exit code — decides.
+    const status =
+      typeof obj.error === "string" ? apiErrorStatus(obj) : undefined;
+    if (status !== undefined) {
+      return {
+        type: "error",
+        error: `claude api error: ${status}`,
+        recoverable: true,
+      };
+    }
+    if (obj.is_error === true) {
+      return {
+        type: "error",
+        error: `claude result envelope reported an error (${typeof obj.subtype === "string" ? obj.subtype : "unknown subtype"})`,
+        recoverable: true,
+      };
+    }
+    return { type: "done", finalText: "", meta: undefined };
   }
 
   // API-error gate. Checked BEFORE content, and before the `message`/`content`
