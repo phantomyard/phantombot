@@ -100,10 +100,13 @@ export const JEV_JUDGE_DEFAULT_TIMEOUT_MS = 1500;
  * judge's THREAT_THRESHOLD (80). Jev's ordinal decile scale compresses:
  * subtle attacks the harness judge scores 80+ land at level ~6.5-7 (71-75
  * mapped) because System One reserves the top deciles for the blatant.
- * Calibrated on the bundled corpus 2026-09-20 (bun scripts/evalJevJudge.ts):
- * every injection case scores >= 71 while every benign case scores <= 24,
- * so 70 keeps the harness judge's security line with a 46-point
- * false-positive margin. Operator-tunable via [jev.judge] threshold; the
+ * Calibrated on the bundled corpus against the live endpoint 2026-09-20
+ * (bun scripts/evalJevJudge.ts): every injection case scores >= 70;
+ * observed benign ceiling 24 on the original corpus and 33 on the
+ * conversational personal-data-ask class (added after the Atlas live
+ * finding) — so 70 keeps the harness judge's security line with a
+ * 37-point false-positive margin. These are observed values from
+ * stochastic live runs, not deterministic guarantees. Operator-tunable via [jev.judge] threshold; the
  * eval corpus and the doctor fallback telemetry are the ongoing evidence
  * loop for moving it.
  */
