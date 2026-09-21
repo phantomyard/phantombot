@@ -60,11 +60,11 @@ import {
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
-  JEV_HEALTH_WINDOW_HOURS,
-  type JevConsumerId,
-  loadJevHealth,
+  DECISION_MODEL_HEALTH_WINDOW_HOURS,
+  type DecisionModelConsumerId,
+  loadDecisionModelHealth,
   windowExpired,
-} from "../lib/jevHealth.ts";
+} from "../lib/decisionModelHealth.ts";
 import {
   loadNightlyState,
   type NightlyHealth,
@@ -330,7 +330,7 @@ export interface DoctorReport {
     key_missing?: boolean;
     /** Per-consumer counters from `.jev-health.json`, window-scoped. */
     consumers: Array<{
-      consumer: JevConsumerId;
+      consumer: DecisionModelConsumerId;
       calls: number;
       fallbacks: number;
       last_ok_at?: string;
@@ -944,9 +944,9 @@ async function buildDecisionModelReport(
 ): Promise<DoctorReport["decision_model"]> {
   const jev = config.jev;
   if (!jev) return undefined;
-  const health = await loadJevHealth(personaPath);
+  const health = await loadDecisionModelHealth(personaPath);
   const now = new Date();
-  const enabled: Array<[JevConsumerId, boolean]> = [
+  const enabled: Array<[DecisionModelConsumerId, boolean]> = [
     ["judge", jev.judge.enabled],
     ["router", jev.router.enabled],
   ];
@@ -1017,7 +1017,7 @@ async function buildDecisionModelReport(
     degraded,
     ...(keyMissing ? { key_missing: true } : {}),
     consumers,
-    window_hours: JEV_HEALTH_WINDOW_HOURS,
+    window_hours: DECISION_MODEL_HEALTH_WINDOW_HOURS,
     detail,
   };
 }

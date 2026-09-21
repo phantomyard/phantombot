@@ -42,7 +42,7 @@ import {
   type EditorConnectorResult,
 } from "../connectors/acp/autoInstall.ts";
 import { isPhantombotBinary as realIsPhantombotBinary } from "../lib/binaryIdentity.ts";
-import { validateJevKey as realValidateJevKey } from "../cli/jev.ts";
+import { validateDecisionModelKey as realValidateDecisionModelKey } from "../cli/jev.ts";
 
 /** Cap probe error detail so one bad line can't blow up the /status reply. */
 const ERR_MAX = 60;
@@ -91,7 +91,7 @@ export interface StatusProbeDeps {
   reconcileEditorConnectors?: typeof realReconcileEditorConnectors;
   isPhantombotBinary?: typeof realIsPhantombotBinary;
   nightlyHealth?: typeof realNightlyHealth;
-  validateJevKey?: typeof realValidateJevKey;
+  validateDecisionModelKey?: typeof realValidateDecisionModelKey;
   env?: Record<string, string | undefined>;
   /** Override the shared probe deadline (ms). Production omits it; tests use
    *  a tiny value to exercise the cap without waiting the real 5s. */
@@ -249,9 +249,9 @@ async function probeDreaming(
  * with no resolvable key reads "— no key" (the badge's yellow state), never
  * ERR — the consumers degrade to the existing methods by design.
  */
-async function probeJev(
+async function probeDecisionModel(
   config: Config | undefined,
-  validate: typeof realValidateJevKey,
+  validate: typeof realValidateDecisionModelKey,
   env: Record<string, string | undefined>,
 ): Promise<string | undefined> {
   const jev = config?.jev;
@@ -296,7 +296,7 @@ export async function gatherStatusProbes(
   const env = deps.env ?? process.env;
   const validateEl = deps.validateElevenLabsKey ?? realValidateElevenLabsKey;
   const validateOa = deps.validateOpenAIKey ?? realValidateOpenAIKey;
-  const validateJev = deps.validateJevKey ?? realValidateJevKey;
+  const validateDecisionModel = deps.validateDecisionModelKey ?? realValidateDecisionModelKey;
   const nightly = deps.nightlyHealth ?? realNightlyHealth;
 
   // One shared deadline for the whole fan-out. Threaded into every client that
@@ -332,7 +332,7 @@ export async function gatherStatusProbes(
       }),
     ),
     settle(probeDreaming(config, persona, nightly)),
-    settle(probeJev(config, validateJev, env)),
+    settle(probeDecisionModel(config, validateDecisionModel, env)),
   ]);
   // ACP probe is synchronous local file reads — no need to race it.
   let acp: string | undefined;

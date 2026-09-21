@@ -22,7 +22,7 @@ const ENV_NAMES = [
 ];
 
 beforeEach(async () => {
-  workdir = await mkdtemp(join(tmpdir(), "phantombot-jevcfg-"));
+  workdir = await mkdtemp(join(tmpdir(), "phantombot-decision-model-cfg-"));
   process.env.PHANTOMBOT_CONFIG = join(workdir, "config.toml");
   process.env.XDG_CONFIG_HOME = join(workdir, "xdg-config");
   process.env.XDG_DATA_HOME = join(workdir, "xdg-data");

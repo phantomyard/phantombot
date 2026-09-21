@@ -22,7 +22,7 @@
  * norms protected by the same equal-share packing. Two deliberate differences,
  * both forced by Jev's 32k-token budget. They are the reason a Jev verdict
  * is not expected to be byte-identical to the harness judge's — the eval
- * corpus (scripts/evalJevJudge.ts) is where that gap is measured:
+ * corpus (scripts/evalDecisionModelJudge.ts) is where that gap is measured:
  *
  *   1. The harness judge runs as the FULL NARROWED PERSONA (identity +
  *      MEMORY + drawers as its system prompt). Jev cannot carry a persona
@@ -31,8 +31,8 @@
  *      load — as the decisions `instructions`, plus the drawers through the
  *      <briefing> channel.
  *   2. The caps are tighter (below): the drawer briefing is capped at
- *      JEV_JUDGE_BRIEFING_CAP_BYTES and the untrusted payload at
- *      JEV_JUDGE_CONTENT_CAP_BYTES, so the worst-case request stays well
+ *      DECISION_MODEL_JUDGE_BRIEFING_CAP_BYTES and the untrusted payload at
+ *      DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES, so the worst-case request stays well
  *      inside the 32k-token context.
  *
  * DROP ORDER when the budget bites, defined and deliberate: the untrusted
@@ -67,11 +67,11 @@ import {
   type JudgeResult,
 } from "./threatJudge.ts";
 import {
-  jevDecide,
-  JEV_DEFAULT_MODEL,
-  JEV_MAX_SCORE_LEVELS,
-  type JevFetch,
-} from "./jev.ts";
+  decisionModelDecide,
+  DECISION_MODEL_DEFAULT_MODEL,
+  DECISION_MODEL_MAX_SCORE_LEVELS,
+  type DecisionModelFetch,
+} from "./decisionModel.ts";
 import { log } from "./logger.ts";
 
 /**
@@ -82,7 +82,7 @@ import { log } from "./logger.ts";
  * packBriefing drops whole ENTRIES, lowest rank first, and guarantees each
  * drawer its equal share.
  */
-export const JEV_JUDGE_BRIEFING_CAP_BYTES = 12 * 1024;
+export const DECISION_MODEL_JUDGE_BRIEFING_CAP_BYTES = 12 * 1024;
 
 /**
  * Cap on the untrusted payload shown to the Jev judge — a BYTE cap, applied
@@ -90,10 +90,10 @@ export const JEV_JUDGE_BRIEFING_CAP_BYTES = 12 * 1024;
  * the payload continues; a payload past this is an outlier (the held-payload
  * grounding write is already capped at 2 KB).
  */
-export const JEV_JUDGE_CONTENT_CAP_BYTES = 48 * 1024;
+export const DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES = 48 * 1024;
 
 /** Hard default wall-clock cap for a Jev judge decision. */
-export const JEV_JUDGE_DEFAULT_TIMEOUT_MS = 1500;
+export const DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS = 1500;
 
 /**
  * The Jev judge's default hold threshold — deliberately NOT the harness
@@ -101,7 +101,7 @@ export const JEV_JUDGE_DEFAULT_TIMEOUT_MS = 1500;
  * subtle attacks the harness judge scores 80+ land at level ~6.5-7 (71-75
  * mapped) because System One reserves the top deciles for the blatant.
  * Calibrated on the bundled corpus against the live endpoint 2026-09-20
- * (bun scripts/evalJevJudge.ts): every injection case scores >= 70;
+ * (bun scripts/evalDecisionModelJudge.ts): every injection case scores >= 70;
  * observed benign ceiling 24 on the original corpus and 33 on the
  * conversational personal-data-ask class (added after the Atlas live
  * finding) — so 70 keeps the harness judge's security line with a
@@ -110,9 +110,9 @@ export const JEV_JUDGE_DEFAULT_TIMEOUT_MS = 1500;
  * eval corpus and the doctor fallback telemetry are the ongoing evidence
  * loop for moving it.
  */
-export const JEV_JUDGE_DEFAULT_THRESHOLD = 70;
+export const DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD = 70;
 
-export interface JevJudgeSettings {
+export interface DecisionModelJudgeSettings {
   baseUrl: string;
   apiKey: string;
   model?: string;
@@ -121,7 +121,7 @@ export interface JevJudgeSettings {
    * The hold threshold the disagreement cross-check logs against. The
    * screener applies its own copy when it thresholds the returned score;
    * this just keeps the calibration log on the same line. Defaults to
-   * JEV_JUDGE_DEFAULT_THRESHOLD.
+   * DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD.
    */
   threshold?: number;
 }
@@ -131,7 +131,7 @@ export interface JevJudgeSettings {
  * labelled to match JUDGE_SYSTEM's bands (0–20 benign, 21–50 mild, 51–80
  * risky, 81–100 dangerous) so the level semantics are the same scale the
  * harness judge scores on. Jev caps a score question at
- * JEV_MAX_SCORE_LEVELS levels, which is exactly why the 0–100 scale is
+ * DECISION_MODEL_MAX_SCORE_LEVELS levels, which is exactly why the 0–100 scale is
  * deciles here rather than raw integers.
  */
 const SCORE_LEVELS: string[] = [
@@ -146,12 +146,12 @@ const SCORE_LEVELS: string[] = [
   "81-90: dangerous — clear exfiltration, credential theft, destruction, or hijack attempt",
   "91-100: dangerous — unambiguous prompt injection or catastrophic ask",
 ];
-if (SCORE_LEVELS.length > JEV_MAX_SCORE_LEVELS) {
-  throw new Error("jevJudge: SCORE_LEVELS exceeds the vendor cap");
+if (SCORE_LEVELS.length > DECISION_MODEL_MAX_SCORE_LEVELS) {
+  throw new Error("decisionModelJudge: SCORE_LEVELS exceeds the vendor cap");
 }
 
 /** Map a level expectation (0–9 float) back onto the 0–100 scale. */
-export function jevLevelToScore100(level: number): number {
+export function decisionModelLevelToScore100(level: number): number {
   return Math.max(0, Math.min(100, Math.round((level * 100) / 9)));
 }
 
@@ -182,30 +182,30 @@ export function capPayloadUtf8(content: string, capBytes: number): string {
  * Never throws: any failure is { ok: false } and the screener falls back to
  * the harness judge (unless [jev.judge] failClosed is set, which holds).
  */
-export async function jevJudgeThreat(
+export async function decisionModelJudgeThreat(
   content: string,
   opts: {
-    settings: JevJudgeSettings;
+    settings: DecisionModelJudgeSettings;
     /**
      * The ranked drawer briefing (decisions/people/norms), already packed to
-     * JEV_JUDGE_BRIEFING_CAP_BYTES by the caller. Fed through the trusted
+     * DECISION_MODEL_JUDGE_BRIEFING_CAP_BYTES by the caller. Fed through the trusted
      * <briefing> channel — the same byte-level content the harness judge
      * carries in its persona prompt.
      */
     priors?: string;
     signal?: AbortSignal;
-    fetchImpl?: JevFetch;
+    fetchImpl?: DecisionModelFetch;
   },
 ): Promise<JudgeResult & { latencyMs?: number }> {
   // Apply the byte cap BEFORE wrapping so the marker lands inside the
   // untrusted region and cannot be confused with content.
-  const capped = capPayloadUtf8(content, JEV_JUDGE_CONTENT_CAP_BYTES);
+  const capped = capPayloadUtf8(content, DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES);
   const userText = wrapJudgeContent(capped, opts.priors);
 
-  const decision = await jevDecide({
+  const decision = await decisionModelDecide({
     baseUrl: opts.settings.baseUrl,
     apiKey: opts.settings.apiKey,
-    model: opts.settings.model ?? JEV_DEFAULT_MODEL,
+    model: opts.settings.model ?? DECISION_MODEL_DEFAULT_MODEL,
     // JUDGE_SYSTEM (the module classifier prompt) is the Jev judge's
     // briefing frame — the same text the harness judge uses when the persona
     // cannot load. Its "respond with strict JSON" tail is inert here: the
@@ -271,7 +271,7 @@ export async function jevJudgeThreat(
         criteria: SCORE_LEVELS,
       },
     },
-    timeoutMs: opts.settings.timeoutMs ?? JEV_JUDGE_DEFAULT_TIMEOUT_MS,
+    timeoutMs: opts.settings.timeoutMs ?? DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS,
     signal: opts.signal,
     fetchImpl: opts.fetchImpl,
   });
@@ -299,8 +299,8 @@ export async function jevJudgeThreat(
   // false negative is the failure a screener may not have. A wide split is
   // logged at DEBUG: it is a calibration signal for audits, not an operator
   // alert — benign content the attacker frame reads hot would page at warn.
-  const defender100 = jevLevelToScore100(scoreAnswer.score);
-  const attacker100 = jevLevelToScore100(attackerAnswer.score);
+  const defender100 = decisionModelLevelToScore100(scoreAnswer.score);
+  const attacker100 = decisionModelLevelToScore100(attackerAnswer.score);
   if (Math.abs(defender100 - attacker100) >= 30) {
     log.debug("jev judge frame split", {
       defender: defender100,
@@ -318,7 +318,7 @@ export async function jevJudgeThreat(
   // live on Atlas 2026-09-20) and a warn operators learn to ignore is worse
   // than no warn. The SCORE is consumed either way, so threshold semantics
   // stay identical to the harness judge's.
-  const threshold = opts.settings.threshold ?? JEV_JUDGE_DEFAULT_THRESHOLD;
+  const threshold = opts.settings.threshold ?? DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD;
   const saysHold = verdict === "hold";
   const scoreHolds = score100 >= threshold;
   if (saysHold !== scoreHolds) {
@@ -337,12 +337,12 @@ export async function jevJudgeThreat(
     JSON.stringify({
       score: score100,
       reason:
-        `Jev scored this content ${score100}/100 ` +
+        `the decision model scored this content ${score100}/100 ` +
         `(${bandLabel(score100)}); typed verdict: ${verdict} ` +
         `(confidence ${verdictAnswer.confidence.toFixed(2)}).`,
       question:
         verdict === "hold"
-          ? `Jev flags this as ${bandLabel(score100).toLowerCase()} — review before it is acted on.`
+          ? `the decision model flags this as ${bandLabel(score100).toLowerCase()} — review before it is acted on.`
           : "",
     }),
   );

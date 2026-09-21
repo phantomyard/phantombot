@@ -53,8 +53,8 @@ import {
 } from "../lib/piRouting.ts";
 import type { ParseEventResult } from "./reasoningReplay.ts";
 import { CODER_SWAP_MAX_ATTEMPTS, getCoderSwapOverride, resolveSwapModel, type SwapDecision } from "../lib/coderSwap.ts";
-import { jevRoute } from "../lib/jevRouter.ts";
-import { recordJevOutcome } from "../lib/jevHealth.ts";
+import { decisionModelRoute } from "../lib/decisionModelRouter.ts";
+import { recordDecisionModelOutcome } from "../lib/decisionModelHealth.ts";
 import { classifyFailure } from "../lib/harnessAlert.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
@@ -129,9 +129,9 @@ export interface PiHarnessConfig {
    * is NOT carried here — it is read per-turn from `process.env[keyEnv]`
    * after the persona's vault is reconciled, the same contract as the Pi
    * API key. An enabled router DECIDES — the keyword scorer is the fallback
-   * on any error, and there is no log-only mode (see JevConsumerSettings).
+   * on any error, and there is no log-only mode (see DecisionModelConsumerSettings).
    */
-  jevRouter?: {
+  decisionModelRouter?: {
     baseUrl: string;
     model: string;
     keyEnv: string;
@@ -308,51 +308,51 @@ export class PiHarness implements Harness {
           history: req.history,
         });
 
-      const jevRouter = this.config.jevRouter;
+      const decisionModelRouter = this.config.decisionModelRouter;
       let decision: SwapDecision | undefined;
-      if (override === undefined && jevRouter) {
+      if (override === undefined && decisionModelRouter) {
         // Resolve the router key per-turn from the env (vault-injected), the
         // same contract as the Pi API key below. reloadVaultForPersona is
         // idempotent; calling it here too keeps the router working on turns
         // where Pi's own key comes from Pi's local store instead.
         await reloadVaultForPersona(req.persona);
-        const jevKey = process.env[jevRouter.keyEnv]?.trim();
-        if (!jevKey) {
+        const decisionModelKey = process.env[decisionModelRouter.keyEnv]?.trim();
+        if (!decisionModelKey) {
           log.warn(
-            `pi.invoke jev-router enabled but ${jevRouter.keyEnv} is not set; using the keyword scorer`,
+            `pi.invoke jev-router enabled but ${decisionModelRouter.keyEnv} is not set; using the keyword scorer`,
           );
           // Same telemetry contract as a provider failure: an enabled router
           // with no key falls back on EVERY turn, and that must read as
           // DEGRADED in doctor, not as "no calls recorded".
-          void recordJevOutcome({
-            ...(jevRouter.personasDir
-              ? { personasDir: jevRouter.personasDir }
+          void recordDecisionModelOutcome({
+            ...(decisionModelRouter.personasDir
+              ? { personasDir: decisionModelRouter.personasDir }
               : {}),
             ...(req.persona ? { persona: req.persona } : {}),
             consumer: "router",
             ok: false,
-            error: `jev-router enabled but ${jevRouter.keyEnv} is not set`,
+            error: `jev-router enabled but ${decisionModelRouter.keyEnv} is not set`,
           });
           decision = scoreRoute();
         } else {
           const recentUserTexts = (req.history ?? [])
             .filter((t) => t.role === "user")
             .map((t) => t.text);
-          const r = await jevRoute({
+          const r = await decisionModelRoute({
             settings: {
-              baseUrl: jevRouter.baseUrl,
-              apiKey: jevKey,
-              model: jevRouter.model,
-              timeoutMs: jevRouter.timeoutMs,
+              baseUrl: decisionModelRouter.baseUrl,
+              apiKey: decisionModelKey,
+              model: decisionModelRouter.model,
+              timeoutMs: decisionModelRouter.timeoutMs,
             },
             text: req.userMessage,
             history: recentUserTexts,
           });
           // Outcome-only telemetry (never the routed text) so `doctor` can
           // report that the decision model is falling back to the scorer.
-          void recordJevOutcome({
-            ...(jevRouter.personasDir
-              ? { personasDir: jevRouter.personasDir }
+          void recordDecisionModelOutcome({
+            ...(decisionModelRouter.personasDir
+              ? { personasDir: decisionModelRouter.personasDir }
               : {}),
             ...(req.persona ? { persona: req.persona } : {}),
             consumer: "router",

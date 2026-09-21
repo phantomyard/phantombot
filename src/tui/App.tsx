@@ -28,10 +28,10 @@ import {
   applyEmbedding,
   applyUpdateChannel,
   applyVoice,
-  applyJev,
+  applyDecisionModel,
   describeDefaultPersonaChange,
   describeEmbeddingChange,
-  describeJevChange,
+  describeDecisionModelChange,
   describePersonaRemoval,
   applyRemovePersona,
   describeUpdateChannelChange,
@@ -1540,30 +1540,30 @@ export function App(props: AppProps): React.ReactElement {
   );
 
   /**
-   * The Decision model row, as a flow (`jevFlow.ts`) — provider first,
+   * The Decision model row, as a flow (`decisionModelFlow.ts`) — provider first,
    * frictionless reuse of an existing OpenRouter key, independent
    * judge/router consumers. The WRITE path stays the CLI's
-   * (`applyJevConfig` via `applyJev` in actions.ts). Idempotent: esc or
+   * (`applyDecisionModelConfig` via `applyDecisionModel` in actions.ts). Idempotent: esc or
    * keeping every offered default writes nothing.
    */
-  const changeJev = useCallback(
+  const changeDecisionModel = useCallback(
     async (target: PersonaSnapshot) => {
       setPrompting(true);
       try {
-        const { configureJev } = await import("./jevFlow.ts");
-        const { jevUpdateEquals, findReusableJevKeys, validateJevKey } =
+        const { configureDecisionModel } = await import("./decisionModelFlow.ts");
+        const { decisionModelUpdateEquals, findReusableDecisionModelKeys, validateDecisionModelKey } =
           await import("../cli/jev.ts");
         const { maybePromptRestart } = await import("../cli/harness.ts");
         const { defaultServiceControl } = await import("../lib/platform.ts");
         const { config } = await loadConfigForPersona(target.name);
 
-        const chosen = await configureJev(
+        const chosen = await configureDecisionModel(
           target.name,
           { choose: askChoice, value: askValue },
           {
             existing: config.jev,
-            reusableKeys: await findReusableJevKeys(config, target.name),
-            validate: (settings) => validateJevKey(settings),
+            reusableKeys: await findReusableDecisionModelKeys(config, target.name),
+            validate: (settings) => validateDecisionModelKey(settings),
           },
         );
         if (!chosen) return setNotice("decision model unchanged");
@@ -1571,7 +1571,7 @@ export function App(props: AppProps): React.ReactElement {
           return setNotice(
             `decision model unchanged — rejected: ${chosen.rejected}`,
           );
-        if (jevUpdateEquals(config.jev, chosen.update))
+        if (decisionModelUpdateEquals(config.jev, chosen.update))
           return setNotice("decision model unchanged — already set");
 
         // The restart offer below belongs to a SAVE, not to a visit — a
@@ -1579,9 +1579,9 @@ export function App(props: AppProps): React.ReactElement {
         let saved = false;
         await askConfirm({
           title: `Set ${target.name}'s decision model to ${chosen.summary}?`,
-          consequence: describeJevChange(chosen.update),
+          consequence: describeDecisionModelChange(chosen.update),
           run: async () => {
-            const r = await applyJev({
+            const r = await applyDecisionModel({
               config,
               persona: target.name,
               update: chosen.update,
@@ -2246,7 +2246,7 @@ export function App(props: AppProps): React.ReactElement {
             // walkthroughs the Brain and Channels rows run. MCP is a real
             // screen: it lists rows, probes them and deletes them.
             if (target === "memory") void changeMemory(persona);
-            else if (target === "jev") void changeJev(persona);
+            else if (target === "jev") void changeDecisionModel(persona);
             else if (target === "mcp") {
               // Clear first: a previous persona's servers flashing as this
               // one's is the same staleness bug the Doctor row guards against.

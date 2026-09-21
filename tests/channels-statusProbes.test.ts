@@ -313,7 +313,7 @@ describe("gatherStatusProbes — voice", () => {
 });
 
 describe("gatherStatusProbes — jev", () => {
-  const jevBlock = (over: Partial<NonNullable<Config["jev"]>> = {}) =>
+  const decisionModelBlock = (over: Partial<NonNullable<Config["jev"]>> = {}) =>
     ({
       provider: "openrouter",
       model: "typesafe/jev-1.13",
@@ -331,7 +331,7 @@ describe("gatherStatusProbes — jev", () => {
 
   test("reads '— no key' (never ERR) when the key doesn't resolve", async () => {
     const r = await gatherStatusProbes(
-      cfg({ jev: jevBlock() }),
+      cfg({ jev: decisionModelBlock() }),
       "phantom",
       stubDeps({ env: {} }),
     );
@@ -342,21 +342,21 @@ describe("gatherStatusProbes — jev", () => {
 
   test("validates a resolved key live and reports OK or ERR", async () => {
     const ok = await gatherStatusProbes(
-      cfg({ jev: jevBlock() }),
+      cfg({ jev: decisionModelBlock() }),
       "phantom",
       stubDeps({
         env: { PHANTOMBOT_JEV_API_KEY: "sk-test" },
-        validateJevKey: async () => ({ ok: true }),
+        validateDecisionModelKey: async () => ({ ok: true }),
       }),
     );
     expect(ok.jev).toBe("openrouter OK (judge on · router off)");
 
     const bad = await gatherStatusProbes(
-      cfg({ jev: jevBlock() }),
+      cfg({ jev: decisionModelBlock() }),
       "phantom",
       stubDeps({
         env: { PHANTOMBOT_JEV_API_KEY: "sk-test" },
-        validateJevKey: async () => ({ ok: false, error: "401 Unauthorized" }),
+        validateDecisionModelKey: async () => ({ ok: false, error: "401 Unauthorized" }),
       }),
     );
     expect(bad.jev).toContain("ERR (401 Unauthorized)");
@@ -366,7 +366,7 @@ describe("gatherStatusProbes — jev", () => {
     let probed = false;
     const r = await gatherStatusProbes(
       cfg({
-        jev: jevBlock({
+        jev: decisionModelBlock({
           judge: {
             enabled: false,
             timeoutMs: 1500,
@@ -379,7 +379,7 @@ describe("gatherStatusProbes — jev", () => {
       "phantom",
       stubDeps({
         env: { PHANTOMBOT_JEV_API_KEY: "sk-test" },
-        validateJevKey: async () => {
+        validateDecisionModelKey: async () => {
           probed = true;
           return { ok: true };
         },

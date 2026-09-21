@@ -27,7 +27,7 @@
  *     reading half a JSON document.
  *   - A ROLLING WINDOW, not a lifetime total. "17 fallbacks" is unreadable
  *     without a denominator and a timeframe; counters reset once the window
- *     is older than JEV_HEALTH_WINDOW_HOURS, while the last-seen facts
+ *     is older than DECISION_MODEL_HEALTH_WINDOW_HOURS, while the last-seen facts
  *     (last ok, last failure, last error, consecutive failures) persist
  *     across resets because they answer "is it broken right now".
  *
@@ -48,12 +48,12 @@ import { join } from "node:path";
 import { log } from "./logger.ts";
 
 /** Which decision-model consumer produced an outcome. */
-export type JevConsumerId = "judge" | "router";
+export type DecisionModelConsumerId = "judge" | "router";
 
 /** Counters reset once the window is older than this. */
-export const JEV_HEALTH_WINDOW_HOURS = 24;
+export const DECISION_MODEL_HEALTH_WINDOW_HOURS = 24;
 
-export interface JevConsumerHealth {
+export interface DecisionModelConsumerHealth {
   /** Calls attempted in the current window. */
   calls: number;
   /** Calls in the current window that fell back to the pre-Jev method. */
@@ -70,30 +70,30 @@ export interface JevConsumerHealth {
   consecutive_fallbacks: number;
 }
 
-export interface JevHealthState {
-  judge?: JevConsumerHealth;
-  router?: JevConsumerHealth;
+export interface DecisionModelHealthState {
+  judge?: DecisionModelConsumerHealth;
+  router?: DecisionModelConsumerHealth;
 }
 
-export function jevHealthPath(personaDir: string): string {
+export function decisionModelHealthPath(personaDir: string): string {
   return join(personaDir, ".jev-health.json");
 }
 
 /** Read the ledger. `{}` when absent or unreadable — never throws. */
-export async function loadJevHealth(
+export async function loadDecisionModelHealth(
   personaDir: string,
-): Promise<JevHealthState> {
-  const p = jevHealthPath(personaDir);
+): Promise<DecisionModelHealthState> {
+  const p = decisionModelHealthPath(personaDir);
   if (!existsSync(p)) return {};
   try {
-    const parsed = JSON.parse(await readFile(p, "utf8")) as JevHealthState;
+    const parsed = JSON.parse(await readFile(p, "utf8")) as DecisionModelHealthState;
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
   }
 }
 
-function freshWindow(nowIso: string): JevConsumerHealth {
+function freshWindow(nowIso: string): DecisionModelConsumerHealth {
   return {
     calls: 0,
     fallbacks: 0,
@@ -104,21 +104,21 @@ function freshWindow(nowIso: string): JevConsumerHealth {
 
 /** True when `entry`'s window has aged out and its counters should reset. */
 export function windowExpired(
-  entry: JevConsumerHealth,
+  entry: DecisionModelConsumerHealth,
   now: Date,
-  windowHours = JEV_HEALTH_WINDOW_HOURS,
+  windowHours = DECISION_MODEL_HEALTH_WINDOW_HOURS,
 ): boolean {
   const started = Date.parse(entry.window_started_at);
   if (!Number.isFinite(started)) return true;
   return now.getTime() - started >= windowHours * 3_600_000;
 }
 
-export interface RecordJevOutcomeInput {
+export interface RecordDecisionModelOutcomeInput {
   /** Root of the personas directory (`config.personasDir`). */
   personasDir?: string;
   /** Persona name; absent (e.g. a harness turn with no persona) = no-op. */
   persona?: string;
-  consumer: JevConsumerId;
+  consumer: DecisionModelConsumerId;
   /** false = the decision model did not answer and the fallback ran. */
   ok: boolean;
   /** Provider/timeout error string. NEVER the screened or routed text. */
@@ -141,12 +141,12 @@ const ledgerQueues = new Map<string, Promise<void>>();
 /** Disambiguates tmp names for writers in the same process (see below). */
 let tmpCounter = 0;
 
-export async function recordJevOutcome(
-  input: RecordJevOutcomeInput,
+export async function recordDecisionModelOutcome(
+  input: RecordDecisionModelOutcomeInput,
 ): Promise<void> {
   const { personasDir, persona } = input;
   if (!personasDir || !persona) return;
-  const target = jevHealthPath(join(personasDir, persona));
+  const target = decisionModelHealthPath(join(personasDir, persona));
   const tail = ledgerQueues.get(target) ?? Promise.resolve();
   // A rejected link must never stall the chain (writeOutcome swallows its own
   // errors; the catch is belt-and-suspenders).
@@ -163,14 +163,14 @@ export async function recordJevOutcome(
 
 async function writeOutcome(
   target: string,
-  input: RecordJevOutcomeInput,
+  input: RecordDecisionModelOutcomeInput,
 ): Promise<void> {
   const { personasDir, persona, consumer, ok } = input;
   const now = input.now ?? new Date();
   const nowIso = now.toISOString();
   const dir = join(personasDir!, persona!);
   try {
-    const state = await loadJevHealth(dir);
+    const state = await loadDecisionModelHealth(dir);
     const prior = state[consumer];
     const entry =
       prior && !windowExpired(prior, now)
@@ -200,7 +200,7 @@ async function writeOutcome(
       entry.consecutive_fallbacks += 1;
       if (input.error) entry.last_error = input.error.slice(0, 300);
     }
-    const next: JevHealthState = { ...state, [consumer]: entry };
+    const next: DecisionModelHealthState = { ...state, [consumer]: entry };
     // Unique tmp name: pid alone collides for two writers in one process
     // (the in-process queue serializes same-ledger writers, but judge and
     // router ledgers share the file — the queue is keyed on the FILE, so

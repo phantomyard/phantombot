@@ -4,9 +4,9 @@
  * already uses, with `phantombot jev` kept as a DEPRECATED alias that
  * forwards to the exact same flow.
  *
- * The write path itself (`applyJevConfig`, `jevUpdateEquals`, reusable-key
+ * The write path itself (`applyDecisionModelConfig`, `decisionModelUpdateEquals`, reusable-key
  * discovery) is covered in cli-jev.test.ts — this file only pins the
- * command surface: the canonical command runs `runJev` without a notice,
+ * command surface: the canonical command runs `runDecisionModel` without a notice,
  * the alias prints its one-line deprecation notice to stderr (never stdout)
  * and both resolve the persona the same way.
  */
@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import decisionModelCmd from "../src/cli/decision-model.ts";
-import { runJev } from "../src/cli/jev.ts";
+import { runDecisionModel } from "../src/cli/jev.ts";
 import { _resetVaultTrackingForTesting } from "../src/lib/vaultEnvTracking.ts";
 
 // Citty's `meta` may be a value, a function, or a function returning a
@@ -60,11 +60,11 @@ afterEach(async () => {
 });
 
 describe("phantombot decision-model — the canonical command", () => {
-  test("runs the same runJev flow with no deprecation notice", async () => {
-    // No persona dir on this fresh workdir → runJev exits 2 after the
+  test("runs the same runDecisionModel flow with no deprecation notice", async () => {
+    // No persona dir on this fresh workdir → runDecisionModel exits 2 after the
     // standard "no persona" diagnostic. The point here is the ABSENCE of
     // the alias notice: the canonical command is not deprecated.
-    const code = await runJev({ persona: "phantom" });
+    const code = await runDecisionModel({ persona: "phantom" });
     expect(code).toBe(2);
     expect(errText).toContain("no persona 'phantom'");
     expect(errText).not.toContain("deprecated");
@@ -86,7 +86,7 @@ describe("phantombot jev — the deprecated alias", () => {
     // Same fresh-workdir exit path as above; the ONLY difference is the
     // notice, which is what keeps old scripts working while telling their
     // operators where to go.
-    const code = await runJev({ persona: "phantom", deprecated: true });
+    const code = await runDecisionModel({ persona: "phantom", deprecated: true });
     expect(code).toBe(2);
     expect(errText).toContain(
       "note: `phantombot jev` is deprecated — use `phantombot decision-model`",

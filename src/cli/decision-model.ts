@@ -7,7 +7,7 @@
  * "Decision model" row on the persona settings screen) rather than by the
  * vendor/model name, which is one provider among future ones. This command
  * standardizes the CLI on the same naming. Everything behind it — the
- * walkthrough (`src/tui/jevFlow.ts`), the write path (`applyJevConfig`),
+ * walkthrough (`src/tui/decisionModelFlow.ts`), the write path (`applyDecisionModelConfig`),
  * the reusable-key discovery and the live key probe — lives in
  * `src/cli/jev.ts` and is shared with the TUI, so the two surfaces cannot
  * drift. `phantombot jev` remains as a deprecated alias forwarding here
@@ -16,12 +16,12 @@
 
 import { defineCommand } from "citty";
 
-import { runJev } from "./jev.ts";
+import { runDecisionModel as runDecisionModelFlow } from "./jev.ts";
 
 export async function runDecisionModel(
   input: { persona?: string } = {},
 ): Promise<number> {
-  return await runJev({ persona: input.persona });
+  return await runDecisionModelFlow({ persona: input.persona });
 }
 
 export default defineCommand({

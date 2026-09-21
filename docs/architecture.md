@@ -48,7 +48,7 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/repl/index.ts` | `runChat` (node:readline loop) + `handleSlash` (command dispatch). | `orchestrator/turn`, `memory` |
 | `src/harnesses/types.ts` | `Harness`, `HarnessRequest`, `HarnessChunk` (discriminated union). | — |
 | `src/harnesses/claude.ts` | `Bun.spawn claude --print --output-format stream-json …`. Stdin payload, ANTHROPIC_API_KEY filtered out. | `claude` CLI |
-| `src/harnesses/pi.ts` | `Bun.spawn pi --print --mode json …`. Argv payload (Pi ignores stdin). Declares `maxPayloadBytes`. Also hosts the per-turn primary/coder brain-swap decision (keyword scorer in `lib/coderSwap.ts`, optional Jev router in `lib/jevRouter.ts`). | `pi` CLI |
+| `src/harnesses/pi.ts` | `Bun.spawn pi --print --mode json …`. Argv payload (Pi ignores stdin). Declares `maxPayloadBytes`. Also hosts the per-turn primary/coder brain-swap decision (keyword scorer in `lib/coderSwap.ts`, optional decision-model router in `lib/decisionModelRouter.ts`). | `pi` CLI |
 | `src/lib/{jev,jevJudge,jevRouter}.ts` | Optional TypeSafe Jev backend (issue #597): one shared typed-decision client, a threat-judge adapter (wired in `orchestrator/screen.ts`) and a primary/coder router adapter (wired in `harnesses/pi.ts`). Shadow-first, the existing methods stay default and fallback. See [decision-model.md](decision-model.md). | OpenRouter / TypeSafe API |
 | `src/lib/logger.ts` | Structured logs to stdout. | stdout |
 | `src/lib/io.ts` | Shared `WriteSink` interface. | — |

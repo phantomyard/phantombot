@@ -78,7 +78,7 @@ export function buildHarness(config: Config, id: string): Harness | undefined {
     // consumer is enabled; the key itself is resolved per-turn from the env.
     ...(config.jev?.router.enabled
       ? {
-          jevRouter: {
+          decisionModelRouter: {
             baseUrl: config.jev.baseUrl,
             model: config.jev.model,
             keyEnv: config.jev.keyEnv,

@@ -1,6 +1,6 @@
 /**
  * Tests for the write path behind `phantombot jev` (issue #597).
- * The TUI prompts are covered in tui-jevFlow.test.ts.
+ * The TUI prompts are covered in tui-decisionModelFlow.test.ts.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -9,10 +9,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  applyJevConfig,
-  findReusableJevKeys,
-  jevUpdateEquals,
-  type JevConfigUpdate,
+  applyDecisionModelConfig,
+  findReusableDecisionModelKeys,
+  decisionModelUpdateEquals,
+  type DecisionModelConfigUpdate,
 } from "../src/cli/jev.ts";
 import { type Config, loadConfig } from "../src/config.ts";
 import { openPersonaVault } from "../src/lib/vault.ts";
@@ -29,7 +29,7 @@ const ENV_NAMES = [
   "OPENROUTER_API_KEY",
 ];
 
-const BASE_UPDATE: JevConfigUpdate = {
+const BASE_UPDATE: DecisionModelConfigUpdate = {
   provider: "openrouter",
   keyEnv: "PHANTOMBOT_JEV_API_KEY",
   judge: { enabled: true },
@@ -76,10 +76,10 @@ function personaTomlPath(): string {
   return join(config.personasDir, persona, "config.toml");
 }
 
-describe("applyJevConfig", () => {
+describe("applyDecisionModelConfig", () => {
   test("stores a new key in the vault and writes only non-secret settings", async () => {
     const writes: unknown[][] = [];
-    await applyJevConfig({
+    await applyDecisionModelConfig({
       config,
       persona,
       update: { ...BASE_UPDATE, apiKey: "sk-or-test" },
@@ -103,7 +103,7 @@ describe("applyJevConfig", () => {
 
   test("a reused key stores nothing — the block just points key_env at it", async () => {
     const writes: unknown[][] = [];
-    await applyJevConfig({
+    await applyDecisionModelConfig({
       config,
       persona,
       update: {
@@ -121,7 +121,7 @@ describe("applyJevConfig", () => {
   });
 
   test("merge semantics: operator tuning the wizard doesn't mention survives a re-run", async () => {
-    await applyJevConfig({ config, persona, update: BASE_UPDATE });
+    await applyDecisionModelConfig({ config, persona, update: BASE_UPDATE });
     // Operator hand-tunes thresholds/timeouts after the wizard.
     const path = personaTomlPath();
     const tuned = (await readFile(path, "utf8")).replace(
@@ -130,7 +130,7 @@ describe("applyJevConfig", () => {
     );
     await writeFile(path, tuned);
     // Re-run the wizard flipping only the consumers.
-    await applyJevConfig({
+    await applyDecisionModelConfig({
       config,
       persona,
       update: {
@@ -156,7 +156,7 @@ describe("applyJevConfig", () => {
       '[jev]\nprovider = "openrouter"\n\n[jev.judge]\nmode = "shadow"\n\n' +
         '[jev.router]\nmode = "shadow"\n',
     );
-    await applyJevConfig({ config, persona, update: BASE_UPDATE });
+    await applyDecisionModelConfig({ config, persona, update: BASE_UPDATE });
     const text = await readFile(personaTomlPath(), "utf8");
     // A bare `mode` KEY, not the substring — `model =` legitimately contains it.
     expect(text).not.toMatch(/^\s*mode\s*=/m);
@@ -168,7 +168,7 @@ describe("applyJevConfig", () => {
       personaTomlPath(),
       '[jev]\nprovider = "openrouter"\napi_key = "sk-leaked"\n',
     );
-    await applyJevConfig({ config, persona, update: BASE_UPDATE });
+    await applyDecisionModelConfig({ config, persona, update: BASE_UPDATE });
     const text = await readFile(personaTomlPath(), "utf8");
     expect(text).not.toContain("sk-leaked");
     expect(text).not.toContain("api_key");
@@ -176,7 +176,7 @@ describe("applyJevConfig", () => {
 
   test("a failed vault write aborts with the secret name, never the value — and config.toml stays UNTOUCHED", async () => {
     await expect(
-      applyJevConfig({
+      applyDecisionModelConfig({
         config,
         persona,
         update: { ...BASE_UPDATE, apiKey: "sk-secret-value" },
@@ -197,35 +197,35 @@ describe("applyJevConfig", () => {
   });
 });
 
-describe("jevUpdateEquals — the idempotence check", () => {
+describe("decisionModelUpdateEquals — the idempotence check", () => {
   test("keeping every offered default after a save is a no-op", async () => {
     process.env.PHANTOMBOT_JEV_API_KEY = "sk-stored";
-    await applyJevConfig({ config, persona, update: BASE_UPDATE });
+    await applyDecisionModelConfig({ config, persona, update: BASE_UPDATE });
     const reloaded = await loadConfig();
-    expect(jevUpdateEquals(reloaded.jev, BASE_UPDATE)).toBe(true);
+    expect(decisionModelUpdateEquals(reloaded.jev, BASE_UPDATE)).toBe(true);
   });
 
   test("a new typed key is always a change", async () => {
-    await applyJevConfig({ config, persona, update: BASE_UPDATE });
+    await applyDecisionModelConfig({ config, persona, update: BASE_UPDATE });
     process.env.PHANTOMBOT_JEV_API_KEY = "sk-stored";
     const reloaded = await loadConfig();
     expect(
-      jevUpdateEquals(reloaded.jev, { ...BASE_UPDATE, apiKey: "sk-other" }),
+      decisionModelUpdateEquals(reloaded.jev, { ...BASE_UPDATE, apiKey: "sk-other" }),
     ).toBe(false);
   });
 
   test("flipping a consumer is a change", async () => {
-    await applyJevConfig({ config, persona, update: BASE_UPDATE });
+    await applyDecisionModelConfig({ config, persona, update: BASE_UPDATE });
     process.env.PHANTOMBOT_JEV_API_KEY = "sk-stored";
     const reloaded = await loadConfig();
     expect(
-      jevUpdateEquals(reloaded.jev, {
+      decisionModelUpdateEquals(reloaded.jev, {
         ...BASE_UPDATE,
         judge: { enabled: false },
       }),
     ).toBe(false);
     expect(
-      jevUpdateEquals(reloaded.jev, {
+      decisionModelUpdateEquals(reloaded.jev, {
         ...BASE_UPDATE,
         router: { enabled: false },
       }),
@@ -233,12 +233,12 @@ describe("jevUpdateEquals — the idempotence check", () => {
   });
 });
 
-describe("findReusableJevKeys — frictionless discovery", () => {
+describe("findReusableDecisionModelKeys — frictionless discovery", () => {
   test("finds the embeddings OpenRouter key only when its endpoint IS OpenRouter", async () => {
     process.env.PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY = "sk-or-embed";
     // No embeddings block → the key alone doesn't prove an OpenRouter endpoint.
     expect(
-      (await findReusableJevKeys(config)).map((k) => k.env),
+      (await findReusableDecisionModelKeys(config)).map((k) => k.env),
     ).not.toContain("PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY");
 
     await mkdir(join(config.personasDir, persona), { recursive: true });
@@ -247,7 +247,7 @@ describe("findReusableJevKeys — frictionless discovery", () => {
       '[embeddings]\nprovider = "openai-compatible"\n\n[embeddings.openai_compatible]\nbase_url = "https://openrouter.ai/api/v1"\nmodel = "openai/text-embedding-3-small"\n',
     );
     const reloaded = await loadConfig();
-    expect((await findReusableJevKeys(reloaded)).map((k) => k.env)).toContain(
+    expect((await findReusableDecisionModelKeys(reloaded)).map((k) => k.env)).toContain(
       "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
     );
   });
@@ -255,7 +255,7 @@ describe("findReusableJevKeys — frictionless discovery", () => {
   test("finds a stored Jev key and a generic OpenRouter export", async () => {
     process.env.PHANTOMBOT_JEV_API_KEY = "sk-jev";
     process.env.OPENROUTER_API_KEY = "sk-generic";
-    const envs = (await findReusableJevKeys(config)).map((k) => k.env);
+    const envs = (await findReusableDecisionModelKeys(config)).map((k) => k.env);
     expect(envs).toContain("PHANTOMBOT_JEV_API_KEY");
     expect(envs).toContain("OPENROUTER_API_KEY");
   });
@@ -274,14 +274,14 @@ describe("findReusableJevKeys — frictionless discovery", () => {
 
     // kai is offered only what KAI can resolve — phantom's injected key is
     // not a candidate, kai's own vault row is.
-    const kaiEnvs = (await findReusableJevKeys(config, "kai")).map(
+    const kaiEnvs = (await findReusableDecisionModelKeys(config, "kai")).map(
       (k) => k.env,
     );
     expect(kaiEnvs).not.toContain("PHANTOMBOT_JEV_API_KEY");
     expect(kaiEnvs).toContain("OPENROUTER_API_KEY");
 
     // …and the loaded persona itself still sees its own key.
-    const phantomEnvs = (await findReusableJevKeys(config, "phantom")).map(
+    const phantomEnvs = (await findReusableDecisionModelKeys(config, "phantom")).map(
       (k) => k.env,
     );
     expect(phantomEnvs).toContain("PHANTOMBOT_JEV_API_KEY");

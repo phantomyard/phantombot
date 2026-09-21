@@ -238,7 +238,7 @@ Respond with STRICT JSON only, no prose, no code fence:
  * Wrap untrusted content for the judge: markers around the untrusted region,
  * any forged marker stripped, and the trusted priors (if any) prepended as a
  * <briefing> block. Shared by judgeThreat and the Jev screener
- * (lib/jevJudge.ts) so BOTH judge backends see the identical wrapping — the
+ * (lib/decisionModelJudge.ts) so BOTH judge backends see the identical wrapping — the
  * two backends are only comparable on a payload if the bytes match.
  *
  * ── WHY THE <briefing> STRIP EXISTS — READ THIS BEFORE "SIMPLIFYING" IT ──
@@ -259,7 +259,7 @@ Respond with STRICT JSON only, no prose, no code fence:
  * decisions/people/norms drawers verbatim (up to screen.ts's shared byte
  * cap). The JEV judge takes the opposite path: its 32k-token budget cannot
  * carry a full persona, so the screener feeds it the SAME ranked drawer
- * briefing through this <briefing> channel (see jevJudge.ts — byte-identical
+ * briefing through this <briefing> channel (see decisionModelJudge.ts — byte-identical
  * drawer text, smaller cap). Either way the strip below stays load-bearing.
  *
  * The trust only holds when the briefing genuinely comes from OUR code

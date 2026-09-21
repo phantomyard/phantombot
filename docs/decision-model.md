@@ -61,7 +61,7 @@ criteria: {<choice>: <description>}}` (the criteria KEYS are the choice set)
 or `{type: "score", instructions, criteria: [<level label>, …]}` (criteria
 index IS the ordinal level). The response is `{answers: {<qid>: …}, usage}`
 with calibrated `probabilities` and `confidence` per answer. See
-`src/lib/jev.ts`.
+`src/lib/decisionModel.ts`.
 
 ## Configuration
 
@@ -173,7 +173,7 @@ the shape of #516, where a revoked embeddings key dropped memory search to
 keyword-only and doctor reported "semantic search off" with no reason.
 
 So every call records its **outcome** — never the screened payload — in a
-per-persona ledger (`<persona-dir>/.jev-health.json`, `src/lib/jevHealth.ts`):
+per-persona ledger (`<persona-dir>/.jev-health.json`, `src/lib/decisionModelHealth.ts`):
 calls, fallbacks, last success, last fallback, the last provider error
 (capped at 300 chars) and the consecutive-fallback streak. Counters are
 scoped to a rolling 24 h window (a total with no timeframe is unreadable);
@@ -283,8 +283,8 @@ user data**) ship in `tests/fixtures/`:
 Run them with a real key:
 
 ```bash
-PHANTOMBOT_JEV_API_KEY=sk-or-... bun scripts/evalJevJudge.ts           # judge
-PHANTOMBOT_JEV_API_KEY=sk-or-... bun scripts/evalJevJudge.ts --router  # router
+PHANTOMBOT_JEV_API_KEY=sk-or-... bun scripts/evalDecisionModelJudge.ts           # judge
+PHANTOMBOT_JEV_API_KEY=sk-or-... bun scripts/evalDecisionModelJudge.ts --router  # router
 ```
 
 The judge report leads with the **false-negative rate on injection** and
@@ -299,7 +299,7 @@ number is the acceptance gate.
 harness judge's raw threshold of 80, Jev under-scored subtle attacks
 (calm-tone and non-English injections at 56–78) — System One reserves the
 top deciles for the blatant. The shipped default is therefore
-`JEV_JUDGE_DEFAULT_THRESHOLD = 70`. Observed live on the bundled corpus:
+`DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD = 70`. Observed live on the bundled corpus:
 every injection scores ≥ 70; benign cases score ≤ 24 on the original corpus
 and up to 33 on the conversational personal-data-ask class added after
 Atlas's live finding — call the observed benign ceiling **33**, a 37-point
@@ -313,12 +313,12 @@ evidence loop for moving either number.
 
 | | |
 |---|---|
-| Shared client | `src/lib/jev.ts` |
-| Judge adapter | `src/lib/jevJudge.ts` |
-| Router adapter | `src/lib/jevRouter.ts` |
+| Shared client | `src/lib/decisionModel.ts` |
+| Judge adapter | `src/lib/decisionModelJudge.ts` |
+| Router adapter | `src/lib/decisionModelRouter.ts` |
 | Judge call site | `src/orchestrator/screen.ts` |
 | Router call site | `src/harnesses/pi.ts` (threaded via `src/harnesses/buildChain.ts`) |
 | Config | `[jev]` in `src/config.ts` |
-| CLI wizard + write path | `src/cli/decision-model.ts` (canonical; `phantombot jev` is a deprecated alias) + `src/cli/jev.ts` (`applyJevConfig`) |
-| TUI flow | `src/tui/jevFlow.ts` (Decision model row on `^s`) |
-| Eval | `scripts/evalJevJudge.ts`, `tests/fixtures/jev-*.json` |
+| CLI wizard + write path | `src/cli/decision-model.ts` (canonical; `phantombot jev` is a deprecated alias) + `src/cli/jev.ts` (`applyDecisionModelConfig`) |
+| TUI flow | `src/tui/decisionModelFlow.ts` (Decision model row on `^s`) |
+| Eval | `scripts/evalDecisionModelJudge.ts`, `tests/fixtures/jev-*.json` |

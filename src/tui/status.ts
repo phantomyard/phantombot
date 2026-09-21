@@ -27,7 +27,7 @@ export type StatusRows = Array<[string, string]>;
  * renaming the row "jev" → "decision model" once already turned a live
  * screener's badge into a silent "optional".
  */
-export const JEV_STATUS_ROW = "decision model";
+export const DECISION_MODEL_STATUS_ROW = "decision model";
 
 export async function gatherStatus(input: {
   persona: string;
@@ -76,7 +76,7 @@ export async function gatherStatus(input: {
   if (probes.acp) rows.push(["acp", probes.acp]);
   if (probes.memory) rows.push(["memory", probes.memory]);
   if (probes.voice) rows.push(["voice", probes.voice]);
-  if (probes.jev) rows.push([JEV_STATUS_ROW, probes.jev]);
+  if (probes.jev) rows.push([DECISION_MODEL_STATUS_ROW, probes.jev]);
   if (probes.dreaming) rows.push(["dreaming", probes.dreaming]);
   return rows;
 }

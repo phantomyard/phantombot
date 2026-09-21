@@ -54,16 +54,16 @@ import {
   isVaultLoadedPersonaDir,
 } from "./lib/vaultEnvTracking.ts";
 import {
-  JEV_DEFAULT_KEY_ENV,
-  JEV_DEFAULT_MODEL,
-  JEV_OPENROUTER_BASE_URL,
-  JEV_TYPESAFE_BASE_URL,
-} from "./lib/jev.ts";
+  DECISION_MODEL_DEFAULT_KEY_ENV,
+  DECISION_MODEL_DEFAULT_MODEL,
+  DECISION_MODEL_OPENROUTER_BASE_URL,
+  DECISION_MODEL_TYPESAFE_BASE_URL,
+} from "./lib/decisionModel.ts";
 import {
-  JEV_JUDGE_DEFAULT_THRESHOLD,
-  JEV_JUDGE_DEFAULT_TIMEOUT_MS,
-} from "./lib/jevJudge.ts";
-import { JEV_ROUTER_DEFAULT_TIMEOUT_MS } from "./lib/jevRouter.ts";
+  DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD,
+  DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS,
+} from "./lib/decisionModelJudge.ts";
+import { DECISION_MODEL_ROUTER_DEFAULT_TIMEOUT_MS } from "./lib/decisionModelRouter.ts";
 
 /**
  * Read the legacy `turn_timeout_s` (TOML) or `PHANTOMBOT_TURN_TIMEOUT_MS`
@@ -928,7 +928,7 @@ export interface Config {
    * decision-model`) flips them on. Jev is never a harness and can never
    * serve a turn.
    */
-  jev?: JevSettings;
+  jev?: DecisionModelSettings;
 
   /**
    * P2P transport (phantombot#258, rewritten in #61): werift WebRTC channels to
@@ -945,7 +945,7 @@ export interface Config {
 }
 
 /** One Jev consumer's enablement. See docs/decision-model.md. */
-export interface JevConsumerSettings {
+export interface DecisionModelConsumerSettings {
   /** Master switch for this consumer. Default false — opt-in per consumer. */
   enabled: boolean;
   /**
@@ -955,7 +955,7 @@ export interface JevConsumerSettings {
    * draft of #597 and was removed before merge: it doubled every call site,
    * and an operator who has configured a decision model wants it deciding —
    * the evidence it was meant to gather is produced instead by the bundled
-   * eval corpora (`scripts/evalJevJudge.ts`) offline, and by the fallback
+   * eval corpora (`scripts/evalDecisionModelJudge.ts`) offline, and by the fallback
    * telemetry `phantombot doctor` reports at runtime.
    */
   /** Hard wall-clock cap; exceeding it degrades to the existing method. */
@@ -963,11 +963,11 @@ export interface JevConsumerSettings {
 }
 
 /** The threat judge's Jev settings — the SECURITY control's consumer. */
-export interface JevJudgeSettings extends JevConsumerSettings {
+export interface DecisionModelJudgeSettings extends DecisionModelConsumerSettings {
   /**
-   * Hold at/above this score. Defaults to JEV_JUDGE_DEFAULT_THRESHOLD (70)
+   * Hold at/above this score. Defaults to DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD (70)
    * — calibrated on the bundled corpus for Jev's decile-compressed scale,
-   * deliberately NOT the harness judge's 80 (see lib/jevJudge.ts).
+   * deliberately NOT the harness judge's 80 (see lib/decisionModelJudge.ts).
    */
   threshold: number;
   /**
@@ -981,7 +981,7 @@ export interface JevJudgeSettings extends JevConsumerSettings {
 }
 
 /** The `[jev]` block, resolved. The API key is vault/env-only — never TOML. */
-export interface JevSettings {
+export interface DecisionModelSettings {
   /** "openrouter" (reuse an OpenRouter key) or "typesafe" (direct token). */
   provider: "typesafe" | "openrouter";
   /** Model id — default `typesafe/jev-1.13`. */
@@ -996,8 +996,8 @@ export interface JevSettings {
    * multi-persona daemon reads its OWN vault, not the injected one.
    */
   apiKey?: string;
-  judge: JevJudgeSettings;
-  router: JevConsumerSettings;
+  judge: DecisionModelJudgeSettings;
+  router: DecisionModelConsumerSettings;
 }
 
 /** Settings for the P2P WebRTC transport node (phantombot#258, #61). */
@@ -1346,20 +1346,20 @@ export async function loadConfig(persona?: string): Promise<Config> {
   >;
   const tomlVoice = (toml.voice ?? {}) as Record<string, unknown>;
   const tomlPromptCache = (toml.prompt_cache ?? {}) as Record<string, unknown>;
-  const tomlJev = (toml.jev ?? {}) as Record<string, unknown>;
+  const tomlDecisionModel = (toml.jev ?? {}) as Record<string, unknown>;
 
   // Jev API keys resolve VAULT-FIRST under the configured key_env name (and
   // the default name), exactly like the embedding keys above — a secondary
   // persona on a multi-persona daemon must read its OWN vault, not the one
   // injected at startup. Only read the vault at all when Jev is configured.
-  const jevKeyEnv =
+  const decisionModelKeyEnv =
     asString(process.env.PHANTOMBOT_JEV_KEY_ENV) ??
-    asString(tomlJev.key_env) ??
-    JEV_DEFAULT_KEY_ENV;
-  const vaultJevSecrets =
-    Object.keys(tomlJev).length > 0 || hasJevEnv()
-      ? await readJevSecretsFromVault(personaDirPath, [
-          ...new Set([jevKeyEnv, JEV_DEFAULT_KEY_ENV]),
+    asString(tomlDecisionModel.key_env) ??
+    DECISION_MODEL_DEFAULT_KEY_ENV;
+  const vaultDecisionModelSecrets =
+    Object.keys(tomlDecisionModel).length > 0 || hasDecisionModelEnv()
+      ? await readDecisionModelSecretsFromVault(personaDirPath, [
+          ...new Set([decisionModelKeyEnv, DECISION_MODEL_DEFAULT_KEY_ENV]),
         ])
       : {};
 
@@ -1680,9 +1680,9 @@ export async function loadConfig(persona?: string): Promise<Config> {
 
     voice: buildVoiceConfig(tomlVoice),
 
-    jev: buildJevConfig(tomlJev, {
+    jev: buildDecisionModelConfig(tomlDecisionModel, {
       personaDirPath,
-      vaultSecrets: vaultJevSecrets,
+      vaultSecrets: vaultDecisionModelSecrets,
     }),
 
     p2p: buildP2PConfig(tomlP2p),
@@ -2525,9 +2525,9 @@ function buildEmbeddingsConfig(
 // ───────────────────────────────────────────────────────────────────────────
 
 /** True when any PHANTOMBOT_JEV_* env var marks Jev as configured. */
-function hasJevEnv(): boolean {
+function hasDecisionModelEnv(): boolean {
   return Object.keys(process.env).some(
-    (k) => k.startsWith("PHANTOMBOT_JEV_") && k !== JEV_DEFAULT_KEY_ENV,
+    (k) => k.startsWith("PHANTOMBOT_JEV_") && k !== DECISION_MODEL_DEFAULT_KEY_ENV,
   );
 }
 
@@ -2538,7 +2538,7 @@ function hasJevEnv(): boolean {
  * Jev consumers would silently use the DEFAULT persona's credential. Never
  * throws — an unopenable or absent vault is "no key", never a failed load.
  */
-async function readJevSecretsFromVault(
+async function readDecisionModelSecretsFromVault(
   personaDirPath: string,
   names: readonly string[],
 ): Promise<Record<string, string>> {
@@ -2565,7 +2565,7 @@ async function readJevSecretsFromVault(
   }
 }
 
-export interface BuildJevOptions {
+export interface BuildDecisionModelOptions {
   personaDirPath: string;
   vaultSecrets: Record<string, string>;
 }
@@ -2579,22 +2579,22 @@ export interface BuildJevOptions {
  * The API key is vault/env-only. An `api_key` key in the TOML block is
  * IGNORED with a warning — secrets never belong in the plaintext file.
  */
-function buildJevConfig(
-  tomlJev: Record<string, unknown>,
-  opts: BuildJevOptions,
-): JevSettings | undefined {
-  if (Object.keys(tomlJev).length === 0 && !hasJevEnv()) return undefined;
+function buildDecisionModelConfig(
+  tomlDecisionModel: Record<string, unknown>,
+  opts: BuildDecisionModelOptions,
+): DecisionModelSettings | undefined {
+  if (Object.keys(tomlDecisionModel).length === 0 && !hasDecisionModelEnv()) return undefined;
 
-  if (tomlJev.api_key !== undefined) {
+  if (tomlDecisionModel.api_key !== undefined) {
     log.warn(
-      "config: [jev] api_key in config.toml is ignored — Jev keys live in " +
-        `the vault (${JEV_DEFAULT_KEY_ENV} or the configured key_env). ` +
+      "config: [jev] api_key in config.toml is ignored — decision-model keys live in " +
+        `the vault (${DECISION_MODEL_DEFAULT_KEY_ENV} or the configured key_env). ` +
         "Run `phantombot decision-model` to store it properly, and remove it from the file.",
     );
   }
 
   const statedProvider =
-    asString(process.env.PHANTOMBOT_JEV_PROVIDER) ?? asString(tomlJev.provider);
+    asString(process.env.PHANTOMBOT_JEV_PROVIDER) ?? asString(tomlDecisionModel.provider);
   if (
     statedProvider !== undefined &&
     statedProvider !== "typesafe" &&
@@ -2621,15 +2621,15 @@ function buildJevConfig(
 
   const keyEnv =
     asString(process.env.PHANTOMBOT_JEV_KEY_ENV) ??
-    asString(tomlJev.key_env) ??
-    JEV_DEFAULT_KEY_ENV;
+    asString(tomlDecisionModel.key_env) ??
+    DECISION_MODEL_DEFAULT_KEY_ENV;
 
   const baseUrl =
     asString(process.env.PHANTOMBOT_JEV_BASE_URL) ??
-    asString(tomlJev.base_url) ??
+    asString(tomlDecisionModel.base_url) ??
     (provider === "openrouter"
-      ? JEV_OPENROUTER_BASE_URL
-      : JEV_TYPESAFE_BASE_URL);
+      ? DECISION_MODEL_OPENROUTER_BASE_URL
+      : DECISION_MODEL_TYPESAFE_BASE_URL);
 
   // Vault first, then env with the vault-injection guard — the same
   // precedence personaEmbeddingKey applies, minus the TOML tier (a Jev key
@@ -2645,8 +2645,8 @@ function buildJevConfig(
       ? fromEnv
       : undefined);
 
-  const tomlJudge = (tomlJev.judge ?? {}) as Record<string, unknown>;
-  const tomlRouter = (tomlJev.router ?? {}) as Record<string, unknown>;
+  const tomlJudge = (tomlDecisionModel.judge ?? {}) as Record<string, unknown>;
+  const tomlRouter = (tomlDecisionModel.router ?? {}) as Record<string, unknown>;
 
   // The judge threshold and both timeouts are SECURITY-RELEVANT bounds —
   // reject out-of-range values at parse time rather than letting them
@@ -2654,21 +2654,21 @@ function buildJevConfig(
   // (silently disabling holds), threshold < 0 holds everything, and a
   // non-positive timeout reaches AbortSignal.timeout and can throw.
   const judgeThreshold =
-    asInt(tomlJudge.threshold) ?? JEV_JUDGE_DEFAULT_THRESHOLD;
+    asInt(tomlJudge.threshold) ?? DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD;
   if (judgeThreshold < 0 || judgeThreshold > 100) {
     throw new Error(
       `config: [jev.judge] threshold must be 0..100, got ${judgeThreshold}`,
     );
   }
   const judgeTimeoutMs =
-    asInt(tomlJudge.timeout_ms) ?? JEV_JUDGE_DEFAULT_TIMEOUT_MS;
+    asInt(tomlJudge.timeout_ms) ?? DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS;
   if (judgeTimeoutMs <= 0 || judgeTimeoutMs > 30_000) {
     throw new Error(
       `config: [jev.judge] timeout_ms must be 1..30000, got ${judgeTimeoutMs}`,
     );
   }
   const routerTimeoutMs =
-    asInt(tomlRouter.timeout_ms) ?? JEV_ROUTER_DEFAULT_TIMEOUT_MS;
+    asInt(tomlRouter.timeout_ms) ?? DECISION_MODEL_ROUTER_DEFAULT_TIMEOUT_MS;
   if (routerTimeoutMs <= 0 || routerTimeoutMs > 30_000) {
     throw new Error(
       `config: [jev.router] timeout_ms must be 1..30000, got ${routerTimeoutMs}`,
@@ -2679,8 +2679,8 @@ function buildJevConfig(
     provider,
     model:
       asString(process.env.PHANTOMBOT_JEV_MODEL) ??
-      asString(tomlJev.model) ??
-      JEV_DEFAULT_MODEL,
+      asString(tomlDecisionModel.model) ??
+      DECISION_MODEL_DEFAULT_MODEL,
     baseUrl,
     keyEnv,
     ...(apiKey !== undefined ? { apiKey } : {}),

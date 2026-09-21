@@ -6,15 +6,15 @@
  * The CANONICAL command is `src/cli/decision-model.ts`; this module owns
  * everything behind it AND the deprecated `phantombot jev` alias (the
  * `env` → `vault` pattern: the alias prints a one-line notice to stderr and
- * forwards to the same `runJev`), so existing scripts and muscle memory
+ * forwards to the same `runDecisionModel`), so existing scripts and muscle memory
  * keep working while the interface standardizes on the general concept the
  * TUI already uses (the "Decision model" row).
  *
- * The walkthrough itself lives in `src/tui/jevFlow.ts` (provider picker,
+ * The walkthrough itself lives in `src/tui/decisionModelFlow.ts` (provider picker,
  * frictionless reuse of an existing OpenRouter key, consumer picker) and is
  * asked on TUI screens — standalone here, or from the
  * PersonaDetail Jev row. This module owns the WRITE path
- * (`applyJevConfig`) so the two surfaces can never drift, plus the
+ * (`applyDecisionModelConfig`) so the two surfaces can never drift, plus the
  * supporting pieces both sides share: the live key probe, the reusable-key
  * discovery, and the idempotence check.
  *
@@ -30,19 +30,19 @@ import { defineCommand } from "citty";
 
 import {
   type Config,
-  type JevSettings,
+  type DecisionModelSettings,
   loadConfigForPersona,
   personaDir,
   resolvePersona,
 } from "../config.ts";
 import {
-  JEV_DEFAULT_KEY_ENV,
-  JEV_DEFAULT_MODEL,
-  JEV_OPENROUTER_BASE_URL,
-  JEV_TYPESAFE_BASE_URL,
-  jevDecide,
-  type JevFetch,
-} from "../lib/jev.ts";
+  DECISION_MODEL_DEFAULT_KEY_ENV,
+  DECISION_MODEL_DEFAULT_MODEL,
+  DECISION_MODEL_OPENROUTER_BASE_URL,
+  DECISION_MODEL_TYPESAFE_BASE_URL,
+  decisionModelDecide,
+  type DecisionModelFetch,
+} from "../lib/decisionModel.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
 import {
@@ -54,11 +54,11 @@ import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import { maybePromptRestart } from "./harness.ts";
 
 /** One consumer's wizard outcome. Timeouts/thresholds keep their defaults. */
-export interface JevConsumerUpdate {
+export interface DecisionModelConsumerUpdate {
   enabled: boolean;
 }
 
-export interface JevConfigUpdate {
+export interface DecisionModelConfigUpdate {
   provider: "typesafe" | "openrouter";
   model?: string;
   baseUrl?: string;
@@ -70,14 +70,14 @@ export interface JevConfigUpdate {
   keyEnv: string;
   /** A NEW key to store in the vault. Undefined = reuse keyEnv as-is. */
   apiKey?: string;
-  judge: JevConsumerUpdate;
-  router: JevConsumerUpdate;
+  judge: DecisionModelConsumerUpdate;
+  router: DecisionModelConsumerUpdate;
 }
 
-export interface ApplyJevConfigInput {
+export interface ApplyDecisionModelConfigInput {
   config: Config;
   persona: string;
-  update: JevConfigUpdate;
+  update: DecisionModelConfigUpdate;
   /** Test seam for forcing vault failures without touching a real vault. */
   writeSecret?: (
     config: Config,
@@ -106,8 +106,8 @@ function deleteIn(root: Record<string, unknown>, path: readonly string[]): void 
  * resets an operator's tuning, and `api_key` is scrubbed if it ever appears
  * (secrets never live in the plaintext file).
  */
-export async function applyJevConfig(
-  input: ApplyJevConfigInput,
+export async function applyDecisionModelConfig(
+  input: ApplyDecisionModelConfigInput,
 ): Promise<void> {
   const { config, persona, update } = input;
   const configPath = personaConfigPath(config.personasDir, persona);
@@ -134,14 +134,14 @@ export async function applyJevConfig(
 
   await updateConfigToml(configPath, (toml) => {
     setIn(toml, ["jev", "provider"], update.provider);
-    setIn(toml, ["jev", "model"], update.model ?? JEV_DEFAULT_MODEL);
+    setIn(toml, ["jev", "model"], update.model ?? DECISION_MODEL_DEFAULT_MODEL);
     setIn(
       toml,
       ["jev", "base_url"],
       update.baseUrl ??
         (update.provider === "openrouter"
-          ? JEV_OPENROUTER_BASE_URL
-          : JEV_TYPESAFE_BASE_URL),
+          ? DECISION_MODEL_OPENROUTER_BASE_URL
+          : DECISION_MODEL_TYPESAFE_BASE_URL),
     );
     setIn(toml, ["jev", "key_env"], update.keyEnv);
     setIn(toml, ["jev", "judge", "enabled"], update.judge.enabled);
@@ -161,22 +161,22 @@ export async function applyJevConfig(
  * idempotence check. Re-running the wizard and keeping every offered default
  * (including "use the existing key") must write nothing.
  */
-export function jevUpdateEquals(
-  existing: JevSettings | undefined,
-  update: JevConfigUpdate,
+export function decisionModelUpdateEquals(
+  existing: DecisionModelSettings | undefined,
+  update: DecisionModelConfigUpdate,
 ): boolean {
   if (!existing) return false;
   const expectBaseUrl =
     update.baseUrl ??
     (update.provider === "openrouter"
-      ? JEV_OPENROUTER_BASE_URL
-      : JEV_TYPESAFE_BASE_URL);
+      ? DECISION_MODEL_OPENROUTER_BASE_URL
+      : DECISION_MODEL_TYPESAFE_BASE_URL);
   // A re-used key means "no credential change"; a NEW typed key always
   // counts as a change worth writing.
   if (update.apiKey !== undefined) return false;
   return (
     existing.provider === update.provider &&
-    existing.model === (update.model ?? JEV_DEFAULT_MODEL) &&
+    existing.model === (update.model ?? DECISION_MODEL_DEFAULT_MODEL) &&
     existing.baseUrl === expectBaseUrl &&
     existing.keyEnv === update.keyEnv &&
     existing.judge.enabled === update.judge.enabled &&
@@ -185,7 +185,7 @@ export function jevUpdateEquals(
 }
 
 /** A credential the Jev wizard can offer to reuse, with a human label. */
-export interface ReusableJevKey {
+export interface ReusableDecisionModelKey {
   env: string;
   label: string;
 }
@@ -204,11 +204,11 @@ export interface ReusableJevKey {
  * into a target vault that does not contain it. Never throws — an
  * unopenable vault degrades to the guarded ambient fallback.
  */
-export async function findReusableJevKeys(
+export async function findReusableDecisionModelKeys(
   config: Config,
   persona?: string,
-): Promise<ReusableJevKey[]> {
-  const out: ReusableJevKey[] = [];
+): Promise<ReusableDecisionModelKey[]> {
+  const out: ReusableDecisionModelKey[] = [];
   const seen = new Set<string>();
   const add = async (env: string, label: string) => {
     if (seen.has(env)) return;
@@ -217,7 +217,7 @@ export async function findReusableJevKeys(
     seen.add(env);
     out.push({ env, label });
   };
-  await add(JEV_DEFAULT_KEY_ENV, "the Jev key already in the vault");
+  await add(DECISION_MODEL_DEFAULT_KEY_ENV, "the decision-model key already in the vault");
   const embeddingsUrl = config.embeddings.openaiCompatible?.baseUrl ?? "";
   if (/openrouter\.ai/i.test(embeddingsUrl)) {
     await add(
@@ -238,16 +238,16 @@ export async function findReusableJevKeys(
  * the first held message — the same gate the embedding and voice wizards
  * apply. Also used by the /status probe.
  */
-export async function validateJevKey(settings: {
+export async function validateDecisionModelKey(settings: {
   baseUrl: string;
   apiKey: string;
   model?: string;
-  fetchImpl?: JevFetch;
+  fetchImpl?: DecisionModelFetch;
 }): Promise<{ ok: boolean; error?: string }> {
-  const r = await jevDecide({
+  const r = await decisionModelDecide({
     baseUrl: settings.baseUrl,
     apiKey: settings.apiKey,
-    model: settings.model ?? JEV_DEFAULT_MODEL,
+    model: settings.model ?? DECISION_MODEL_DEFAULT_MODEL,
     instructions: "Answer the validation ping.",
     state: "Validation ping.",
     questions: {
@@ -271,7 +271,7 @@ interface RunInput {
   deprecated?: boolean;
 }
 
-export async function runJev(input: RunInput = {}): Promise<number> {
+export async function runDecisionModel(input: RunInput = {}): Promise<number> {
   const err = process.stderr;
   if (input.deprecated) {
     err.write(
@@ -293,32 +293,32 @@ export async function runJev(input: RunInput = {}): Promise<number> {
 
   const deps = {
     existing: config.jev,
-    reusableKeys: await findReusableJevKeys(config, persona),
+    reusableKeys: await findReusableDecisionModelKeys(config, persona),
     validate: (settings: { baseUrl: string; apiKey: string; model?: string }) =>
-      validateJevKey(settings),
+      validateDecisionModelKey(settings),
   };
 
   const finish = async (
     chosen:
       | { rejected: string }
-      | { update: JevConfigUpdate; summary: string }
+      | { update: DecisionModelConfigUpdate; summary: string }
       | undefined,
   ): Promise<string> => {
     if (!chosen) return "decision model unchanged";
     if ("rejected" in chosen)
       return `decision model unchanged — rejected: ${chosen.rejected}`;
-    if (jevUpdateEquals(config.jev, chosen.update))
+    if (decisionModelUpdateEquals(config.jev, chosen.update))
       return "decision model unchanged — already set";
-    await applyJevConfig({ config, persona, update: chosen.update });
+    await applyDecisionModelConfig({ config, persona, update: chosen.update });
     return `decision model saved: ${chosen.summary}`;
   };
 
   if (process.stdin.isTTY) {
     const { runStandaloneFlow } = await import("../tui/standalone.tsx");
-    const { configureJev } = await import("../tui/jevFlow.ts");
+    const { configureDecisionModel } = await import("../tui/decisionModelFlow.ts");
     const svc = input.serviceControl ?? defaultServiceControl();
     return await runStandaloneFlow(async (q) => {
-      const chosen = await configureJev(
+      const chosen = await configureDecisionModel(
         persona,
         { choose: (opts) => q.choose(opts), value: (opts) => q.value(opts) },
         deps,
@@ -347,9 +347,9 @@ export async function runJev(input: RunInput = {}): Promise<number> {
   }
 
   // Non-TTY fallback: the same flow asked through clack.
-  const { configureJev } = await import("../tui/jevFlow.ts");
+  const { configureDecisionModel } = await import("../tui/decisionModelFlow.ts");
   p.intro("Configure the decision model");
-  const chosen = await configureJev(
+  const chosen = await configureDecisionModel(
     persona,
     {
       choose: async (opts) => {
@@ -395,7 +395,7 @@ export default defineCommand({
     },
   },
   async run({ args }) {
-    process.exitCode = await runJev({
+    process.exitCode = await runDecisionModel({
       persona: args.persona as string | undefined,
       deprecated: true,
     });

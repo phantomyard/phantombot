@@ -23,7 +23,7 @@ import {
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
 import * as vault from "../src/lib/vault.ts";
-import { loadJevHealth } from "../src/lib/jevHealth.ts";
+import { loadDecisionModelHealth } from "../src/lib/decisionModelHealth.ts";
 
 const FAKE_PI = resolve(__dirname, "fixtures/fake-pi.sh");
 
@@ -737,7 +737,7 @@ describe("PiHarness routing (subprocess)", () => {
         mode: "native",
         command: [FAKE_PI],
         routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
-        jevRouter: {
+        decisionModelRouter: {
           baseUrl: "https://jev.test/api/v1",
           model: "typesafe/jev-1.13",
           keyEnv: "PHANTOMBOT_JEV_TEST_KEY",
@@ -754,7 +754,7 @@ describe("PiHarness routing (subprocess)", () => {
       expect(chunks.some((c) => c.type === "done")).toBe(true);
       // The write is fire-and-forget on the turn's critical path.
       await Bun.sleep(20);
-      const health = await loadJevHealth(join(personasDir, "robbie"));
+      const health = await loadDecisionModelHealth(join(personasDir, "robbie"));
       expect(health.router!.calls).toBe(1);
       expect(health.router!.fallbacks).toBe(1);
       expect(health.router!.last_error).toContain("PHANTOMBOT_JEV_TEST_KEY");

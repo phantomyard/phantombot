@@ -2129,7 +2129,7 @@ describe("runDoctor — decision model (issue #597)", () => {
     checkEditorConnectors: false,
   } as const;
 
-  function withJev(judge = true, router = false): Config {
+  function withDecisionModel(judge = true, router = false): Config {
     return {
       ...config,
       jev: {
@@ -2165,7 +2165,7 @@ describe("runDoctor — decision model (issue #597)", () => {
 
   test("enabled with no calls yet reads ok, not degraded", async () => {
     const out = new CaptureStream();
-    const code = await runDoctor({ config: withJev(), out, ...DISABLED });
+    const code = await runDoctor({ config: withDecisionModel(), out, ...DISABLED });
     expect(code).toBe(0);
     expect(out.text).toContain("decision model: ok");
     expect(out.text).toContain("no calls recorded");
@@ -2184,7 +2184,7 @@ describe("runDoctor — decision model (issue #597)", () => {
       },
     });
     const out = new CaptureStream();
-    const code = await runDoctor({ config: withJev(), out, ...DISABLED });
+    const code = await runDoctor({ config: withDecisionModel(), out, ...DISABLED });
     expect(out.text).toContain("decision model: DEGRADED");
     expect(out.text).toContain("judge fell back 4/9");
     expect(out.text).toContain("401 Unauthorized");
@@ -2208,14 +2208,14 @@ describe("runDoctor — decision model (issue #597)", () => {
       },
     });
     const out = new CaptureStream();
-    await runDoctor({ config: withJev(true, false), out, ...DISABLED });
+    await runDoctor({ config: withDecisionModel(true, false), out, ...DISABLED });
     expect(out.text).toContain("decision model: ok");
     expect(out.text).not.toContain("DEGRADED");
   });
 
   test("configured but no consumer enabled says who IS deciding", async () => {
     const out = new CaptureStream();
-    await runDoctor({ config: withJev(false, false), out, ...DISABLED });
+    await runDoctor({ config: withDecisionModel(false, false), out, ...DISABLED });
     expect(out.text).toContain("no consumer enabled");
     expect(out.text).toContain("harness judge");
   });
@@ -2225,7 +2225,7 @@ describe("runDoctor — decision model (issue #597)", () => {
     // falls back on every call while an empty ledger would otherwise print
     // "no calls recorded". Doctor derives the degraded state from
     // enabled + no key; it must not wait for the first screened turn.
-    const cfg = withJev() as unknown as { jev: { apiKey?: string } } & Config;
+    const cfg = withDecisionModel() as unknown as { jev: { apiKey?: string } } & Config;
     delete cfg.jev.apiKey;
     const out = new CaptureStream();
     const code = await runDoctor({ config: cfg, out, ...DISABLED });
@@ -2253,7 +2253,7 @@ describe("runDoctor — decision model (issue #597)", () => {
       },
     });
     const out = new CaptureStream();
-    const code = await runDoctor({ config: withJev(), out, ...DISABLED });
+    const code = await runDoctor({ config: withDecisionModel(), out, ...DISABLED });
     expect(code).toBe(0);
     expect(out.text).toContain("decision model: ok");
     expect(out.text).not.toContain("DEGRADED");

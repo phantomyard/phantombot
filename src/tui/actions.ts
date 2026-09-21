@@ -34,7 +34,7 @@ import { type Config, personaDir, servedPersonasOf } from "../config.ts";
 import { applyEmbeddingConfig } from "../cli/embedding.ts";
 import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { applyVoiceConfig } from "../cli/voice.ts";
-import { applyJevConfig, type JevConfigUpdate } from "../cli/jev.ts";
+import { applyDecisionModelConfig, type DecisionModelConfigUpdate } from "../cli/jev.ts";
 import { runMemoryIndex } from "../cli/memory.ts";
 import type { EmbedProgress } from "../lib/embedJob.ts";
 import {
@@ -252,13 +252,13 @@ export async function applyVoice(
   return r.ok ? { ok: true } : { ok: false, error: r.stderr ?? "restart failed" };
 }
 
-export interface ApplyJevInputTui {
+export interface ApplyDecisionModelInputTui {
   config: Config;
   persona: string;
-  update: JevConfigUpdate;
+  update: DecisionModelConfigUpdate;
 }
 
-export function describeJevChange(update: JevConfigUpdate): Consequence {
+export function describeDecisionModelChange(update: DecisionModelConfigUpdate): Consequence {
   const judgeOn = update.judge.enabled;
   const routerOn = update.router.enabled;
   const what =
@@ -281,17 +281,17 @@ export function describeJevChange(update: JevConfigUpdate): Consequence {
 }
 
 /**
- * The Decision model row's write path — the same `applyJevConfig` the CLI
+ * The Decision model row's write path — the same `applyDecisionModelConfig` the CLI
  * calls, so the TUI and `phantombot decision-model` can never write
  * different shapes of `[jev]`. Unlike voice there is no listener to bounce
  * here; the daemon picks [jev] up on its next start, which is why the
  * callers offer the restart.
  */
-export async function applyJev(
-  input: ApplyJevInputTui,
+export async function applyDecisionModel(
+  input: ApplyDecisionModelInputTui,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    await applyJevConfig({
+    await applyDecisionModelConfig({
       config: input.config,
       persona: input.persona,
       update: input.update,
