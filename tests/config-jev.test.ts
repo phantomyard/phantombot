@@ -103,6 +103,41 @@ describe("config [jev]", () => {
     expect(config.jev!.judge.enabled).toBe(true);
   });
 
+  test("an UNKNOWN provider still loads (coerced to openrouter) — loudly", async () => {
+    // A future decision-model vendor written into a today-binary config
+    // must not wedge startup or silently rewrite the operator's intent.
+    // The value coerces to the OpenRouter transport (unchanged behaviour)
+    // but log.warn names it and points at the portability surface, so the
+    // next decision-model vendor is anticipated without a release dance.
+    let config = await loadConfig();
+    await writePersonaToml(
+      config,
+      '[jev]\nprovider = "acme"\nbase_url = "https://api.acme.dev/v1"\n',
+    );
+    const lines: string[] = [];
+    const original = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      config = await loadConfig();
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(config.jev!.provider).toBe("openrouter");
+    // The operator's base_url is honoured regardless of the transport name.
+    expect(config.jev!.baseUrl).toBe("https://api.acme.dev/v1");
+    // The coercion is NOT silent: the warning names the stated provider.
+    const msgs = lines
+      .flatMap((l) => l.split("\n"))
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l).msg as string);
+    expect(
+      msgs.some((m) => m.includes("provider 'acme'") && m.includes("key_env")),
+    ).toBe(true);
+  });
+
   test("a legacy mode key is INERT — an enabled consumer always decides", async () => {
     // `mode = "shadow"` shipped in a pre-merge draft. A host that still has
     // it in config.toml must not read as configured-but-not-deciding: the

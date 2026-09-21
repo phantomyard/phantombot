@@ -113,6 +113,13 @@ are **rejected at config load**, because threshold 101 would silently
 disable every hold and a non-positive timeout can throw inside
 `AbortSignal.timeout`.
 
+An unrecognised `provider` is the one value that does **not** reject: the
+block still loads and the value coerces to the OpenRouter transport (today's
+default), but a warning names what was stated and points at the portability
+surface (`base_url` + `model` + `key_env`) — a future vendor's value written
+into a today-binary config must never wedge startup, and the operator's
+intent must never be rewritten silently.
+
 Every field has an env override (`PHANTOMBOT_JEV_PROVIDER`, `_MODEL`,
 `_BASE_URL`, `_KEY_ENV`, `_JUDGE`, `_ROUTER`),
 env beats TOML as everywhere in phantombot. An `api_key` written into the

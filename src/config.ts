@@ -2593,9 +2593,29 @@ function buildJevConfig(
     );
   }
 
+  const statedProvider =
+    asString(process.env.PHANTOMBOT_JEV_PROVIDER) ?? asString(tomlJev.provider);
+  if (
+    statedProvider !== undefined &&
+    statedProvider !== "typesafe" &&
+    statedProvider !== "openrouter"
+  ) {
+    // A FUTURE decision-model vendor (the [jev] surface is meant to outlive
+    // Jev itself). Today only two transports exist, so the value would
+    // silently coerce to the OpenRouter transport below — the operator's
+    // intent would be silently rewritten and the probe would report a
+    // provider they never configured. Keep loading (nothing breaks; the
+    // portability surface is base_url + model + key_env, all free strings)
+    // but say so loudly rather than quietly.
+    log.warn(
+      `config: [jev] provider '${statedProvider}' is not a known transport ` +
+        "(typesafe | openrouter) — reading it as the OpenRouter transport. " +
+        "A different vendor today needs its own decisions endpoint in `base_url`; " +
+        "the model id travels in `model` and its credential in `key_env`.",
+    );
+  }
   const provider =
-    (asString(process.env.PHANTOMBOT_JEV_PROVIDER) ??
-    asString(tomlJev.provider)) === "typesafe"
+    statedProvider === "typesafe"
       ? ("typesafe" as const)
       : ("openrouter" as const);
 
