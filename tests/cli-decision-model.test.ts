@@ -30,6 +30,14 @@ async function resolveMeta(cmd: typeof decisionModelCmd) {
 
 let workdir: string;
 const SAVED_CONFIG = process.env.PHANTOMBOT_CONFIG;
+// The preload (tests/testEnvIsolation.ts) points XDG_DATA_HOME at the suite's
+// isolation root; DELETING it here leaked that redirect for every file that
+// ran after this one, so the next test reaching a state-writing path resolved
+// the default store against the REAL host and the isolation guard in
+// src/state.ts threw (deterministic once bun ran this file before
+// cli-doctor.test.ts). Restore, never delete.
+const SAVED_XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME;
+const SAVED_XDG_DATA_HOME = process.env.XDG_DATA_HOME;
 const savedErrWrite = process.stderr.write.bind(process.stderr);
 let errText = "";
 
@@ -52,8 +60,10 @@ afterEach(async () => {
   if (SAVED_CONFIG === undefined) delete process.env.PHANTOMBOT_CONFIG;
   else process.env.PHANTOMBOT_CONFIG = SAVED_CONFIG;
   delete process.env.PHANTOMBOT_PERSONA;
-  delete process.env.XDG_CONFIG_HOME;
-  delete process.env.XDG_DATA_HOME;
+  if (SAVED_XDG_CONFIG_HOME === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = SAVED_XDG_CONFIG_HOME;
+  if (SAVED_XDG_DATA_HOME === undefined) delete process.env.XDG_DATA_HOME;
+  else process.env.XDG_DATA_HOME = SAVED_XDG_DATA_HOME;
   _resetVaultTrackingForTesting();
   (process.stderr as any).write = savedErrWrite;
   await rm(workdir, { recursive: true, force: true });
