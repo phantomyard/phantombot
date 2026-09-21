@@ -1733,11 +1733,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     if (dm.degraded) {
       out.write(
         dm.key_missing
-          ? "  → every call falls back to the pre-Jev method until the key " +
-              "resolves. Store it with `phantombot jev`; screening and " +
-              "routing still work meanwhile\n"
-          : `  → falling back to the pre-Jev method on those calls ` +
-              `(last ${dm.window_hours}h). Check the key with \`phantombot jev\` ` +
+          ? "  → every call falls back to the harness judge / keyword scorer " +
+              "until the key resolves. Store it with `phantombot " +
+              "decision-model`; screening and routing still work meanwhile\n"
+          : `  → falling back to the harness judge / keyword scorer on those calls ` +
+              `(last ${dm.window_hours}h). Check the key with \`phantombot decision-model\` ` +
               "and the provider's status; screening and routing still work meanwhile\n",
       );
     }

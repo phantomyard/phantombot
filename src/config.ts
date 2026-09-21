@@ -924,8 +924,9 @@ export interface Config {
    * primary|coder brain-swap router. UNDEFINED unless a `[jev]` block (or a
    * PHANTOMBOT_JEV_* env var) configures it — a user with neither token sees
    * no behaviour change whatsoever. When present, each consumer is still
-   * individually disabled by default; the wizard (`phantombot jev`) flips
-   * them on. Jev is never a harness and can never serve a turn.
+   * individually disabled by default; the wizard (`phantombot
+   * decision-model`) flips them on. Jev is never a harness and can never
+   * serve a turn.
    */
   jev?: JevSettings;
 
@@ -2573,7 +2574,7 @@ export interface BuildJevOptions {
  * Build the `[jev]` block. UNDEFINED when nothing configures Jev — no block,
  * no PHANTOMBOT_JEV_* env — so an unconfigured user sees zero behaviour
  * change. When present, both consumers still default to disabled; the wizard
- * (`phantombot jev` / the TUI Jev row) flips them on.
+ * (`phantombot decision-model` / the TUI Decision model row) flips them on.
  *
  * The API key is vault/env-only. An `api_key` key in the TOML block is
  * IGNORED with a warning — secrets never belong in the plaintext file.
@@ -2588,7 +2589,7 @@ function buildJevConfig(
     log.warn(
       "config: [jev] api_key in config.toml is ignored — Jev keys live in " +
         `the vault (${JEV_DEFAULT_KEY_ENV} or the configured key_env). ` +
-        "Run `phantombot jev` to store it properly, and remove it from the file.",
+        "Run `phantombot decision-model` to store it properly, and remove it from the file.",
     );
   }
 

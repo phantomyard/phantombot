@@ -1,6 +1,14 @@
 /**
- * `phantombot jev` — configure the optional TypeSafe Jev backend (issue
- * #597) for the threat judge and/or the brain-swap router.
+ * `phantombot decision-model` — configure the optional decision model
+ * (issue #597; TypeSafe Jev today) for the threat judge and/or the
+ * brain-swap router.
+ *
+ * The CANONICAL command is `src/cli/decision-model.ts`; this module owns
+ * everything behind it AND the deprecated `phantombot jev` alias (the
+ * `env` → `vault` pattern: the alias prints a one-line notice to stderr and
+ * forwards to the same `runJev`), so existing scripts and muscle memory
+ * keep working while the interface standardizes on the general concept the
+ * TUI already uses (the "Decision model" row).
  *
  * The walkthrough itself lives in `src/tui/jevFlow.ts` (provider picker,
  * frictionless reuse of an existing OpenRouter key, consumer picker) and is
@@ -259,10 +267,17 @@ interface RunInput {
   persona?: string;
   config?: Config;
   serviceControl?: ServiceControl;
+  /** True when invoked through the deprecated `phantombot jev` alias. */
+  deprecated?: boolean;
 }
 
 export async function runJev(input: RunInput = {}): Promise<number> {
   const err = process.stderr;
+  if (input.deprecated) {
+    err.write(
+      "note: `phantombot jev` is deprecated — use `phantombot decision-model`. Forwarding to the same flow.\n",
+    );
+  }
   const { config, persona } = input.config
     ? {
         config: input.config,
@@ -289,13 +304,13 @@ export async function runJev(input: RunInput = {}): Promise<number> {
       | { update: JevConfigUpdate; summary: string }
       | undefined,
   ): Promise<string> => {
-    if (!chosen) return "jev unchanged";
+    if (!chosen) return "decision model unchanged";
     if ("rejected" in chosen)
-      return `jev unchanged — rejected: ${chosen.rejected}`;
+      return `decision model unchanged — rejected: ${chosen.rejected}`;
     if (jevUpdateEquals(config.jev, chosen.update))
-      return "jev unchanged — already set";
+      return "decision model unchanged — already set";
     await applyJevConfig({ config, persona, update: chosen.update });
-    return `jev saved: ${chosen.summary}`;
+    return `decision model saved: ${chosen.summary}`;
   };
 
   if (process.stdin.isTTY) {
@@ -309,7 +324,7 @@ export async function runJev(input: RunInput = {}): Promise<number> {
         deps,
       );
       const message = await finish(chosen);
-      if (message.startsWith("jev saved")) {
+      if (message.startsWith("decision model saved")) {
         await maybePromptRestart(
           svc,
           async (msg) =>
@@ -328,12 +343,12 @@ export async function runJev(input: RunInput = {}): Promise<number> {
         );
       }
       return message;
-    }, ["phantombot", persona, "jev"]);
+    }, ["phantombot", persona, "decision-model"]);
   }
 
   // Non-TTY fallback: the same flow asked through clack.
   const { configureJev } = await import("../tui/jevFlow.ts");
-  p.intro("Configure the Jev screener");
+  p.intro("Configure the decision model");
   const chosen = await configureJev(
     persona,
     {
@@ -369,19 +384,20 @@ export default defineCommand({
   meta: {
     name: "jev",
     description:
-      "Configure the recommended decision model (TypeSafe Jev) for the threat judge and/or brain-swap router. Validates the key before saving.",
+      "DEPRECATED alias for `phantombot decision-model`. Forwards to the same decision-model walkthrough (TypeSafe Jev today).",
   },
   args: {
     persona: {
       type: "string",
       required: false,
       description:
-        "Persona to configure Jev for. Default: PHANTOMBOT_PERSONA env, then the host's default persona.",
+        "Persona to configure the decision model for. Default: PHANTOMBOT_PERSONA env, then the host's default persona.",
     },
   },
   async run({ args }) {
     process.exitCode = await runJev({
       persona: args.persona as string | undefined,
+      deprecated: true,
     });
   },
 });

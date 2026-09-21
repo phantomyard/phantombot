@@ -268,9 +268,9 @@ export function describeJevChange(update: JevConfigUpdate): Consequence {
         ? "the threat judge"
         : routerOn
           ? "the brain-swap router"
-          : "nothing — Jev stays disabled";
+          : "nothing — the decision model stays disabled";
   return {
-    summary: `points ${what} at TypeSafe Jev, then restarts the daemon`,
+    summary: `points ${what} at the decision model (TypeSafe Jev), then restarts the daemon`,
     detail:
       update.apiKey !== undefined
         ? `The new key was validated with one live call and is stored in the vault as ${update.keyEnv}; nothing secret touches config.toml.`
@@ -281,10 +281,11 @@ export function describeJevChange(update: JevConfigUpdate): Consequence {
 }
 
 /**
- * The Jev row's write path — the same `applyJevConfig` the CLI calls, so the
- * TUI and `phantombot jev` can never write different shapes of `[jev]`.
- * Unlike voice there is no listener to bounce here; the daemon picks [jev]
- * up on its next start, which is why the callers offer the restart.
+ * The Decision model row's write path — the same `applyJevConfig` the CLI
+ * calls, so the TUI and `phantombot decision-model` can never write
+ * different shapes of `[jev]`. Unlike voice there is no listener to bounce
+ * here; the daemon picks [jev] up on its next start, which is why the
+ * callers offer the restart.
  */
 export async function applyJev(
   input: ApplyJevInputTui,

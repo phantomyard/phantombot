@@ -2188,7 +2188,8 @@ describe("runDoctor — decision model (issue #597)", () => {
     expect(out.text).toContain("decision model: DEGRADED");
     expect(out.text).toContain("judge fell back 4/9");
     expect(out.text).toContain("401 Unauthorized");
-    expect(out.text).toContain("falling back to the pre-Jev method");
+    expect(out.text).toContain("falling back to the harness judge / keyword scorer");
+    expect(out.text).toContain("phantombot decision-model");
     // Degradation is DESIGNED — screening still happens, so it must never
     // fail the exit code and page someone at 3am.
     expect(code).toBe(0);

@@ -65,8 +65,9 @@ with calibrated `probabilities` and `confidence` per answer. See
 
 ## Configuration
 
-`phantombot jev` (or the **Decision model** row on the persona settings
-screen, `^s`) walks you through it. Provider choice comes **first**:
+`phantombot decision-model` (deprecated alias: `phantombot jev`; or the
+**Decision model** row on the persona settings screen, `^s`) walks you
+through it. Provider choice comes **first**:
 
 - **OpenRouter** — if any OpenRouter credential already exists in the vault
   (e.g. the embeddings `PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY` when its
@@ -120,12 +121,12 @@ plaintext file. Timeouts, threshold and fail_closed are TOML-only and survive
 wizard re-runs (merge semantics: the wizard never resets tuning it doesn't
 ask about).
 
-`/status` reports the Jev line (provider, per-consumer state, live key
-validation), and the settings screen badges from it.
+`/status` reports the decision-model line (provider, per-consumer state,
+live key validation), and the settings screen badges from it.
 
 ## On or off — there is no third state
 
-An enabled consumer **decides**, and the pre-Jev method is the fallback on
+An enabled consumer **decides**, and the built-in method is the fallback on
 any error, timeout or missing key: the harness judge for the screener, the
 keyword scorer for the router. There is no user-visible difference beyond a
 log line and a counter.
@@ -160,7 +161,7 @@ Falling back is silent by design: the turn is still screened, still routed,
 still answered. That is the right runtime behaviour and the wrong
 operational one — an operator who configured a decision model believes it is
 deciding, and a revoked key or a provider outage would otherwise show up
-only as behaviour quietly reverting to the pre-Jev method. That is exactly
+only as behaviour quietly reverting to the built-in method. That is exactly
 the shape of #516, where a revoked embeddings key dropped memory search to
 keyword-only and doctor reported "semantic search off" with no reason.
 
@@ -177,9 +178,9 @@ right now".
 ```
   decision model: DEGRADED — openrouter 'typesafe/jev-1.13' · judge fell back
     4/9 call(s) to the harness judge — last error: 401 Unauthorized
-  → falling back to the pre-Jev method on those calls (last 24h). Check the
-    key with `phantombot jev` and the provider's status; screening and routing
-    still work meanwhile
+  → falling back to the harness judge / keyword scorer on those calls
+    (last 24h). Check the key with `phantombot decision-model` and the
+    provider's status; screening and routing still work meanwhile
 ```
 
 It is **informational, never an exit-code input** — the same neutrality as
@@ -311,6 +312,6 @@ evidence loop for moving either number.
 | Judge call site | `src/orchestrator/screen.ts` |
 | Router call site | `src/harnesses/pi.ts` (threaded via `src/harnesses/buildChain.ts`) |
 | Config | `[jev]` in `src/config.ts` |
-| CLI wizard + write path | `src/cli/jev.ts` (`applyJevConfig`) |
+| CLI wizard + write path | `src/cli/decision-model.ts` (canonical; `phantombot jev` is a deprecated alias) + `src/cli/jev.ts` (`applyJevConfig`) |
 | TUI flow | `src/tui/jevFlow.ts` (Decision model row on `^s`) |
 | Eval | `scripts/evalJevJudge.ts`, `tests/fixtures/jev-*.json` |

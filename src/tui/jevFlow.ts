@@ -1,8 +1,8 @@
 /**
  * The Jev row, as a sequence of SCREEN questions (issue #597).
  *
- * `phantombot jev` asks these through the standalone flow; the PersonaDetail
- * Jev row asks them in-app. The WRITE path stays the CLI's
+ * `phantombot decision-model` asks these through the standalone flow; the
+ * PersonaDetail Jev row asks them in-app. The WRITE path stays the CLI's
  * (`applyJevConfig`), so the two surfaces cannot drift — the same rule the
  * memory and voice flows follow.
  *

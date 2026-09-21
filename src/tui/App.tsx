@@ -1540,9 +1540,9 @@ export function App(props: AppProps): React.ReactElement {
   );
 
   /**
-   * The Jev row, as a flow (`jevFlow.ts`) — provider first, frictionless
-   * reuse of an existing OpenRouter key, independent judge/router consumers,
-   * shadow mode by default. The WRITE path stays the CLI's
+   * The Decision model row, as a flow (`jevFlow.ts`) — provider first,
+   * frictionless reuse of an existing OpenRouter key, independent
+   * judge/router consumers. The WRITE path stays the CLI's
    * (`applyJevConfig` via `applyJev` in actions.ts). Idempotent: esc or
    * keeping every offered default writes nothing.
    */
@@ -1566,11 +1566,13 @@ export function App(props: AppProps): React.ReactElement {
             validate: (settings) => validateJevKey(settings),
           },
         );
-        if (!chosen) return setNotice("jev unchanged");
+        if (!chosen) return setNotice("decision model unchanged");
         if ("rejected" in chosen)
-          return setNotice(`jev unchanged — rejected: ${chosen.rejected}`);
+          return setNotice(
+            `decision model unchanged — rejected: ${chosen.rejected}`,
+          );
         if (jevUpdateEquals(config.jev, chosen.update))
-          return setNotice("jev unchanged — already set");
+          return setNotice("decision model unchanged — already set");
 
         // The restart offer below belongs to a SAVE, not to a visit — a
         // cancelled confirm must not fire it.
@@ -1586,7 +1588,9 @@ export function App(props: AppProps): React.ReactElement {
             });
             saved = r.ok;
             setNotice(
-              r.ok ? `jev saved: ${chosen.summary}` : `failed: ${r.error}`,
+              r.ok
+                ? `decision model saved: ${chosen.summary}`
+                : `failed: ${r.error}`,
             );
             await refresh();
           },
@@ -1613,7 +1617,7 @@ export function App(props: AppProps): React.ReactElement {
             } as never,
           );
       } catch (e) {
-        setNotice(`jev failed: ${(e as Error).message}`);
+        setNotice(`decision model failed: ${(e as Error).message}`);
       } finally {
         setPrompting(false);
         await refresh();

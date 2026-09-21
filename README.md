@@ -276,7 +276,7 @@ phantombot telegram    # BotFather token + allowed Telegram user IDs
 
 phantombot voice       # optional TTS/STT setup
 phantombot embedding   # optional semantic-memory provider setup
-phantombot jev         # optional TypeSafe Jev screener (judge + router)
+phantombot decision-model # optional decision model (TypeSafe Jev today) — judge + router
 
 phantombot run         # foreground host runtime for configured chat channels + P2P
 phantombot run --if-not-running  # supervisor keep-alive; quiet success if already running
@@ -1027,7 +1027,7 @@ Setup and channels:
 | `phantombot phantomchat [--persona <name>]` | Configure PhantomChat identity, relays, and allowlist |
 | `phantombot voice [--persona <name>]` | Configure TTS/STT |
 | `phantombot embedding` | Configure optional Gemini/OpenAI-compatible embeddings, or none |
-| `phantombot jev [--persona <name>]` | Configure the optional TypeSafe Jev screener for the threat judge and/or the brain-swap router |
+| `phantombot decision-model [--persona <name>]` | Configure the optional decision model (TypeSafe Jev today) for the threat judge and/or the brain-swap router. `phantombot jev` remains a deprecated alias |
 | `phantombot acp install zed|jetbrains|vscode` | Register the ACP agent with an editor |
 
 `phantombot persona <name>` switches the daemon-wide default persona.
@@ -2387,7 +2387,8 @@ screen **open**). Jev receives the same ranked drawer briefing
 and the harness judge remains the fallback on any error or missing key —
 every fallback is recorded so `phantombot doctor` can say the decision model
 is degraded instead of the revert being invisible. Configure it with
-`phantombot jev`; the full design, including the both-backends-down
+`phantombot decision-model` (the deprecated `phantombot jev` alias still
+works); the full design, including the both-backends-down
 fail-closed option, is in [docs/jev.md](docs/jev.md).
 
 Each harness runs the judge with its CLI's **native** capability-restriction
