@@ -49,7 +49,7 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/harnesses/types.ts` | `Harness`, `HarnessRequest`, `HarnessChunk` (discriminated union). | — |
 | `src/harnesses/claude.ts` | `Bun.spawn claude --print --output-format stream-json …`. Stdin payload, ANTHROPIC_API_KEY filtered out. | `claude` CLI |
 | `src/harnesses/pi.ts` | `Bun.spawn pi --print --mode json …`. Argv payload (Pi ignores stdin). Declares `maxPayloadBytes`. Also hosts the per-turn primary/coder brain-swap decision (keyword scorer in `lib/coderSwap.ts`, optional Jev router in `lib/jevRouter.ts`). | `pi` CLI |
-| `src/lib/{jev,jevJudge,jevRouter}.ts` | Optional TypeSafe Jev backend (issue #597): one shared typed-decision client, a threat-judge adapter (wired in `orchestrator/screen.ts`) and a primary/coder router adapter (wired in `harnesses/pi.ts`). Shadow-first, the existing methods stay default and fallback. See [jev.md](jev.md). | OpenRouter / TypeSafe API |
+| `src/lib/{jev,jevJudge,jevRouter}.ts` | Optional TypeSafe Jev backend (issue #597): one shared typed-decision client, a threat-judge adapter (wired in `orchestrator/screen.ts`) and a primary/coder router adapter (wired in `harnesses/pi.ts`). Shadow-first, the existing methods stay default and fallback. See [decision-model.md](decision-model.md). | OpenRouter / TypeSafe API |
 | `src/lib/logger.ts` | Structured logs to stdout. | stdout |
 | `src/lib/io.ts` | Shared `WriteSink` interface. | — |
 | `src/lib/platform.ts` | Cross-platform service-manager router. Picks the backend (systemd/launchd/Windows Task Scheduler) and exposes one `ServiceControl` (`isActive`/`start`/`stop`/`restart`/`rerenderUnitIfStale`), plus hint strings and `logsSpec()` for tailing. | `systemd.ts`, `launchd.ts`, `taskScheduler.ts` |
@@ -153,7 +153,7 @@ picture. From an architecture standpoint:
   threat judge's briefing reads the ranked rows — on BOTH judge backends (the
   harness judge and the optional Jev screener get the same ranked drawer text,
   the Jev one packed tighter for its 32k-token budget; see
-  [jev.md](jev.md#briefing-parity-the-load-bearing-requirement)). Markdown is an artefact you can
+  [decision-model.md](decision-model.md#briefing-parity-the-load-bearing-requirement)). Markdown is an artefact you can
   regenerate (`memory drawers --export`), not a second copy of the truth — which
   is why `memory.sqlite` now carries verified, rotating restore points
   (`memory/dbBackup.ts`) and `doctor` checks its integrity.

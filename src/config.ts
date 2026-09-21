@@ -919,7 +919,7 @@ export interface Config {
   voice: import("./lib/voice.ts").VoiceConfig;
 
   /**
-   * Optional TypeSafe Jev backend (issue #597, see docs/jev.md): a cheap,
+   * Optional TypeSafe Jev backend (issue #597, see docs/decision-model.md): a cheap,
    * independent System One screener for the threat judge and/or the
    * primary|coder brain-swap router. UNDEFINED unless a `[jev]` block (or a
    * PHANTOMBOT_JEV_* env var) configures it — a user with neither token sees
@@ -944,7 +944,7 @@ export interface Config {
   p2p?: P2PSettings;
 }
 
-/** One Jev consumer's enablement. See docs/jev.md. */
+/** One Jev consumer's enablement. See docs/decision-model.md. */
 export interface JevConsumerSettings {
   /** Master switch for this consumer. Default false — opt-in per consumer. */
   enabled: boolean;
@@ -975,7 +975,7 @@ export interface JevJudgeSettings extends JevConsumerSettings {
    * judge errored. false (default) = fail open exactly as today; true =
    * hold the turn and notify. Fail-closed only becomes affordable with a
    * cheap independent screener in front, and even then it is the operator's
-   * call — see docs/jev.md for the analysis.
+   * call — see docs/decision-model.md for the analysis.
    */
   failClosed: boolean;
 }
@@ -2521,7 +2521,7 @@ function buildEmbeddingsConfig(
 
 // ───────────────────────────────────────────────────────────────────────────
 // Jev (issue #597) — optional TypeSafe System One backend for the threat
-// judge and the brain-swap router. Docs: docs/jev.md.
+// judge and the brain-swap router. Docs: docs/decision-model.md.
 // ───────────────────────────────────────────────────────────────────────────
 
 /** True when any PHANTOMBOT_JEV_* env var marks Jev as configured. */

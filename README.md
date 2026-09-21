@@ -1699,7 +1699,7 @@ model that returns a typed `primary | coder` choice in ~300 ms instead of
 matching keywords. The keyword scorer stays the default and the fallback; an
 enabled Jev router decides, and any error or missing key falls back to the
 scorer — `phantombot doctor` reports those fallbacks so the degradation is
-never silent. See [docs/jev.md](docs/jev.md).
+never silent. See [docs/decision-model.md](docs/decision-model.md).
 
 Two safety rails keep a swapped turn from ever being *lost*:
 
@@ -2389,7 +2389,7 @@ every fallback is recorded so `phantombot doctor` can say the decision model
 is degraded instead of the revert being invisible. Configure it with
 `phantombot decision-model` (the deprecated `phantombot jev` alias still
 works); the full design, including the both-backends-down
-fail-closed option, is in [docs/jev.md](docs/jev.md).
+fail-closed option, is in [docs/decision-model.md](docs/decision-model.md).
 
 Each harness runs the judge with its CLI's **native** capability-restriction
 flag, not a hand-maintained deny-list (which rots as new tools ship):

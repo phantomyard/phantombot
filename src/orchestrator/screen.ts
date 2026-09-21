@@ -460,7 +460,7 @@ export function makeScreener(
       // error. There is no log-only mode — see JevConsumerSettings. Both down
       // ⇒ fail open as today UNLESS the operator opted into fail-closed
       // (affordable exactly because an independent screener exists — see
-      // docs/jev.md).
+      // docs/decision-model.md).
       const jevResult = await runJevJudge(content, signal).catch((e) => ({
         ok: false as const,
         error: `jev judge threw: ${(e as Error).message}`,

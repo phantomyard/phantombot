@@ -1,6 +1,6 @@
-# Jev — the optional TypeSafe System One screener
+# The decision model (TypeSafe Jev today)
 
-[TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13) is not an LLM. It is a
+The optional decision model is [TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13) — the vendor name appears only as the qualifier, the same way the CLI and the TUI label it. Jev is not an LLM. It is a
 "System One" model: unstructured text in, a **typed choice with a calibrated
 probability** out — no free-text generation at all. Phantombot can use it as a
 dedicated backend for the two places that want exactly that shape:
