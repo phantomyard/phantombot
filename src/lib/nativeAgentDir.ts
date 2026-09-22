@@ -22,7 +22,8 @@
  *
  * The directory is HOST-level (one per machine, not per persona): persona
  * state that varies per turn (delegate models, the API key) travels per-turn
- * via env (`PHANTOMBOT_ROUTING_JSON`, `--api-key`), never via files here.
+ * via env (`PHANTOMBOT_ROUTING_JSON`, the provider's native key var — issue
+ * #602), never via files here.
  */
 
 import { mkdirSync } from "node:fs";

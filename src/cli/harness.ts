@@ -590,11 +590,11 @@ async function configureNative(
     });
     if (apiKey === undefined) return true;
     // Blank means "keep current" ONLY when the provider is unchanged. The
-    // api-key is provider-scoped (threaded onto `--api-key` alongside
-    // `--provider`), so a blank key after a provider switch/clear must DROP
-    // the stale key — otherwise the old provider's key is fired at the new
-    // `--provider` and auth fails. The decision is a pure, tested function;
-    // here we just enact it.
+    // api-key is provider-scoped (relayed per-turn via the provider's native
+    // env var alongside `--provider`), so a blank key after a provider
+    // switch/clear must DROP the stale key — otherwise the old provider's key
+    // is fired at the new `--provider` and auth fails. The decision is a pure,
+    // tested function; here we just enact it.
     keyWrite = resolvePiApiKeyWrite(apiKey, provider, currentRouting.provider);
     const candidate =
       keyWrite.action === "set"

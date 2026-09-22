@@ -80,7 +80,12 @@ case "$mode" in
     if [ -n "${PHANTOMBOT_ROUTING_JSON-}" ] && [ -f "${PHANTOMBOT_ROUTING_JSON}" ]; then
       routejson=$(tr -d '\n ' < "${PHANTOMBOT_ROUTING_JSON}" | sed 's/"/\\"/g')
     fi
-    joined="primary=${PHANTOMBOT_PRIMARY_MODEL-} image=${PHANTOMBOT_IMAGE_MODEL-} coding=${PHANTOMBOT_CODING_MODEL-} provider=${PHANTOMBOT_PI_PROVIDER-} apikey=${PHANTOMBOT_PI_API_KEY-} nodeopts=${NODE_OPTIONS-} routing=${routejson}"
+    joined="primary=${PHANTOMBOT_PRIMARY_MODEL-} image=${PHANTOMBOT_IMAGE_MODEL-} coding=${PHANTOMBOT_CODING_MODEL-} provider=${PHANTOMBOT_PI_PROVIDER-} apikey=${PHANTOMBOT_PI_API_KEY-} nodeopts=${NODE_OPTIONS-} routing=${routejson} keyenv=${PHANTOMBOT_PI_KEY_ENV-}"
+    # The provider's NATIVE key var (named by PHANTOMBOT_PI_KEY_ENV), echoed via
+    # indirect expansion so tests can assert the key relayed under it (#602).
+    if [ -n "${PHANTOMBOT_PI_KEY_ENV-}" ]; then
+      joined+=" native=${PHANTOMBOT_PI_KEY_ENV}=${!PHANTOMBOT_PI_KEY_ENV}"
+    fi
     printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"env: ${joined}\",\"partial\":{}},\"message\":{}}"
     printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
     exit 0

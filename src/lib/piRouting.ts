@@ -63,20 +63,34 @@ export const ENV_CODING_MODEL = "PHANTOMBOT_CODING_MODEL";
  */
 export const ENV_PI_PROVIDER = "PHANTOMBOT_PI_PROVIDER";
 /**
- * The Pi provider API key, threaded per-turn onto `pi --api-key <key>` exactly
- * the way the model is threaded onto `--model` — NOT persisted into Pi's own
- * auth store (~/.pi). Phantomops owns long-term key storage in production; here
- * the wizard's "configure now" path may stash one in ~/.env so a single box can
- * run standalone. The contract is a graceful three-tier fallback for auth:
- *   1. this env var present  → `--api-key` is passed (wins).
- *   2. absent                → no `--api-key`; Pi falls back to its OWN env vars
- *                              / local store settings (the "install later, no
- *                              key" path — legacy installs keep working).
+ * The Pi provider API key, relayed per-turn to the child via the provider's
+ * NATIVE env var (e.g. OPENROUTER_API_KEY, resolved via PI_PROVIDER_CATALOG —
+ * see ENV_PI_KEY_ENV) — NOT persisted into Pi's own auth store (~/.pi), and
+ * NEVER onto the command line: /proc/<pid>/cmdline is world-readable for the
+ * process's lifetime, so an argv key exposes the credential to every local
+ * user (issue #602); environ is 0400 owner-only. Phantomops owns long-term key
+ * storage in production; here the wizard's "configure now" path may stash one
+ * in ~/.env so a single box can run standalone. The contract is a graceful
+ * three-tier fallback for auth:
+ *   1. this env var present  → the native provider var is projected (wins).
+ *   2. absent                → the native var is actively CLEARED; Pi falls
+ *                              back to its OWN env vars / local store settings
+ *                              (the "install later, no key" path — legacy
+ *                              installs keep working).
  *   3. neither               → Pi errors as it normally would.
- * Empty / unset ⇒ omit the flag (tier 2). Never written by computeRoutingWrites;
- * it's collected separately by the wizard and read directly in harnesses/pi.ts.
+ * Empty / unset ⇒ tier 2. Never written by computeRoutingWrites; it's collected
+ * separately by the wizard and read directly in harnesses/pi.ts.
  */
 export const ENV_PI_API_KEY = "PHANTOMBOT_PI_API_KEY";
+/**
+ * Names the provider's NATIVE env var the API key was relayed under (e.g.
+ * "OPENROUTER_API_KEY"), so the capability-routing extension can pass the key
+ * to its OWN delegate pi children via env too — never onto their argv (issue
+ * #602). Empty / unset ⇒ no native var for this provider (not in the catalog);
+ * the extension falls back to the legacy `--api-key` argv flag, same as the
+ * parent harness.
+ */
+export const ENV_PI_KEY_ENV = "PHANTOMBOT_PI_KEY_ENV";
 /**
  * Base dir for the pi capability-routing extension's `phantombot-route-*` temp
  * files (issue #365). The pi harness sets this per-child to the persona's own
@@ -123,7 +137,7 @@ export interface PiRoutingConfig {
    * (`use_local_config = true`, written by the wizard's "Use Pi's own config"
    * path — see ROUTING_LOCAL_CONFIG_KEY). Every other field is undefined when
    * this is set, and the pi harness passes no `--provider` / `--model` /
-   * `--api-key` at all.
+   * key at all.
    */
   useLocalConfig?: boolean;
 }
@@ -165,7 +179,8 @@ export function resolveRoutingProvider(
  *
  * The key prompt treats blank as "keep whatever's already in ~/.env" — but that
  * is ONLY safe when the provider is unchanged. The api-key is provider-scoped:
- * it's threaded per-turn onto `pi --api-key` ALONGSIDE `pi --provider`, and Pi's
+ * it's relayed per-turn via the provider's native env var ALONGSIDE `pi
+ * --provider`, and Pi's
  * `--provider` defaults to google, so a key from the OLD provider fired at a NEW
  * `--provider` (or at no provider) auth-fails. So if the operator switched
  * providers (or cleared the provider to "(none)") and left the key blank, the
@@ -366,7 +381,7 @@ export const ROUTING_TOML_KEYS = [
  * `pi --provider` DEFAULTS TO GOOGLE, so a surviving PHANTOMBOT_PI_API_KEY (say
  * an OpenRouter key) with the provider erased would be fired at Google every
  * turn and auth-fail. Clearing the key restores the documented tier-2 fallback
- * (no `--api-key` flag ⇒ Pi uses its own auth store), which is exactly what
+ * (native key var cleared ⇒ Pi uses its own auth store), which is exactly what
  * "use Pi's own config" means.
  *
  * "" is the unset sentinel for env writes (updateEnvFile / computeRoutingWrites

@@ -409,18 +409,18 @@ let originalMode: string | undefined;
 // that is now the leak this stub closes: on any machine where the running
 // persona genuinely has Pi configured (a dev box, Lena), the reload injects a
 // real PHANTOMBOT_PI_API_KEY / PHANTOMBOT_PI_PROVIDER into process.env, undoing
-// the `delete process.env…` these tests rely on and breaking the "no key → no
-// --api-key flag" assertions off the test author's machine. These tests assert
-// argv / child-env construction against the process.env each test sets, so the
-// reload is stubbed to a no-op and asserted separately below.
+// the `delete process.env…` these tests rely on and breaking the "no key →
+// native var cleared" assertions off the test author's machine. These tests
+// assert argv / child-env construction against the process.env each test sets,
+// so the reload is stubbed to a no-op and asserted separately below.
 let vaultReloadSpy: ReturnType<typeof spyOn> | undefined;
 
 // The same leak, one layer up: the shell running the suite may ALREADY carry a
-// vault-injected key (PHANTOMBOT_PI_API_KEY*, OPENROUTER_API_KEY). A native
-// slot with a provider and no key now fails loudly, so a test that forgot to
-// set a key passed on a dev box and failed on CI. Scrub them per test; a test
-// that needs a key sets its own.
-const AMBIENT_KEY = /^(PHANTOMBOT_PI_API_KEY(_[A-Z0-9_]+)?|OPENROUTER_API_KEY)$/;
+// vault-injected key (PHANTOMBOT_PI_API_KEY*, OPENROUTER_API_KEY, and the
+// #602 relay var PHANTOMBOT_PI_KEY_ENV). A native slot with a provider and no
+// key now fails loudly, so a test that forgot to set a key passed on a dev box
+// and failed on CI. Scrub them per test; a test that needs a key sets its own.
+const AMBIENT_KEY = /^(PHANTOMBOT_PI_API_KEY(_[A-Z0-9_]+)?|OPENROUTER_API_KEY|PHANTOMBOT_PI_KEY_ENV)$/;
 let savedKeys: Record<string, string> = {};
 
 beforeEach(() => {
@@ -879,42 +879,85 @@ describe("PiHarness routing (subprocess)", () => {
     }
   });
 
-  test("PHANTOMBOT_PI_API_KEY is threaded onto --api-key per turn", async () => {
+  test("PHANTOMBOT_PI_API_KEY travels via the provider's NATIVE env var, never argv (#602)", async () => {
+    // /proc/<pid>/cmdline is world-readable; environ is 0400. The key must be
+    // relayed under the provider's native var (resolved via the catalog), and
+    // PHANTOMBOT_PI_KEY_ENV must name that var for the extension's delegates.
     process.env.FAKE_PI_MODE = "argv";
     process.env.PHANTOMBOT_PI_API_KEY = "sk-test-key";
     try {
-      const chunks = await collect(mkHarness().invoke(newRequest()));
+      const chunks = await collect(
+        new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(newRequest()),
+      );
       const argv = chunks
         .filter((c) => c.type === "text")
         .map((c) => (c as { text: string }).text)
         .join("");
-      expect(argv).toContain("--api-key sk-test-key");
+      expect(argv).not.toContain("--api-key");
+      expect(argv).not.toContain("sk-test-key");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+    }
+    // Env path: the native var carries the key, ENV_PI_KEY_ENV names it.
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test-key";
+    try {
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(newRequest()),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(out).toContain("keyenv=OPENROUTER_API_KEY");
+      expect(out).toContain("native=OPENROUTER_API_KEY=sk-test-key");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+    }
+  });
+
+  test("a provider missing from the catalog falls back to the legacy --api-key argv flag", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-exotic-key";
+    try {
+      const chunks = await collect(
+        new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "some-live-only-provider", primaryModel: "model-a" } }).invoke(newRequest()),
+      );
+      const argv = chunks
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(argv).toContain("--api-key sk-exotic-key");
     } finally {
       delete process.env.PHANTOMBOT_PI_API_KEY;
     }
   });
 
   test("a named Pi instance reads only its instance-specific API key", async () => {
-    process.env.FAKE_PI_MODE = "argv";
+    process.env.FAKE_PI_MODE = "env";
     process.env.PHANTOMBOT_PI_API_KEY = "legacy-wrong-key";
     process.env.PHANTOMBOT_PI_API_KEY_PI_PRIMARY = "primary-right-key";
     try {
-      const chunks = await collect(
-        new PiHarness({
-          bin: FAKE_PI,
-          mode: "native",
-          command: [FAKE_PI],
-          id: "pi-primary",
-          apiKeyEnv: "PHANTOMBOT_PI_API_KEY_PI_PRIMARY",
-          routing: { provider: "openrouter", primaryModel: "model-a" },
-        }).invoke(newRequest()),
-      );
-      const argv = chunks
+      const out = (
+        await collect(
+          new PiHarness({
+            bin: FAKE_PI,
+            mode: "native",
+            command: [FAKE_PI],
+            id: "pi-primary",
+            apiKeyEnv: "PHANTOMBOT_PI_API_KEY_PI_PRIMARY",
+            routing: { provider: "openrouter", primaryModel: "model-a" },
+          }).invoke(newRequest()),
+        )
+      )
         .filter((c) => c.type === "text")
         .map((c) => (c as { text: string }).text)
         .join("");
-      expect(argv).toContain("--api-key primary-right-key");
-      expect(argv).not.toContain("legacy-wrong-key");
+      // The native env var must carry ONLY the instance's own key — the legacy
+      // ambient value must never reach the child (#602: env is the relay).
+      expect(out).toContain("native=OPENROUTER_API_KEY=primary-right-key");
+      expect(out).not.toContain("legacy-wrong-key");
     } finally {
       delete process.env.PHANTOMBOT_PI_API_KEY;
       delete process.env.PHANTOMBOT_PI_API_KEY_PI_PRIMARY;
@@ -922,6 +965,10 @@ describe("PiHarness routing (subprocess)", () => {
   });
 
   test("no PHANTOMBOT_PI_API_KEY → no --api-key flag (Pi falls back to its own store)", async () => {
+    // Native + provider + no key fails LOUDLY before spawn (asserted below), so
+    // the keyless-spawn path here is the providerless/native-legacy one: no
+    // native var is named, no flag is passed, and Pi reads its own env/store —
+    // the documented tier-2 fallback.
     process.env.FAKE_PI_MODE = "argv";
     delete process.env.PHANTOMBOT_PI_API_KEY;
     const chunks = await collect(mkHarness().invoke(newRequest()));

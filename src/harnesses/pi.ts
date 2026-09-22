@@ -23,11 +23,16 @@
  *   anything else (agent_start, agent_end, agent_settled,
  *     tool_execution_end, extension_*) → ignored
  *
- * Auth (per-turn, with local-store fallback): when PHANTOMBOT_PI_API_KEY is
- * set, phantombot threads it onto `--api-key` per turn (the same way it threads
- * `--model`) — never persisting it into Pi's own auth store. When it's UNSET,
- * phantombot passes no `--api-key` and Pi falls back to its own env / local
- * store settings, so an "install later, no key" or legacy install keeps working.
+ * Auth (per-turn, via env): when PHANTOMBOT_PI_API_KEY is set, phantombot
+ * relays the key to the child through the provider's NATIVE env var (e.g.
+ * OPENROUTER_API_KEY — resolved via PI_PROVIDER_CATALOG), never onto the
+ * command line: /proc/<pid>/cmdline is world-readable while environ is 0400
+ * (issue #602). It is still never persisted into Pi's own auth store. When
+ * the key is UNSET, phantombot actively clears the native var and Pi falls
+ * back to its own env / local store settings, so an "install later, no key"
+ * or legacy install keeps working. A provider missing from the catalog has
+ * no known native var — the key falls back to `--api-key` argv there (rare,
+ * live-only providers), with a logged warning.
  * `phantombot doctor` surfaces failure if neither path yields credentials.
  *
  * Provider: the configured routing provider is threaded onto `--provider` every
@@ -47,10 +52,12 @@ import type {
 import {
   ENV_PHANTOMBOT_TMP_DIR,
   ENV_PI_API_KEY,
+  ENV_PI_KEY_ENV,
   ENV_PI_PROVIDER,
   ENV_ROUTING_JSON,
   type PiRoutingConfig,
 } from "../lib/piRouting.ts";
+import { PI_PROVIDER_CATALOG } from "../lib/piModels.ts";
 import type { ParseEventResult } from "./reasoningReplay.ts";
 import { CODER_SWAP_MAX_ATTEMPTS, getCoderSwapOverride, resolveSwapModel, type SwapDecision } from "../lib/coderSwap.ts";
 import { decisionModelRoute } from "../lib/decisionModelRouter.ts";
@@ -397,24 +404,42 @@ export class PiHarness implements Harness {
     // choice that pairs with the saved models.
     const provider = routing?.provider;
 
+    // The provider's NATIVE env var — the one Pi itself resolves the key from
+    // when no runtime/stored credential exists (issue #602). Undefined for a
+    // provider missing from the catalog (rare, live-only): those fall back to
+    // the legacy `--api-key` argv flag below, with a logged warning.
+    const nativeKeyEnv = provider
+      ? PI_PROVIDER_CATALOG.find((p) => p.id === provider)?.envVar
+      : undefined;
+
     // Reconcile this persona's encrypted vault into the env BEFORE the Pi API
     // key is read below — the key is a vault secret post-migration. See claude.ts.
     await reloadVaultForPersona(req.persona);
 
-    // Per-turn Pi auth: thread the API key onto `--api-key` exactly the way the
-    // model is threaded onto `--model`. We do NOT persist it into Pi's own auth
-    // store — Phantomops owns key storage; this just relays whatever is in the
-    // env this turn. Three-tier fallback (see ENV_PI_API_KEY): key present ⇒
-    // pass it (wins); ABSENT ⇒ omit the flag so Pi falls back to its OWN env /
-    // local store settings (the "install later, no key" path keeps legacy
-    // installs working); neither ⇒ Pi errors as usual. Must precede the
-    // positional payload below.
+    // Per-turn Pi auth: relay the API key to the child via its PROVIDER-SCOPED
+    // env var (e.g. OPENROUTER_API_KEY) — exactly the var Pi reads when it has
+    // no runtime/stored credential. The key must NEVER travel on the command
+    // line: /proc/<pid>/cmdline is world-readable (0444) for the process's
+    // lifetime, so any local user could read the provider key; environ is 0400
+    // owner-only (issue #602). We do NOT persist it into Pi's own auth store —
+    // Phantomops owns key storage; this just relays whatever is in the env this
+    // turn. Three-tier fallback (see ENV_PI_API_KEY): key present ⇒ project it
+    // (wins over an ambient value, and natively scoped to the right provider);
+    // ABSENT ⇒ actively CLEAR the native var so no stale ambient value reaches
+    // Pi, which then falls back to its OWN env / local store settings (the
+    // "install later, no key" path keeps legacy installs working); neither ⇒
+    // Pi errors as usual.
+    // Precedence note: Pi prefers a STORED credential over env vars. In native
+    // mode the isolated agent dir's store is written by phantombot itself
+    // (wizard / doctor --fix) from the same vault key, so store and relay agree;
+    // if they ever drift, the store winning surfaces the drift as an auth
+    // failure rather than silently firing a stale key.
     // ...UNLESS this persona explicitly opted out of phantombot's routing
     // ("Use Pi's own config"). That opt-out has to cover the key as well as the
     // models: the key is read from the ambient env, which on a multi-persona
     // host is the HOST's key, so honouring it here would fire another persona's
-    // credential at a provider this persona never chose. Withholding the flag
-    // is what "Pi decides for itself" actually means.
+    // credential at a provider this persona never chose. Withholding (and
+    // clearing) the native var is what "Pi decides for itself" actually means.
     // A host pi (`pi-host`) never gets phantombot's key either: its owner
     // configured its auth, and the ambient key may belong to another persona.
     //
@@ -465,7 +490,15 @@ export class PiHarness implements Harness {
       if (req.toolsMode === "none") {
         argv.push("--no-tools");
       }
-      if (piApiKey) {
+      // Legacy fallback ONLY: a provider missing from PI_PROVIDER_CATALOG has no
+      // known native env var, so the key still has to travel on argv there.
+      // World-readable /proc cmdline exposure (issue #602) — keep this path rare.
+      if (piApiKey && !nativeKeyEnv) {
+        log.warn(
+          `${this.id}: provider '${provider ?? "(none)"}' is not in the provider catalog — ` +
+            "relaying the API key via the legacy --api-key argv flag (visible in /proc/<pid>/cmdline). " +
+            "Add the provider to PI_PROVIDER_CATALOG to close this.",
+        );
         argv.push("--api-key", piApiKey);
       }
       // Payload is the LAST positional arg (pi reads it from argv, not stdin).
@@ -482,8 +515,10 @@ export class PiHarness implements Harness {
     });
 
     // Relay THIS harness's provider + api-key into the child env so the bundled
-    // capability-routing extension threads them onto its OWN delegate children
-    // (look_at_image / coder) as `--provider`/`--api-key`. Delegate MODELS still
+    // capability-routing extension can relay them to its OWN delegate children
+    // (look_at_image / coder) — provider via `--provider`, key via the native
+    // env var named in ENV_PI_KEY_ENV, never onto delegate argv (#602). Delegate
+    // MODELS still
     // travel via the managed routing.json, but the auth PAIR is per-turn and
     // scoped to the active harness — projecting it here (rather than leaning on a
     // shared ambient env var) is what keeps a primary-Pi→OpenRouter /
@@ -507,6 +542,16 @@ export class PiHarness implements Harness {
     }
     childEnv[ENV_PI_PROVIDER] = provider ?? "";
     childEnv[ENV_PI_API_KEY] = piApiKey ?? "";
+    // The key itself travels via the provider's NATIVE env var (issue #602):
+    // set when both provider and key resolve, actively CLEARED otherwise so a
+    // stale ambient value (the host's own OPENROUTER_API_KEY etc.) can't leak
+    // into a subtree that didn't configure that provider. ENV_PI_KEY_ENV names
+    // the var for the capability-routing extension, which must relay the key to
+    // its OWN delegate children via env too — never onto their argv.
+    if (nativeKeyEnv) {
+      childEnv[nativeKeyEnv] = piApiKey ?? "";
+    }
+    childEnv[ENV_PI_KEY_ENV] = nativeKeyEnv ?? "";
     // Point the extension at THIS persona's delegate models (phantombot#441).
     // Delegate models still travel as a routing.json, NOT as env vars — that
     // contract is unchanged. What changes is WHICH routing.json: the managed
