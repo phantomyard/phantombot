@@ -300,3 +300,232 @@ describe("configureDecisionModel — an unknown vendor name is kept, never rewri
     } else throw new Error("expected an update");
   });
 });
+
+describe("configureDecisionModel — a custom vendor with NO base_url is never probed at a guessed endpoint (PR #605)", () => {
+  // The shape config loads with both consumers off: an unknown vendor and
+  // no base_url. `baseUrl` is absent — a transport default is NOT stood in.
+  const existing: DecisionModelSettings = {
+    provider: "openrouter",
+    statedProvider: "acme",
+    model: "acme/decision-v2",
+    keyEnv: "ACME_API_KEY",
+    apiKey: "sk-acme",
+    judge: { enabled: false, timeoutMs: 1500, threshold: 70, failClosed: false },
+    router: { enabled: false, timeoutMs: 800 },
+  };
+
+  test("keeping it asks for the endpoint and validates ONLY there — openrouter.ai never sees the key", async () => {
+    const validated: { baseUrl: string; apiKey: string }[] = [];
+    const { q, asked } = fakeQ(["custom", "judge"], ["https://api.acme.dev/v1/"]);
+    const r = await configureDecisionModel(
+      "robbie",
+      q as never,
+      deps({
+        existing,
+        validate: async (s) => {
+          validated.push({ baseUrl: s.baseUrl, apiKey: s.apiKey });
+          return { ok: true };
+        },
+      }),
+    );
+    expect(asked.chooses[0]?.options).toContain("custom");
+    expect(asked.values).toEqual(["acme decisions API base URL (the /v1 part)"]);
+    expect(validated).toEqual([
+      { baseUrl: "https://api.acme.dev/v1", apiKey: "sk-acme" },
+    ]);
+    expect(validated.some((v) => v.baseUrl.includes("openrouter.ai"))).toBe(false);
+    expect(r && "update" in r).toBe(true);
+    if (r && "update" in r) {
+      expect(r.update.statedProvider).toBe("acme");
+      expect(r.update.baseUrl).toBe("https://api.acme.dev/v1");
+      expect(r.update.keyEnv).toBe("ACME_API_KEY");
+      expect(r.update.model).toBe("acme/decision-v2");
+      expect(r.update.judge.enabled).toBe(true);
+    }
+  });
+
+  test("an empty endpoint rejects before any call; esc cancels", async () => {
+    let calls = 0;
+    const probe = deps({
+      existing,
+      validate: async () => {
+        calls += 1;
+        return { ok: true };
+      },
+    });
+    const { q } = fakeQ(["custom", "judge"], [""]);
+    const r = await configureDecisionModel("robbie", q as never, probe);
+    expect(r && "rejected" in r ? r.rejected : "").toContain("base URL is required");
+
+    const { q: q2 } = fakeQ(["custom", "judge"], [undefined]);
+    expect(await configureDecisionModel("robbie", q2 as never, probe)).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+
+  test("a missing key rejects first — no endpoint question, no call", async () => {
+    let calls = 0;
+    const { q, asked } = fakeQ(["custom", "judge"], ["https://api.acme.dev/v1"]);
+    const r = await configureDecisionModel(
+      "robbie",
+      q as never,
+      deps({
+        existing: { ...existing, apiKey: undefined },
+        validate: async () => {
+          calls += 1;
+          return { ok: true };
+        },
+      }),
+    );
+    expect(r && "rejected" in r ? r.rejected : "").toContain("ACME_API_KEY");
+    expect(asked.values).toHaveLength(0);
+    expect(calls).toBe(0);
+  });
+
+  test("off carries the absence through — the update names no endpoint to write", async () => {
+    const { q } = fakeQ(["off"]);
+    const r = await configureDecisionModel("robbie", q as never, deps({ existing }));
+    if (r && "update" in r) {
+      expect(r.update.statedProvider).toBe("acme");
+      expect(r.update.baseUrl).toBeUndefined();
+      expect(r.update.keyEnv).toBe("ACME_API_KEY");
+    } else throw new Error("expected an update");
+  });
+});
+
+describe("configureDecisionModel — a provider SWITCH never reaches into the previous provider's state (PR #605)", () => {
+  const acme: DecisionModelSettings = {
+    provider: "openrouter",
+    statedProvider: "acme",
+    model: "acme/decision-v2",
+    baseUrl: "https://api.acme.dev/v1",
+    keyEnv: "ACME_API_KEY",
+    apiKey: "sk-acme",
+    judge: { enabled: true, timeoutMs: 1500, threshold: 70, failClosed: false },
+    router: { enabled: false, timeoutMs: 800 },
+  };
+
+  test("acme -> Direct TypeSafe: the new token lands in the DEFAULT slot, never over ACME_API_KEY", async () => {
+    let validatedModel: string | undefined;
+    const { q, asked } = fakeQ(
+      ["typesafe", "both"],
+      ["https://api.typesafe.ai/v1", "ts-token-new"],
+    );
+    const r = await configureDecisionModel(
+      "robbie",
+      q as never,
+      deps({
+        existing: acme,
+        validate: async (s) => {
+          validatedModel = s.model;
+          return { ok: true };
+        },
+      }),
+    );
+    // No keep/replace question: there is no TypeSafe token to keep.
+    expect(asked.chooses.map((c) => c.title)).toEqual([
+      "Decision model for robbie",
+      "What should the decision model do for robbie?",
+    ]);
+    expect(r && "update" in r).toBe(true);
+    if (r && "update" in r) {
+      expect(r.update.provider).toBe("typesafe");
+      expect(r.update.statedProvider).toBeUndefined();
+      expect(r.update.keyEnv).toBe("PHANTOMBOT_JEV_API_KEY");
+      expect(r.update.apiKey).toBe("ts-token-new");
+      // The custom vendor's model id means nothing at TypeSafe.
+      expect(r.update.model).toBe("typesafe/jev-1.13");
+      expect(r.update.baseUrl).toBe("https://api.typesafe.ai/v1");
+    }
+    expect(validatedModel).toBe("typesafe/jev-1.13");
+  });
+
+  test("acme -> OpenRouter: validates and persists the default model, not acme/decision-v2", async () => {
+    let validatedModel: string | undefined;
+    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "judge"]);
+    const r = await configureDecisionModel(
+      "robbie",
+      q as never,
+      deps({
+        existing: acme,
+        validate: async (s) => {
+          validatedModel = s.model;
+          return { ok: true };
+        },
+      }),
+    );
+    expect(validatedModel).toBe("typesafe/jev-1.13");
+    if (r && "update" in r) {
+      expect(r.update.model).toBe("typesafe/jev-1.13");
+      expect(r.update.keyEnv).toBe(EMBED_KEY_ENV);
+      expect(r.update.apiKey).toBeUndefined();
+    } else throw new Error("expected an update");
+  });
+
+  test("OpenRouter (reusing the embeddings key) -> Direct TypeSafe: the token is not stored over the embeddings key", async () => {
+    const existing: DecisionModelSettings = {
+      provider: "openrouter",
+      model: "typesafe/jev-1.13",
+      baseUrl: "https://openrouter.ai/api/v1",
+      keyEnv: EMBED_KEY_ENV,
+      judge: { enabled: true, timeoutMs: 1500, threshold: 70, failClosed: false },
+      router: { enabled: true, timeoutMs: 800 },
+    };
+    const { q } = fakeQ(
+      ["typesafe", "both"],
+      ["https://api.typesafe.ai/v1", "ts-token-new"],
+    );
+    const r = await configureDecisionModel("robbie", q as never, deps({ existing }));
+    if (r && "update" in r) {
+      expect(r.update.keyEnv).toBe("PHANTOMBOT_JEV_API_KEY");
+      expect(r.update.apiKey).toBe("ts-token-new");
+    } else throw new Error("expected an update");
+  });
+
+  test("the SAME provider keeps its pin: an OpenRouter re-run preserves a non-default model, a TypeSafe keep preserves its key name", async () => {
+    const pinned: DecisionModelSettings = {
+      provider: "openrouter",
+      model: "typesafe/jev-next",
+      baseUrl: "https://openrouter.ai/api/v1",
+      keyEnv: EMBED_KEY_ENV,
+      judge: { enabled: true, timeoutMs: 1500, threshold: 70, failClosed: false },
+      router: { enabled: true, timeoutMs: 800 },
+    };
+    let validatedModel: string | undefined;
+    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "both"]);
+    const r = await configureDecisionModel(
+      "robbie",
+      q as never,
+      deps({
+        existing: pinned,
+        validate: async (s) => {
+          validatedModel = s.model;
+          return { ok: true };
+        },
+      }),
+    );
+    expect(validatedModel).toBe("typesafe/jev-next");
+    if (r && "update" in r) expect(r.update.model).toBe("typesafe/jev-next");
+    else throw new Error("expected an update");
+
+    const ts: DecisionModelSettings = {
+      provider: "typesafe",
+      model: "typesafe/jev-next",
+      baseUrl: "https://api.typesafe.ai/v1",
+      keyEnv: "MY_TS_TOKEN",
+      judge: { enabled: true, timeoutMs: 1500, threshold: 70, failClosed: false },
+      router: { enabled: false, timeoutMs: 800 },
+    };
+    process.env.MY_TS_TOKEN = "ts-stored";
+    try {
+      const { q: q2 } = fakeQ(["typesafe", "keep", "judge"], ["https://api.typesafe.ai/v1"]);
+      const r2 = await configureDecisionModel("robbie", q2 as never, deps({ existing: ts }));
+      if (r2 && "update" in r2) {
+        expect(r2.update.keyEnv).toBe("MY_TS_TOKEN");
+        expect(r2.update.apiKey).toBeUndefined();
+        expect(r2.update.model).toBe("typesafe/jev-next");
+      } else throw new Error("expected an update");
+    } finally {
+      delete process.env.MY_TS_TOKEN;
+    }
+  });
+});

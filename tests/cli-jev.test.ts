@@ -320,4 +320,37 @@ describe("an unknown vendor name (statedProvider) round-trips through the write 
       }),
     ).toBe(false);
   });
+
+  test("an unknown vendor with NO endpoint never gets a transport default written — 'off' leaves base_url absent and is idempotent", async () => {
+    process.env.PHANTOMBOT_JEV_API_KEY = "sk-stored";
+    const offUpdate: DecisionModelConfigUpdate = {
+      provider: "openrouter",
+      statedProvider: "acme",
+      keyEnv: "ACME_API_KEY",
+      judge: { enabled: false },
+      router: { enabled: false },
+    };
+    await applyDecisionModelConfig({ config, persona, update: offUpdate });
+    const text = await readFile(personaTomlPath(), "utf8");
+    expect(text).toContain('provider = "acme"');
+    // A written openrouter.ai here would read back as the operator's own
+    // choice and pass the no-guessed-endpoint guard on the next enable.
+    expect(text).not.toContain("base_url");
+    expect(text).not.toContain("openrouter.ai");
+    const reloaded = await loadConfig();
+    expect(reloaded.jev!.statedProvider).toBe("acme");
+    expect(reloaded.jev!.baseUrl).toBeUndefined();
+    expect(decisionModelUpdateEquals(reloaded.jev, offUpdate)).toBe(true);
+
+    // A transport pick without an explicit URL still writes that transport's
+    // default — the default is only ever withheld for an unknown vendor.
+    await applyDecisionModelConfig({
+      config,
+      persona,
+      update: { ...BASE_UPDATE, judge: { enabled: false }, router: { enabled: false } },
+    });
+    expect(await readFile(personaTomlPath(), "utf8")).toContain(
+      'base_url = "https://openrouter.ai/api/v1"',
+    );
+  });
 });

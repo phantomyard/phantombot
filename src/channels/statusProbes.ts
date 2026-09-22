@@ -270,6 +270,11 @@ async function probeDecisionModel(
     return `off — harness judge · keyword router (${label} configured)`;
   const key = jev.apiKey ?? env[jev.keyEnv]?.trim();
   if (!key) return `${label} — no key (${consumers})`;
+  // An unknown vendor with no base_url has no endpoint to probe — and must
+  // never be probed at a transport's default, which would send its
+  // credential to a host the operator never named.
+  if (jev.baseUrl === undefined)
+    return `${label} — no base_url (${consumers})`;
   const r = await validate({
     baseUrl: jev.baseUrl,
     apiKey: key,

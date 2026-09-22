@@ -357,6 +357,29 @@ describe("gatherStatusProbes — jev", () => {
     expect(r.jev).toBe("acme OK (judge on · router off)");
   });
 
+  test("an unknown vendor with no base_url is reported, never probed at a transport default", async () => {
+    let calls = 0;
+    const r = await gatherStatusProbes(
+      cfg({
+        jev: decisionModelBlock({
+          statedProvider: "acme",
+          baseUrl: undefined,
+          keyEnv: "ACME_API_KEY",
+        }),
+      }),
+      "phantom",
+      stubDeps({
+        env: { ACME_API_KEY: "sk-acme" },
+        validateDecisionModelKey: async () => {
+          calls += 1;
+          return { ok: true };
+        },
+      }),
+    );
+    expect(r.jev).toBe("acme — no base_url (judge on · router off)");
+    expect(calls).toBe(0);
+  });
+
   test("validates a resolved key live and reports OK or ERR", async () => {
     const ok = await gatherStatusProbes(
       cfg({ jev: decisionModelBlock() }),

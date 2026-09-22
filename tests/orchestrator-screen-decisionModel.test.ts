@@ -149,6 +149,24 @@ describe("screener + Jev", () => {
     expect(harnessCalls).toHaveLength(0);
   });
 
+  it("no endpoint means no Jev call — an unknown vendor with no base_url takes the harness judge, never a transport default", async () => {
+    const jev = decisionModelStub({
+      ok: true,
+      verdict: { score: 91, reason: "must not be reached", question: "" },
+    });
+    const { baseUrl: _omitted, ...settings } = decisionModelSettings();
+    const { screen, harnessCalls } = mk(
+      { ...settings, statedProvider: "acme", keyEnv: "ACME_API_KEY" },
+      ALLOW_JSON,
+      { decisionModelJudge: jev.impl },
+    );
+    const v = await screen("hello");
+    expect(v.action).toBe("pass");
+    expect(v.score).toBe(5);
+    expect(jev.calls).toHaveLength(0);
+    expect(harnessCalls).toHaveLength(1);
+  });
+
   it("a Jev error falls back to the harness judge", async () => {
     const jev = decisionModelStub({ ok: false, error: "jev timeout after 1500ms" });
     const { screen, harnessCalls } = mk(decisionModelSettings(), ALLOW_JSON, {

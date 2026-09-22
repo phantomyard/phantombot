@@ -154,12 +154,31 @@ describe("config [jev]", () => {
     );
   });
 
-  test("an unknown provider with both consumers off still loads — no call is ever made", async () => {
+  test("an unknown provider with both consumers off still loads — no call is ever made, and NO endpoint is stood in", async () => {
     let config = await loadConfig();
     await writePersonaToml(config, '[jev]\nprovider = "acme"\n');
     config = await loadConfig();
     expect(config.jev!.provider).toBe("openrouter");
     expect(config.jev!.statedProvider).toBe("acme");
+    // The transport default is openrouter.ai's endpoint, not acme's. A
+    // derived URL here is indistinguishable from a stated one to every
+    // reader (the wizard's keep path validated at it — PR #605 review), so
+    // the field is ABSENT rather than guessed.
+    expect(config.jev!.baseUrl).toBeUndefined();
+  });
+
+  test("an unknown provider WITH a base_url carries it; a known transport always has its default", async () => {
+    let config = await loadConfig();
+    await writePersonaToml(
+      config,
+      '[jev]\nprovider = "acme"\nbase_url = "https://api.acme.dev/v1"\n',
+    );
+    config = await loadConfig();
+    expect(config.jev!.baseUrl).toBe("https://api.acme.dev/v1");
+
+    await writePersonaToml(config, '[jev]\nprovider = "openrouter"\n');
+    config = await loadConfig();
+    expect(config.jev!.baseUrl).toBe("https://openrouter.ai/api/v1");
   });
 
   test("a case or whitespace slip names the known transport, not a new vendor", async () => {

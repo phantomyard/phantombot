@@ -123,10 +123,26 @@ set**, with a warning that names what was stated; the portability surface is
 rejected like an out-of-range threshold, because defaulting to openrouter.ai
 would send a credential meant for another vendor to a host you never named,
 on every screened turn and every `/status` probe (with both consumers off no
-call is made, so the block loads with the warning only). The stated name is
+call is made, so the block loads with the warning only — and the loaded
+block then has **no `baseUrl` at all** rather than a transport default
+standing in, so nothing that reads it can call out). The stated name is
 kept as written (`statedProvider`): `/status` reports it, and the wizard
 offers "Keep <name>" preselected, so a re-run never rewrites it to
 `openrouter`.
+
+The wizard applies the same no-guessing rule to itself. "Keep <name>" on a
+block with no `base_url` **asks for the vendor's endpoint** and validates the
+stored credential only there — never at openrouter.ai; "Off" on such a block
+leaves `base_url` absent rather than writing a transport default that would
+later read back as your own choice. And a **provider switch never reaches
+into the previous provider's state**: picking OpenRouter or Direct TypeSafe
+over a custom vendor validates and persists the default model (its
+`acme/decision-v2` means nothing at the new transport), and a token typed on
+a switch is stored under the default `PHANTOMBOT_JEV_API_KEY`, never over
+the custom vendor's `key_env` (or over an OpenRouter embeddings key a reuse
+pick had left there). The existing credential name and model carry over only
+while the flow stays on the same actual provider, which is what keeps a
+same-provider re-run idempotent.
 
 Every field has an env override (`PHANTOMBOT_JEV_PROVIDER`, `_MODEL`,
 `_BASE_URL`, `_KEY_ENV`, `_JUDGE`, `_ROUTER`),

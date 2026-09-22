@@ -68,6 +68,14 @@ export interface DecisionModelConfigUpdate {
    */
   statedProvider?: string;
   model?: string;
+  /**
+   * The endpoint to write. Undefined with a TRANSPORT provider means that
+   * transport's default; undefined with `statedProvider` set means the
+   * vendor named no endpoint and the file's `base_url` is left exactly as
+   * it is (absent stays absent) — a transport default written there would
+   * later read back as the operator's own choice and pass the
+   * no-guessed-endpoint guard with a credential meant for another vendor.
+   */
   baseUrl?: string;
   /**
    * The vault/env NAME the key is read from. A reused OpenRouter key keeps
@@ -142,14 +150,8 @@ export async function applyDecisionModelConfig(
   await updateConfigToml(configPath, (toml) => {
     setIn(toml, ["jev", "provider"], update.statedProvider ?? update.provider);
     setIn(toml, ["jev", "model"], update.model ?? DECISION_MODEL_DEFAULT_MODEL);
-    setIn(
-      toml,
-      ["jev", "base_url"],
-      update.baseUrl ??
-        (update.provider === "openrouter"
-          ? DECISION_MODEL_OPENROUTER_BASE_URL
-          : DECISION_MODEL_TYPESAFE_BASE_URL),
-    );
+    const baseUrl = effectiveBaseUrl(update);
+    if (baseUrl !== undefined) setIn(toml, ["jev", "base_url"], baseUrl);
     setIn(toml, ["jev", "key_env"], update.keyEnv);
     setIn(toml, ["jev", "judge", "enabled"], update.judge.enabled);
     setIn(toml, ["jev", "router", "enabled"], update.router.enabled);
@@ -173,11 +175,7 @@ export function decisionModelUpdateEquals(
   update: DecisionModelConfigUpdate,
 ): boolean {
   if (!existing) return false;
-  const expectBaseUrl =
-    update.baseUrl ??
-    (update.provider === "openrouter"
-      ? DECISION_MODEL_OPENROUTER_BASE_URL
-      : DECISION_MODEL_TYPESAFE_BASE_URL);
+  const expectBaseUrl = effectiveBaseUrl(update);
   // A re-used key means "no credential change"; a NEW typed key always
   // counts as a change worth writing.
   if (update.apiKey !== undefined) return false;
@@ -190,6 +188,19 @@ export function decisionModelUpdateEquals(
     existing.judge.enabled === update.judge.enabled &&
     existing.router.enabled === update.router.enabled
   );
+}
+
+/**
+ * The `base_url` an update stands for: the stated one, else the transport's
+ * default — except for an unknown vendor, which has no default to fall back
+ * to (see `DecisionModelConfigUpdate.baseUrl`).
+ */
+function effectiveBaseUrl(update: DecisionModelConfigUpdate): string | undefined {
+  if (update.baseUrl !== undefined) return update.baseUrl;
+  if (update.statedProvider !== undefined) return undefined;
+  return update.provider === "openrouter"
+    ? DECISION_MODEL_OPENROUTER_BASE_URL
+    : DECISION_MODEL_TYPESAFE_BASE_URL;
 }
 
 /** A credential the Jev wizard can offer to reuse, with a human label. */

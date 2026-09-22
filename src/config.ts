@@ -995,8 +995,16 @@ export interface DecisionModelSettings {
   statedProvider?: string;
   /** Model id — default `typesafe/jev-1.13`. */
   model: string;
-  /** OpenAI-compatible base URL for the chosen provider. */
-  baseUrl: string;
+  /**
+   * OpenAI-compatible base URL for the chosen provider. Absent ONLY for an
+   * unknown vendor (`statedProvider` set) whose block names no `base_url`:
+   * a transport default is that transport's endpoint, not the vendor's, so
+   * standing one in would be a GUESSED endpoint — and every reader of this
+   * field would then send that vendor's credential to a host the operator
+   * never named. Absence is what makes that unrepresentable; with a consumer
+   * enabled the load already fails, so a consumer only ever sees a URL.
+   */
+  baseUrl?: string;
   /** The vault/env NAME the API key is read from (default PHANTOMBOT_JEV_API_KEY). */
   keyEnv: string;
   /**
@@ -2666,11 +2674,18 @@ function buildDecisionModelConfig(
     asString(tomlDecisionModel.key_env) ??
     DECISION_MODEL_DEFAULT_KEY_ENV;
 
+  // A transport default is only the vendor's endpoint when the vendor IS
+  // that transport. An unknown name with no base_url stays URL-less (the
+  // wizard asks for one; nothing else may call out) rather than borrowing
+  // openrouter.ai — a derived URL is indistinguishable from a stated one to
+  // every consumer downstream, and "consumers off" is not "never read".
   const baseUrl =
     explicitBaseUrl ??
-    (provider === "openrouter"
-      ? DECISION_MODEL_OPENROUTER_BASE_URL
-      : DECISION_MODEL_TYPESAFE_BASE_URL);
+    (unknownProviderName !== undefined
+      ? undefined
+      : provider === "openrouter"
+        ? DECISION_MODEL_OPENROUTER_BASE_URL
+        : DECISION_MODEL_TYPESAFE_BASE_URL);
 
   // Vault first, then env with the vault-injection guard — the same
   // precedence personaEmbeddingKey applies, minus the TOML tier (a Jev key
@@ -2722,7 +2737,7 @@ function buildDecisionModelConfig(
       asString(process.env.PHANTOMBOT_JEV_MODEL) ??
       asString(tomlDecisionModel.model) ??
       DECISION_MODEL_DEFAULT_MODEL,
-    baseUrl,
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
     keyEnv,
     ...(apiKey !== undefined ? { apiKey } : {}),
     judge: {

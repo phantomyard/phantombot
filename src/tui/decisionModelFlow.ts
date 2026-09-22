@@ -16,6 +16,18 @@
  * Idempotent: re-running the flow and keeping every offered default writes
  * nothing (the caller checks `decisionModelUpdateEquals`). Esc at any step cancels the
  * whole flow — `undefined` anywhere means nothing is written.
+ *
+ * Two rules keep a PROVIDER SWITCH from reaching into the previous
+ * provider's state (PR #605 review). The existing credential NAME and the
+ * existing MODEL are carried over only while the flow stays on the same
+ * actual provider (`sameProvider`): a custom vendor's `ACME_API_KEY` must
+ * not become the vault slot a freshly typed TypeSafe token is stored into
+ * (that overwrites the Acme secret under the guise of a switch), and its
+ * `acme/decision-v2` must not be what a Direct-TypeSafe pick validates and
+ * persists. A switch always lands on the default name and the default
+ * model. And a custom vendor is only ever validated at an endpoint the
+ * operator STATED — a block with no `base_url` is asked for one here, never
+ * probed at a transport's default.
  */
 
 import type { DecisionModelConfigUpdate, ReusableDecisionModelKey } from "../cli/jev.ts";
@@ -96,7 +108,9 @@ export async function configureDecisionModel(
             {
               value: "custom",
               label: `Keep ${existing.statedProvider} (custom endpoint)`,
-              hint: `current · ${existing.baseUrl} · key ${existing.keyEnv}`,
+              hint:
+                `current · ${existing.baseUrl ?? "no base_url set"} · ` +
+                `key ${existing.keyEnv}`,
             },
           ]
         : []),
@@ -135,9 +149,11 @@ export async function configureDecisionModel(
   let baseUrl: string;
 
   if (provider === "custom") {
-    // Nothing vendor-specific to ask: keep the endpoint and the credential
-    // name exactly as configured, then re-ask the consumers and re-validate.
-    baseUrl = existing!.baseUrl;
+    // Keep the credential name exactly as configured, then re-ask the
+    // consumers and re-validate. The endpoint is the operator's: a block
+    // that names none (loadable only with both consumers off) is asked for
+    // one here — the credential is NEVER sent to a transport's default,
+    // which is the guessed endpoint the config guard refuses to load.
     keyEnv = existing!.keyEnv;
     resolvedKey = existing!.apiKey ?? process.env[keyEnv]?.trim();
     if (!resolvedKey)
@@ -146,11 +162,22 @@ export async function configureDecisionModel(
           `no key resolves for ${keyEnv} — store it with ` +
           `\`phantombot vault set ${keyEnv}\` and re-run`,
       };
+    if (existing!.baseUrl !== undefined) {
+      baseUrl = existing!.baseUrl;
+    } else {
+      const url = await q.value({
+        title: `${existing!.statedProvider} decisions API base URL (the /v1 part)`,
+        hint: `no base_url is set for ${existing!.statedProvider} — nothing is called until you name one`,
+      });
+      if (url === undefined) return undefined;
+      if (!url.trim()) return { rejected: "base URL is required" };
+      baseUrl = url.trim().replace(/\/+$/, "");
+    }
   } else if (provider === "openrouter") {
     // A custom vendor rides the same transport but at its OWN endpoint:
     // picking OpenRouter explicitly must not inherit that URL.
-    baseUrl = existing?.provider === "openrouter" && !existing.statedProvider
-      ? existing.baseUrl
+    baseUrl = sameProvider(existing, "openrouter")
+      ? (existing!.baseUrl ?? DECISION_MODEL_OPENROUTER_BASE_URL)
       : DECISION_MODEL_OPENROUTER_BASE_URL;
     const reuseOptions = deps.reusableKeys.map((k) => ({
       value: `reuse:${k.env}`,
@@ -198,8 +225,8 @@ export async function configureDecisionModel(
     }
   } else {
     // Direct TypeSafe.
-    baseUrl = existing?.provider === "typesafe"
-      ? existing.baseUrl
+    baseUrl = sameProvider(existing, "typesafe")
+      ? (existing!.baseUrl ?? DECISION_MODEL_TYPESAFE_BASE_URL)
       : DECISION_MODEL_TYPESAFE_BASE_URL;
     const url = await q.value({
       title: "TypeSafe API base URL (the /v1 part)",
@@ -210,10 +237,9 @@ export async function configureDecisionModel(
     if (!url.trim()) return { rejected: "base URL is required" };
     baseUrl = url.trim().replace(/\/+$/, "");
 
-    const existingKey =
-      existing?.provider === "typesafe"
-        ? process.env[existing.keyEnv]?.trim()
-        : undefined;
+    const existingKey = sameProvider(existing, "typesafe")
+      ? process.env[existing!.keyEnv]?.trim()
+      : undefined;
     if (existingKey) {
       const action = await q.choose({
         title: `TypeSafe API token for ${persona}`,
@@ -231,7 +257,13 @@ export async function configureDecisionModel(
         keyEnv = existing!.keyEnv;
       }
     } else {
-      keyEnv = existing?.keyEnv ?? DECISION_MODEL_DEFAULT_KEY_ENV;
+      // A token typed on a SWITCH lands in the decision model's own default
+      // slot. Reusing the previous provider's name here (a custom vendor's
+      // `ACME_API_KEY`, or the OpenRouter embeddings key a reuse pick left
+      // in key_env) would store the TypeSafe token over that secret.
+      keyEnv = sameProvider(existing, "typesafe")
+        ? existing!.keyEnv
+        : DECISION_MODEL_DEFAULT_KEY_ENV;
     }
     if (resolvedKey === undefined) {
       const typed = await q.value({
@@ -279,11 +311,18 @@ export async function configureDecisionModel(
   if (!consumers) return undefined;
 
   // 4. VALIDATE — even a reused key: a revoked credential must fail here,
-  //    not at the first held message.
+  //    not at the first held message. The model is the existing one only
+  //    while the provider stays the same (a custom keep, or a re-run of the
+  //    same transport keeps an operator's pin); a switch validates and
+  //    persists the default — a custom vendor's model id is meaningless at
+  //    the transport it is switching to.
+  const keepsProvider =
+    provider === "custom" || sameProvider(existing, provider);
+  const model = keepsProvider ? existing!.model : DECISION_MODEL_DEFAULT_MODEL;
   const v = await deps.validate({
     baseUrl,
     apiKey: resolvedKey!,
-    model: existing?.model ?? DECISION_MODEL_DEFAULT_MODEL,
+    model,
   });
   if (!v.ok) return { rejected: v.error ?? "key validation failed" };
 
@@ -298,7 +337,7 @@ export async function configureDecisionModel(
       ...(provider === "custom" && existing?.statedProvider
         ? { statedProvider: existing.statedProvider }
         : {}),
-      model: existing?.model,
+      model,
       baseUrl,
       keyEnv,
       ...(apiKey !== undefined ? { apiKey } : {}),
@@ -309,6 +348,23 @@ export async function configureDecisionModel(
       `${provider === "custom" ? existing!.statedProvider : provider} · judge ${judgeOn ? "on" : "off"} · router ${routerOn ? "on" : "off"}` +
       (apiKey !== undefined ? ` · key stored as ${keyEnv}` : ` · reusing ${keyEnv}`),
   };
+}
+
+/**
+ * True when `existing` is the SAME actual provider as `provider` — a custom
+ * vendor rides the openrouter transport but is not OpenRouter, so its
+ * credential name, model and endpoint must not carry into an OpenRouter
+ * pick (nor into a TypeSafe one).
+ */
+function sameProvider(
+  existing: DecisionModelSettings | undefined,
+  provider: string,
+): boolean {
+  return (
+    existing !== undefined &&
+    existing.provider === provider &&
+    existing.statedProvider === undefined
+  );
 }
 
 function currentConsumers(

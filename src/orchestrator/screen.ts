@@ -390,8 +390,14 @@ export function makeScreener(
   // unconfigured user takes the harness-judge path below untouched. Never
   // engaged when a test injects its own judge: the override IS the judge.
   const jev = config.jev;
+  // `baseUrl` is absent only for an unknown vendor with no base_url, which
+  // config refuses to load with a consumer enabled — the check here keeps
+  // the judge's endpoint an explicit precondition rather than an assertion.
   const decisionModelJudgeOn =
-    deps.judge === undefined && jev?.judge.enabled === true && !!jev?.apiKey;
+    deps.judge === undefined &&
+    jev?.judge.enabled === true &&
+    !!jev?.apiKey &&
+    jev.baseUrl !== undefined;
   // An ENABLED judge whose key never resolved is the exact silent-degradation
   // shape the fallback ledger exists to expose (#516): every untrusted turn
   // falls back to the harness judge while doctor would otherwise read "no
@@ -415,7 +421,7 @@ export function makeScreener(
     );
     return decisionModelJudgeImpl(text, {
       settings: {
-        baseUrl: jev!.baseUrl,
+        baseUrl: jev!.baseUrl!,
         apiKey: jev!.apiKey!,
         model: jev!.model,
         timeoutMs: jev!.judge.timeoutMs,

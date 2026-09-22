@@ -1027,7 +1027,7 @@ Setup and channels:
 | `phantombot phantomchat [--persona <name>]` | Configure PhantomChat identity, relays, and allowlist |
 | `phantombot voice [--persona <name>]` | Configure TTS/STT |
 | `phantombot embedding` | Configure optional Gemini/OpenAI-compatible embeddings, or none |
-| `phantombot decision-model [--persona <name>]` | Configure the optional decision model (TypeSafe Jev today) for the threat judge and/or the brain-swap router. `phantombot jev` remains a deprecated alias |
+| `phantombot decision-model [--persona <name>]` | Configure the optional decision model (TypeSafe Jev today) for the threat judge and/or the brain-swap router. A custom vendor is only ever validated at the `base_url` you state (the wizard asks for one if the block has none — it never probes openrouter.ai with that vendor's key), and switching provider lands on the default model and the default key name rather than the previous provider's. `phantombot jev` remains a deprecated alias |
 | `phantombot acp install zed|jetbrains|vscode` | Register the ACP agent with an editor |
 
 `phantombot persona <name>` switches the daemon-wide default persona.

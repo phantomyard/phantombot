@@ -76,7 +76,9 @@ export function buildHarness(config: Config, id: string): Harness | undefined {
     ...(instance ? { apiKeyEnv: piInstanceSecretName(id) } : {}),
     // The Jev brain-swap router (issue #597): threaded only when the ROUTER
     // consumer is enabled; the key itself is resolved per-turn from the env.
-    ...(config.jev?.router.enabled
+    // No endpoint (an unknown vendor with no base_url — a shape config
+    // refuses with a consumer on) means no router: never a guessed URL.
+    ...(config.jev?.router.enabled && config.jev.baseUrl !== undefined
       ? {
           decisionModelRouter: {
             baseUrl: config.jev.baseUrl,
