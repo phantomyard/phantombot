@@ -5,9 +5,9 @@
  * typed choice with a calibrated probability out — no free-text generation
  * at all. That shape matches two phantombot decision points exactly:
  *
- *   1. the THREAT JUDGE (lib/jevJudge.ts) — screening untrusted input before
+ *   1. the THREAT JUDGE (lib/decisionModelJudge.ts) — screening untrusted input before
  *      a capable turn runs;
- *   2. the BRAIN-SWAP router (lib/jevRouter.ts) — the `primary | coder`
+ *   2. the BRAIN-SWAP router (lib/decisionModelRouter.ts) — the `primary | coder`
  *      routing choice in front of every Pi turn.
  *
  * This module is the SHARED plumbing for both: one credential resolution
@@ -32,10 +32,10 @@
  *     `type` discriminator, a per-question `instructions` line, and
  *     `criteria`:
  *       - { type: "choice", instructions, criteria: { <choice>: <description> } }
- *         — the criteria KEYS are the choice set (max JEV_MAX_CHOICES);
+ *         — the criteria KEYS are the choice set (max DECISION_MODEL_MAX_CHOICES);
  *       - { type: "score", instructions, criteria: [ <level label>, ... ] }
  *         — an ordinal scale; criteria index IS the level, max
- *         JEV_MAX_SCORE_LEVELS (10) levels.
+ *         DECISION_MODEL_MAX_SCORE_LEVELS (10) levels.
  *
  * The response is `{ answers: { <qid>: answer }, usage }` where a choice
  * answer is `{ type, choice, probabilities, confidence }` and a score answer
@@ -60,10 +60,10 @@
 import { timeoutSignal } from "./fetchTimeout.ts";
 
 /** The model id as listed on OpenRouter (`typesafe/jev-1.13`). */
-export const JEV_DEFAULT_MODEL = "typesafe/jev-1.13";
+export const DECISION_MODEL_DEFAULT_MODEL = "typesafe/jev-1.13";
 
 /** OpenRouter's OpenAI-compatible base URL. */
-export const JEV_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+export const DECISION_MODEL_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 /**
  * Default base URL for the DIRECT TypeSafe provider. A starting point for the
@@ -72,19 +72,19 @@ export const JEV_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
  * it against their TypeSafe dashboard, and `base_url` in `[jev]` overrides
  * it. OpenRouter needs no such guesswork.
  */
-export const JEV_TYPESAFE_BASE_URL = "https://api.typesafe.ai/v1";
+export const DECISION_MODEL_TYPESAFE_BASE_URL = "https://api.typesafe.ai/v1";
 
 /** The vault/env name a Jev API key lives under by default. */
-export const JEV_DEFAULT_KEY_ENV = "PHANTOMBOT_JEV_API_KEY";
+export const DECISION_MODEL_DEFAULT_KEY_ENV = "PHANTOMBOT_JEV_API_KEY";
 
 /** Vendor cap: a choice question's criteria may not exceed 255 entries. */
-export const JEV_MAX_CHOICES = 255;
+export const DECISION_MODEL_MAX_CHOICES = 255;
 
 /** Vendor cap: a score question's ordinal scale may not exceed 10 levels. */
-export const JEV_MAX_SCORE_LEVELS = 10;
+export const DECISION_MODEL_MAX_SCORE_LEVELS = 10;
 
 /** A choice question: the criteria KEYS are the choice set. */
-export interface JevChoiceQuestion {
+export interface DecisionModelChoiceQuestion {
   type: "choice";
   /** What this question asks, in one line. */
   instructions: string;
@@ -93,17 +93,17 @@ export interface JevChoiceQuestion {
 }
 
 /** A score question: an ordinal scale, criteria index IS the level. */
-export interface JevScoreQuestion {
+export interface DecisionModelScoreQuestion {
   type: "score";
   /** What this question asks, in one line. */
   instructions: string;
-  /** Level labels, lowest first; at most JEV_MAX_SCORE_LEVELS entries. */
+  /** Level labels, lowest first; at most DECISION_MODEL_MAX_SCORE_LEVELS entries. */
   criteria: string[];
 }
 
-export type JevQuestion = JevChoiceQuestion | JevScoreQuestion;
+export type DecisionModelQuestion = DecisionModelChoiceQuestion | DecisionModelScoreQuestion;
 
-export interface JevDecisionRequest {
+export interface DecisionModelDecisionRequest {
   /** OpenAI-compatible base URL (no trailing slash), e.g. OpenRouter's. */
   baseUrl: string;
   /** Bearer token for the endpoint. */
@@ -115,7 +115,7 @@ export interface JevDecisionRequest {
   /** The payload the decision is ABOUT (untrusted content for the judge). */
   state: string;
   /** The typed questions, keyed by caller-chosen id. */
-  questions: Record<string, JevQuestion>;
+  questions: Record<string, DecisionModelQuestion>;
   /** Hard wall-clock cap. Exceeding it is an { ok: false }, never a stall. */
   timeoutMs: number;
   /** Optional caller cancellation, composed with the timeout. */
@@ -125,16 +125,16 @@ export interface JevDecisionRequest {
    * plain function (not `typeof fetch`) so tests can pass a bare arrow
    * without Bun's `preconnect` property getting in the way.
    */
-  fetchImpl?: JevFetch;
+  fetchImpl?: DecisionModelFetch;
 }
 
 /** The minimal slice of fetch this module uses. */
-export type JevFetch = (
+export type DecisionModelFetch = (
   url: string | URL | Request,
   init?: RequestInit,
 ) => Promise<Response>;
 
-export type JevAnswer =
+export type DecisionModelAnswer =
   | {
       type: "choice";
       choice: string;
@@ -150,17 +150,17 @@ export type JevAnswer =
       confidence: number;
     };
 
-export type JevDecision =
-  | { ok: true; answers: Record<string, JevAnswer>; latencyMs: number }
+export type DecisionModelDecision =
+  | { ok: true; answers: Record<string, DecisionModelAnswer>; latencyMs: number }
   | { ok: false; error: string; latencyMs: number };
 
 /**
  * Derive the decisions endpoint from an OpenAI-compatible base URL.
  * OpenRouter keeps it next to /api/v1 at /api/alpha/decisions; the same
  * derivation is the best available guess for a direct TypeSafe base URL
- * (operator-confirmed at configure time — see JEV_TYPESAFE_BASE_URL).
+ * (operator-confirmed at configure time — see DECISION_MODEL_TYPESAFE_BASE_URL).
  */
-export function jevDecisionsUrl(baseUrl: string): string {
+export function decisionModelDecisionsUrl(baseUrl: string): string {
   let base = baseUrl.replace(/\/+$/, "");
   if (base.endsWith("/v1")) base = base.slice(0, -"/v1".length);
   return base.endsWith("/api")
@@ -175,7 +175,7 @@ interface DecisionsResponse {
 
 /** Validate the caller's question set against the vendor's caps. */
 function questionsError(
-  questions: Record<string, JevQuestion>,
+  questions: Record<string, DecisionModelQuestion>,
 ): string | undefined {
   const ids = Object.keys(questions);
   if (ids.length === 0) return "jev: at least one question is required";
@@ -184,15 +184,15 @@ function questionsError(
     if (q.type === "choice") {
       const n = Object.keys(q.criteria).length;
       if (n === 0) return `jev: choice question '${id}' has no choices`;
-      if (n > JEV_MAX_CHOICES)
-        return `jev: choice question '${id}' has ${n} choices (max ${JEV_MAX_CHOICES})`;
+      if (n > DECISION_MODEL_MAX_CHOICES)
+        return `jev: choice question '${id}' has ${n} choices (max ${DECISION_MODEL_MAX_CHOICES})`;
     } else if (q.type === "score") {
       if (q.criteria.length === 0)
         return `jev: score question '${id}' has no levels`;
-      if (q.criteria.length > JEV_MAX_SCORE_LEVELS)
+      if (q.criteria.length > DECISION_MODEL_MAX_SCORE_LEVELS)
         return (
           `jev: score question '${id}' has ${q.criteria.length} levels ` +
-          `(max ${JEV_MAX_SCORE_LEVELS})`
+          `(max ${DECISION_MODEL_MAX_SCORE_LEVELS})`
         );
     } else {
       return `jev: question '${id}' has unknown type`;
@@ -218,7 +218,7 @@ function asNumberRecord(value: unknown): Record<string, number> {
  * inside the question's ordinal range. The
  * wire is trusted to be JSON, nothing more.
  */
-function parseAnswer(q: JevQuestion, raw: unknown): JevAnswer | undefined {
+function parseAnswer(q: DecisionModelQuestion, raw: unknown): DecisionModelAnswer | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const a = raw as Record<string, unknown>;
   if (q.type === "choice") {
@@ -255,9 +255,9 @@ function parseAnswer(q: JevQuestion, raw: unknown): JevAnswer | undefined {
  * timeout, HTTP error, malformed or missing answers — comes back as
  * { ok: false, error } so the caller can fall back to its existing method.
  */
-export async function jevDecide(
-  req: JevDecisionRequest,
-): Promise<JevDecision> {
+export async function decisionModelDecide(
+  req: DecisionModelDecisionRequest,
+): Promise<DecisionModelDecision> {
   const started = Date.now();
   const latencyMs = () => Date.now() - started;
 
@@ -266,7 +266,7 @@ export async function jevDecide(
     return { ok: false, error: contractError, latencyMs: latencyMs() };
   }
 
-  const doFetch: JevFetch = req.fetchImpl ?? fetch;
+  const doFetch: DecisionModelFetch = req.fetchImpl ?? fetch;
   const body = {
     model: req.model,
     instructions: req.instructions,
@@ -276,7 +276,7 @@ export async function jevDecide(
 
   let res: Response;
   try {
-    res = await doFetch(jevDecisionsUrl(req.baseUrl), {
+    res = await doFetch(decisionModelDecisionsUrl(req.baseUrl), {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -328,7 +328,7 @@ export async function jevDecide(
     };
   }
 
-  const answers: Record<string, JevAnswer> = {};
+  const answers: Record<string, DecisionModelAnswer> = {};
   for (const [qid, q] of Object.entries(req.questions)) {
     const answer = parseAnswer(q, parsed.answers[qid]);
     if (!answer) {

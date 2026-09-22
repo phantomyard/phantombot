@@ -1,6 +1,6 @@
-# Jev — the optional TypeSafe System One screener
+# The decision model (TypeSafe Jev today)
 
-[TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13) is not an LLM. It is a
+The optional decision model is [TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13) — the vendor name appears only as the qualifier, the same way the CLI and the TUI label it. Jev is not an LLM. It is a
 "System One" model: unstructured text in, a **typed choice with a calibrated
 probability** out — no free-text generation at all. Phantombot can use it as a
 dedicated backend for the two places that want exactly that shape:
@@ -61,12 +61,13 @@ criteria: {<choice>: <description>}}` (the criteria KEYS are the choice set)
 or `{type: "score", instructions, criteria: [<level label>, …]}` (criteria
 index IS the ordinal level). The response is `{answers: {<qid>: …}, usage}`
 with calibrated `probabilities` and `confidence` per answer. See
-`src/lib/jev.ts`.
+`src/lib/decisionModel.ts`.
 
 ## Configuration
 
-`phantombot jev` (or the **Decision model** row on the persona settings
-screen, `^s`) walks you through it. Provider choice comes **first**:
+`phantombot decision-model` (deprecated alias: `phantombot jev`; or the
+**Decision model** row on the persona settings screen, `^s`) walks you
+through it. Provider choice comes **first**:
 
 - **OpenRouter** — if any OpenRouter credential already exists in the vault
   (e.g. the embeddings `PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY` when its
@@ -112,6 +113,37 @@ are **rejected at config load**, because threshold 101 would silently
 disable every hold and a non-positive timeout can throw inside
 `AbortSignal.timeout`.
 
+An unrecognised `provider` is handled in three steps. A case or whitespace
+slip (`"TypeSafe"`, `"openrouter "`) normalises to the known transport. A
+genuinely unknown name — a future vendor's value written into a today-binary
+config — loads over the OpenRouter-style transport **at the `base_url` you
+set**, with a warning that names what was stated; the portability surface is
+`base_url` + `model` + `key_env`, all free strings. What it never does is
+**guess** the endpoint: with a consumer enabled and no `base_url` the load is
+rejected like an out-of-range threshold, because defaulting to openrouter.ai
+would send a credential meant for another vendor to a host you never named,
+on every screened turn and every `/status` probe (with both consumers off no
+call is made, so the block loads with the warning only — and the loaded
+block then has **no `baseUrl` at all** rather than a transport default
+standing in, so nothing that reads it can call out). The stated name is
+kept as written (`statedProvider`): `/status` reports it, and the wizard
+offers "Keep <name>" preselected, so a re-run never rewrites it to
+`openrouter`.
+
+The wizard applies the same no-guessing rule to itself. "Keep <name>" on a
+block with no `base_url` **asks for the vendor's endpoint** and validates the
+stored credential only there — never at openrouter.ai; "Off" on such a block
+leaves `base_url` absent rather than writing a transport default that would
+later read back as your own choice. And a **provider switch never reaches
+into the previous provider's state**: picking OpenRouter or Direct TypeSafe
+over a custom vendor validates and persists the default model (its
+`acme/decision-v2` means nothing at the new transport), and a token typed on
+a switch is stored under the default `PHANTOMBOT_JEV_API_KEY`, never over
+the custom vendor's `key_env` (or over an OpenRouter embeddings key a reuse
+pick had left there). The existing credential name and model carry over only
+while the flow stays on the same actual provider, which is what keeps a
+same-provider re-run idempotent.
+
 Every field has an env override (`PHANTOMBOT_JEV_PROVIDER`, `_MODEL`,
 `_BASE_URL`, `_KEY_ENV`, `_JUDGE`, `_ROUTER`),
 env beats TOML as everywhere in phantombot. An `api_key` written into the
@@ -120,12 +152,12 @@ plaintext file. Timeouts, threshold and fail_closed are TOML-only and survive
 wizard re-runs (merge semantics: the wizard never resets tuning it doesn't
 ask about).
 
-`/status` reports the Jev line (provider, per-consumer state, live key
-validation), and the settings screen badges from it.
+`/status` reports the decision-model line (provider, per-consumer state,
+live key validation), and the settings screen badges from it.
 
 ## On or off — there is no third state
 
-An enabled consumer **decides**, and the pre-Jev method is the fallback on
+An enabled consumer **decides**, and the built-in method is the fallback on
 any error, timeout or missing key: the harness judge for the screener, the
 keyword scorer for the router. There is no user-visible difference beyond a
 log line and a counter.
@@ -160,12 +192,12 @@ Falling back is silent by design: the turn is still screened, still routed,
 still answered. That is the right runtime behaviour and the wrong
 operational one — an operator who configured a decision model believes it is
 deciding, and a revoked key or a provider outage would otherwise show up
-only as behaviour quietly reverting to the pre-Jev method. That is exactly
+only as behaviour quietly reverting to the built-in method. That is exactly
 the shape of #516, where a revoked embeddings key dropped memory search to
 keyword-only and doctor reported "semantic search off" with no reason.
 
 So every call records its **outcome** — never the screened payload — in a
-per-persona ledger (`<persona-dir>/.jev-health.json`, `src/lib/jevHealth.ts`):
+per-persona ledger (`<persona-dir>/.jev-health.json`, `src/lib/decisionModelHealth.ts`):
 calls, fallbacks, last success, last fallback, the last provider error
 (capped at 300 chars) and the consecutive-fallback streak. Counters are
 scoped to a rolling 24 h window (a total with no timeframe is unreadable);
@@ -177,9 +209,9 @@ right now".
 ```
   decision model: DEGRADED — openrouter 'typesafe/jev-1.13' · judge fell back
     4/9 call(s) to the harness judge — last error: 401 Unauthorized
-  → falling back to the pre-Jev method on those calls (last 24h). Check the
-    key with `phantombot jev` and the provider's status; screening and routing
-    still work meanwhile
+  → falling back to the harness judge / keyword scorer on those calls
+    (last 24h). Check the key with `phantombot decision-model` and the
+    provider's status; screening and routing still work meanwhile
 ```
 
 It is **informational, never an exit-code input** — the same neutrality as
@@ -209,8 +241,8 @@ context:
    `JUDGE_SYSTEM` classifier prompt — the same text the harness path falls
    back to when the persona can't load — plus the drawers through the
    `<briefing>` channel.
-2. The caps are tighter: drawers at 12 KB (`JEV_JUDGE_BRIEFING_CAP_BYTES`)
-   and the untrusted payload at 48 KB (`JEV_JUDGE_CONTENT_CAP_BYTES`).
+2. The caps are tighter: drawers at 12 KB (`DECISION_MODEL_JUDGE_BRIEFING_CAP_BYTES`)
+   and the untrusted payload at 48 KB (`DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES`).
 
 **Drop order** when the budget bites: the payload's tail is cut first (marked
 `[payload truncated at cap]`), then drawer entries are dropped lowest-rank
@@ -275,8 +307,8 @@ user data**) ship in `tests/fixtures/`:
 Run them with a real key:
 
 ```bash
-PHANTOMBOT_JEV_API_KEY=sk-or-... bun scripts/evalJevJudge.ts           # judge
-PHANTOMBOT_JEV_API_KEY=sk-or-... bun scripts/evalJevJudge.ts --router  # router
+PHANTOMBOT_JEV_API_KEY=sk-or-... bun scripts/evalDecisionModelJudge.ts           # judge
+PHANTOMBOT_JEV_API_KEY=sk-or-... bun scripts/evalDecisionModelJudge.ts --router  # router
 ```
 
 The judge report leads with the **false-negative rate on injection** and
@@ -291,7 +323,7 @@ number is the acceptance gate.
 harness judge's raw threshold of 80, Jev under-scored subtle attacks
 (calm-tone and non-English injections at 56–78) — System One reserves the
 top deciles for the blatant. The shipped default is therefore
-`JEV_JUDGE_DEFAULT_THRESHOLD = 70`. Observed live on the bundled corpus:
+`DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD = 70`. Observed live on the bundled corpus:
 every injection scores ≥ 70; benign cases score ≤ 24 on the original corpus
 and up to 33 on the conversational personal-data-ask class added after
 Atlas's live finding — call the observed benign ceiling **33**, a 37-point
@@ -305,12 +337,12 @@ evidence loop for moving either number.
 
 | | |
 |---|---|
-| Shared client | `src/lib/jev.ts` |
-| Judge adapter | `src/lib/jevJudge.ts` |
-| Router adapter | `src/lib/jevRouter.ts` |
+| Shared client | `src/lib/decisionModel.ts` |
+| Judge adapter | `src/lib/decisionModelJudge.ts` |
+| Router adapter | `src/lib/decisionModelRouter.ts` |
 | Judge call site | `src/orchestrator/screen.ts` |
 | Router call site | `src/harnesses/pi.ts` (threaded via `src/harnesses/buildChain.ts`) |
 | Config | `[jev]` in `src/config.ts` |
-| CLI wizard + write path | `src/cli/jev.ts` (`applyJevConfig`) |
-| TUI flow | `src/tui/jevFlow.ts` (Decision model row on `^s`) |
-| Eval | `scripts/evalJevJudge.ts`, `tests/fixtures/jev-*.json` |
+| CLI wizard + write path | `src/cli/decision-model.ts` (canonical; `phantombot jev` is a deprecated alias) + `src/cli/jev.ts` (`applyDecisionModelConfig`) |
+| TUI flow | `src/tui/decisionModelFlow.ts` (Decision model row on `^s`) |
+| Eval | `scripts/evalDecisionModelJudge.ts`, `tests/fixtures/jev-*.json` |

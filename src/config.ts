@@ -54,16 +54,16 @@ import {
   isVaultLoadedPersonaDir,
 } from "./lib/vaultEnvTracking.ts";
 import {
-  JEV_DEFAULT_KEY_ENV,
-  JEV_DEFAULT_MODEL,
-  JEV_OPENROUTER_BASE_URL,
-  JEV_TYPESAFE_BASE_URL,
-} from "./lib/jev.ts";
+  DECISION_MODEL_DEFAULT_KEY_ENV,
+  DECISION_MODEL_DEFAULT_MODEL,
+  DECISION_MODEL_OPENROUTER_BASE_URL,
+  DECISION_MODEL_TYPESAFE_BASE_URL,
+} from "./lib/decisionModel.ts";
 import {
-  JEV_JUDGE_DEFAULT_THRESHOLD,
-  JEV_JUDGE_DEFAULT_TIMEOUT_MS,
-} from "./lib/jevJudge.ts";
-import { JEV_ROUTER_DEFAULT_TIMEOUT_MS } from "./lib/jevRouter.ts";
+  DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD,
+  DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS,
+} from "./lib/decisionModelJudge.ts";
+import { DECISION_MODEL_ROUTER_DEFAULT_TIMEOUT_MS } from "./lib/decisionModelRouter.ts";
 
 /**
  * Read the legacy `turn_timeout_s` (TOML) or `PHANTOMBOT_TURN_TIMEOUT_MS`
@@ -919,15 +919,16 @@ export interface Config {
   voice: import("./lib/voice.ts").VoiceConfig;
 
   /**
-   * Optional TypeSafe Jev backend (issue #597, see docs/jev.md): a cheap,
+   * Optional TypeSafe Jev backend (issue #597, see docs/decision-model.md): a cheap,
    * independent System One screener for the threat judge and/or the
    * primary|coder brain-swap router. UNDEFINED unless a `[jev]` block (or a
    * PHANTOMBOT_JEV_* env var) configures it — a user with neither token sees
    * no behaviour change whatsoever. When present, each consumer is still
-   * individually disabled by default; the wizard (`phantombot jev`) flips
-   * them on. Jev is never a harness and can never serve a turn.
+   * individually disabled by default; the wizard (`phantombot
+   * decision-model`) flips them on. Jev is never a harness and can never
+   * serve a turn.
    */
-  jev?: JevSettings;
+  jev?: DecisionModelSettings;
 
   /**
    * P2P transport (phantombot#258, rewritten in #61): werift WebRTC channels to
@@ -943,18 +944,18 @@ export interface Config {
   p2p?: P2PSettings;
 }
 
-/** One Jev consumer's enablement. See docs/jev.md. */
-export interface JevConsumerSettings {
+/** One Jev consumer's enablement. See docs/decision-model.md. */
+export interface DecisionModelConsumerSettings {
   /** Master switch for this consumer. Default false — opt-in per consumer. */
   enabled: boolean;
   /**
    * There is deliberately NO mode switch here. An enabled consumer DECIDES,
-   * and the pre-Jev method (harness judge / keyword scorer) is the fallback
+   * and the built-in method (harness judge / keyword scorer) is the fallback
    * on any error or timeout. A log-only "shadow" mode shipped in the first
    * draft of #597 and was removed before merge: it doubled every call site,
    * and an operator who has configured a decision model wants it deciding —
    * the evidence it was meant to gather is produced instead by the bundled
-   * eval corpora (`scripts/evalJevJudge.ts`) offline, and by the fallback
+   * eval corpora (`scripts/evalDecisionModelJudge.ts`) offline, and by the fallback
    * telemetry `phantombot doctor` reports at runtime.
    */
   /** Hard wall-clock cap; exceeding it degrades to the existing method. */
@@ -962,11 +963,11 @@ export interface JevConsumerSettings {
 }
 
 /** The threat judge's Jev settings — the SECURITY control's consumer. */
-export interface JevJudgeSettings extends JevConsumerSettings {
+export interface DecisionModelJudgeSettings extends DecisionModelConsumerSettings {
   /**
-   * Hold at/above this score. Defaults to JEV_JUDGE_DEFAULT_THRESHOLD (70)
+   * Hold at/above this score. Defaults to DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD (70)
    * — calibrated on the bundled corpus for Jev's decile-compressed scale,
-   * deliberately NOT the harness judge's 80 (see lib/jevJudge.ts).
+   * deliberately NOT the harness judge's 80 (see lib/decisionModelJudge.ts).
    */
   threshold: number;
   /**
@@ -974,19 +975,36 @@ export interface JevJudgeSettings extends JevConsumerSettings {
    * judge errored. false (default) = fail open exactly as today; true =
    * hold the turn and notify. Fail-closed only becomes affordable with a
    * cheap independent screener in front, and even then it is the operator's
-   * call — see docs/jev.md for the analysis.
+   * call — see docs/decision-model.md for the analysis.
    */
   failClosed: boolean;
 }
 
 /** The `[jev]` block, resolved. The API key is vault/env-only — never TOML. */
-export interface JevSettings {
+export interface DecisionModelSettings {
   /** "openrouter" (reuse an OpenRouter key) or "typesafe" (direct token). */
   provider: "typesafe" | "openrouter";
+  /**
+   * The provider name as WRITTEN in config when it is not one of the two
+   * transports above (a future vendor reached over the OpenRouter-style
+   * transport at an explicit `base_url`). Preserved so `/status` reports
+   * what the operator configured and a wizard re-run writes it back
+   * verbatim instead of rewriting it to the transport's name. Absent for
+   * "typesafe" / "openrouter".
+   */
+  statedProvider?: string;
   /** Model id — default `typesafe/jev-1.13`. */
   model: string;
-  /** OpenAI-compatible base URL for the chosen provider. */
-  baseUrl: string;
+  /**
+   * OpenAI-compatible base URL for the chosen provider. Absent ONLY for an
+   * unknown vendor (`statedProvider` set) whose block names no `base_url`:
+   * a transport default is that transport's endpoint, not the vendor's, so
+   * standing one in would be a GUESSED endpoint — and every reader of this
+   * field would then send that vendor's credential to a host the operator
+   * never named. Absence is what makes that unrepresentable; with a consumer
+   * enabled the load already fails, so a consumer only ever sees a URL.
+   */
+  baseUrl?: string;
   /** The vault/env NAME the API key is read from (default PHANTOMBOT_JEV_API_KEY). */
   keyEnv: string;
   /**
@@ -995,8 +1013,8 @@ export interface JevSettings {
    * multi-persona daemon reads its OWN vault, not the injected one.
    */
   apiKey?: string;
-  judge: JevJudgeSettings;
-  router: JevConsumerSettings;
+  judge: DecisionModelJudgeSettings;
+  router: DecisionModelConsumerSettings;
 }
 
 /** Settings for the P2P WebRTC transport node (phantombot#258, #61). */
@@ -1345,20 +1363,20 @@ export async function loadConfig(persona?: string): Promise<Config> {
   >;
   const tomlVoice = (toml.voice ?? {}) as Record<string, unknown>;
   const tomlPromptCache = (toml.prompt_cache ?? {}) as Record<string, unknown>;
-  const tomlJev = (toml.jev ?? {}) as Record<string, unknown>;
+  const tomlDecisionModel = (toml.jev ?? {}) as Record<string, unknown>;
 
   // Jev API keys resolve VAULT-FIRST under the configured key_env name (and
   // the default name), exactly like the embedding keys above — a secondary
   // persona on a multi-persona daemon must read its OWN vault, not the one
   // injected at startup. Only read the vault at all when Jev is configured.
-  const jevKeyEnv =
+  const decisionModelKeyEnv =
     asString(process.env.PHANTOMBOT_JEV_KEY_ENV) ??
-    asString(tomlJev.key_env) ??
-    JEV_DEFAULT_KEY_ENV;
-  const vaultJevSecrets =
-    Object.keys(tomlJev).length > 0 || hasJevEnv()
-      ? await readJevSecretsFromVault(personaDirPath, [
-          ...new Set([jevKeyEnv, JEV_DEFAULT_KEY_ENV]),
+    asString(tomlDecisionModel.key_env) ??
+    DECISION_MODEL_DEFAULT_KEY_ENV;
+  const vaultDecisionModelSecrets =
+    Object.keys(tomlDecisionModel).length > 0 || hasDecisionModelEnv()
+      ? await readDecisionModelSecretsFromVault(personaDirPath, [
+          ...new Set([decisionModelKeyEnv, DECISION_MODEL_DEFAULT_KEY_ENV]),
         ])
       : {};
 
@@ -1679,9 +1697,9 @@ export async function loadConfig(persona?: string): Promise<Config> {
 
     voice: buildVoiceConfig(tomlVoice),
 
-    jev: buildJevConfig(tomlJev, {
+    jev: buildDecisionModelConfig(tomlDecisionModel, {
       personaDirPath,
-      vaultSecrets: vaultJevSecrets,
+      vaultSecrets: vaultDecisionModelSecrets,
     }),
 
     p2p: buildP2PConfig(tomlP2p),
@@ -2520,13 +2538,13 @@ function buildEmbeddingsConfig(
 
 // ───────────────────────────────────────────────────────────────────────────
 // Jev (issue #597) — optional TypeSafe System One backend for the threat
-// judge and the brain-swap router. Docs: docs/jev.md.
+// judge and the brain-swap router. Docs: docs/decision-model.md.
 // ───────────────────────────────────────────────────────────────────────────
 
 /** True when any PHANTOMBOT_JEV_* env var marks Jev as configured. */
-function hasJevEnv(): boolean {
+function hasDecisionModelEnv(): boolean {
   return Object.keys(process.env).some(
-    (k) => k.startsWith("PHANTOMBOT_JEV_") && k !== JEV_DEFAULT_KEY_ENV,
+    (k) => k.startsWith("PHANTOMBOT_JEV_") && k !== DECISION_MODEL_DEFAULT_KEY_ENV,
   );
 }
 
@@ -2537,7 +2555,7 @@ function hasJevEnv(): boolean {
  * Jev consumers would silently use the DEFAULT persona's credential. Never
  * throws — an unopenable or absent vault is "no key", never a failed load.
  */
-async function readJevSecretsFromVault(
+async function readDecisionModelSecretsFromVault(
   personaDirPath: string,
   names: readonly string[],
 ): Promise<Record<string, string>> {
@@ -2564,7 +2582,7 @@ async function readJevSecretsFromVault(
   }
 }
 
-export interface BuildJevOptions {
+export interface BuildDecisionModelOptions {
   personaDirPath: string;
   vaultSecrets: Record<string, string>;
 }
@@ -2573,42 +2591,101 @@ export interface BuildJevOptions {
  * Build the `[jev]` block. UNDEFINED when nothing configures Jev — no block,
  * no PHANTOMBOT_JEV_* env — so an unconfigured user sees zero behaviour
  * change. When present, both consumers still default to disabled; the wizard
- * (`phantombot jev` / the TUI Jev row) flips them on.
+ * (`phantombot decision-model` / the TUI Decision model row) flips them on.
  *
  * The API key is vault/env-only. An `api_key` key in the TOML block is
  * IGNORED with a warning — secrets never belong in the plaintext file.
  */
-function buildJevConfig(
-  tomlJev: Record<string, unknown>,
-  opts: BuildJevOptions,
-): JevSettings | undefined {
-  if (Object.keys(tomlJev).length === 0 && !hasJevEnv()) return undefined;
+function buildDecisionModelConfig(
+  tomlDecisionModel: Record<string, unknown>,
+  opts: BuildDecisionModelOptions,
+): DecisionModelSettings | undefined {
+  if (Object.keys(tomlDecisionModel).length === 0 && !hasDecisionModelEnv()) return undefined;
 
-  if (tomlJev.api_key !== undefined) {
+  if (tomlDecisionModel.api_key !== undefined) {
     log.warn(
-      "config: [jev] api_key in config.toml is ignored — Jev keys live in " +
-        `the vault (${JEV_DEFAULT_KEY_ENV} or the configured key_env). ` +
-        "Run `phantombot jev` to store it properly, and remove it from the file.",
+      "config: [jev] api_key in config.toml is ignored — decision-model keys live in " +
+        `the vault (${DECISION_MODEL_DEFAULT_KEY_ENV} or the configured key_env). ` +
+        "Run `phantombot decision-model` to store it properly, and remove it from the file.",
     );
   }
 
+  const tomlJudge = (tomlDecisionModel.judge ?? {}) as Record<string, unknown>;
+  const tomlRouter = (tomlDecisionModel.router ?? {}) as Record<string, unknown>;
+  const judgeEnabled =
+    asBool(process.env.PHANTOMBOT_JEV_JUDGE) ?? asBool(tomlJudge.enabled) ?? false;
+  const routerEnabled =
+    asBool(process.env.PHANTOMBOT_JEV_ROUTER) ?? asBool(tomlRouter.enabled) ?? false;
+
+  // A case or whitespace slip ("TypeSafe", "openrouter ") is the operator
+  // naming a known transport, not a different vendor.
+  const statedProviderRaw =
+    asString(process.env.PHANTOMBOT_JEV_PROVIDER) ??
+    asString(tomlDecisionModel.provider);
+  const statedProvider = statedProviderRaw?.trim().toLowerCase();
+  const knownTransport =
+    statedProvider === "typesafe" || statedProvider === "openrouter";
+  /** The stated name when it is NOT a known transport — kept verbatim. */
+  const unknownProviderName =
+    statedProviderRaw !== undefined && !knownTransport
+      ? statedProviderRaw.trim()
+      : undefined;
+  const explicitBaseUrl =
+    asString(process.env.PHANTOMBOT_JEV_BASE_URL) ??
+    asString(tomlDecisionModel.base_url);
+  if (unknownProviderName !== undefined) {
+    // A FUTURE decision-model vendor (the [jev] surface is meant to outlive
+    // Jev itself). Today only two transports exist; the portability surface
+    // is base_url + model + key_env, all free strings, so an unknown name
+    // loads over the OpenRouter-style transport at the operator's OWN
+    // endpoint. What it must never do is GUESS the endpoint: defaulting to
+    // openrouter.ai would send a credential meant for another vendor to a
+    // host the operator never named, on every screened turn and every
+    // /status probe. With a consumer enabled that is a config error, same
+    // as an out-of-range threshold; with both consumers off no call is ever
+    // made, so the block loads with the warning only.
+    if (explicitBaseUrl === undefined && (judgeEnabled || routerEnabled)) {
+      throw new Error(
+        `config: [jev] provider '${unknownProviderName}' is not a known transport ` +
+          "(typesafe | openrouter) and no base_url is set — refusing to guess an " +
+          "endpoint for a credential meant for another vendor. Set base_url to " +
+          "that vendor's decisions endpoint (its model id in `model`, its " +
+          "credential name in `key_env`), or use one of the known providers.",
+      );
+    }
+    log.warn(
+      `config: [jev] provider '${unknownProviderName}' is not a known transport ` +
+        "(typesafe | openrouter) — reading it over the OpenRouter-style transport" +
+        (explicitBaseUrl !== undefined
+          ? ` at the configured base_url ${explicitBaseUrl}. `
+          : ", and with both consumers off no call is made. ") +
+        "The stated name is kept as written; a different vendor today needs its " +
+        "own decisions endpoint in `base_url`, its model id in `model` and its " +
+        "credential name in `key_env`.",
+    );
+  }
   const provider =
-    (asString(process.env.PHANTOMBOT_JEV_PROVIDER) ??
-    asString(tomlJev.provider)) === "typesafe"
+    statedProvider === "typesafe"
       ? ("typesafe" as const)
       : ("openrouter" as const);
 
   const keyEnv =
     asString(process.env.PHANTOMBOT_JEV_KEY_ENV) ??
-    asString(tomlJev.key_env) ??
-    JEV_DEFAULT_KEY_ENV;
+    asString(tomlDecisionModel.key_env) ??
+    DECISION_MODEL_DEFAULT_KEY_ENV;
 
+  // A transport default is only the vendor's endpoint when the vendor IS
+  // that transport. An unknown name with no base_url stays URL-less (the
+  // wizard asks for one; nothing else may call out) rather than borrowing
+  // openrouter.ai — a derived URL is indistinguishable from a stated one to
+  // every consumer downstream, and "consumers off" is not "never read".
   const baseUrl =
-    asString(process.env.PHANTOMBOT_JEV_BASE_URL) ??
-    asString(tomlJev.base_url) ??
-    (provider === "openrouter"
-      ? JEV_OPENROUTER_BASE_URL
-      : JEV_TYPESAFE_BASE_URL);
+    explicitBaseUrl ??
+    (unknownProviderName !== undefined
+      ? undefined
+      : provider === "openrouter"
+        ? DECISION_MODEL_OPENROUTER_BASE_URL
+        : DECISION_MODEL_TYPESAFE_BASE_URL);
 
   // Vault first, then env with the vault-injection guard — the same
   // precedence personaEmbeddingKey applies, minus the TOML tier (a Jev key
@@ -2624,30 +2701,27 @@ function buildJevConfig(
       ? fromEnv
       : undefined);
 
-  const tomlJudge = (tomlJev.judge ?? {}) as Record<string, unknown>;
-  const tomlRouter = (tomlJev.router ?? {}) as Record<string, unknown>;
-
   // The judge threshold and both timeouts are SECURITY-RELEVANT bounds —
   // reject out-of-range values at parse time rather than letting them
   // reach the consumers: threshold > 100 makes every Jev verdict pass
   // (silently disabling holds), threshold < 0 holds everything, and a
   // non-positive timeout reaches AbortSignal.timeout and can throw.
   const judgeThreshold =
-    asInt(tomlJudge.threshold) ?? JEV_JUDGE_DEFAULT_THRESHOLD;
+    asInt(tomlJudge.threshold) ?? DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD;
   if (judgeThreshold < 0 || judgeThreshold > 100) {
     throw new Error(
       `config: [jev.judge] threshold must be 0..100, got ${judgeThreshold}`,
     );
   }
   const judgeTimeoutMs =
-    asInt(tomlJudge.timeout_ms) ?? JEV_JUDGE_DEFAULT_TIMEOUT_MS;
+    asInt(tomlJudge.timeout_ms) ?? DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS;
   if (judgeTimeoutMs <= 0 || judgeTimeoutMs > 30_000) {
     throw new Error(
       `config: [jev.judge] timeout_ms must be 1..30000, got ${judgeTimeoutMs}`,
     );
   }
   const routerTimeoutMs =
-    asInt(tomlRouter.timeout_ms) ?? JEV_ROUTER_DEFAULT_TIMEOUT_MS;
+    asInt(tomlRouter.timeout_ms) ?? DECISION_MODEL_ROUTER_DEFAULT_TIMEOUT_MS;
   if (routerTimeoutMs <= 0 || routerTimeoutMs > 30_000) {
     throw new Error(
       `config: [jev.router] timeout_ms must be 1..30000, got ${routerTimeoutMs}`,
@@ -2656,27 +2730,24 @@ function buildJevConfig(
 
   return {
     provider,
+    ...(unknownProviderName !== undefined
+      ? { statedProvider: unknownProviderName }
+      : {}),
     model:
       asString(process.env.PHANTOMBOT_JEV_MODEL) ??
-      asString(tomlJev.model) ??
-      JEV_DEFAULT_MODEL,
-    baseUrl,
+      asString(tomlDecisionModel.model) ??
+      DECISION_MODEL_DEFAULT_MODEL,
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
     keyEnv,
     ...(apiKey !== undefined ? { apiKey } : {}),
     judge: {
-      enabled:
-        asBool(process.env.PHANTOMBOT_JEV_JUDGE) ??
-        asBool(tomlJudge.enabled) ??
-        false,
+      enabled: judgeEnabled,
       timeoutMs: judgeTimeoutMs,
       threshold: judgeThreshold,
       failClosed: asBool(tomlJudge.fail_closed) ?? false,
     },
     router: {
-      enabled:
-        asBool(process.env.PHANTOMBOT_JEV_ROUTER) ??
-        asBool(tomlRouter.enabled) ??
-        false,
+      enabled: routerEnabled,
       timeoutMs: routerTimeoutMs,
     },
   };

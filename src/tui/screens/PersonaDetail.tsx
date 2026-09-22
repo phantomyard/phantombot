@@ -38,7 +38,7 @@ import { scrollWindow } from "../scroll.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { frameChromeColumns, frameChromeRows } from "../chrome.ts";
 import type { PersonaSnapshot } from "../snapshot.ts";
-import { JEV_STATUS_ROW, type StatusRows } from "../status.ts";
+import { DECISION_MODEL_STATUS_ROW, type StatusRows } from "../status.ts";
 
 /** Fixed geometry of a settings row, in terminal columns. */
 const BAR_COLS = 4; // TWO selection bars: Selectable's outer glyph cell and
@@ -381,7 +381,7 @@ export function PersonaDetailScreen(props: {
           // The STATUS row is keyed by its printed label ("decision model"),
           // not by the config section name — looking it up as "jev" silently
           // returned undefined and painted a configured screener "optional".
-          {...probeBadge(line(JEV_STATUS_ROW), "configured")}
+          {...probeBadge(line(DECISION_MODEL_STATUS_ROW), "configured")}
           selected={row === "jev"}
           onPress={() => press("jev")}
           {...tableProps}

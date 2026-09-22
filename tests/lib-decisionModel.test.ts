@@ -8,13 +8,13 @@
 import { describe, expect, it } from "bun:test";
 
 import {
-  jevDecide,
-  jevDecisionsUrl,
-  JEV_MAX_SCORE_LEVELS,
-  type JevQuestion,
-} from "../src/lib/jev.ts";
+  decisionModelDecide,
+  decisionModelDecisionsUrl,
+  DECISION_MODEL_MAX_SCORE_LEVELS,
+  type DecisionModelQuestion,
+} from "../src/lib/decisionModel.ts";
 
-const QUESTIONS: Record<string, JevQuestion> = {
+const QUESTIONS: Record<string, DecisionModelQuestion> = {
   verdict: {
     type: "choice",
     instructions: "allow or hold?",
@@ -66,30 +66,30 @@ function decisionsResponse(): unknown {
   };
 }
 
-describe("jevDecisionsUrl", () => {
+describe("decisionModelDecisionsUrl", () => {
   it("derives the OpenRouter decisions endpoint from the /api/v1 base", () => {
-    expect(jevDecisionsUrl("https://openrouter.ai/api/v1")).toBe(
+    expect(decisionModelDecisionsUrl("https://openrouter.ai/api/v1")).toBe(
       "https://openrouter.ai/api/alpha/decisions",
     );
   });
   it("derives a plausible direct-provider endpoint from a bare /v1 base", () => {
-    expect(jevDecisionsUrl("https://api.typesafe.ai/v1")).toBe(
+    expect(decisionModelDecisionsUrl("https://api.typesafe.ai/v1")).toBe(
       "https://api.typesafe.ai/api/alpha/decisions",
     );
   });
   it("tolerates a trailing slash", () => {
-    expect(jevDecisionsUrl("https://openrouter.ai/api/v1/")).toBe(
+    expect(decisionModelDecisionsUrl("https://openrouter.ai/api/v1/")).toBe(
       "https://openrouter.ai/api/alpha/decisions",
     );
   });
 });
 
-describe("jevDecide", () => {
+describe("decisionModelDecide", () => {
   it("posts model/instructions/state/questions to the decisions endpoint", async () => {
     let seenUrl = "";
     let seenBody = "";
     let seenAuth = "";
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       fetchImpl: async (url, init) => {
         seenUrl = String(url);
@@ -117,7 +117,7 @@ describe("jevDecide", () => {
   });
 
   it("returns typed answers with probabilities, confidence and latency", async () => {
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       fetchImpl: async () => jsonResponse(decisionsResponse()),
     });
@@ -141,7 +141,7 @@ describe("jevDecide", () => {
   });
 
   it("rejects a choice answer naming a choice outside the criteria", async () => {
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       fetchImpl: async () =>
         jsonResponse({
@@ -156,7 +156,7 @@ describe("jevDecide", () => {
   });
 
   it("rejects a missing answer for a requested question", async () => {
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       fetchImpl: async () =>
         jsonResponse({
@@ -170,7 +170,7 @@ describe("jevDecide", () => {
   });
 
   it("rejects a malformed (non-finite) score answer", async () => {
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       fetchImpl: async () =>
         jsonResponse({
@@ -188,7 +188,7 @@ describe("jevDecide", () => {
     // most benign level on the scale — in active judge mode that turns a
     // malformed provider response into a silent "benign" verdict.
     for (const bad of [null, "", undefined]) {
-      const r = await jevDecide({
+      const r = await decisionModelDecide({
         ...BASE,
         fetchImpl: async () =>
           jsonResponse({
@@ -204,7 +204,7 @@ describe("jevDecide", () => {
 
   it("rejects a score answer outside the question's ordinal range", async () => {
     for (const bad of [-1, 3, 99]) {
-      const r = await jevDecide({
+      const r = await decisionModelDecide({
         ...BASE,
         fetchImpl: async () =>
           jsonResponse({
@@ -219,7 +219,7 @@ describe("jevDecide", () => {
   });
 
   it("maps an HTTP error to { ok: false } with the status and detail", async () => {
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       fetchImpl: async () =>
         jsonResponse(
@@ -240,7 +240,7 @@ describe("jevDecide", () => {
   });
 
   it("maps a network failure to { ok: false }", async () => {
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       fetchImpl: async () => {
         throw new Error("connection refused");
@@ -251,7 +251,7 @@ describe("jevDecide", () => {
   });
 
   it("maps non-JSON success bodies to { ok: false }", async () => {
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       fetchImpl: async () => new Response("<html>proxy error</html>"),
     });
@@ -260,7 +260,7 @@ describe("jevDecide", () => {
   });
 
   it("times out rather than stall", async () => {
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       timeoutMs: 50,
       fetchImpl: (_url, init) =>
@@ -279,14 +279,14 @@ describe("jevDecide", () => {
   });
 
   it("rejects a score question with more levels than the vendor cap", async () => {
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       questions: {
         risk: {
           type: "score",
           instructions: "x",
           criteria: Array.from(
-            { length: JEV_MAX_SCORE_LEVELS + 1 },
+            { length: DECISION_MODEL_MAX_SCORE_LEVELS + 1 },
             (_, i) => String(i),
           ),
         },
@@ -300,7 +300,7 @@ describe("jevDecide", () => {
   });
 
   it("rejects an empty question set without hitting the wire", async () => {
-    const r = await jevDecide({
+    const r = await decisionModelDecide({
       ...BASE,
       questions: {},
       fetchImpl: async () => {
@@ -317,14 +317,14 @@ describe("jevDecide", () => {
  * unless JEV_LIVE_KEY names a real OpenRouter key — CI never sets it, a
  * reviewer runs it explicitly:
  *
- *   JEV_LIVE_KEY=sk-or-... bun test tests/lib-jev.test.ts
+ *   JEV_LIVE_KEY=sk-or-... bun test tests/lib-decisionModel.test.ts
  */
-describe("jevDecide LIVE (opt-in via JEV_LIVE_KEY)", () => {
+describe("decisionModelDecide LIVE (opt-in via JEV_LIVE_KEY)", () => {
   const key = process.env.JEV_LIVE_KEY;
   it.skipIf(!key)(
     "the real endpoint answers the decisions contract",
     async () => {
-      const r = await jevDecide({
+      const r = await decisionModelDecide({
         baseUrl: "https://openrouter.ai/api/v1",
         apiKey: key!,
         model: "typesafe/jev-1.13",

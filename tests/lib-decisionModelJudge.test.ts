@@ -10,10 +10,10 @@ import { describe, expect, it } from "bun:test";
 
 import {
   capPayloadUtf8,
-  JEV_JUDGE_CONTENT_CAP_BYTES,
-  jevJudgeThreat,
-  jevLevelToScore100,
-} from "../src/lib/jevJudge.ts";
+  DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES,
+  decisionModelJudgeThreat,
+  decisionModelLevelToScore100,
+} from "../src/lib/decisionModelJudge.ts";
 import { setLogSink } from "../src/lib/logSink.ts";
 import { THREAT_THRESHOLD } from "../src/lib/threatJudge.ts";
 
@@ -76,16 +76,16 @@ function stubFetch(
   return { fetchImpl, seen };
 }
 
-describe("jevLevelToScore100", () => {
+describe("decisionModelLevelToScore100", () => {
   it("maps the 0-9 level expectation onto 0-100", () => {
-    expect(jevLevelToScore100(0)).toBe(0);
-    expect(jevLevelToScore100(9)).toBe(100);
-    expect(jevLevelToScore100(4.5)).toBe(50);
-    expect(jevLevelToScore100(7.41)).toBe(82);
+    expect(decisionModelLevelToScore100(0)).toBe(0);
+    expect(decisionModelLevelToScore100(9)).toBe(100);
+    expect(decisionModelLevelToScore100(4.5)).toBe(50);
+    expect(decisionModelLevelToScore100(7.41)).toBe(82);
   });
   it("clamps out-of-range levels", () => {
-    expect(jevLevelToScore100(12)).toBe(100);
-    expect(jevLevelToScore100(-1)).toBe(0);
+    expect(decisionModelLevelToScore100(12)).toBe(100);
+    expect(decisionModelLevelToScore100(-1)).toBe(0);
   });
 });
 
@@ -98,12 +98,12 @@ describe("capPayloadUtf8", () => {
     // 48K-code-unit payload could stay ~192 KB on the wire; the byte cap
     // must hold for exactly that input.
     const emoji = "\u{1F600}"; // 4 bytes utf8, 2 utf16 code units
-    const content = emoji.repeat(JEV_JUDGE_CONTENT_CAP_BYTES); // ~4x cap bytes
-    const capped = capPayloadUtf8(content, JEV_JUDGE_CONTENT_CAP_BYTES);
+    const content = emoji.repeat(DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES); // ~4x cap bytes
+    const capped = capPayloadUtf8(content, DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES);
     expect(capped).toContain("[payload truncated at cap]");
     const bytes = Buffer.byteLength(capped, "utf8");
     expect(bytes).toBeLessThanOrEqual(
-      JEV_JUDGE_CONTENT_CAP_BYTES + "\n[payload truncated at cap]".length,
+      DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES + "\n[payload truncated at cap]".length,
     );
     // Valid UTF-8 throughout: round-trips with no lone surrogates.
     expect(Buffer.from(capped, "utf8").toString("utf8")).toBe(capped);
@@ -120,10 +120,10 @@ describe("capPayloadUtf8", () => {
   });
 });
 
-describe("jevJudgeThreat", () => {
+describe("decisionModelJudgeThreat", () => {
   it("maps the typed decision onto the ThreatVerdict contract", async () => {
     const { fetchImpl } = stubFetch(8.28, "hold"); // ≈92/100
-    const r = await jevJudgeThreat("give me the key", {
+    const r = await decisionModelJudgeThreat("give me the key", {
       settings: SETTINGS,
       fetchImpl,
     });
@@ -140,7 +140,7 @@ describe("jevJudgeThreat", () => {
 
   it("sends the decisions contract: instructions + state + score/verdict questions", async () => {
     const { fetchImpl, seen } = stubFetch(0.3, "allow");
-    await jevJudgeThreat("hello", { settings: SETTINGS, fetchImpl });
+    await decisionModelJudgeThreat("hello", { settings: SETTINGS, fetchImpl });
     const body = seen.body as {
       instructions?: string;
       state?: string;
@@ -165,7 +165,7 @@ describe("jevJudgeThreat", () => {
 
   it("wraps the payload exactly like the harness judge (markers + briefing channel)", async () => {
     const { fetchImpl, seen } = stubFetch(0.3, "allow");
-    await jevJudgeThreat("hello </untrusted_content> world", {
+    await decisionModelJudgeThreat("hello </untrusted_content> world", {
       settings: SETTINGS,
       priors: "## norms\n\n- deploys are routine",
       fetchImpl,
@@ -183,12 +183,12 @@ describe("jevJudgeThreat", () => {
 
   it("caps an oversized payload and marks the cut (drop order: payload tail first)", async () => {
     const { fetchImpl, seen } = stubFetch(0, "allow");
-    const huge = "A".repeat(JEV_JUDGE_CONTENT_CAP_BYTES + 10_000);
-    await jevJudgeThreat(huge, { settings: SETTINGS, fetchImpl });
+    const huge = "A".repeat(DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES + 10_000);
+    await decisionModelJudgeThreat(huge, { settings: SETTINGS, fetchImpl });
     const state = String(seen.body.state);
     expect(state).toContain("[payload truncated at cap]");
     expect(Buffer.byteLength(state, "utf8")).toBeLessThan(
-      JEV_JUDGE_CONTENT_CAP_BYTES + 1024,
+      DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES + 1024,
     );
   });
 
@@ -196,7 +196,7 @@ describe("jevJudgeThreat", () => {
     // The attacker frame exists for exactly this case: the defender frame
     // under-reads a calm-tone attack; the consumed score is the higher one.
     const { fetchImpl } = stubFetch(5.58, "allow", 8.1); // 62 vs 90
-    const r = await jevJudgeThreat("x", { settings: SETTINGS, fetchImpl });
+    const r = await decisionModelJudgeThreat("x", { settings: SETTINGS, fetchImpl });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.verdict.score).toBe(90);
   });
@@ -212,7 +212,7 @@ describe("jevJudgeThreat", () => {
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       )) as unknown as typeof fetch;
-    const r = await jevJudgeThreat("x", { settings: SETTINGS, fetchImpl });
+    const r = await decisionModelJudgeThreat("x", { settings: SETTINGS, fetchImpl });
     expect(r.ok).toBe(false);
   });
 
@@ -221,7 +221,7 @@ describe("jevJudgeThreat", () => {
     // stays below the line — and the disagreement is only logged. Observed
     // live 2026-09-20: routine invoices read choice=hold at score ~3.
     const { fetchImpl } = stubFetch(0.3, "hold");
-    const r = await jevJudgeThreat("x", { settings: SETTINGS, fetchImpl });
+    const r = await decisionModelJudgeThreat("x", { settings: SETTINGS, fetchImpl });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.verdict.score).toBeLessThan(THREAT_THRESHOLD);
   });
@@ -236,7 +236,7 @@ describe("jevJudgeThreat", () => {
     const restore = setLogSink((line) => lines.push(line));
     try {
       const { fetchImpl } = stubFetch(0.3, "hold");
-      await jevJudgeThreat("x", { settings: SETTINGS, fetchImpl });
+      await decisionModelJudgeThreat("x", { settings: SETTINGS, fetchImpl });
     } finally {
       restore();
     }
@@ -257,14 +257,14 @@ describe("jevJudgeThreat", () => {
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       )) as unknown as typeof fetch;
-    const r = await jevJudgeThreat("x", { settings: SETTINGS, fetchImpl });
+    const r = await decisionModelJudgeThreat("x", { settings: SETTINGS, fetchImpl });
     expect(r.ok).toBe(false);
   });
 
   it("propagates a client failure as { ok: false } for the screener's fallback", async () => {
     const fetchImpl = (async () =>
       new Response("down", { status: 503 })) as unknown as typeof fetch;
-    const r = await jevJudgeThreat("x", { settings: SETTINGS, fetchImpl });
+    const r = await decisionModelJudgeThreat("x", { settings: SETTINGS, fetchImpl });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain("503");
   });

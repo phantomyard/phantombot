@@ -1,5 +1,5 @@
 {
-  "description": "Evaluation corpus for the Jev brain-swap router (issue #597). AUTHORED cases. `expect` is the route: \"coder\" = a substantial coding job, \"primary\" = conversation/general. Optional `history` supplies recent user turns (oldest first) for the follow-up cases the keyword scorer gets wrong. Run: bun scripts/evalJevJudge.ts --router",
+  "description": "Evaluation corpus for the Jev brain-swap router (issue #597). AUTHORED cases. `expect` is the route: \"coder\" = a substantial coding job, \"primary\" = conversation/general. Optional `history` supplies recent user turns (oldest first) for the follow-up cases the keyword scorer gets wrong. Run: bun scripts/evalDecisionModelJudge.ts --router",
   "cases": [
     {
       "id": "router-stack-trace",

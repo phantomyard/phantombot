@@ -60,11 +60,11 @@ import {
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
-  JEV_HEALTH_WINDOW_HOURS,
-  type JevConsumerId,
-  loadJevHealth,
+  DECISION_MODEL_HEALTH_WINDOW_HOURS,
+  type DecisionModelConsumerId,
+  loadDecisionModelHealth,
   windowExpired,
-} from "../lib/jevHealth.ts";
+} from "../lib/decisionModelHealth.ts";
 import {
   loadNightlyState,
   type NightlyHealth,
@@ -316,7 +316,7 @@ export interface DoctorReport {
    * a silent one, and that is why this section exists — an operator who
    * configured a decision model believes it is deciding, and without this
    * the only symptom of a revoked key or a provider outage is behaviour
-   * quietly reverting to the pre-Jev method (the #516 embeddings shape).
+   * quietly reverting to the built-in method (harness judge / keyword scorer) (the #516 embeddings shape).
    */
   decision_model?: {
     provider: "typesafe" | "openrouter";
@@ -330,7 +330,7 @@ export interface DoctorReport {
     key_missing?: boolean;
     /** Per-consumer counters from `.jev-health.json`, window-scoped. */
     consumers: Array<{
-      consumer: JevConsumerId;
+      consumer: DecisionModelConsumerId;
       calls: number;
       fallbacks: number;
       last_ok_at?: string;
@@ -944,9 +944,9 @@ async function buildDecisionModelReport(
 ): Promise<DoctorReport["decision_model"]> {
   const jev = config.jev;
   if (!jev) return undefined;
-  const health = await loadJevHealth(personaPath);
+  const health = await loadDecisionModelHealth(personaPath);
   const now = new Date();
-  const enabled: Array<[JevConsumerId, boolean]> = [
+  const enabled: Array<[DecisionModelConsumerId, boolean]> = [
     ["judge", jev.judge.enabled],
     ["router", jev.router.enabled],
   ];
@@ -1017,7 +1017,7 @@ async function buildDecisionModelReport(
     degraded,
     ...(keyMissing ? { key_missing: true } : {}),
     consumers,
-    window_hours: JEV_HEALTH_WINDOW_HOURS,
+    window_hours: DECISION_MODEL_HEALTH_WINDOW_HOURS,
     detail,
   };
 }
@@ -1733,11 +1733,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     if (dm.degraded) {
       out.write(
         dm.key_missing
-          ? "  → every call falls back to the pre-Jev method until the key " +
-              "resolves. Store it with `phantombot jev`; screening and " +
-              "routing still work meanwhile\n"
-          : `  → falling back to the pre-Jev method on those calls ` +
-              `(last ${dm.window_hours}h). Check the key with \`phantombot jev\` ` +
+          ? "  → every call falls back to the harness judge / keyword scorer " +
+              "until the key resolves. Store it with `phantombot " +
+              "decision-model`; screening and routing still work meanwhile\n"
+          : `  → falling back to the harness judge / keyword scorer on those calls ` +
+              `(last ${dm.window_hours}h). Check the key with \`phantombot decision-model\` ` +
               "and the provider's status; screening and routing still work meanwhile\n",
       );
     }

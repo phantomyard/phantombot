@@ -22,7 +22,7 @@ const ENV_NAMES = [
 ];
 
 beforeEach(async () => {
-  workdir = await mkdtemp(join(tmpdir(), "phantombot-jevcfg-"));
+  workdir = await mkdtemp(join(tmpdir(), "phantombot-decision-model-cfg-"));
   process.env.PHANTOMBOT_CONFIG = join(workdir, "config.toml");
   process.env.XDG_CONFIG_HOME = join(workdir, "xdg-config");
   process.env.XDG_DATA_HOME = join(workdir, "xdg-data");
@@ -101,6 +101,93 @@ describe("config [jev]", () => {
     config = await loadConfig();
     expect(config.jev!.provider).toBe("openrouter");
     expect(config.jev!.judge.enabled).toBe(true);
+  });
+
+  test("an UNKNOWN provider still loads (coerced to openrouter) — loudly", async () => {
+    // A future decision-model vendor written into a today-binary config
+    // must not wedge startup or silently rewrite the operator's intent.
+    // The value coerces to the OpenRouter transport (unchanged behaviour)
+    // but log.warn names it and points at the portability surface, so the
+    // next decision-model vendor is anticipated without a release dance.
+    let config = await loadConfig();
+    await writePersonaToml(
+      config,
+      '[jev]\nprovider = "acme"\nbase_url = "https://api.acme.dev/v1"\n',
+    );
+    const lines: string[] = [];
+    const original = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      config = await loadConfig();
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(config.jev!.provider).toBe("openrouter");
+    // The operator's base_url is honoured regardless of the transport name.
+    expect(config.jev!.baseUrl).toBe("https://api.acme.dev/v1");
+    // The name is carried as written — /status and the wizard read it.
+    expect(config.jev!.statedProvider).toBe("acme");
+    // The coercion is NOT silent: the warning names the stated provider.
+    const msgs = lines
+      .flatMap((l) => l.split("\n"))
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l).msg as string);
+    expect(
+      msgs.some((m) => m.includes("provider 'acme'") && m.includes("key_env")),
+    ).toBe(true);
+  });
+
+  test("an unknown provider with a consumer enabled and NO base_url is a config error — never a guessed endpoint", async () => {
+    // Defaulting to openrouter.ai here would send a credential meant for
+    // another vendor to a host the operator never named, on every screened
+    // turn. Same shape as the threshold/timeout checks: reject at load.
+    const config = await loadConfig();
+    await writePersonaToml(
+      config,
+      '[jev]\nprovider = "acme"\n\n[jev.judge]\nenabled = true\n',
+    );
+    await expect(loadConfig()).rejects.toThrow(
+      /provider 'acme' is not a known transport.*no base_url is set/,
+    );
+  });
+
+  test("an unknown provider with both consumers off still loads — no call is ever made, and NO endpoint is stood in", async () => {
+    let config = await loadConfig();
+    await writePersonaToml(config, '[jev]\nprovider = "acme"\n');
+    config = await loadConfig();
+    expect(config.jev!.provider).toBe("openrouter");
+    expect(config.jev!.statedProvider).toBe("acme");
+    // The transport default is openrouter.ai's endpoint, not acme's. A
+    // derived URL here is indistinguishable from a stated one to every
+    // reader (the wizard's keep path validated at it — PR #605 review), so
+    // the field is ABSENT rather than guessed.
+    expect(config.jev!.baseUrl).toBeUndefined();
+  });
+
+  test("an unknown provider WITH a base_url carries it; a known transport always has its default", async () => {
+    let config = await loadConfig();
+    await writePersonaToml(
+      config,
+      '[jev]\nprovider = "acme"\nbase_url = "https://api.acme.dev/v1"\n',
+    );
+    config = await loadConfig();
+    expect(config.jev!.baseUrl).toBe("https://api.acme.dev/v1");
+
+    await writePersonaToml(config, '[jev]\nprovider = "openrouter"\n');
+    config = await loadConfig();
+    expect(config.jev!.baseUrl).toBe("https://openrouter.ai/api/v1");
+  });
+
+  test("a case or whitespace slip names the known transport, not a new vendor", async () => {
+    let config = await loadConfig();
+    await writePersonaToml(config, '[jev]\nprovider = "TypeSafe "\n');
+    config = await loadConfig();
+    expect(config.jev!.provider).toBe("typesafe");
+    expect(config.jev!.statedProvider).toBeUndefined();
+    expect(config.jev!.baseUrl).toBe("https://api.typesafe.ai/v1");
   });
 
   test("a legacy mode key is INERT — an enabled consumer always decides", async () => {

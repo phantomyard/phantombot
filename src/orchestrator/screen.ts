@@ -116,10 +116,10 @@ import {
   type JudgeResult,
 } from "../lib/threatJudge.ts";
 import {
-  JEV_JUDGE_BRIEFING_CAP_BYTES,
-  jevJudgeThreat,
-} from "../lib/jevJudge.ts";
-import { recordJevOutcome } from "../lib/jevHealth.ts";
+  DECISION_MODEL_JUDGE_BRIEFING_CAP_BYTES,
+  decisionModelJudgeThreat,
+} from "../lib/decisionModelJudge.ts";
+import { recordDecisionModelOutcome } from "../lib/decisionModelHealth.ts";
 import { runNotify } from "../cli/notify.ts";
 import type { DrawerKind } from "../memory/drawers.ts";
 import { drawerPath } from "../memory/drawerIngest.ts";
@@ -232,11 +232,11 @@ export interface ScreenerDeps {
    */
   recordHeld?: (episode: HeldEpisode) => Promise<void>;
   /**
-   * Override the Jev judge call (tests). Production uses lib/jevJudge.ts —
+   * Override the Jev judge call (tests). Production uses lib/decisionModelJudge.ts —
    * which hits the network — so screen-level tests inject a stub and assert
    * the enabled/fail-closed wiring around it.
    */
-  jevJudge?: typeof jevJudgeThreat;
+  decisionModelJudge?: typeof decisionModelJudgeThreat;
 }
 
 /**
@@ -390,32 +390,38 @@ export function makeScreener(
   // unconfigured user takes the harness-judge path below untouched. Never
   // engaged when a test injects its own judge: the override IS the judge.
   const jev = config.jev;
-  const jevJudgeOn =
-    deps.judge === undefined && jev?.judge.enabled === true && !!jev?.apiKey;
+  // `baseUrl` is absent only for an unknown vendor with no base_url, which
+  // config refuses to load with a consumer enabled — the check here keeps
+  // the judge's endpoint an explicit precondition rather than an assertion.
+  const decisionModelJudgeOn =
+    deps.judge === undefined &&
+    jev?.judge.enabled === true &&
+    !!jev?.apiKey &&
+    jev.baseUrl !== undefined;
   // An ENABLED judge whose key never resolved is the exact silent-degradation
   // shape the fallback ledger exists to expose (#516): every untrusted turn
   // falls back to the harness judge while doctor would otherwise read "no
   // calls recorded". Counted per screened turn below, in the fallback path.
-  const jevJudgeKeyMissing =
+  const decisionModelJudgeKeyMissing =
     deps.judge === undefined && jev?.judge.enabled === true && !jev?.apiKey;
 
   // One Jev judge call. The briefing is the SAME ranked drawer text the
   // harness judge carries (readBriefingDrawers, below), packed to the Jev
   // budget — briefing parity is what keeps the two judge backends
   // comparable on the same content.
-  const jevJudgeImpl = deps.jevJudge ?? jevJudgeThreat;
-  const runJevJudge = async (
+  const decisionModelJudgeImpl = deps.decisionModelJudge ?? decisionModelJudgeThreat;
+  const runDecisionModelJudge = async (
     text: string,
     sig?: AbortSignal,
   ): Promise<JudgeResult & { latencyMs?: number }> => {
     const drawersText = await readBriefingDrawersCapped(
       config,
       persona,
-      JEV_JUDGE_BRIEFING_CAP_BYTES,
+      DECISION_MODEL_JUDGE_BRIEFING_CAP_BYTES,
     );
-    return jevJudgeImpl(text, {
+    return decisionModelJudgeImpl(text, {
       settings: {
-        baseUrl: jev!.baseUrl,
+        baseUrl: jev!.baseUrl!,
         apiKey: jev!.apiKey!,
         model: jev!.model,
         timeoutMs: jev!.judge.timeoutMs,
@@ -455,39 +461,39 @@ export function makeScreener(
     let holdThreshold = THREAT_THRESHOLD;
 
     let result: JudgeResult;
-    if (jevJudgeOn) {
+    if (decisionModelJudgeOn) {
       // The decision model DECIDES; the harness judge is the fallback on any
-      // error. There is no log-only mode — see JevConsumerSettings. Both down
+      // error. There is no log-only mode — see DecisionModelConsumerSettings. Both down
       // ⇒ fail open as today UNLESS the operator opted into fail-closed
       // (affordable exactly because an independent screener exists — see
-      // docs/jev.md).
-      const jevResult = await runJevJudge(content, signal).catch((e) => ({
+      // docs/decision-model.md).
+      const decisionModelResult = await runDecisionModelJudge(content, signal).catch((e) => ({
         ok: false as const,
         error: `jev judge threw: ${(e as Error).message}`,
       }));
       // Fallback telemetry — outcome only, never the screened text. This is
       // what `phantombot doctor` reads to say the decision model is degraded
       // instead of the operator discovering it at the first missed hold.
-      void recordJevOutcome({
+      void recordDecisionModelOutcome({
         personasDir: config.personasDir,
         persona,
         consumer: "judge",
-        ok: jevResult.ok,
-        ...(jevResult.ok ? {} : { error: jevResult.error }),
+        ok: decisionModelResult.ok,
+        ...(decisionModelResult.ok ? {} : { error: decisionModelResult.error }),
       });
-      if (jevResult.ok) {
+      if (decisionModelResult.ok) {
         // Jev's threshold applies ONLY to a Jev score — the harness judge is
         // calibrated against THREAT_THRESHOLD, so a fallback must be graded
         // on its own scale or every Jev outage shifts the hold bar.
         holdThreshold = jev!.judge.threshold;
         log.info("screen: jev judge decided", {
-          score: jevResult.verdict.score,
-          latencyMs: jevResult.latencyMs,
+          score: decisionModelResult.verdict.score,
+          latencyMs: decisionModelResult.latencyMs,
         });
-        result = jevResult;
+        result = decisionModelResult;
       } else {
         log.warn(
-          `screen: jev judge unavailable, falling back to harness judge: ${jevResult.error}`,
+          `screen: jev judge unavailable, falling back to harness judge: ${decisionModelResult.error}`,
         );
         result = await judgeSafely();
         if (!result.ok && jev!.judge.failClosed) {
@@ -497,7 +503,7 @@ export function makeScreener(
             verdict: {
               score: Math.max(holdThreshold, 1),
               reason:
-                `threat screening is down on both backends (jev: ${jevResult.error}; ` +
+                `threat screening is down on both backends (jev: ${decisionModelResult.error}; ` +
                 `harness: ${result.error}) and this persona fails closed`,
               question:
                 "Screening is unavailable and this persona is set to hold rather " +
@@ -508,11 +514,11 @@ export function makeScreener(
         }
       }
     } else {
-      if (jevJudgeKeyMissing) {
+      if (decisionModelJudgeKeyMissing) {
         // Same telemetry contract as a provider failure: this turn IS falling
         // back to the harness judge, so doctor must say DEGRADED and name the
         // missing key, not print "enabled; no calls recorded".
-        void recordJevOutcome({
+        void recordDecisionModelOutcome({
           personasDir: config.personasDir,
           persona,
           consumer: "judge",
@@ -675,7 +681,7 @@ async function readBriefingDrawers(
 
 /**
  * The briefing reader with an explicit cap, shared by the harness judge
- * (DRAWERS_CAP_BYTES) and the Jev judge (JEV_JUDGE_BRIEFING_CAP_BYTES) so
+ * (DRAWERS_CAP_BYTES) and the Jev judge (DECISION_MODEL_JUDGE_BRIEFING_CAP_BYTES) so
  * both backends brief from the SAME ranked rows, differing only in how much
  * of the tail their context budget can carry.
  */
