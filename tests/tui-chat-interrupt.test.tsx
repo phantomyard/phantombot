@@ -10,6 +10,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
+import { createTurnRunner } from "../src/tui/turnRunner.ts";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -176,10 +178,10 @@ const lastFrame = (frames: string[]) =>
 function abortableSession() {
   const sent: string[] = [];
   const reasons: unknown[] = [];
-  const session: ChatSession = {
+  const base: Omit<ChatSession, "turn" | "submit" | "abortTurn"> = {
     persona: "lab",
     conversation: "cli:tui:lab",
-    history: [],
+    transcript: new TranscriptStore([]),
     async *send(text: string, signal?: AbortSignal) {
       sent.push(text);
       yield { type: "thinking" as const };
@@ -203,7 +205,8 @@ function abortableSession() {
     },
     async close() {},
   };
-  return { session, sent, reasons };
+  const runner = createTurnRunner(base.send, base.transcript);
+  return { session: { ...base, ...runner }, sent, reasons };
 }
 
 async function mount(session: ChatSession) {
@@ -260,6 +263,56 @@ describe("TUI screen: interrupting a turn", () => {
       expect(spy.sent).toEqual(["first"]);
     } finally {
       instance.unmount();
+    }
+  });
+
+  test("a turn in flight SURVIVES unmount and remount of the screen", async () => {
+    // The defect the review of 2d345c4 caught: the turn lifecycle used to be
+    // screen-local, so unmounting mid-stream (any navigation away) dropped
+    // the controller and a re-submit started a SECOND concurrent send while
+    // displacing the turn /stop could abort. The lifecycle is the session's
+    // now: a remounted screen re-attaches to the SAME turn.
+    const spy = abortableSession();
+    const first = await mount(spy.session);
+    first.stdin.write("first");
+    first.stdin.write("\r");
+    await sleep(150);
+    await first.instance.unmount();
+
+    // The session keeps the turn; a freshly mounted screen shows it running
+    // WITHOUT any new input.
+    const second = await mount(spy.session);
+    try {
+      expect(spy.sent).toEqual(["first"]);
+      expect(lastFrame(second.stdout.frames)).toContain("thinking");
+      // A prompt typed after the remount interrupts that SAME turn.
+      second.stdin.write("second");
+      await sleep(30);
+      second.stdin.write("\r");
+      await sleep(200);
+      expect(spy.reasons).toEqual(["interrupt"]);
+      expect(spy.sent).toEqual(["first", "second"]);
+    } finally {
+      second.instance.unmount();
+    }
+  });
+
+  test("^c after a remount stops the SAME turn, not a ghost", async () => {
+    const spy = abortableSession();
+    const first = await mount(spy.session);
+    first.stdin.write("first");
+    first.stdin.write("\r");
+    await sleep(150);
+    await first.instance.unmount();
+
+    const second = await mount(spy.session);
+    try {
+      second.stdin.write(CTRL_C);
+      await sleep(150);
+      expect(spy.reasons).toEqual(["stop"]);
+      expect(spy.sent).toEqual(["first"]);
+    } finally {
+      second.instance.unmount();
     }
   });
 });

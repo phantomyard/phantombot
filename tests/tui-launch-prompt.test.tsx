@@ -18,7 +18,9 @@ import { render } from "ink";
 
 import { App } from "../src/tui/App.tsx";
 import { seedForOpening } from "../src/tui/index.tsx";
-import type { ChatSession } from "../src/tui/chatSession.ts";
+import type { ChatEvent } from "../src/tui/chatSession.ts";
+import { createTurnRunner } from "../src/tui/turnRunner.ts";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 import type { HostSnapshot, PersonaSnapshot } from "../src/tui/snapshot.ts";
 
 function fakeStdin() {
@@ -121,21 +123,26 @@ function mountApp(props: {
       openSession={async ({ persona, workingDir }) => {
         rec.workingDirs.push(workingDir);
         const name = props.sessionPersona?.(persona) ?? persona;
-        return {
+        const transcript = new TranscriptStore([]);
+        async function* send(text: string): AsyncGenerator<ChatEvent> {
+          rec.sent.push(`${name}:${text}`);
+          yield { type: "done", text: "ok" };
+        }
+        const base = {
           persona: name,
           conversation: `cli:tui:${name}`,
-          history: [],
-          async *send(text: string) {
-            rec.sent.push(`${name}:${text}`);
-            yield { type: "done", text: "ok" } as never;
-          },
+          transcript,
+          send,
           async command(text: string) {
             rec.commands.push(`${name}:${text}`);
             return { reply: "ok" };
           },
           reloadHarnesses: async () => [],
           close: async () => {},
-        } as unknown as ChatSession;
+        };
+        // The seed is a real submit: it goes through the session-owned turn
+        // lifecycle like a typed prompt, not a side door.
+        return { ...base, ...createTurnRunner(send, transcript) };
       }}
     />,
     {

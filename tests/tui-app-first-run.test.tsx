@@ -39,6 +39,7 @@ import React from "react";
 
 import { App } from "../src/tui/App.tsx";
 import type { ChatSession } from "../src/tui/chatSession.ts";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 import type { HostSnapshot } from "../src/tui/snapshot.ts";
 
 /**
@@ -86,7 +87,7 @@ function fakeSession(persona: string): ChatSession {
   return {
     persona,
     conversation: `cli:tui:${persona}`,
-    history: [],
+    transcript: new TranscriptStore([]),
     // eslint-disable-next-line require-yield
     async *send() {
       return;
