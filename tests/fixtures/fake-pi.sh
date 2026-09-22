@@ -121,6 +121,15 @@ case "$mode" in
       modelsjson=$(tr -d '\n ' < "${PI_CODING_AGENT_DIR}/models.json" | sed 's/"/\\"/g')
       joined+=" models=${modelsjson}"
     fi
+    # AGENT DIR MODE (PR #606 round-7, Kai): the agent dir holds credential
+    # and model-config files; a group-writable dir lets another local user
+    # unlink/substitute them even when the files are 0600. Echo the dir's
+    # mode so the ephemeral-dir regression (created 0700, umask-masked) can
+    # prove it at the harness boundary. `?` only on a stat-less platform.
+    if [ -n "${PI_CODING_AGENT_DIR-}" ] && [ -d "${PI_CODING_AGENT_DIR}" ]; then
+      agentmode=$(stat -c %a "${PI_CODING_AGENT_DIR}" 2>/dev/null || echo "?")
+      joined+=" agentmode=${agentmode}"
+    fi
     printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"env: ${joined}\",\"partial\":{}},\"message\":{}}"
     printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
     exit 0

@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -24,6 +24,7 @@ import {
   nativeAgentDir,
   nativeAgentEnv,
   nativeAuthPath,
+  seedEphemeralAgentConfig,
 } from "../src/lib/nativeAgentDir.ts";
 
 function workspace(): string {
@@ -191,5 +192,85 @@ describe("nativeAgentDir persona scoping", () => {
     writeFileSync(join(dir, "auth.json"), "{}\n");
     ensureNativeAgentDir(dataHome, "lena");
     expect(readFileSync(join(dir, "auth.json"), "utf8")).toBe("{}\n");
+  });
+});
+describe("nativeAgentDir round-7 — relayed-turn auth-absorb skip + dir modes", () => {
+  test("absorbAuth:false (a RELAYED turn) skips the auth absorb — config still inherits, legacy key survives for tier-2 (round-7, Robbie/Kai)", () => {
+    // The consume-and-block cycle this prevents: a persona's FIRST
+    // post-upgrade turn is relayed (phantombot routing), the absorb copies
+    // the legacy key into the persona store, the pre-spawn strip empties it,
+    // and "target exists" then blocks every later absorb — the persona
+    // silently loses its documented tier-2 fallback. With the skip, nothing
+    // is written on the relayed turn and the first tier-2 turn migrates
+    // intact.
+    const dataHome = workspace();
+    const legacy = nativeAgentDir(dataHome);
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(
+      join(legacy, "auth.json"),
+      JSON.stringify({ openrouter: { type: "api_key", key: "sk-legacy-shared" } }, null, 2) + "\n",
+    );
+    writeFileSync(
+      join(legacy, "settings.json"),
+      JSON.stringify({ defaultModel: "legacy-model" }, null, 2) + "\n",
+    );
+    // RELAYED turn: ensure with absorbAuth:false. No auth.json created ...
+    const dir = ensureNativeAgentDir(dataHome, "omar", { absorbAuth: false });
+    expect(existsSync(join(dir, "auth.json"))).toBe(false);
+    // ... but local-config files still inherit (no strip touches those).
+    expect(readFileSync(join(dir, "settings.json"), "utf8")).toContain("legacy-model");
+    // The relayed turn's strip then writes NOTHING (absent store = no-op),
+    // and the next tier-2 ensure absorbs the legacy credential intact.
+    ensureNativeAgentDir(dataHome, "omar");
+    expect(JSON.parse(readFileSync(join(dir, "auth.json"), "utf8"))).toEqual({
+      openrouter: { type: "api_key", key: "sk-legacy-shared" },
+    });
+    // The legacy source is never touched.
+    expect(JSON.parse(readFileSync(join(legacy, "auth.json"), "utf8"))).toEqual({
+      openrouter: { type: "api_key", key: "sk-legacy-shared" },
+    });
+  });
+
+  test("ensureNativeAgentDir creates root/personas/<persona>/agent at 0700 under a 0002 umask (round-7, Kai)", () => {
+    // Regression (round-7, Kai/Robbie): mkdirSync without a mode inherits
+    // the process umask — 0002 made the persona dirs 0775, group-writable,
+    // so another local user could unlink/substitute auth.json (0600) or
+    // inject a models.json with a hostile base URL. Explicit 0700 is
+    // umask-masked, so it survives.
+    const dataHome = workspace();
+    const prior = process.umask(0o002); // the host's real umask per the reviews
+    try {
+      const dir = ensureNativeAgentDir(dataHome, "omar");
+      for (const p of [
+        join(dataHome, "pi-native"),
+        join(dataHome, "pi-native", "personas"),
+        join(dataHome, "pi-native", "personas", "omar"),
+        dir,
+      ]) {
+        expect(statSync(p).mode & 0o777).toBe(0o700);
+      }
+    } finally {
+      process.umask(prior);
+    }
+  });
+
+  test("seedEphemeralAgentConfig copies legacy config files, NEVER auth.json (round-7, Robbie non-blocking 2)", () => {
+    const dataHome = workspace();
+    const legacy = nativeAgentDir(dataHome);
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, "auth.json"), JSON.stringify({ openrouter: { type: "api_key", key: "sk-legacy" } }) + "\n");
+    writeFileSync(join(legacy, "models.json"), JSON.stringify({ custom: true }) + "\n");
+    const ephemeral = mkdtempSync(join(tmpdir(), "ephemeral-agent-"));
+    try {
+      seedEphemeralAgentConfig(ephemeral, dataHome);
+      expect(JSON.parse(readFileSync(join(ephemeral, "models.json"), "utf8"))).toEqual({ custom: true });
+      expect(existsSync(join(ephemeral, "auth.json"))).toBe(false);
+      // Never clobbers a file already present.
+      writeFileSync(join(ephemeral, "models.json"), '{"own":true}\n');
+      seedEphemeralAgentConfig(ephemeral, dataHome);
+      expect(readFileSync(join(ephemeral, "models.json"), "utf8")).toBe('{"own":true}\n');
+    } finally {
+      rmSync(ephemeral, { recursive: true, force: true });
+    }
   });
 });

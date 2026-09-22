@@ -92,6 +92,7 @@ import {
   ENV_PI_AGENT_DIR,
   nativeAgentEnv,
   nativeExtensionsDir,
+  seedEphemeralAgentConfig,
 } from "../lib/nativeAgentDir.ts";
 import { removePiApiKey } from "../lib/piAuthStore.ts";
 import type { WriteSink } from "../lib/io.ts";
@@ -616,12 +617,19 @@ export class PiHarness implements Harness {
     // that file is the read-only migration source every persona's first
     // scoped turn absorbs from, and the strip below would empty it (and a
     // legacy oauth entry would abort every judge/extraction turn host-wide).
-    // The turn carries its key in env, so it needs no store at all: it gets
-    // a per-turn ephemeral agent dir under the harness temp dir, removed
-    // with the turn (temp.cleanup) and reaped by the tmp sweep on a crash.
-    // The strip below then no-ops against an empty store.
+    // The turn carries its key in env, so it needs no stored credential at
+    // all: it gets a per-turn ephemeral agent dir under the harness temp dir,
+    // removed with the turn (temp.cleanup) and reaped by the tmp sweep on a
+    // crash. The strip below then no-ops against an empty store.
+    // It still gets the LEGACY local-config files seeded read-only
+    // (seedEphemeralAgentConfig, round-7 Robbie non-blocking 2): the turn
+    // pins --provider/--model explicitly, but a host may define its judge
+    // routing model through a custom models.json provider, and these turns
+    // ran on the legacy config pre-upgrade. auth.json is NEVER seeded — no
+    // stored credential on a relayed turn, ever.
+    const relayingKey = Boolean(piApiKey && nativeKeyEnv);
     const ephemeralAgentDir =
-      this.config.mode === "native" && piApiKey && nativeKeyEnv && !req.persona
+      this.config.mode === "native" && relayingKey && !req.persona
         ? join(temp.dir, "pi-agent")
         : undefined;
     if (this.config.mode === "native") {
@@ -633,10 +641,26 @@ export class PiHarness implements Harness {
       // that dependency broke Atlas when her owner deleted pi. Host mode:
       // leave the var UNSET so the host pi keeps ~/.pi.
       if (ephemeralAgentDir) {
-        await mkdir(ephemeralAgentDir, { recursive: true });
+        // Explicit 0700 (umask-masked): the dir can hold seeded config and the
+        // store pi writes; group-writable would let another local user
+        // substitute files in it (round-7, Kai).
+        await mkdir(ephemeralAgentDir, { recursive: true, mode: 0o700 });
+        seedEphemeralAgentConfig(ephemeralAgentDir, xdgDataHome());
         childEnv[ENV_PI_AGENT_DIR] = ephemeralAgentDir;
       } else {
-        Object.assign(childEnv, nativeAgentEnv(xdgDataHome(), req.persona));
+        // absorbAuth: false on RELAYED turns (round-7, Robbie/Kai): this
+        // turn's strip (below) empties the relayed provider's entry, so an
+        // auth absorb HERE would consume the legacy credential and mark the
+        // migration done while the key is gone — "target exists" would then
+        // block the first tier-2 turn from ever inheriting it. Config files
+        // still absorb (no strip touches those); the first genuinely tier-2
+        // turn does the auth migration intact.
+        Object.assign(
+          childEnv,
+          nativeAgentEnv(xdgDataHome(), req.persona, {
+            absorbAuth: !relayingKey,
+          }),
+        );
       }
       if (this.config.command) {
         childEnv[ENV_PHANTOMBOT_PI_COMMAND] = JSON.stringify(this.config.command);
@@ -675,7 +699,13 @@ export class PiHarness implements Harness {
       const strip = await removePiApiKey(provider as string, {
         // Ephemeral scope for persona-less relayed turns (above): the strip
         // no-ops there and the legacy migration source is never touched.
-        agentDir: ephemeralAgentDir ?? ensureNativeAgentDir(xdgDataHome(), req.persona),
+        // absorbAuth: false — this ensure() runs on a RELAYED turn, and an
+        // auth absorb here is exactly the consume-and-block cycle of round-7
+        // (Robbie/Kai): absorb → strip empties it → "target exists" blocks
+        // the first tier-2 turn from ever re-inheriting the legacy key.
+        agentDir:
+          ephemeralAgentDir ??
+          ensureNativeAgentDir(xdgDataHome(), req.persona, { absorbAuth: false }),
       });
       if (!strip.ok) {
         throw new Error(
