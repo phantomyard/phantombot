@@ -49,7 +49,7 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/harnesses/types.ts` | `Harness`, `HarnessRequest`, `HarnessChunk` (discriminated union). | — |
 | `src/harnesses/claude.ts` | `Bun.spawn claude --print --output-format stream-json …`. Stdin payload, ANTHROPIC_API_KEY filtered out. | `claude` CLI |
 | `src/harnesses/pi.ts` | `Bun.spawn pi --print --mode json …`. Argv payload (Pi ignores stdin). Declares `maxPayloadBytes`. Also hosts the per-turn primary/coder brain-swap decision (keyword scorer in `lib/coderSwap.ts`, optional decision-model router in `lib/decisionModelRouter.ts`). | `pi` CLI |
-| `src/lib/{decisionModel,decisionModelJudge,decisionModelRouter}.ts` | Optional TypeSafe Jev backend (issue #597): one shared typed-decision client, a threat-judge adapter (wired in `orchestrator/screen.ts`) and a primary/coder router adapter (wired in `harnesses/pi.ts`). Shadow-first, the existing methods stay default and fallback. See [decision-model.md](decision-model.md). | OpenRouter / TypeSafe API |
+| `src/lib/{decisionModel,decisionModelJudge,decisionModelRouter}.ts` | Optional decision-model backend (TypeSafe Jev today; issue #597): one shared typed-decision client, a threat-judge adapter (wired in `orchestrator/screen.ts`) and a primary/coder router adapter (wired in `harnesses/pi.ts`). Opt-in per consumer (judge and router independently); the existing methods stay the default and the fallback. See [decision-model.md](decision-model.md). | OpenRouter / TypeSafe API |
 | `src/lib/logger.ts` | Structured logs to stdout. | stdout |
 | `src/lib/io.ts` | Shared `WriteSink` interface. | — |
 | `src/lib/platform.ts` | Cross-platform service-manager router. Picks the backend (systemd/launchd/Windows Task Scheduler) and exposes one `ServiceControl` (`isActive`/`start`/`stop`/`restart`/`rerenderUnitIfStale`), plus hint strings and `logsSpec()` for tailing. | `systemd.ts`, `launchd.ts`, `taskScheduler.ts` |
@@ -151,8 +151,8 @@ picture. From an architecture standpoint:
   files today's tagged lines as rows, and then RETIRES the markdown once it has
   proved the content is filed and re-renderable (`memory/drawerRetire.ts`). The
   threat judge's briefing reads the ranked rows — on BOTH judge backends (the
-  harness judge and the optional Jev screener get the same ranked drawer text,
-  the Jev one packed tighter for its 32k-token budget; see
+  harness judge and the optional decision-model screener — TypeSafe Jev today — get the same ranked drawer text,
+  the decision-model one packed tighter for its 32k-token budget; see
   [decision-model.md](decision-model.md#briefing-parity-the-load-bearing-requirement)). Markdown is an artefact you can
   regenerate (`memory drawers --export`), not a second copy of the truth — which
   is why `memory.sqlite` now carries verified, rotating restore points

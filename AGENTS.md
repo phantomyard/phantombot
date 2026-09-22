@@ -118,6 +118,8 @@ phantombot/
 │   │   ├── task.ts           # phantombot task (CRUD over scheduled tasks)
 │   │   ├── tick.ts           # phantombot tick (called by phantombot-tick.timer every minute)
 │   │   ├── voice.ts          # phantombot voice (TUI: TTS/STT provider config)
+│   │   ├── decision-model.ts # phantombot decision-model (TUI: optional decision model — TypeSafe Jev today — for the threat judge / brain-swap router)
+│   │   ├── jev.ts            # phantombot jev (DEPRECATED alias → phantombot decision-model) + the shared write path (applyDecisionModelConfig)
 │   │   ├── workspace.ts      # phantombot workspace lock/unlock/status — advisory claims on shared checkouts
 │   │   ├── telegram.ts       # phantombot telegram (TUI: token + allowed users)
 │   │   ├── harness.ts        # phantombot harness (TUI: chain) + maybePromptRestart helper
