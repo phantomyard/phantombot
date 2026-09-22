@@ -86,6 +86,23 @@ case "$mode" in
     if [ -n "${PHANTOMBOT_PI_KEY_ENV-}" ]; then
       joined+=" native=${PHANTOMBOT_PI_KEY_ENV}=${!PHANTOMBOT_PI_KEY_ENV}"
     fi
+    # RESOLUTION LAYER (PR #606 review): mimic real pi's precedence — a STORED
+    # credential in the agent dir's auth.json beats env vars — and report which
+    # key this child would ACTUALLY authenticate with. This is the assertion
+    # surface for the env-only-resolution contract: if the harness left the
+    # provider's entry in the (host-level) native store, `resolved=` shows the
+    # stale stored key, not the relayed one.
+    resolved=""
+    if [ -n "${PI_CODING_AGENT_DIR-}" ] && [ -f "${PI_CODING_AGENT_DIR}/auth.json" ] && [ -n "${PHANTOMBOT_PI_PROVIDER-}" ]; then
+      stored=$(grep -A2 "\"${PHANTOMBOT_PI_PROVIDER}\"" "${PI_CODING_AGENT_DIR}/auth.json" \
+        | grep -o '"key"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -1 | sed 's/.*:[[:space:]]*"//;s/"$//')
+      resolved="$stored"
+    fi
+    if [ -z "$resolved" ] && [ -n "${PHANTOMBOT_PI_KEY_ENV-}" ]; then
+      resolved="${!PHANTOMBOT_PI_KEY_ENV}"
+    fi
+    joined+=" resolved=${resolved}"
     printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"env: ${joined}\",\"partial\":{}},\"message\":{}}"
     printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
     exit 0

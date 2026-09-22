@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   mergePiApiKey,
   piAuthJsonPath,
+  removePiApiKey,
   restorePiAuth,
   snapshotPiAuth,
   writePiApiKey,
@@ -217,5 +218,78 @@ describe("snapshotPiAuth / restorePiAuth (brain-wizard rollback)", () => {
     await restorePiAuth(snap, home);
     const entries = await readdir(join(home, ".pi", "agent"));
     expect(entries).toEqual(["auth.json"]);
+  });
+});
+
+describe("removePiApiKey (native store strip, PR #606 review)", () => {
+  const seed = async (store: Record<string, unknown>) => {
+    const agentDir = join(home, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify(store, null, 2) + "\n",
+    );
+    return agentDir;
+  };
+
+  test("removes ONLY the provider's api_key entry; others verbatim, oauth untouched", async () => {
+    const agentDir = await seed({
+      openrouter: { type: "api_key", key: "sk-or" },
+      anthropic: { type: "oauth", access: "a", refresh: "r" },
+      google: { type: "api_key", key: "gk" },
+    });
+    const r = await removePiApiKey("openrouter", { agentDir });
+    expect(r).toMatchObject({ ok: true, removed: true });
+    const after = JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8"));
+    expect(after.openrouter).toBeUndefined();
+    expect(after.google).toEqual({ type: "api_key", key: "gk" });
+    expect(after.anthropic).toEqual({ type: "oauth", access: "a", refresh: "r" });
+  });
+
+  test("an oauth entry for the provider is SKIPPED, not deleted", async () => {
+    const agentDir = await seed({
+      openrouter: { type: "oauth", access: "a" },
+    });
+    const r = await removePiApiKey("openrouter", { agentDir });
+    expect(r).toMatchObject({ ok: true, removed: false, skipped: "oauth-present" });
+    const after = JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8"));
+    expect(after.openrouter).toEqual({ type: "oauth", access: "a" });
+  });
+
+  test("absent entry or absent file: success, nothing to do", async () => {
+    const agentDir = await seed({ google: { type: "api_key", key: "gk" } });
+    expect(await removePiApiKey("openrouter", { agentDir })).toMatchObject({
+      ok: true,
+      removed: false,
+    });
+    const missing = join(home, "nope");
+    expect(await removePiApiKey("openrouter", { agentDir: missing })).toMatchObject({
+      ok: true,
+      removed: false,
+    });
+  });
+
+  test("unparseable file: refuses to rewrite, leaves it byte for byte", async () => {
+    const agentDir = join(home, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "auth.json"), "{not json");
+    const r = await removePiApiKey("openrouter", { agentDir });
+    expect(r.ok).toBe(false);
+    expect((await readFile(join(agentDir, "auth.json"), "utf8"))).toBe("{not json");
+  });
+
+  test("refuses a target without an agentDir — the host ~/.pi is never deletable", async () => {
+    const r = await removePiApiKey("openrouter", {} as never);
+    expect(r.ok).toBe(false);
+    expect(existsSync(piAuthJsonPath(home))).toBe(false);
+  });
+
+  test("removal lands atomically at mode 0600 with no tempfile behind", async () => {
+    if (process.platform === "win32") return;
+    const agentDir = await seed({ openrouter: { type: "api_key", key: "sk" } });
+    const r = await removePiApiKey("openrouter", { agentDir });
+    expect(r).toMatchObject({ ok: true, removed: true });
+    expect((await stat(join(agentDir, "auth.json"))).mode & 0o777).toBe(0o600);
+    expect(await readdir(agentDir)).toEqual(["auth.json"]);
   });
 });

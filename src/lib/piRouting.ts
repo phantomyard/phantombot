@@ -79,7 +79,10 @@ export const ENV_PI_PROVIDER = "PHANTOMBOT_PI_PROVIDER";
  *                              installs keep working).
  *   3. neither               → Pi errors as it normally would.
  * Empty / unset ⇒ tier 2. Never written by computeRoutingWrites; it's collected
- * separately by the wizard and read directly in harnesses/pi.ts.
+ * separately by the wizard and read directly in harnesses/pi.ts. On a RELAYED
+ * turn the provider's entry is also stripped from the NATIVE store (host-level
+ * — a stored credential would otherwise beat the env var and decide every
+ * persona's key): env is the only resolution source while a key is relayed.
  */
 export const ENV_PI_API_KEY = "PHANTOMBOT_PI_API_KEY";
 /**

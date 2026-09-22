@@ -82,7 +82,7 @@ bin precedence chain and the resolver your new harness inherits.
 
 `src/harnesses/pi.ts` drives the pi engine in two modes (see AGENTS.md invariant 56):
 
-- **native** — spawns the engine EMBEDDED in the phantombot binary (`<phantombot> __pi …`, `lib/embeddedPi.ts`) and threads phantombot's routing: `--provider`, `--model`, `--api-key` from the persona vault, plus the coding-brain swap. The only mode that loads the Phantomyard's Phantombot attribution extension.
+- **native** — spawns the engine EMBEDDED in the phantombot binary (`<phantombot> __pi …`, `lib/embeddedPi.ts`) and threads phantombot's routing: `--provider`, `--model`, plus the coding-brain swap. The per-turn API key from the persona vault travels via the provider's NATIVE env var (e.g. `OPENROUTER_API_KEY`), never `--api-key` — `/proc/<pid>/cmdline` is world-readable (#602) — and each relayed turn strips the provider's entry from the native `auth.json` so env is the only source (a host-level stored key would decide every persona's auth). The only mode that loads the Phantomyard's Phantombot attribution extension.
 - **pi-host** — spawns the host's `pi` binary and passes none of that; the host's pi configuration decides.
 - **Payload via temp files** (`--system-prompt <file>` and an `@<file>` positional): pi ignores stdin in `--print` mode, and as the usual last harness it must accept any payload size.
 - Different stream-json schema: `message_update` events with `text_delta` → text chunks; `tool_execution_start` → progress chunks; `turn_end` → the completion marker.
