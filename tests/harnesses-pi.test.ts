@@ -974,6 +974,99 @@ describe("PiHarness routing (subprocess)", () => {
     }
   });
 
+  test("strip failure on a relayed turn is FAIL-CLOSED — abort before spawn (PR #606 re-review)", async () => {
+    // Pi resolves a STORED credential ahead of env vars, so spawning with an
+    // un-strippable entry risks silently authenticating as the wrong (possibly
+    // another persona's) key. A failed strip must ABORT the relayed turn —
+    // same loud-throw contract as the no-key path — never warn-and-spawn.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-native-strip-fail-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const agentDir = join(workdir, "xdg", "pi-native", "agent");
+    await mkdir(agentDir, { recursive: true });
+    // Unparseable auth.json: removePiApiKey refuses to touch it → strip fails.
+    const corrupt = "{ not json";
+    await writeFile(join(agentDir, "auth.json"), corrupt);
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-fresh-vault-key";
+    try {
+      await expect(
+        collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(newRequest()),
+        ),
+      ).rejects.toThrow(/relayed turn aborted/);
+      // Nothing was spawned and nothing was mutated: the corrupt store is
+      // byte-identical (removePiApiKey's refuse-not-clobber guarantee holds
+      // even on the abort path).
+      expect(await readFile(join(agentDir, "auth.json"), "utf8")).toBe(corrupt);
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("surviving oauth entry on a relayed turn is FAIL-CLOSED — abort, login untouched (PR #606 re-review)", async () => {
+    // Pi resolves ANY stored credential ahead of env — including an oauth
+    // login. removePiApiKey refuses to delete logins, so an oauth entry for
+    // the provider must abort the relayed turn, not spawn past it.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-native-oauth-abort-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const agentDir = join(workdir, "xdg", "pi-native", "agent");
+    await mkdir(agentDir, { recursive: true });
+    const oauth = { openrouter: { type: "oauth", access: "oauth-token" } };
+    await writeFile(join(agentDir, "auth.json"), JSON.stringify(oauth, null, 2) + "\n");
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-fresh-vault-key";
+    try {
+      await expect(
+        collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(newRequest()),
+        ),
+      ).rejects.toThrow(/oauth login/);
+      // The interactive login survives byte-for-byte: phantombot never deletes
+      // an oauth entry, even to unblock itself.
+      expect(JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8"))).toEqual(oauth);
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("tier-2 (no relayed key) with an oauth entry still runs — abort is coupled to the relay", async () => {
+    // The fail-closed abort must not break the "install later, no key"
+    // fallback: a turn with no relayed key has no env credential to outrank,
+    // so an oauth entry is exactly what pi SHOULD use. No abort, no strip.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-native-oauth-tier2-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const agentDir = join(workdir, "xdg", "pi-native", "agent");
+    await mkdir(agentDir, { recursive: true });
+    const oauth = { openrouter: { type: "oauth", access: "oauth-token" } };
+    await writeFile(join(agentDir, "auth.json"), JSON.stringify(oauth, null, 2) + "\n");
+    process.env.FAKE_PI_MODE = "env";
+    try {
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", useLocalConfig: true } }).invoke(newRequest()),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(out).toContain("resolved=oauth-token");
+      expect(JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8"))).toEqual(oauth);
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
   test("no relayed key → the stored entry SURVIVES (tier-2 fallback stays usable)", async () => {
     // The strip must be coupled to the relay, not to native mode: when no key
     // is relayed this turn (keyless legacy path / providerless), Pi falls back

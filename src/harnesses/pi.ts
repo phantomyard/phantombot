@@ -601,18 +601,39 @@ export class PiHarness implements Harness {
     // precedence can't resurrect a stale (possibly another persona's) key —
     // env is the only source while we relay. Coupled to the relay, not to
     // native mode: no relayed key ⇒ no strip (tier-2 fallback stays usable).
-    // agentDir-targeted only, so the host's ~/.pi is unreachable here. A failed
-    // strip is loud but non-fatal: the turn proceeds; if the stored entry is
-    // stale the child's auth fails visibly rather than silently mis-billing.
+    // agentDir-targeted only, so the host's ~/.pi is unreachable here.
+    //
+    // FAIL-CLOSED (PR #606 re-review, Kai): a relayed turn must never spawn
+    // while ANY stored credential for this provider could still outrank the
+    // relayed env key — Pi resolves any store entry, api_key AND oauth login,
+    // ahead of env vars, so a survivor means the turn may silently
+    // authenticate as the wrong (possibly another persona's) credential.
+    //   - Strip failed (locked file, unparseable JSON, IO error) → ABORT this
+    //     turn: throw, which the orchestrator converts into the standard
+    //     fall-through + cooldown + alerter path. Same contract as the
+    //     loud no-key throw above.
+    //   - OAuth entry present → ABORT too. phantombot never deletes an
+    //     interactive login; the error tells the operator how to clear it.
+    // No relayed key ⇒ no strip (tier-2 fallback stays usable, oauth and all).
     if (piApiKey && nativeKeyEnv) {
       const strip = await removePiApiKey(provider as string, {
         agentDir: nativeAgentDir(xdgDataHome()),
       });
       if (!strip.ok) {
-        log.warn(
-          `${this.id}: could not strip the stored '${provider}' credential from the ` +
-            `native auth store (${strip.reason}) — Pi may resolve the STORED key over the ` +
-            "relayed env key this turn.",
+        throw new Error(
+          `${this.id}: relayed turn aborted — could not remove the stored ` +
+            `'${provider}' credential from the native auth store ` +
+            `(${strip.reason}). Pi resolves a stored credential AHEAD of the ` +
+            `relayed env key, so spawning now could authenticate as the wrong ` +
+            `key. Fix the store (or clear the entry) and retry; nothing was spawned.`,
+        );
+      }
+      if (strip.skipped === "oauth-present") {
+        throw new Error(
+          `${this.id}: relayed turn aborted — the native auth store holds an ` +
+            `oauth login for '${provider}', which outranks the relayed env key. ` +
+            `phantombot never deletes an interactive login: clear it from the ` +
+            `native store (or re-onboard this persona) and retry; nothing was spawned.`,
         );
       }
     }

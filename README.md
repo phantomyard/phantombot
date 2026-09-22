@@ -908,9 +908,13 @@ message is sent straight after.
   native env var (e.g. `OPENROUTER_API_KEY`) instead. The native agent dir is
   host-level while each persona's key lives in that persona's vault, so the
   store must never decide which key authenticates — env is the only source on
-  a relayed turn. The store entry only survives turns with no relayed key
-  (the "install later, no key" fallback). An existing OAuth entry for the
-  same provider is left untouched in both paths.
+  a relayed turn. The strip is fail-closed: Pi resolves any stored credential
+  (api_key or an OAuth login) ahead of env vars, so if the strip cannot
+  complete, or an OAuth entry for the provider survives it, phantombot aborts
+  the relayed turn with a loud error before spawning rather than risk
+  authenticating as the wrong key. The store entry only survives turns with
+  no relayed key (the "install later, no key" fallback), where an existing
+  OAuth entry for the same provider is left untouched as before.
 - Claude Code is normally authenticated with OAuth on the host.
 - Gemini and OpenAI-compatible endpoints are available for optional
   semantic-memory embeddings via `phantombot embedding`; they are not agent

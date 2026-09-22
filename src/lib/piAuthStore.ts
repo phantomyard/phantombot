@@ -24,8 +24,10 @@
  *     outvote the per-turn env relay and decide EVERY persona's key (last
  *     onboarded wins — PR #606 review). Each relayed turn therefore strips the
  *     provider's entry from that store before spawn (harnesses/pi.ts): while a
- *     key is being relayed, env is the only resolution source. Outside the
- *     native agent dir this module never deletes.
+ *     key is being relayed, env is the only resolution source. That strip is
+ *     FAIL-CLOSED: if it cannot complete — or an oauth entry survives it — the
+ *     relayed turn ABORTS before spawn rather than risk resolving the wrong
+ *     credential. Outside the native agent dir this module never deletes.
  *
  * Otherwise, in the HOST store (~/.pi) this module is WRITE-ONLY: phantombot
  * never deletes from Pi's own store. The "Use Pi's own config" path
@@ -225,7 +227,9 @@ export type PiAuthRemoveResult =
  * (never deleted), an unparseable file is refused byte-for-byte, every other
  * provider's entry is preserved verbatim, and the rewrite is atomic at 0600.
  * Serialized with the other writers via the same per-path chain. Never
- * throws: the harness turns a failed strip into a loud non-fatal warning.
+ * throws: failures come back in the result — the harness turns a failed
+ * strip (or a skipped oauth entry, which would outrank the relayed env key)
+ * into a fail-closed abort of the relayed turn.
  */
 export async function removePiApiKey(
   provider: string,

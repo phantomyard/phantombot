@@ -94,8 +94,11 @@ case "$mode" in
     # stale stored key, not the relayed one.
     resolved=""
     if [ -n "${PI_CODING_AGENT_DIR-}" ] && [ -f "${PI_CODING_AGENT_DIR}/auth.json" ] && [ -n "${PHANTOMBOT_PI_PROVIDER-}" ]; then
-      stored=$(grep -A2 "\"${PHANTOMBOT_PI_PROVIDER}\"" "${PI_CODING_AGENT_DIR}/auth.json" \
-        | grep -o '"key"[[:space:]]*:[[:space:]]*"[^"]*"' \
+      # Stored credential beats env — ANY stored credential: an api_key entry
+      # resolves its "key", an oauth login its "access" token (PR #606
+      # re-review: an oauth survivor outranks the relayed env key too).
+      stored=$(grep -A3 "\"${PHANTOMBOT_PI_PROVIDER}\"" "${PI_CODING_AGENT_DIR}/auth.json" \
+        | grep -o '"\(access\|key\)"[[:space:]]*:[[:space:]]*"[^"]*"' \
         | head -1 | sed 's/.*:[[:space:]]*"//;s/"$//')
       resolved="$stored"
     fi
