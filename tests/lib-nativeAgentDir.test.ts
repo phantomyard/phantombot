@@ -40,9 +40,9 @@ describe("nativeAgentDir persona scoping", () => {
 
   test("nativeAgentEnv points PI_CODING_AGENT_DIR at the persona dir and creates it", () => {
     const dataHome = workspace();
-    const env = nativeAgentEnv(dataHome, "omar");
-    expect(env.PI_CODING_AGENT_DIR).toBe(join(dataHome, "pi-native", "personas", "omar", "agent"));
-    expect(existsSync(env.PI_CODING_AGENT_DIR)).toBe(true);
+    const agentDir = nativeAgentEnv(dataHome, "omar").PI_CODING_AGENT_DIR!;
+    expect(agentDir).toBe(join(dataHome, "pi-native", "personas", "omar", "agent"));
+    expect(existsSync(agentDir)).toBe(true);
   });
 
   test("absorb: no legacy store → no-op, persona store stays empty", () => {
