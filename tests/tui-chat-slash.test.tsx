@@ -19,6 +19,7 @@ import type {
   ChatSession,
 } from "../src/tui/chatSession.ts";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
+import { createTurnRunner } from "../src/tui/turnRunner.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -76,7 +77,7 @@ function spySession(options: {
 } = {}): Spy {
   const sent: string[] = [];
   const commanded: string[] = [];
-  const session: ChatSession = {
+  const base: Omit<ChatSession, "turn" | "submit" | "abortTurn"> = {
     persona: "lab",
     conversation: "cli:tui:lab",
     transcript: new TranscriptStore(options.history ?? []),
@@ -97,7 +98,8 @@ function spySession(options: {
     },
     async close() {},
   };
-  return { session, sent, commanded };
+  const runner = createTurnRunner(base.send, base.transcript);
+  return { session: { ...base, ...runner }, sent, commanded };
 }
 
 async function mount(session: ChatSession) {

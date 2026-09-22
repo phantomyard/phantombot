@@ -61,6 +61,7 @@ import {
   makeFactExtractor,
 } from "../orchestrator/durableFacts.ts";
 import { TranscriptStore } from "./transcriptStore.ts";
+import { createTurnRunner, type TurnStore } from "./turnRunner.ts";
 
 /**
  * Conversation key for the terminal. One per persona, stable across restarts,
@@ -132,8 +133,29 @@ export interface ChatSession {
    * made coming back from `^l`/`^s` look like a wiped conversation.
    */
   transcript: TranscriptStore;
+  /**
+   * The turn lifecycle, owned by the session like the transcript above it
+   * (phantombot#604, review of 2d345c4): one controller, one in-flight
+   * promise, one generation counter per session. A screen that remounts
+   * mid-turn re-attaches to the still-running turn instead of starting a
+   * second `send()`, and `/stop` can never be displaced by a newer submit.
+   */
+  turn: TurnStore;
   /** Run one user message. Yields UI events as the turn streams. */
   send(text: string, signal?: AbortSignal): AsyncGenerator<ChatEvent>;
+  /**
+   * Submit a prompt through the session-owned lifecycle: appends the user
+   * bubble and reply slot to the transcript, streams `send`'s events into it,
+   * and interrupts any turn already in flight ("type to interrupt"). The
+   * screen calls this; the REPL keeps using `send` directly with its own
+   * line-oriented rendering.
+   */
+  submit(text: string): Promise<void>;
+  /**
+   * Abort the turn in flight with a recorded reason ("stop" from ^c;
+   * `/stop` reaches the same controller through `activeTurn` in `command`).
+   */
+  abortTurn(reason: string): void;
   /**
    * Run a slash command, or return null when this text is not one and must go
    * to the harness instead (phantombot#480).
@@ -236,10 +258,11 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
   /**
    * The turn in flight, for `/stop` and for `/status`'s "what is it doing".
    *
-   * The screen owns a controller too (it is what `^c` aborts), so the session
-   * keeps its OWN and forwards the screen's abort into it. Two entry points to
-   * one interrupt: without this, `/stop` would have nothing to abort, because
-   * an `AbortSignal` cannot be aborted by whoever merely holds it.
+   * The turn LIFECYCLE is owned by the session (`turnRunner.ts`): the runner
+   * holds the controller ^c aborts (via `abortTurn`) and forwards its reason
+   * into `send`'s internal one. Two entry points to one interrupt — without
+   * the session-side handle, `/stop` would have nothing to abort, because an
+   * `AbortSignal` cannot be aborted by whoever merely holds it.
    */
   let activeTurn: ActiveTurnHandle | undefined;
 
@@ -262,6 +285,11 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
     };
   });
   const transcript = new TranscriptStore(history);
+
+  // The turn lifecycle lives on the session (see ChatSession.turn): built
+  // over this session's `send` and transcript, so submit/interrupt/stop all
+  // survive every screen switch.
+  const runner = createTurnRunner(send, transcript);
 
   async function* send(
     text: string,
@@ -469,7 +497,10 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
     persona,
     conversation,
     transcript,
+    turn: runner.turn,
     send,
+    submit: runner.submit,
+    abortTurn: runner.abortTurn,
     command,
     reloadHarnesses,
     async close() {

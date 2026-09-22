@@ -15,7 +15,8 @@ import { PassThrough } from "node:stream";
 import { render } from "ink";
 
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
-import type { ChatMessage, ChatSession } from "../src/tui/chatSession.ts";
+import type { ChatEvent, ChatMessage, ChatSession } from "../src/tui/chatSession.ts";
+import { createTurnRunner } from "../src/tui/turnRunner.ts";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -55,14 +56,17 @@ const lastFrame = (frames: string[]) =>
 
 /** A session whose harness answers with one streamed line. */
 function echoSession(prior: ChatSession["transcript"]): ChatSession {
+  async function* send(text: string): AsyncGenerator<ChatEvent> {
+    yield { type: "text", text: `echo: ${text}` };
+    yield { type: "done", text: `echo: ${text}` };
+  }
+  const runner = createTurnRunner(send, prior);
   return {
     persona: "lab",
     conversation: "cli:tui:lab",
     transcript: prior,
-    async *send(text: string) {
-      yield { type: "text", text: `echo: ${text}` };
-      yield { type: "done", text: `echo: ${text}` };
-    },
+    send,
+    ...runner,
     async command() {
       return null;
     },

@@ -21,8 +21,12 @@ import { PassThrough } from "node:stream";
 import { render } from "ink";
 
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
-import type { ChatSession } from "../src/tui/chatSession.ts";
+import type {
+  ChatEvent,
+  ChatSession,
+} from "../src/tui/chatSession.ts";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
+import { createTurnRunner, TurnStore } from "../src/tui/turnRunner.ts";
 
 function fakeStdin() {
   const s = new PassThrough() as PassThrough & {
@@ -61,6 +65,9 @@ function sessionWithTools(): ChatSession {
   return {
     persona: "alice",
     conversation: "cli:tui:alice",
+    turn: new TurnStore(),
+    submit: async () => {},
+    abortTurn: () => {},
     transcript: new TranscriptStore([
       { role: "user", text: "ship it", at: 0 },
       {
@@ -274,7 +281,10 @@ afterEach(() => {
 const BOB: PersonaSnapshot = { ...ALICE, name: "bob", isDefault: false };
 const TWO_PERSONA_HOST: HostSnapshot = { ...HOST, personas: [ALICE, BOB] };
 
-async function mountApp(host: HostSnapshot = HOST) {
+async function mountApp(
+  host: HostSnapshot = HOST,
+  openSessionImpl?: (input: { persona: string }) => Promise<ChatSession>,
+) {
   const stdin = fakeStdin();
   const stdout = fakeStdout();
   stdout.rows = 40;
@@ -290,17 +300,23 @@ async function mountApp(host: HostSnapshot = HOST) {
         return 0;
       }}
       onCreatePersona={async () => {}}
-      openSession={async ({ persona }) => ({
-        persona,
-        conversation: `cli:tui:${persona}`,
-        transcript: new TranscriptStore([]),
-        async *send() {},
-        async command() {
-          return null;
-        },
-        reloadHarnesses: async () => [],
-        close: async () => {},
-      })}
+      openSession={
+        openSessionImpl ??
+        (async ({ persona }) => ({
+          persona,
+          conversation: `cli:tui:${persona}`,
+          turn: new TurnStore(),
+          submit: async () => {},
+          abortTurn: () => {},
+          transcript: new TranscriptStore([]),
+          async *send() {},
+          async command() {
+            return null;
+          },
+          reloadHarnesses: async () => [],
+          close: async () => {},
+        }))
+      }
     />,
     {
       stdin: stdin as never,
@@ -320,6 +336,75 @@ async function mountApp(host: HostSnapshot = HOST) {
     },
   };
 }
+
+describe("a turn in flight across the screen switch (App router)", () => {
+  test("navigating away mid-turn never starts a second turn on return", async () => {
+    // The review-of-2d345c4 defect, pinned at the router level: the App keeps
+    // ONE session per persona above the screen switch, and the turn lifecycle
+    // lives on that session — so ^s mid-stream and esc back must re-attach to
+    // the SAME still-running turn, and a prompt typed after the round trip
+    // must interrupt it, not start a second send behind it.
+    const sent: string[] = [];
+    const reasons: unknown[] = [];
+    let opens = 0;
+    const app = await mountApp(HOST, async ({ persona }) => {
+      opens++;
+      const transcript = new TranscriptStore([]);
+      async function* send(
+        text: string,
+        signal?: AbortSignal,
+      ): AsyncGenerator<ChatEvent> {
+        sent.push(text);
+        yield { type: "thinking" };
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener(
+            "abort",
+            () => {
+              reasons.push(signal.reason);
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+        yield { type: "done", text: "" };
+      }
+      return {
+        persona,
+        conversation: `cli:tui:${persona}`,
+        transcript,
+        send,
+        ...createTurnRunner(send, transcript),
+        async command() {
+          return null;
+        },
+        async reloadHarnesses() {
+          return [];
+        },
+        async close() {},
+      };
+    });
+    try {
+      await app.press("hi\r"); // starts a turn
+      await sleep(150);
+      await app.press("\x13"); // ^s: away to the settings table mid-stream
+      await app.press("\x1b"); // esc: back to the conversation
+      await sleep(100);
+      // The session was opened ONCE — the turn belongs to it, not to a screen.
+      expect(opens).toBe(1);
+      expect(sent).toEqual(["hi"]);
+      // The returning screen re-attached to the still-running turn.
+      expect(app.frame()).toContain("thinking");
+      // A prompt now interrupts that SAME turn.
+      await app.press("again\r");
+      await sleep(200);
+      expect(reasons).toEqual(["interrupt"]);
+      expect(sent).toEqual(["hi", "again"]);
+    } finally {
+      // Unblock the still-running fake turn so the test can exit.
+      // (The App is unmounted by afterEach; the abort reason is asserted.)
+    }
+  });
+});
 
 describe("reaching settings and the phantom list", () => {
   test("^s opens the phantom TABLE — settings starts with 'which phantom'", async () => {

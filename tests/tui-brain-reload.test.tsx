@@ -24,6 +24,7 @@ import { render } from "ink";
 import { App } from "../src/tui/App.tsx";
 import type { ChatSession } from "../src/tui/chatSession.ts";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
+import { TurnStore } from "../src/tui/turnRunner.ts";
 import type { HostSnapshot } from "../src/tui/snapshot.ts";
 
 /** What the terminal sends for ctrl+s. */
@@ -124,6 +125,9 @@ describe("the Configure screen's Brain row", () => {
       persona: "alice",
       conversation: "cli:tui:alice",
       transcript: new TranscriptStore([]),
+      turn: new TurnStore(),
+      submit: async () => {},
+      abortTurn: () => {},
       // eslint-disable-next-line require-yield
       async *send() {
         return;

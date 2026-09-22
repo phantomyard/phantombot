@@ -24,6 +24,7 @@ import { render } from "ink";
 
 import { App } from "../src/tui/App.tsx";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
+import { TurnStore } from "../src/tui/turnRunner.ts";
 import type { HostSnapshot, PersonaSnapshot } from "../src/tui/snapshot.ts";
 import type { DoctorReport } from "../src/cli/doctor.ts";
 import { stripAnsi } from "./helpers/ansi.ts";
@@ -207,6 +208,9 @@ async function openSettings(rows: number, columns = 100) {
         persona,
         conversation: `cli:tui:${persona}`,
         transcript: new TranscriptStore([]),
+        turn: new TurnStore(),
+        submit: async () => {},
+        abortTurn: () => {},
         async *send() {},
         async command() {
           return null;

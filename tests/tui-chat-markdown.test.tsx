@@ -16,6 +16,7 @@ import { render } from "ink";
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import type { ChatMessage, ChatSession } from "../src/tui/chatSession.ts";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
+import { TurnStore } from "../src/tui/turnRunner.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -61,6 +62,9 @@ async function frameFor(text: string): Promise<string> {
     persona: "lab",
     conversation: "cli:tui:lab",
     transcript: new TranscriptStore(history),
+    turn: new TurnStore(),
+    submit: async () => {},
+    abortTurn: () => {},
     async *send() {},
     async command() {
       return null;

@@ -24,6 +24,7 @@ import { render } from "ink";
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import type { ChatEvent, ChatSession } from "../src/tui/chatSession.ts";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
+import { createTurnRunner } from "../src/tui/turnRunner.ts";
 
 function fakeStdin() {
   const s = new PassThrough() as PassThrough & {
@@ -58,13 +59,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const lastFrame = (frames: string[]) => frames.at(-1) ?? "";
 
 function sessionYielding(events: ChatEvent[]): ChatSession {
+  const transcript = new TranscriptStore([]);
+  async function* send() {
+    for (const event of events) yield event;
+  }
+  const runner = createTurnRunner(send, transcript);
   return {
     persona: "alice",
     conversation: "cli:tui:alice",
-    transcript: new TranscriptStore([]),
-    async *send() {
-      for (const event of events) yield event;
-    },
+    transcript,
+    send,
+    ...runner,
     async command() {
       return null;
     },

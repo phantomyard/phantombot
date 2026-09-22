@@ -34,8 +34,12 @@ import { render } from "ink";
 import React from "react";
 
 import { App } from "../src/tui/App.tsx";
-import type { ChatSession } from "../src/tui/chatSession.ts";
+import type {
+  ChatEvent,
+  ChatSession,
+} from "../src/tui/chatSession.ts";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
+import { createTurnRunner } from "../src/tui/turnRunner.ts";
 import type { HostSnapshot, PersonaSnapshot } from "../src/tui/snapshot.ts";
 import { VERSION } from "../src/version.ts";
 import { stripAnsi } from "./helpers/ansi.ts";
@@ -74,16 +78,24 @@ const tick = () => new Promise((r) => setTimeout(r, 30));
 const strip = stripAnsi;
 
 function fakeSession(persona: string): ChatSession {
-  return {
+  const transcript = new TranscriptStore([]);
+  async function* send(): AsyncGenerator<ChatEvent> {
+    return;
+  }
+  const base = {
     persona,
     conversation: `cli:tui:${persona}`,
-    transcript: new TranscriptStore([]),
-    // eslint-disable-next-line require-yield
-    async *send() {
-      return;
+    transcript,
+    send,
+    async command() {
+      return null;
     },
+    reloadHarnesses: async () => [],
     close: async () => {},
-  } as unknown as ChatSession;
+  };
+  // The screen subscribes to the session-owned turn store on mount; a fake
+  // without the real lifecycle would crash the first render.
+  return { ...base, ...createTurnRunner(send, transcript) };
 }
 
 const ALICE: PersonaSnapshot = {
