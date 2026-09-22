@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -85,6 +85,29 @@ describe("nativeAgentDir persona scoping", () => {
       openrouter: { type: "api_key", key: "sk-legacy" },
       anthropic: { type: "oauth", access: "legacy-oauth" },
     });
+  });
+
+  test("absorb: migrated auth.json lands at 0600 regardless of process umask", () => {
+    // Regression (round-6, Kai): the staged write must set mode 0600
+    // explicitly — with the process umask 0o000 (worse than any real
+    // shell's) the file used to come out 0666/0644, leaking copied API
+    // keys to other local users.
+    const dataHome = workspace();
+    const legacy = nativeAgentDir(dataHome);
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(
+      join(legacy, "auth.json"),
+      JSON.stringify({ openrouter: { type: "api_key", key: "sk-legacy" } }, null, 2) + "\n",
+    );
+    const prior = process.umask(0o000);
+    let result: ReturnType<typeof absorbLegacyNativeAgent>;
+    try {
+      result = absorbLegacyNativeAgent(dataHome, "omar");
+    } finally {
+      process.umask(prior);
+    }
+    expect(result.auth).toBe(true);
+    expect(statSync(nativeAuthPath(dataHome, "omar")).mode & 0o777).toBe(0o600);
   });
 
   test("absorb: an oauth-ONLY legacy store converges to {} — no stored fallback, no retry loop", () => {

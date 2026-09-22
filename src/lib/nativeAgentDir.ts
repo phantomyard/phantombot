@@ -191,7 +191,14 @@ export function absorbLegacyNativeAgent(
       const staged = `${target}.absorb-${process.pid}.tmp`;
       try {
         mkdirSync(dir, { recursive: true });
-        writeFileSync(staged, JSON.stringify(filtered, null, 2) + "\n", "utf8");
+        // Explicit 0600: the copied store holds live API keys, so the file
+        // must not inherit the process umask (round-6, Kai — a 0002 umask
+        // would otherwise land it at 0664). rename() preserves the staged
+        // mode, so the final auth.json is 0600 too.
+        writeFileSync(staged, JSON.stringify(filtered, null, 2) + "\n", {
+          encoding: "utf8",
+          mode: 0o600,
+        });
         renameSync(staged, target);
         auth = true;
       } catch {
