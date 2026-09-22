@@ -19,12 +19,15 @@
  *     a rollback of our own write, never a deletion of pre-existing user state.
  *   - `removePiApiKey`, which deletes a provider's api_key entry — but ONLY
  *     from an explicitly-named agentDir (type-enforced: the host's `~/.pi` is
- *     never deletable). The native (embedded) engine's agent dir is HOST-level
- *     (lib/nativeAgentDir.ts), so a wizard-written api_key entry there would
- *     outvote the per-turn env relay and decide EVERY persona's key (last
- *     onboarded wins — PR #606 review). Each relayed turn therefore strips the
- *     provider's entry from that store before spawn (harnesses/pi.ts): while a
- *     key is being relayed, env is the only resolution source. That strip is
+ *     never deletable). The native (embedded) engine's agent dir is
+ *     PER-PERSONA (lib/nativeAgentDir.ts), so a wizard-written api_key entry
+ *     there would outvote the per-turn env relay and decide THIS persona's key
+ *     even after a vault rotation (PR #606 review). Each relayed turn
+ *     therefore strips the provider's entry from that persona's OWN store
+ *     before spawn (harnesses/pi.ts): while a key is being relayed, env is the
+ *     only resolution source. Persona-scoping is what makes the strip safe on
+ *     a multi-persona host — a sibling's tier-2 fallback or oauth login lives
+ *     in the sibling's own store and is unreachable here. That strip is
  *     FAIL-CLOSED: if it cannot complete — or an oauth entry survives it — the
  *     relayed turn ABORTS before spawn rather than risk resolving the wrong
  *     credential. Outside the native agent dir this module never deletes.

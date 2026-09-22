@@ -90,7 +90,7 @@ case "$mode" in
     # credential in the agent dir's auth.json beats env vars — and report which
     # key this child would ACTUALLY authenticate with. This is the assertion
     # surface for the env-only-resolution contract: if the harness left the
-    # provider's entry in the (host-level) native store, `resolved=` shows the
+    # provider's entry in the persona's native store, `resolved=` shows the
     # stale stored key, not the relayed one.
     resolved=""
     if [ -n "${PI_CODING_AGENT_DIR-}" ] && [ -f "${PI_CODING_AGENT_DIR}/auth.json" ] && [ -n "${PHANTOMBOT_PI_PROVIDER-}" ]; then

@@ -42,7 +42,9 @@
  * one provider, so a single `--provider` is correct even after a coding swap.
  */
 
+import { existsSync } from "node:fs";
 import { access, constants } from "node:fs/promises";
+import { join } from "node:path";
 import type {
   Harness,
   HarnessChunk,
@@ -85,7 +87,11 @@ import {
   embeddedPiCommand,
   ENV_PHANTOMBOT_PI_COMMAND,
 } from "../lib/embeddedPi.ts";
-import { nativeAgentDir, nativeAgentEnv } from "../lib/nativeAgentDir.ts";
+import {
+  ensureNativeAgentDir,
+  nativeAgentEnv,
+  nativeExtensionsDir,
+} from "../lib/nativeAgentDir.ts";
 import { removePiApiKey } from "../lib/piAuthStore.ts";
 import type { WriteSink } from "../lib/io.ts";
 
@@ -261,6 +267,24 @@ export class PiHarness implements Harness {
       "--offline",
       "--no-session",
     ];
+    // Managed capability-routing extension (PR #606 review): the agent dir is
+    // PERSONA-scoped (nativeAgentEnv above), but the extension is stamped ONCE
+    // at the host level (lib/piExtensionProvision.ts) — so hand it to pi
+    // explicitly via `--extension` instead of stamping a copy into every
+    // persona's dir. Without this the persona child would discover no
+    // extensions at all and look_at_image would silently vanish. Only when the
+    // stamp exists: an unstamped install (no image model) has nothing to load,
+    // matching the old discovery semantics. `-e` a DIRECTORY: pi discovers the
+    // package (index.ts) inside it.
+    if (this.config.mode === "native") {
+      const managedExtDir = join(
+        nativeExtensionsDir(xdgDataHome()),
+        "capability-routing",
+      );
+      if (existsSync(managedExtDir)) {
+        baseArgs.push("--extension", managedExtDir);
+      }
+    }
     // Capability routing: pin the orchestrator model. Without this `--model`
     // the saved primary is never honored — Pi falls back to its own default
     // and the routing config is silently inert. The delegate models reach the
@@ -431,13 +455,16 @@ export class PiHarness implements Harness {
     // "install later, no key" path keeps legacy installs working); neither ⇒
     // Pi errors as usual.
     // Precedence note: Pi prefers a STORED credential over env vars, and the
-    // native agent dir is HOST-level (lib/nativeAgentDir.ts) — a wizard-written
-    // api_key entry there would outvote this relay and decide EVERY persona's
-    // key (last onboarded wins, vault rotation a silent no-op; PR #606 review).
-    // So a relayed turn STRIPS the provider's entry from the native store below
-    // (see the removePiApiKey call before spawn): while a key is relayed, env
-    // is the only resolution source. Tier-2 (no relayed key) keeps the entry —
-    // the documented "install later, no key" fallback stays usable.
+    // native agent dir is PER-PERSONA (lib/nativeAgentDir.ts) — a wizard-written
+    // api_key entry there would outvote this relay and decide THIS persona's
+    // key even after a vault rotation (PR #606 review). So a relayed turn
+    // STRIPS the provider's entry from THIS persona's own store below (see the
+    // removePiApiKey call before spawn): while a key is relayed, env is the
+    // only resolution source. Tier-2 (no relayed key) keeps the entry —
+    // the documented "install later, no key" fallback stays usable. The store
+    // being persona-scoped is what makes the strip safe on a multi-persona
+    // host: a sibling's tier-2 fallback lives in the sibling's own store and
+    // is never touched by this persona's turns.
     // ...UNLESS this persona explicitly opted out of phantombot's routing
     // ("Use Pi's own config"). That opt-out has to cover the key as well as the
     // models: the key is read from the ambient env, which on a multi-persona
@@ -585,10 +612,12 @@ export class PiHarness implements Harness {
     if (this.config.mode === "native") {
       Object.assign(childEnv, embeddedPiChildEnv(xdgDataHome()));
       // ISOLATION: the embedded engine gets a phantombot-owned agent dir
-      // (auth.json, models-store.json, extensions). It never reads or writes
-      // the user's ~/.pi — that dependency broke Atlas when her owner deleted
-      // pi. Host mode: leave the var UNSET so the host pi keeps ~/.pi.
-      Object.assign(childEnv, nativeAgentEnv(xdgDataHome()));
+      // (auth.json, models-store.json) — PER-PERSONA (lib/nativeAgentDir.ts),
+      // so one persona's stored credential can never decide another persona's
+      // turns (PR #606 review). It never reads or writes the user's ~/.pi —
+      // that dependency broke Atlas when her owner deleted pi. Host mode:
+      // leave the var UNSET so the host pi keeps ~/.pi.
+      Object.assign(childEnv, nativeAgentEnv(xdgDataHome(), req.persona));
       if (this.config.command) {
         childEnv[ENV_PHANTOMBOT_PI_COMMAND] = JSON.stringify(this.config.command);
       }
@@ -597,27 +626,31 @@ export class PiHarness implements Harness {
     }
 
     // STRIP (PR #606 review): on a RELAYED turn, remove the provider's api_key
-    // entry from the native auth store BEFORE spawn so Pi's store-first
-    // precedence can't resurrect a stale (possibly another persona's) key —
-    // env is the only source while we relay. Coupled to the relay, not to
-    // native mode: no relayed key ⇒ no strip (tier-2 fallback stays usable).
-    // agentDir-targeted only, so the host's ~/.pi is unreachable here.
+    // entry from THIS PERSONA'S native auth store BEFORE spawn so Pi's
+    // store-first precedence can't resurrect a stale key — env is the only
+    // source while we relay. Coupled to the relay, not to native mode: no
+    // relayed key ⇒ no strip (tier-2 fallback stays usable). Persona-scoped
+    // (lib/nativeAgentDir.ts): the strip can only ever touch THIS persona's
+    // own store — a sibling's tier-2 fallback or oauth login is unreachable
+    // here. agentDir-targeted only, so the host's ~/.pi is unreachable too.
     //
     // FAIL-CLOSED (PR #606 re-review, Kai): a relayed turn must never spawn
-    // while ANY stored credential for this provider could still outrank the
-    // relayed env key — Pi resolves any store entry, api_key AND oauth login,
-    // ahead of env vars, so a survivor means the turn may silently
-    // authenticate as the wrong (possibly another persona's) credential.
+    // while ANY stored credential of ITS OWN could still outrank the relayed
+    // env key — Pi resolves any store entry, api_key AND oauth login, ahead of
+    // env vars, so a survivor means the turn may silently authenticate as the
+    // wrong credential.
     //   - Strip failed (locked file, unparseable JSON, IO error) → ABORT this
     //     turn: throw, which the orchestrator converts into the standard
     //     fall-through + cooldown + alerter path. Same contract as the
     //     loud no-key throw above.
     //   - OAuth entry present → ABORT too. phantombot never deletes an
     //     interactive login; the error tells the operator how to clear it.
+    //     Persona-scoped, this is self-inflicted only: one persona's own oauth
+    //     login aborts ITS relayed turns and nobody else's.
     // No relayed key ⇒ no strip (tier-2 fallback stays usable, oauth and all).
     if (piApiKey && nativeKeyEnv) {
       const strip = await removePiApiKey(provider as string, {
-        agentDir: nativeAgentDir(xdgDataHome()),
+        agentDir: ensureNativeAgentDir(xdgDataHome(), req.persona),
       });
       if (!strip.ok) {
         throw new Error(

@@ -901,20 +901,25 @@ message is sent straight after.
   back.
 - When the `phantombot harness` wizard takes a native provider API key (e.g.
   OpenRouter), it merge-writes the key into Pi's native auth store
-  (`<data>/pi-native/agent/auth.json`) so `pi --list-models` and the wizard's
+  (`<data>/pi-native/personas/<persona>/agent/auth.json` — the native agent
+  dir is PER-PERSONA, PR #606) so `pi --list-models` and the wizard's
   model pickers populate. That entry is transient bookkeeping: on every turn
   that actually relays the key, phantombot strips the provider's entry from
-  that store before spawning, and the key travels per-turn via the provider's
-  native env var (e.g. `OPENROUTER_API_KEY`) instead. The native agent dir is
-  host-level while each persona's key lives in that persona's vault, so the
-  store must never decide which key authenticates — env is the only source on
-  a relayed turn. The strip is fail-closed: Pi resolves any stored credential
-  (api_key or an OAuth login) ahead of env vars, so if the strip cannot
-  complete, or an OAuth entry for the provider survives it, phantombot aborts
-  the relayed turn with a loud error before spawning rather than risk
-  authenticating as the wrong key. The store entry only survives turns with
-  no relayed key (the "install later, no key" fallback), where an existing
-  OAuth entry for the same provider is left untouched as before.
+  THAT persona's own store before spawning, and the key travels per-turn via the provider's
+  native env var (e.g. `OPENROUTER_API_KEY`) instead. Persona-scoping is what
+  makes the strip safe on a multi-persona host: each persona's store holds
+  only its own credential, so a relayed turn can never delete a sibling's
+  tier-2 fallback or trip over a sibling's OAuth login. A persona's first
+  scoped use absorbs the legacy shared store
+  (`<data>/pi-native/agent/auth.json`) verbatim, so pre-scoping installs keep
+  working without re-running Configure→Brain. The strip is fail-closed: Pi
+  resolves any stored credential (api_key or an OAuth login) ahead of env
+  vars, so if the strip cannot complete, or an OAuth entry for the provider
+  survives it, phantombot aborts the relayed turn with a loud error before
+  spawning rather than risk authenticating as the wrong key. The store entry
+  only survives turns with no relayed key (the "install later, no key"
+  fallback), where an existing OAuth entry for the same provider is left
+  untouched as before.
 - Claude Code is normally authenticated with OAuth on the host.
 - Gemini and OpenAI-compatible endpoints are available for optional
   semantic-memory embeddings via `phantombot embedding`; they are not agent
