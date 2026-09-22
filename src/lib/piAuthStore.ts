@@ -11,18 +11,28 @@
  * Keying Pi directly fixes it because the first catalog fetch then succeeds —
  * so the wizard now merge-writes the key into Pi's store too.
  *
- * SCOPE: this module only ever ADDS/REPLACES the api_key entry for the
- * provider the operator just keyed — with one exception, `restorePiAuth`,
- * which puts back a snapshot the wizard took moments earlier (including
- * removing a file that did not exist before the wizard created it) when the
- * operator declines to apply the configuration. It is a rollback of our own
- * write, never a deletion of pre-existing user state.
+ * SCOPE: this module ADDS/REPLACES the api_key entry for the provider the
+ * operator just keyed, with two deliberate exceptions:
+ *   - `restorePiAuth`, which puts back a snapshot the wizard took moments
+ *     earlier (including removing a file that did not exist before the wizard
+ *     created it) when the operator declines to apply the configuration. It is
+ *     a rollback of our own write, never a deletion of pre-existing user state.
+ *   - `removePiApiKey`, which deletes a provider's api_key entry — but ONLY
+ *     from an explicitly-named agentDir (type-enforced: the host's `~/.pi` is
+ *     never deletable). The native (embedded) engine's agent dir is HOST-level
+ *     (lib/nativeAgentDir.ts), so a wizard-written api_key entry there would
+ *     outvote the per-turn env relay and decide EVERY persona's key (last
+ *     onboarded wins — PR #606 review). Each relayed turn therefore strips the
+ *     provider's entry from that store before spawn (harnesses/pi.ts): while a
+ *     key is being relayed, env is the only resolution source. Outside the
+ *     native agent dir this module never deletes.
  *
- * Otherwise: this module is WRITE-ONLY. Phantombot never deletes from Pi's store:
- * the "Use Pi's own config" path (clearPiRouting) delegates to the very login
- * this file holds, so erasing it would break the mode it enables. Pi's store
- * is shared user state (interactive `pi` logins included) — we add/replace an
- * api_key entry for the provider the operator just keyed, and nothing else.
+ * Otherwise, in the HOST store (~/.pi) this module is WRITE-ONLY: phantombot
+ * never deletes from Pi's own store. The "Use Pi's own config" path
+ * (clearPiRouting) delegates to the very login this file holds, so erasing it
+ * would break the mode it enables. Pi's host store is shared user state
+ * (interactive `pi` logins included) — we add/replace an api_key entry for the
+ * provider the operator just keyed, and nothing else.
  *
  * GUARDS (Pi's auth.json is user-owned, so we are conservative):
  *   - existing oauth entry for the same provider → left untouched (an
@@ -199,6 +209,106 @@ export async function restorePiAuth(
 export type PiAuthWriteResult =
   | { ok: true; path: string; skipped?: "oauth-present" }
   | { ok: false; path: string; reason: string };
+
+export type PiAuthRemoveResult =
+  | { ok: true; path: string; removed: boolean; skipped?: "oauth-present" }
+  | { ok: false; path: string; reason: string };
+
+/**
+ * Delete a provider's api_key entry from Pi's auth.json — the NATIVE store
+ * strip for relayed turns (PR #606 review). HARD-SCOPED: without an explicit
+ * `agentDir` target this refuses outright — the host's `~/.pi` is shared user
+ * state (interactive logins, other tooling) and is never deletable by
+ * phantombot; only the phantombot-owned native agent dir may be touched.
+ *
+ * Guards mirror `writePiApiKey`: an oauth entry for the provider is SKIPPED
+ * (never deleted), an unparseable file is refused byte-for-byte, every other
+ * provider's entry is preserved verbatim, and the rewrite is atomic at 0600.
+ * Serialized with the other writers via the same per-path chain. Never
+ * throws: the harness turns a failed strip into a loud non-fatal warning.
+ */
+export async function removePiApiKey(
+  provider: string,
+  target?: PiAuthTarget,
+): Promise<PiAuthRemoveResult> {
+  const path = authPathFor(target);
+  if (!target?.agentDir) {
+    return {
+      ok: false,
+      path,
+      reason:
+        "removePiApiKey requires an explicit agentDir target — the host ~/.pi is shared user state and is never deletable by phantombot",
+    };
+  }
+  return serialized(path, () => removePiApiKeyInner(provider, path));
+}
+
+async function removePiApiKeyInner(
+  provider: string,
+  path: string,
+): Promise<PiAuthRemoveResult> {
+  let existing: string;
+  try {
+    existing = await readFile(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      return { ok: true, path, removed: false };
+    }
+    return { ok: false, path, reason: e instanceof Error ? e.message : String(e) };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(existing);
+  } catch {
+    return {
+      ok: false,
+      path,
+      reason: "existing auth.json is not valid JSON — refusing to rewrite it",
+    };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      ok: false,
+      path,
+      reason: "existing auth.json is not a JSON object — refusing to rewrite it",
+    };
+  }
+  const store = parsed as Record<string, PiAuthEntry>;
+  const current = store[provider];
+  if (!current) return { ok: true, path, removed: false };
+  if (typeof current === "object" && current.type === "oauth") {
+    return { ok: true, path, removed: false, skipped: "oauth-present" };
+  }
+  delete store[provider];
+  try {
+    // Same discipline as writePiApiKeyInner: unique exclusively-created
+    // tempfile at 0600, atomic rename, best-effort cleanup on failure.
+    const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    try {
+      const fh = await open(tmp, "wx", 0o600);
+      try {
+        await fh.writeFile(JSON.stringify(store, null, 2) + "\n", "utf8");
+      } finally {
+        await fh.close();
+      }
+      await rename(tmp, path);
+    } catch (e) {
+      try {
+        await unlink(tmp);
+      } catch {
+        /* best-effort cleanup */
+      }
+      throw e;
+    }
+    return { ok: true, path, removed: true };
+  } catch (e) {
+    return {
+      ok: false,
+      path,
+      reason: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
 
 /**
  * Merge-write an api_key for `provider` into Pi's auth.json, preserving every

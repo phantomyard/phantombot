@@ -900,13 +900,17 @@ message is sent straight after.
   phantombot binary does not know the new ids, so do not roll a migrated host
   back.
 - When the `phantombot harness` wizard takes a native provider API key (e.g.
-  OpenRouter), it merge-writes the key into Pi's own auth store
-  (`~/.pi/agent/auth.json`) — the same place an interactive `pi` login
-  writes — so `pi --list-models` and the wizard's model pickers populate. An
-  existing OAuth entry for the same provider is left untouched. Note that
-  auth.json stores one API key per provider: if you have multiple keys for
-  the same provider (e.g. two OpenRouter keys), the merge-write replaces the
-  previous key, and Pi's model catalog only uses the one on file.
+  OpenRouter), it merge-writes the key into Pi's native auth store
+  (`<data>/pi-native/agent/auth.json`) so `pi --list-models` and the wizard's
+  model pickers populate. That entry is transient bookkeeping: on every turn
+  that actually relays the key, phantombot strips the provider's entry from
+  that store before spawning, and the key travels per-turn via the provider's
+  native env var (e.g. `OPENROUTER_API_KEY`) instead. The native agent dir is
+  host-level while each persona's key lives in that persona's vault, so the
+  store must never decide which key authenticates — env is the only source on
+  a relayed turn. The store entry only survives turns with no relayed key
+  (the "install later, no key" fallback). An existing OAuth entry for the
+  same provider is left untouched in both paths.
 - Claude Code is normally authenticated with OAuth on the host.
 - Gemini and OpenAI-compatible endpoints are available for optional
   semantic-memory embeddings via `phantombot embedding`; they are not agent

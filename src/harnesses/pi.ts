@@ -85,7 +85,8 @@ import {
   embeddedPiCommand,
   ENV_PHANTOMBOT_PI_COMMAND,
 } from "../lib/embeddedPi.ts";
-import { nativeAgentEnv } from "../lib/nativeAgentDir.ts";
+import { nativeAgentDir, nativeAgentEnv } from "../lib/nativeAgentDir.ts";
+import { removePiApiKey } from "../lib/piAuthStore.ts";
 import type { WriteSink } from "../lib/io.ts";
 
 export const EXPECTED_PI_HEAP_MB = 2_048;
@@ -429,11 +430,14 @@ export class PiHarness implements Harness {
     // Pi, which then falls back to its OWN env / local store settings (the
     // "install later, no key" path keeps legacy installs working); neither ⇒
     // Pi errors as usual.
-    // Precedence note: Pi prefers a STORED credential over env vars. In native
-    // mode the isolated agent dir's store is written by phantombot itself
-    // (wizard / doctor --fix) from the same vault key, so store and relay agree;
-    // if they ever drift, the store winning surfaces the drift as an auth
-    // failure rather than silently firing a stale key.
+    // Precedence note: Pi prefers a STORED credential over env vars, and the
+    // native agent dir is HOST-level (lib/nativeAgentDir.ts) — a wizard-written
+    // api_key entry there would outvote this relay and decide EVERY persona's
+    // key (last onboarded wins, vault rotation a silent no-op; PR #606 review).
+    // So a relayed turn STRIPS the provider's entry from the native store below
+    // (see the removePiApiKey call before spawn): while a key is relayed, env
+    // is the only resolution source. Tier-2 (no relayed key) keeps the entry —
+    // the documented "install later, no key" fallback stays usable.
     // ...UNLESS this persona explicitly opted out of phantombot's routing
     // ("Use Pi's own config"). That opt-out has to cover the key as well as the
     // models: the key is read from the ambient env, which on a multi-persona
@@ -590,6 +594,27 @@ export class PiHarness implements Harness {
       }
     } else {
       childEnv[ENV_PHANTOMBOT_PI_COMMAND] = "";
+    }
+
+    // STRIP (PR #606 review): on a RELAYED turn, remove the provider's api_key
+    // entry from the native auth store BEFORE spawn so Pi's store-first
+    // precedence can't resurrect a stale (possibly another persona's) key —
+    // env is the only source while we relay. Coupled to the relay, not to
+    // native mode: no relayed key ⇒ no strip (tier-2 fallback stays usable).
+    // agentDir-targeted only, so the host's ~/.pi is unreachable here. A failed
+    // strip is loud but non-fatal: the turn proceeds; if the stored entry is
+    // stale the child's auth fails visibly rather than silently mis-billing.
+    if (piApiKey && nativeKeyEnv) {
+      const strip = await removePiApiKey(provider as string, {
+        agentDir: nativeAgentDir(xdgDataHome()),
+      });
+      if (!strip.ok) {
+        log.warn(
+          `${this.id}: could not strip the stored '${provider}' credential from the ` +
+            `native auth store (${strip.reason}) — Pi may resolve the STORED key over the ` +
+            "relayed env key this turn.",
+        );
+      }
     }
 
     /**
