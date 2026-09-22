@@ -19,7 +19,7 @@
  *
  * Two properties keep this safe to sit on the critical path of EVERY turn:
  *
- *   1. HARD LATENCY CAP. The default is 800 ms (JEV_ROUTER_DEFAULT_TIMEOUT_MS),
+ *   1. HARD LATENCY CAP. The default is 800 ms (DECISION_MODEL_ROUTER_DEFAULT_TIMEOUT_MS),
  *      sized from the live corpus (a 300 ms cap times out on realistic
  *      states). Exceeding the budget degrades to the keyword score — a slow
  *      Jev must never stall a turn.
@@ -33,7 +33,7 @@
  * separate rollout gate.
  */
 
-import { jevDecide, JEV_DEFAULT_MODEL, type JevFetch } from "./jev.ts";
+import { decisionModelDecide, DECISION_MODEL_DEFAULT_MODEL, type DecisionModelFetch } from "./decisionModel.ts";
 
 /**
  * Hard default wall-clock cap for a routing decision. Sized from the live
@@ -44,19 +44,19 @@ import { jevDecide, JEV_DEFAULT_MODEL, type JevFetch } from "./jev.ts";
  * keeps the guarantee that matters: a DEGRADED endpoint costs one instant
  * scorer fallback, never a stalled turn.
  */
-export const JEV_ROUTER_DEFAULT_TIMEOUT_MS = 800;
+export const DECISION_MODEL_ROUTER_DEFAULT_TIMEOUT_MS = 800;
 
-export type JevRoute = "primary" | "coder";
+export type DecisionModelRoute = "primary" | "coder";
 
-export interface JevRouterSettings {
+export interface DecisionModelRouterSettings {
   baseUrl: string;
   apiKey: string;
   model?: string;
   timeoutMs?: number;
 }
 
-export type JevRouteResult =
-  | { ok: true; route: JevRoute; confidence: number; latencyMs: number }
+export type DecisionModelRouteResult =
+  | { ok: true; route: DecisionModelRoute; confidence: number; latencyMs: number }
   | { ok: false; error: string; latencyMs: number };
 
 /** How many recent user turns the router shows Jev for context. */
@@ -93,15 +93,15 @@ Recent user messages are shown oldest-first for context. A short natural-languag
  * Ask Jev whether the next turn should run on the primary or the coder.
  * Never throws — { ok: false } means "use the keyword scorer".
  */
-export async function jevRoute(opts: {
-  settings: JevRouterSettings;
+export async function decisionModelRoute(opts: {
+  settings: DecisionModelRouterSettings;
   /** The current user message. */
   text: string;
   /** Recent USER turns, oldest → newest (current message excluded). */
   history?: string[];
   signal?: AbortSignal;
-  fetchImpl?: JevFetch;
-}): Promise<JevRouteResult> {
+  fetchImpl?: DecisionModelFetch;
+}): Promise<DecisionModelRouteResult> {
   const recent = (opts.history ?? []).slice(-ROUTER_HISTORY_TURNS);
   const lines = recent.map(
     (t, i) => `<turn ${i + 1}>\n${clip(t)}\n</turn ${i + 1}>`,
@@ -110,14 +110,14 @@ export async function jevRoute(opts: {
     (lines.length > 0 ? `Recent user messages:\n${lines.join("\n")}\n\n` : "") +
     `Current message:\n<current>\n${clip(opts.text)}\n</current>`;
 
-  const decision = await jevDecide({
+  const decision = await decisionModelDecide({
     baseUrl: opts.settings.baseUrl,
     apiKey: opts.settings.apiKey,
-    model: opts.settings.model ?? JEV_DEFAULT_MODEL,
+    model: opts.settings.model ?? DECISION_MODEL_DEFAULT_MODEL,
     instructions: ROUTER_SYSTEM,
     state: prompt,
     questions: { route: ROUTER_QUESTION },
-    timeoutMs: opts.settings.timeoutMs ?? JEV_ROUTER_DEFAULT_TIMEOUT_MS,
+    timeoutMs: opts.settings.timeoutMs ?? DECISION_MODEL_ROUTER_DEFAULT_TIMEOUT_MS,
     signal: opts.signal,
     fetchImpl: opts.fetchImpl,
   });

@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "bun:test";
 
-import { jevRoute } from "../src/lib/jevRouter.ts";
+import { decisionModelRoute } from "../src/lib/decisionModelRouter.ts";
 
 const SETTINGS = {
   baseUrl: "https://jev.test/api/v1",
@@ -47,10 +47,10 @@ function stubFetch(
   return { fetchImpl, seen };
 }
 
-describe("jevRoute", () => {
+describe("decisionModelRoute", () => {
   it("maps a coder choice with its calibrated confidence", async () => {
     const { fetchImpl } = stubFetch("coder", 0.87);
-    const r = await jevRoute({
+    const r = await decisionModelRoute({
       settings: SETTINGS,
       text: "review this PR",
       fetchImpl,
@@ -64,7 +64,7 @@ describe("jevRoute", () => {
 
   it("maps a primary choice", async () => {
     const { fetchImpl } = stubFetch("primary", 0.95);
-    const r = await jevRoute({
+    const r = await decisionModelRoute({
       settings: SETTINGS,
       text: "what's for dinner?",
       fetchImpl,
@@ -75,7 +75,7 @@ describe("jevRoute", () => {
 
   it("sends the decisions contract with the routes as choice criteria", async () => {
     const { fetchImpl, seen } = stubFetch("coder", 0.7);
-    await jevRoute({
+    await decisionModelRoute({
       settings: SETTINGS,
       text: "what about the error handling?",
       history: ["fix the type error in src/config.ts", "looks good"],
@@ -107,14 +107,14 @@ describe("jevRoute", () => {
     // The CLIENT guards the choice against the question's criteria keys, so
     // a route outside {primary, coder} never reaches the router's own check.
     const { fetchImpl } = stubFetch("vision", 0.5);
-    const r = await jevRoute({ settings: SETTINGS, text: "x", fetchImpl });
+    const r = await decisionModelRoute({ settings: SETTINGS, text: "x", fetchImpl });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain("'route'");
   });
 
   it("clamps a wild confidence into [0, 1]", async () => {
     const { fetchImpl } = stubFetch("coder", 4.2);
-    const r = await jevRoute({ settings: SETTINGS, text: "x", fetchImpl });
+    const r = await decisionModelRoute({ settings: SETTINGS, text: "x", fetchImpl });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.confidence).toBe(1);
   });
@@ -123,7 +123,7 @@ describe("jevRoute", () => {
     const fetchImpl = (async () => {
       throw new Error("connection refused");
     }) as unknown as typeof fetch;
-    const r = await jevRoute({ settings: SETTINGS, text: "x", fetchImpl });
+    const r = await decisionModelRoute({ settings: SETTINGS, text: "x", fetchImpl });
     expect(r.ok).toBe(false);
   });
 });

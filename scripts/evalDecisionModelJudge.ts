@@ -1,8 +1,8 @@
 /**
  * Evaluate the Jev backends against the bundled corpora (issue #597).
  *
- *   bun scripts/evalJevJudge.ts            # threat-judge corpus (default)
- *   bun scripts/evalJevJudge.ts --router   # brain-swap router corpus
+ *   bun scripts/evalDecisionModelJudge.ts            # threat-judge corpus (default)
+ *   bun scripts/evalDecisionModelJudge.ts --router   # brain-swap router corpus
  *
  * Requires a working credential, exactly like production: an API key in the
  * env (default PHANTOMBOT_JEV_API_KEY; override with --key-env NAME) and a
@@ -21,13 +21,13 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { jevJudgeThreat } from "../src/lib/jevJudge.ts";
-import { jevRoute } from "../src/lib/jevRouter.ts";
+import { decisionModelJudgeThreat } from "../src/lib/decisionModelJudge.ts";
+import { decisionModelRoute } from "../src/lib/decisionModelRouter.ts";
 import {
-  JEV_DEFAULT_KEY_ENV,
-  JEV_DEFAULT_MODEL,
-  JEV_OPENROUTER_BASE_URL,
-} from "../src/lib/jev.ts";
+  DECISION_MODEL_DEFAULT_KEY_ENV,
+  DECISION_MODEL_DEFAULT_MODEL,
+  DECISION_MODEL_OPENROUTER_BASE_URL,
+} from "../src/lib/decisionModel.ts";
 
 interface JudgeCase {
   id: string;
@@ -58,10 +58,10 @@ function arg(flag: string): string | undefined {
 }
 const has = (flag: string) => process.argv.includes(flag);
 
-const keyEnv = arg("--key-env") ?? JEV_DEFAULT_KEY_ENV;
+const keyEnv = arg("--key-env") ?? DECISION_MODEL_DEFAULT_KEY_ENV;
 const apiKey = process.env[keyEnv]?.trim();
-const baseUrl = arg("--base-url") ?? JEV_OPENROUTER_BASE_URL;
-const model = arg("--model") ?? JEV_DEFAULT_MODEL;
+const baseUrl = arg("--base-url") ?? DECISION_MODEL_OPENROUTER_BASE_URL;
+const model = arg("--model") ?? DECISION_MODEL_DEFAULT_MODEL;
 
 if (!apiKey) {
   console.error(
@@ -95,7 +95,7 @@ async function evalJudge(): Promise<void> {
   const injectionCases = corpus.cases.filter((c) => c.kind === "injection");
 
   for (const c of corpus.cases) {
-    const r = await jevJudgeThreat(c.content, {
+    const r = await decisionModelJudgeThreat(c.content, {
       settings,
       priors: c.priors,
     });
@@ -162,7 +162,7 @@ async function evalRouter(): Promise<void> {
   let errors = 0;
   let latencySum = 0;
   for (const c of corpus.cases) {
-    const r = await jevRoute({ settings, text: c.text, history: c.history });
+    const r = await decisionModelRoute({ settings, text: c.text, history: c.history });
     if (!r.ok) {
       errors++;
       console.log(`ERR   ${c.id}: ${r.error}`);
