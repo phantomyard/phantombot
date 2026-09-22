@@ -106,6 +106,21 @@ case "$mode" in
       resolved="${!PHANTOMBOT_PI_KEY_ENV}"
     fi
     joined+=" resolved=${resolved}"
+    # LOCAL CONFIG (PR #606 round-5, Kai): pi resolves its default
+    # provider/model for `useLocalConfig` (tier-2) turns from the agent dir's
+    # settings.json — and custom providers/models from models.json /
+    # models-store.json. Echoing what this child ACTUALLY sees lets the
+    # upgrade regression prove a persona-scoped dir kept the legacy local
+    # config (a filtered auth.json alone would leave the persona running on
+    # pi's defaults instead of the operator's chosen model).
+    if [ -n "${PI_CODING_AGENT_DIR-}" ] && [ -f "${PI_CODING_AGENT_DIR}/settings.json" ]; then
+      settingsjson=$(tr -d '\n ' < "${PI_CODING_AGENT_DIR}/settings.json" | sed 's/"/\\"/g')
+      joined+=" settings=${settingsjson}"
+    fi
+    if [ -n "${PI_CODING_AGENT_DIR-}" ] && [ -f "${PI_CODING_AGENT_DIR}/models.json" ]; then
+      modelsjson=$(tr -d '\n ' < "${PI_CODING_AGENT_DIR}/models.json" | sed 's/"/\\"/g')
+      joined+=" models=${modelsjson}"
+    fi
     printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"env: ${joined}\",\"partial\":{}},\"message\":{}}"
     printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
     exit 0

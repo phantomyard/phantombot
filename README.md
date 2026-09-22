@@ -910,9 +910,18 @@ message is sent straight after.
   makes the strip safe on a multi-persona host: each persona's store holds
   only its own credential, so a relayed turn can never delete a sibling's
   tier-2 fallback or trip over a sibling's OAuth login. A persona's first
-  scoped use absorbs the legacy shared store
-  (`<data>/pi-native/agent/auth.json`) verbatim, so pre-scoping installs keep
-  working without re-running Configure→Brain. The strip is fail-closed: Pi
+  scoped use absorbs the legacy shared dir
+  (`<data>/pi-native/agent/`): its `auth.json` OAUTH-FILTERED — only
+  `api_key` entries are inherited, because the shared file has no persona
+  attribution and one operator's interactive OAuth login must not become
+  every persona's stored fallback (or a fail-closed abort on their first
+  relayed turn; the operator who logged in re-runs Configure→Brain once) —
+  plus the local-config files Pi resolves "Use Pi's own config" turns from
+  (`settings.json`, `models.json`, `models-store.json`, verbatim), so a
+  pre-upgrade persona keeps its model/provider choice as well as its
+  credential. The legacy dir itself is a read-only migration source
+  afterwards; a persona-less relayed turn (threat judge, durable-fact
+  extraction) runs on a per-turn ephemeral agent dir instead of touching it. The strip is fail-closed: Pi
   resolves any stored credential (api_key or an OAuth login) ahead of env
   vars, so if the strip cannot complete, or an OAuth entry for the provider
   survives it, phantombot aborts the relayed turn with a loud error before

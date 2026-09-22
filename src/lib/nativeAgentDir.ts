@@ -31,14 +31,37 @@
  * child explicitly via pi's `--extension` flag, so it stays stamped ONCE at
  * the host level (piExtensionProvision) instead of per persona.
  *
- * The LEGACY host-level dir (`<root>/agent`) remains for contexts with no
- * persona (a bare `phantombot __pi` hand-run) and as the MIGRATION SOURCE:
- * the first persona-scoped ensure() absorbs a legacy auth.json into that
- * persona's own store (absorbLegacyNativeAuth), so an upgrade keeps every
- * tier-2 fallback working without anyone re-running Configure→Brain.
+ * The LEGACY host-level dir (`<root>/agent`) is now STRICTLY the migration
+ * source (plus the agent dir for a bare persona-less NON-relayed `phantombot
+ * __pi` hand-run): every persona-scoped ensure() absorbs from it (below) and
+ * NOTHING ever mutates it after the upgrade — in particular the relayed-turn
+ * strip NEVER reaches it, because a persona-less RELAYED turn (threat judge,
+ * durable-fact extraction — HarnessRequest.persona deliberately undefined)
+ * runs on a per-turn EPHEMERAL agent dir instead (harnesses/pi.ts): it carries
+ * its key in env and needs no store at all (PR #606 round-5, Robbie).
+ *
+ * UPGRADE MIGRATION (absorbLegacyNativeAgent, PR #606 rounds 4+5):
+ * a persona's first scoped ensure() inherits the legacy dir's state so an
+ * upgrade keeps tier-2 (`useLocalConfig`) turns working without re-running
+ * Configure→Brain:
+ *   - auth.json is copied FILTERED: api_key entries only. A legacy OAUTH
+ *     login is deliberately NOT absorbed (round-5, Robbie): the shared file
+ *     has no persona attribution — exactly one operator did that interactive
+ *     login — and absorbing it into every persona would make the FAIL-CLOSED
+ *     oauth abort fire on every persona's first relayed turn (a fleet-wide
+ *     outage delivered by the migration itself). The one operator who logged
+ *     in re-runs Configure→Brain once; nobody else sees a mystery abort.
+ *   - the LOCAL-CONFIG files pi resolves `useLocalConfig` turns from —
+ *     settings.json (default model/provider), models.json (custom
+ *     providers/models), models-store.json (catalog) — are copied verbatim
+ *     (round-5, Kai): without them a pre-upgrade local-config persona keeps
+ *     its credential but silently loses its model/provider choice.
+ *   - sessions/, skills/, themes/ are NOT absorbed: conversation history and
+ *     cosmetics are per-persona by nature and duplicating them per persona
+ *     buys nothing the config files don't already cover.
  */
 
-import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { xdgDataHome } from "../config.ts";
 
@@ -55,7 +78,8 @@ export function nativeAgentRoot(dataHome: string = xdgDataHome()): string {
  * PER-PERSONA when a persona is given (`personas/<persona>/agent`): auth.json
  * is per-persona state (PR #606 review). Without a persona — a bare
  * `phantombot __pi` hand-run — the LEGACY host-level dir, which is also the
- * migration source a persona's first ensure() absorbs from.
+ * migration source a persona's first ensure() absorbs from. A persona-less
+ * RELAYED turn never uses either (harnesses/pi.ts gives it an ephemeral dir).
  */
 export function nativeAgentDir(
   dataHome: string = xdgDataHome(),
@@ -66,27 +90,27 @@ export function nativeAgentDir(
     : join(nativeAgentRoot(dataHome), "agent");
 }
 
-/**
- * One-time absorb of the LEGACY host-level auth.json into a persona's own
- * store. Runs inside ensureNativeAgentDir for persona-scoped dirs: if the
- * persona has no auth.json yet and the pre-persona-scoping shared store does,
- * copy it verbatim (oauth logins included — the shared store is exactly what
- * every persona resolved against before this change, so absorbing it preserves
- * the upgrade-time status quo per persona; PR #606 review, Robbie's "safely
- * preserve B's credential"). After the absorb, each persona's store diverges
- * honestly: relayed turns strip their OWN entry, tier-2 keeps its own.
- *
- * Best-effort, never throws: a failed copy degrades to "no stored fallback
- * this turn" (the vault-relayed key path is unaffected) rather than blocking
- * a spawn. A subsequent ensure() retries.
- */
-export function absorbLegacyNativeAuth(
-  dataHome: string = xdgDataHome(),
-  persona: string,
-): boolean {
-  const legacy = join(nativeAgentDir(dataHome), "auth.json");
-  const dir = nativeAgentDir(dataHome, persona);
-  const target = join(dir, "auth.json");
+/** Pi LOCAL-CONFIG files that a persona dir must inherit from the legacy dir
+ * so `useLocalConfig` (tier-2) turns keep resolving the same provider/models
+ * after the scoping upgrade (PR #606 round-5, Kai): settings.json = default
+ * model/provider choice, models.json = custom providers/models,
+ * models-store.json = model catalog. auth.json is handled separately
+ * (oauth-filtered) in absorbLegacyNativeAgent. */
+const LEGACY_AGENT_CONFIG_FILES = ["settings.json", "models.json", "models-store.json"] as const;
+
+/** What absorbLegacyNativeAgent inherited from the legacy dir. */
+export interface LegacyAbsorbResult {
+  /** True when a (filtered) auth.json was written into the persona store. */
+  auth: boolean;
+  /** Local-config files copied verbatim (subset of LEGACY_AGENT_CONFIG_FILES). */
+  configFiles: string[];
+}
+
+/** Copy one legacy agent-dir file into a persona's own dir without clobbering
+ * an existing target. Staged write + atomic rename, best-effort (never throws). */
+function absorbFileInto(dir: string, dataHome: string, name: string): boolean {
+  const legacy = join(nativeAgentDir(dataHome), name);
+  const target = join(dir, name);
   if (!existsSync(legacy) || existsSync(target)) return false;
   const staged = `${target}.absorb-${process.pid}.tmp`;
   try {
@@ -104,9 +128,87 @@ export function absorbLegacyNativeAuth(
   }
 }
 
+/** Read the legacy auth.json under `dataHome`, drop every OAUTH entry, and
+ * return the filtered store — or undefined when there is nothing safe to
+ * absorb (no file, or a file phantombot refuses to interpret). An empty
+ * result is still a RESULT: the persona never had a stored fallback to
+ * inherit, and writing `{}` converges the absorb instead of retrying (and
+ * re-failing) every ensure(). */
+function filteredLegacyAuth(dataHome: string): Record<string, unknown> | undefined {
+  const legacy = join(nativeAgentDir(dataHome), "auth.json");
+  if (!existsSync(legacy)) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(legacy, "utf8"));
+  } catch {
+    return undefined; // unparseable: refuse to interpret, retry next ensure()
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined; // not an auth store: refuse, retry next ensure()
+  }
+  const filtered: Record<string, unknown> = {};
+  for (const [provider, entry] of Object.entries(parsed)) {
+    // Same oauth test as removePiApiKey (lib/piAuthStore.ts): a login entry
+    // is type "oauth" and belongs to the ONE operator who made it — it must
+    // not become a stored fallback (or a fail-closed abort) for a persona
+    // that never logged in. Everything else is kept verbatim.
+    if (entry && typeof entry === "object" && (entry as { type?: unknown }).type === "oauth") {
+      continue;
+    }
+    filtered[provider] = entry;
+  }
+  return filtered;
+}
+
+/**
+ * One-time absorb of the LEGACY host-level agent dir into a persona's own
+ * scope. Runs inside ensureNativeAgentDir for persona-scoped dirs:
+ *  - auth.json, OAUTH-FILTERED (see the module header — round-5, Robbie),
+ *  - the local-config files pi resolves `useLocalConfig` turns from,
+ *    verbatim (round-5, Kai),
+ * each only when the persona doesn't already have that file (a store/config
+ * written after the upgrade, or by the wizard, is never clobbered).
+ *
+ * Best-effort, never throws: a failed copy degrades to "no stored fallback
+ * this turn" (the vault-relayed key path is unaffected) rather than blocking
+ * a spawn. A subsequent ensure() retries whatever is still missing.
+ */
+export function absorbLegacyNativeAgent(
+  dataHome: string = xdgDataHome(),
+  persona: string,
+): LegacyAbsorbResult {
+  const dir = nativeAgentDir(dataHome, persona);
+  const configFiles: string[] = [];
+  for (const name of LEGACY_AGENT_CONFIG_FILES) {
+    if (absorbFileInto(dir, dataHome, name)) configFiles.push(name);
+  }
+  // auth.json: filtered copy, only when the persona has no auth.json yet.
+  let auth = false;
+  const target = join(dir, "auth.json");
+  if (!existsSync(target)) {
+    const filtered = filteredLegacyAuth(dataHome);
+    if (filtered !== undefined) {
+      const staged = `${target}.absorb-${process.pid}.tmp`;
+      try {
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(staged, JSON.stringify(filtered, null, 2) + "\n", "utf8");
+        renameSync(staged, target);
+        auth = true;
+      } catch {
+        try {
+          unlinkSync(staged);
+        } catch {
+          /* nothing to clean up */
+        }
+      }
+    }
+  }
+  return { auth, configFiles };
+}
+
 /** Create the agent dir if missing and return it. Synchronous on purpose:
-/** every caller is about to hand the path to a child env or a file write.
- * Persona-scoped callers also absorb the legacy shared auth.json (above).
+ * every caller is about to hand the path to a child env or a file write.
+ * Persona-scoped callers also absorb the legacy agent dir (above).
  */
 export function ensureNativeAgentDir(
   dataHome: string = xdgDataHome(),
@@ -114,7 +216,7 @@ export function ensureNativeAgentDir(
 ): string {
   const dir = nativeAgentDir(dataHome, persona);
   mkdirSync(dir, { recursive: true });
-  if (persona) absorbLegacyNativeAuth(dataHome, persona);
+  if (persona) absorbLegacyNativeAgent(dataHome, persona);
   return dir;
 }
 

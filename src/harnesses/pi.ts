@@ -43,7 +43,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { access, constants } from "node:fs/promises";
+import { access, constants, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   Harness,
@@ -89,6 +89,7 @@ import {
 } from "../lib/embeddedPi.ts";
 import {
   ensureNativeAgentDir,
+  ENV_PI_AGENT_DIR,
   nativeAgentEnv,
   nativeExtensionsDir,
 } from "../lib/nativeAgentDir.ts";
@@ -609,6 +610,20 @@ export class PiHarness implements Harness {
     // extension's delegates re-enter THIS engine rather than hunting for a
     // host pi. Host: blank the var so a host pi's delegates never inherit a
     // native invocation from an ambient environment.
+    // EPHEMERAL SCOPE (PR #606 round-5, Robbie): a RELAYED turn with NO
+    // persona (threat judge, durable-fact extraction — HarnessRequest.persona
+    // deliberately undefined) must never touch the LEGACY host-level store —
+    // that file is the read-only migration source every persona's first
+    // scoped turn absorbs from, and the strip below would empty it (and a
+    // legacy oauth entry would abort every judge/extraction turn host-wide).
+    // The turn carries its key in env, so it needs no store at all: it gets
+    // a per-turn ephemeral agent dir under the harness temp dir, removed
+    // with the turn (temp.cleanup) and reaped by the tmp sweep on a crash.
+    // The strip below then no-ops against an empty store.
+    const ephemeralAgentDir =
+      this.config.mode === "native" && piApiKey && nativeKeyEnv && !req.persona
+        ? join(temp.dir, "pi-agent")
+        : undefined;
     if (this.config.mode === "native") {
       Object.assign(childEnv, embeddedPiChildEnv(xdgDataHome()));
       // ISOLATION: the embedded engine gets a phantombot-owned agent dir
@@ -617,7 +632,12 @@ export class PiHarness implements Harness {
       // turns (PR #606 review). It never reads or writes the user's ~/.pi —
       // that dependency broke Atlas when her owner deleted pi. Host mode:
       // leave the var UNSET so the host pi keeps ~/.pi.
-      Object.assign(childEnv, nativeAgentEnv(xdgDataHome(), req.persona));
+      if (ephemeralAgentDir) {
+        await mkdir(ephemeralAgentDir, { recursive: true });
+        childEnv[ENV_PI_AGENT_DIR] = ephemeralAgentDir;
+      } else {
+        Object.assign(childEnv, nativeAgentEnv(xdgDataHome(), req.persona));
+      }
       if (this.config.command) {
         childEnv[ENV_PHANTOMBOT_PI_COMMAND] = JSON.stringify(this.config.command);
       }
@@ -633,6 +653,9 @@ export class PiHarness implements Harness {
     // (lib/nativeAgentDir.ts): the strip can only ever touch THIS persona's
     // own store — a sibling's tier-2 fallback or oauth login is unreachable
     // here. agentDir-targeted only, so the host's ~/.pi is unreachable too.
+    // A persona-less relayed turn strips its own EPHEMERAL dir instead (an
+    // empty store: a clean no-op), so the LEGACY migration source is never
+    // written by anything (PR #606 round-5, Robbie).
     //
     // FAIL-CLOSED (PR #606 re-review, Kai): a relayed turn must never spawn
     // while ANY stored credential of ITS OWN could still outrank the relayed
@@ -650,7 +673,9 @@ export class PiHarness implements Harness {
     // No relayed key ⇒ no strip (tier-2 fallback stays usable, oauth and all).
     if (piApiKey && nativeKeyEnv) {
       const strip = await removePiApiKey(provider as string, {
-        agentDir: ensureNativeAgentDir(xdgDataHome(), req.persona),
+        // Ephemeral scope for persona-less relayed turns (above): the strip
+        // no-ops there and the legacy migration source is never touched.
+        agentDir: ephemeralAgentDir ?? ensureNativeAgentDir(xdgDataHome(), req.persona),
       });
       if (!strip.ok) {
         throw new Error(
