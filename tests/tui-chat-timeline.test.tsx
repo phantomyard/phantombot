@@ -17,6 +17,7 @@ import { render } from "ink";
 
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import type { ChatEvent, ChatSession } from "../src/tui/chatSession.ts";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -56,7 +57,7 @@ function sessionOf(events: ChatEvent[]): ChatSession {
   return {
     persona: "lab",
     conversation: "cli:tui:lab",
-    history: [],
+    transcript: new TranscriptStore([]),
     async *send() {
       for (const event of events) yield event;
     },

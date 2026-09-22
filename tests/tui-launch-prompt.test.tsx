@@ -19,6 +19,7 @@ import { render } from "ink";
 import { App } from "../src/tui/App.tsx";
 import { seedForOpening } from "../src/tui/index.tsx";
 import type { ChatSession } from "../src/tui/chatSession.ts";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 import type { HostSnapshot, PersonaSnapshot } from "../src/tui/snapshot.ts";
 
 function fakeStdin() {
@@ -124,7 +125,7 @@ function mountApp(props: {
         return {
           persona: name,
           conversation: `cli:tui:${name}`,
-          history: [],
+          transcript: new TranscriptStore([]),
           async *send(text: string) {
             rec.sent.push(`${name}:${text}`);
             yield { type: "done", text: "ok" } as never;

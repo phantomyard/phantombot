@@ -60,6 +60,7 @@ import {
   makeDurableFactPuller,
   makeFactExtractor,
 } from "../orchestrator/durableFacts.ts";
+import { TranscriptStore } from "./transcriptStore.ts";
 
 /**
  * Conversation key for the terminal. One per persona, stable across restarts,
@@ -120,8 +121,17 @@ export interface ChatCommandResult {
 export interface ChatSession {
   persona: string;
   conversation: string;
-  /** Prior turns, oldest first, loaded from the memory store on open. */
-  history: ChatMessage[];
+  /**
+   * The visible conversation, owned by the session (phantombot#604).
+   *
+   * Seeded from the memory store when the session opens, then grown live by
+   * the screen as turns stream. Screens unmount on every navigation and used
+   * to lose the transcript with them; the session outlives the screen
+   * switch, so its store IS the history the user sees. `history` — the stale
+   * one-shot snapshot this replaces — was never appended to, which is what
+   * made coming back from `^l`/`^s` look like a wiped conversation.
+   */
+  transcript: TranscriptStore;
   /** Run one user message. Yields UI events as the turn streams. */
   send(text: string, signal?: AbortSignal): AsyncGenerator<ChatEvent>;
   /**
@@ -251,6 +261,7 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
       at: Number.isFinite(at) ? at : 0,
     };
   });
+  const transcript = new TranscriptStore(history);
 
   async function* send(
     text: string,
@@ -457,7 +468,7 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
   return {
     persona,
     conversation,
-    history,
+    transcript,
     send,
     command,
     reloadHarnesses,

@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { render } from "ink";
 
 import { App } from "../src/tui/App.tsx";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 import { stripAnsi } from "./helpers/ansi.ts";
 import type { HostSnapshot, PersonaSnapshot } from "../src/tui/snapshot.ts";
 
@@ -128,7 +129,7 @@ async function mountApp() {
       openSession={async ({ persona }) => ({
         persona,
         conversation: `cli:tui:${persona}`,
-        history: [],
+        transcript: new TranscriptStore([]),
         async *send() {},
         async command() {
           return null;

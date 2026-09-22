@@ -29,7 +29,13 @@
  *     thread, and so does reopening the app tomorrow.
  */
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
@@ -212,9 +218,25 @@ export function ChatScreen(props: {
   /** Called the moment the seed is taken, so the owner never offers it again. */
   onSeedSent?: () => void;
 }): React.ReactElement {
-  const [messages, setMessages] = useState<ChatMessage[]>(
-    props.session.history,
+  /**
+   * The visible conversation lives on the SESSION, not here
+   * (phantombot#604). Screens unmount on every navigation (`^l`, `^s`, …),
+   * and a screen-local copy died with each unmount — coming back re-seeded
+   * from the open-time snapshot and the current session vanished from the
+   * screen. The session outlives the screen switch; this screen is now a
+   * pure view of its store. Scroll resets to the live bottom on return:
+   * the newest exchange is where a returning reader looks.
+   */
+  const transcript = props.session.transcript;
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => transcript.subscribe(onStoreChange),
+    [transcript],
   );
+  const getSnapshot = useCallback(
+    () => transcript.getSnapshot(),
+    [transcript],
+  );
+  const messages = useSyncExternalStore(subscribe, getSnapshot);
   const [input, setInputState] = useState<PromptState>(() => promptState(""));
   /** Mirrors `input` synchronously so a burst of keystrokes cannot lose one. */
   const inputRef = useRef<PromptState>(input);
@@ -266,12 +288,13 @@ export function ChatScreen(props: {
   const turnRef = useRef<Promise<void> | null>(null);
   const genRef = useRef(0);
 
-  // Reset the transcript when the session changes (^p switched phantom).
+  // A switched session (^p changed the phantom) is a different transcript:
+  // the store re-binds through the `subscribe`/`getSnapshot` deps above, so
+  // only the viewport needs resetting — back to the live bottom.
   useEffect(() => {
-    setMessages(props.session.history);
     scrollRef.current = 0;
     setScroll(0);
-  }, [props.session]);
+  }, [transcript]);
 
   const runSubmit = useCallback(
     async (text: string) => {
@@ -295,18 +318,10 @@ export function ChatScreen(props: {
         tools: [],
         parts: [],
       };
-      setMessages((prev) => [
-        ...prev,
-        { role: "user", text, at: Date.now() },
-        slot,
-      ]);
-      const patch = (fn: (m: ChatMessage) => ChatMessage) =>
-        setMessages((prev) => {
-          const next = fn(slot);
-          const out = prev.map((m) => (m === slot ? next : m));
-          slot = next;
-          return out;
-        });
+      transcript.append({ role: "user", text, at: Date.now() }, slot);
+      const patch = (fn: (m: ChatMessage) => ChatMessage) => {
+        slot = transcript.patch(slot, fn);
+      };
       try {
         for await (const event of props.session.send(text, controller.signal)) {
           if (event.type === "text") {
@@ -441,7 +456,7 @@ export function ChatScreen(props: {
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [props.session],
+    [props.session, transcript],
   );
 
   /**
@@ -488,18 +503,10 @@ export function ChatScreen(props: {
         text: "\u2026",
         at: Date.now(),
       };
-      setMessages((prev) => [
-        ...prev,
-        { role: "user", text, at: Date.now() },
-        slot,
-      ]);
-      const patch = (fn: (m: ChatMessage) => ChatMessage) =>
-        setMessages((prev) => {
-          const next = fn(slot);
-          const out = prev.map((m) => (m === slot ? next : m));
-          slot = next;
-          return out;
-        });
+      transcript.append({ role: "user", text, at: Date.now() }, slot);
+      const patch = (fn: (m: ChatMessage) => ChatMessage) => {
+        slot = transcript.patch(slot, fn);
+      };
       try {
         const result = await props.session.command(text);
         patch((m) => ({ ...m, text: result?.reply ?? "" }));
@@ -511,7 +518,7 @@ export function ChatScreen(props: {
         patch((m) => ({ ...m, error: (e as Error).message }));
       }
     },
-    [props.session],
+    [props.session, transcript],
   );
 
   // The launch prompt (issue #575). Taken exactly once per mount, and the

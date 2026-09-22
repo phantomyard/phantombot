@@ -19,6 +19,7 @@ import { render } from "ink";
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import { SPINNER_FRAMES } from "../src/tui/components/Spinner.tsx";
 import type { ChatEvent, ChatSession } from "../src/tui/chatSession.ts";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 
 function fakeStdin() {
   const s = new PassThrough() as PassThrough & {
@@ -60,7 +61,7 @@ function pendingSession(events: ChatEvent[]): ChatSession {
   return {
     persona: "alice",
     conversation: "cli:tui:alice",
-    history: [],
+    transcript: new TranscriptStore([]),
     async *send() {
       for (const event of events) yield event;
       // Never returns: the harness is still working.
@@ -102,7 +103,7 @@ function recordingSession(sent: string[]): ChatSession {
   return {
     persona: "alice",
     conversation: "cli:tui:alice",
-    history: [],
+    transcript: new TranscriptStore([]),
     async *send(text: string) {
       sent.push(text);
       await new Promise(() => {});
@@ -259,7 +260,7 @@ describe("chat activity indicator", () => {
     const session: ChatSession = {
       persona: "alice",
       conversation: "cli:tui:alice",
-      history: [],
+      transcript: new TranscriptStore([]),
       async *send() {
         yield { type: "text", text: "hello back" } as ChatEvent;
         yield { type: "done", text: "hello back" } as ChatEvent;
@@ -293,7 +294,7 @@ describe("message timestamps", () => {
     const session: ChatSession = {
       persona: "alice",
       conversation: "cli:tui:alice",
-      history: [{ role: "user", text: "from yesterday", at: 0 }],
+      transcript: new TranscriptStore([{ role: "user", text: "from yesterday", at: 0 }]),
       async *send() {},
       async command() {
         return null;

@@ -22,6 +22,7 @@ import { render } from "ink";
 
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import type { ChatSession } from "../src/tui/chatSession.ts";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 
 function fakeStdin() {
   const s = new PassThrough() as PassThrough & {
@@ -60,7 +61,7 @@ function sessionWithTools(): ChatSession {
   return {
     persona: "alice",
     conversation: "cli:tui:alice",
-    history: [
+    transcript: new TranscriptStore([
       { role: "user", text: "ship it", at: 0 },
       {
         role: "assistant",
@@ -71,7 +72,7 @@ function sessionWithTools(): ChatSession {
           { title: "bun test", startedAt: 0, durationMs: 3400 },
         ],
       },
-    ],
+    ]),
     async *send() {},
     async command() {
       return null;
@@ -292,7 +293,7 @@ async function mountApp(host: HostSnapshot = HOST) {
       openSession={async ({ persona }) => ({
         persona,
         conversation: `cli:tui:${persona}`,
-        history: [],
+        transcript: new TranscriptStore([]),
         async *send() {},
         async command() {
           return null;

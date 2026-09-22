@@ -18,6 +18,7 @@ import { render } from "ink";
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import { theme } from "../src/tui/theme.ts";
 import type { ChatSession } from "../src/tui/chatSession.ts";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 
 chalk.level = 3;
 
@@ -59,7 +60,7 @@ function fakeStdout(columns: number, rows: number) {
 const idleSession: ChatSession = {
   persona: "alice",
   conversation: "cli:tui:alice",
-  history: [],
+  transcript: new TranscriptStore([]),
   async *send() {},
   async command() {
     return null;

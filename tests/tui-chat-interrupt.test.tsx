@@ -10,6 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -179,7 +180,7 @@ function abortableSession() {
   const session: ChatSession = {
     persona: "lab",
     conversation: "cli:tui:lab",
-    history: [],
+    transcript: new TranscriptStore([]),
     async *send(text: string, signal?: AbortSignal) {
       sent.push(text);
       yield { type: "thinking" as const };

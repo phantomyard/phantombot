@@ -17,6 +17,7 @@
  */
 
 import React from "react";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 import { describe, expect, test } from "bun:test";
 import { Box, render } from "ink";
 import { PassThrough } from "node:stream";
@@ -67,7 +68,7 @@ function session(turns: number): ChatSession {
   return {
     persona: "lab",
     conversation: "cli:tui:lab",
-    history: history(turns),
+    transcript: new TranscriptStore(history(turns)),
     async *send(): AsyncGenerator<ChatEvent> {},
     async command() {
       return null;

@@ -18,6 +18,7 @@ import type {
   ChatMessage,
   ChatSession,
 } from "../src/tui/chatSession.ts";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -78,7 +79,7 @@ function spySession(options: {
   const session: ChatSession = {
     persona: "lab",
     conversation: "cli:tui:lab",
-    history: options.history ?? [],
+    transcript: new TranscriptStore(options.history ?? []),
     async *send(text: string) {
       sent.push(text);
       if (options.hang) {
