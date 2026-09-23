@@ -11,6 +11,7 @@ import {
   snapshotPiAuth,
   writePiApiKey,
 } from "../src/lib/piAuthStore.ts";
+import { LEGACY_ABSORBED_MARKER } from "../src/lib/nativeAgentDir.ts";
 
 let home: string;
 
@@ -291,5 +292,40 @@ describe("removePiApiKey (native store strip, PR #606 review)", () => {
     expect(r).toMatchObject({ ok: true, removed: true });
     expect((await stat(join(agentDir, "auth.json"))).mode & 0o777).toBe(0o600);
     expect(await readdir(agentDir)).toEqual(["auth.json"]);
+  });
+});
+
+describe("removePiApiKey sentinel invalidation (issue #609, PR #610 round 2)", () => {
+  const seed = async (store: Record<string, unknown>) => {
+    const agentDir = join(home, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify(store, null, 2) + "\n",
+    );
+    return agentDir;
+  };
+
+  test("strip deletes the sentinel, so the thinned store stays re-absorbable", async () => {
+    const agentDir = await seed({ openrouter: { type: "api_key", key: "sk" } });
+    await writeFile(join(agentDir, LEGACY_ABSORBED_MARKER), "");
+    const r = await removePiApiKey("openrouter", { agentDir });
+    expect(r).toMatchObject({ ok: true, removed: true });
+    expect(existsSync(join(agentDir, LEGACY_ABSORBED_MARKER))).toBe(false);
+  });
+
+  test("unremovable sentinel aborts the strip BEFORE the store is rewritten (old ordering would report ok:true with the store stripped)", async () => {
+    // A marker that cannot be unlinked (a directory: unlink gives a
+    // non-ENOENT error on every platform) must fail the strip with the
+    // store LEFT INTACT — never the #609 shape of a stripped store behind
+    // an intact marker reporting success.
+    const before = { openrouter: { type: "api_key", key: "sk" } };
+    const agentDir = await seed(before);
+    await mkdir(join(agentDir, LEGACY_ABSORBED_MARKER));
+    const r = await removePiApiKey("openrouter", { agentDir });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain(LEGACY_ABSORBED_MARKER);
+    const after = JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8"));
+    expect(after).toEqual(before);
   });
 });
