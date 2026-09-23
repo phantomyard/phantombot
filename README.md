@@ -921,7 +921,18 @@ message is sent straight after.
   pre-upgrade persona keeps its model/provider choice as well as its
   credential. The legacy dir itself is a read-only migration source
   afterwards; a persona-less relayed turn (threat judge, durable-fact
-  extraction) runs on a per-turn ephemeral agent dir instead of touching it. The strip is fail-closed: Pi
+  extraction) runs on a per-turn ephemeral agent dir instead of touching it.
+  The absorb is gated by a convergence sentinel —
+  `personas/<persona>/agent/.legacy-absorbed` — NOT by the store file merely
+  existing (issue #609): a strip that removes entries can legitimately leave
+  `{}` behind, and a file-presence test would make that state block the
+  re-absorb forever. A real strip therefore deletes the sentinel BEFORE it
+  commits the stripped store (so a crash in between leaves the old store
+  intact and re-absorbable, never a thinned store behind an intact marker;
+  any unlink failure other than a missing marker aborts the strip fail-closed),
+  and the next tier-2 ensure re-absorbs at PROVIDER level — missing legacy
+  providers merge back in, persona/wizard-owned entries are never
+  overwritten — so even a partially stripped store heals. The strip is fail-closed: Pi
   resolves any stored credential (api_key or an OAuth login) ahead of env
   vars, so if the strip cannot complete, or an OAuth entry for the provider
   survives it, phantombot aborts the relayed turn with a loud error before

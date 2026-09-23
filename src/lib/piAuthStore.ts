@@ -19,7 +19,12 @@
  *     a rollback of our own write, never a deletion of pre-existing user state.
  *   - `removePiApiKey`, which deletes a provider's api_key entry — but ONLY
  *     from an explicitly-named agentDir (type-enforced: the host's `~/.pi` is
- *     never deletable). The native (embedded) engine's agent dir is
+ *     never deletable), and which ALSO invalidates the legacy-absorb sentinel
+ *     (LEGACY_ABSORBED_MARKER, lib/nativeAgentDir.ts) BEFORE committing the
+ *     thinned store — a store the strip has touched must stay re-absorbable
+ *     (issue #609: an emptied `{}` behind an intact marker used to block the
+ *     legacy migration forever; a strip whose sentinel cannot be removed
+ *     aborts instead of committing, PR #610 review). The native (embedded) engine's agent dir is
  *     PER-PERSONA (lib/nativeAgentDir.ts), so a wizard-written api_key entry
  *     there would outvote the per-turn env relay and decide THIS persona's key
  *     even after a vault rotation (PR #606 review). Each relayed turn
@@ -51,6 +56,8 @@ import { existsSync } from "node:fs";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+import { LEGACY_ABSORBED_MARKER } from "./nativeAgentDir.ts";
 
 /**
  * In-process serialization of writers, keyed by target path. Pi's auth.json
@@ -287,6 +294,31 @@ async function removePiApiKeyInner(
     return { ok: true, path, removed: false, skipped: "oauth-present" };
   }
   delete store[provider];
+  // Issue #609: the strip must also invalidate the legacy-absorb sentinel.
+  // The marker claims "migration converged"; removing an entry UN-converges
+  // it — otherwise the `{}` left behind after the last entry would sit
+  // behind an intact marker forever, permanently blocking the legacy
+  // re-absorb. ORDERING MATTERS (PR #610 review): the marker is deleted
+  // BEFORE the stripped store is committed. If we committed first and then
+  // failed to unlink (crash, EISDIR, EPERM), a thinned/`{}` store would sit
+  // behind an intact marker — exactly the permanent state this fixes — while
+  // reporting success. Deleting the marker first inverts the failure: a
+  // crash after marker removal leaves the OLD store untouched, and the next
+  // tier-2 ensure re-absorbs (provider-level merge, never clobbers), which
+  // is safe. ENOENT (no marker: never absorbed / already stripped / ephemeral
+  // dir) is the normal case and passes; any other unlink error aborts the
+  // strip fail-closed before the store is rewritten.
+  try {
+    await unlink(join(dirname(path), LEGACY_ABSORBED_MARKER));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      return {
+        ok: false,
+        path,
+        reason: `could not invalidate ${LEGACY_ABSORBED_MARKER} before stripping (${e instanceof Error ? e.message : String(e)}) — aborting so the store never sits thinned behind an intact marker`,
+      };
+    }
+  }
   try {
     // Same discipline as writePiApiKeyInner: unique exclusively-created
     // tempfile at 0600, atomic rename, best-effort cleanup on failure.
