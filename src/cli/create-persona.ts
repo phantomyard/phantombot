@@ -83,7 +83,16 @@ export interface CreatePersonaResult {
 
 export async function applyPersona(
   config: Config,
-  inputs: PersonaTemplateInput & { setDefault: boolean },
+  inputs: PersonaTemplateInput & {
+    setDefault: boolean;
+    /**
+     * Verbatim SOUL.md content. Omitted: phantombot's shared behaviour
+     * anchor (`generateSoulMd`). The wizard and the TUI never pass it; the
+     * embeddable engine does, for an application that authors its persona's
+     * character in code rather than by hand-editing the file afterwards.
+     */
+    soul?: string;
+  },
 ): Promise<CreatePersonaResult> {
   const dir = personaDir(config, inputs.name);
   let archived: ArchivedPersona | undefined;
@@ -94,7 +103,7 @@ export async function applyPersona(
   // Split identity: SOUL.md is the shared, character-free behaviour anchor;
   // IDENTITY.md is the per-phantom "who you are" from the wizard answers.
   // The loader concatenates them at runtime.
-  await writeFile(join(dir, "SOUL.md"), generateSoulMd(), "utf8");
+  await writeFile(join(dir, "SOUL.md"), inputs.soul ?? generateSoulMd(), "utf8");
   await writeFile(join(dir, "IDENTITY.md"), generateIdentityMd(inputs), "utf8");
   await writeFile(
     join(dir, "MEMORY.md"),

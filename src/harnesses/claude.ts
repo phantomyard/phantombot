@@ -57,7 +57,7 @@ import type {
 import { buildToolCall } from "./toolNote.ts";
 import { DEFAULT_REASONING_REPLAY, type ParseEventResult, type ReasoningReplayConfig } from "./reasoningReplay.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
-import { reloadVaultForPersona } from "../lib/vault.ts";
+import { harnessSpawnEnv } from "../lib/vault.ts";
 import {
   type HarnessActivity,
   runHarnessProcess,
@@ -196,19 +196,21 @@ export class ClaudeHarness implements Harness {
       systemPromptBytes,
     });
 
-    // Reconcile THIS persona's encrypted vault into the env — the ONLY runtime
-    // credential source since #452 (plaintext .env is a one-way legacy import,
-    // never re-read). This makes a `vault set` from the previous turn visible
-    // now and ensures the subprocess sees only this persona's secrets.
-    await reloadVaultForPersona(req.persona);
+    // The env this spawn starts from, with THIS persona's encrypted vault
+    // applied — the ONLY runtime credential source since #452 (plaintext .env
+    // is a one-way legacy import, never re-read). On the daemon that is
+    // `process.env` reconciled in place (a `vault set` from the previous turn
+    // becomes visible, another persona's keys are removed); inside an engine
+    // scope it is a per-spawn copy and the application's env is never written
+    // (see harnessSpawnEnv).
+    const spawnEnv = await harnessSpawnEnv(req.persona);
 
     // OAuth-on-host: don't leak any ANTHROPIC_* / CLAUDE_CODE_* auth or
-    // routing var into the subprocess env (the vault reload above may have
-    // injected one), so claude resolves credentials from
-    // ~/.claude/.credentials.json.
+    // routing var into the subprocess env (the vault may have supplied one),
+    // so claude resolves credentials from ~/.claude/.credentials.json.
     const env = withPersonaEnv(
       {
-        ...filterAuthEnv(process.env),
+        ...filterAuthEnv(spawnEnv),
         // Background agents are disabled by product policy. This flag makes
         // the CLI strip `run_in_background` from the Bash and Task tool
         // SCHEMAS entirely (verified against claude 2.1.170), so the model
@@ -450,8 +452,8 @@ export const PHANTOMBOT_INJECTED_CLAUDE_SETTINGS = {
  * Denylisting individual names (the old behaviour, which only stripped
  * ANTHROPIC_API_KEY) is fragile: ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL,
  * CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_USE_BEDROCK, etc. all silently flip
- * claude off the Max-subscription OAuth path. The env files and active persona
- * vault are reconciled into process.env right before this runs, so a stray
+ * claude off the Max-subscription OAuth path. The active persona's vault is
+ * applied to the spawn env right before this runs, so a stray
  * `phantombot vault set ANTHROPIC_AUTH_TOKEN …` would leak straight through.
  * Allow-listing the namespace closes the whole family at once.
  */

@@ -26,7 +26,9 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 // The `with { type: "file" }` import makes bun embed the bytes in the compiled
 // binary and hand back a path it can read them from ($bunfs / ~BUN).
-import embeddedWasmPath from "../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm" with { type: "file" };
+// Bare specifier: photon-node has no exports map, so this resolves both from a
+// checkout and from a hoisted dependency install.
+import embeddedWasmPath from "@silvia-odwyer/photon-node/photon_rs_bg.wasm" with { type: "file" };
 
 export const PHOTON_WASM_FILENAME = "photon_rs_bg.wasm";
 

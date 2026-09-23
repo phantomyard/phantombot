@@ -9,6 +9,7 @@
  * Resolution priority for any value that lives in both: env > state > toml > default.
  */
 
+import { hostLocationEnv } from "./lib/engineScope.ts";
 import { mkdir, readFile, appendFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
@@ -22,7 +23,7 @@ export interface State {
 
 export function statePath(): string {
   return (
-    process.env.PHANTOMBOT_STATE ??
+    hostLocationEnv("PHANTOMBOT_STATE") ??
     join(xdgDataHome(), "phantombot", "state.json")
   );
 }
@@ -59,7 +60,8 @@ async function loadStateForAudit(): Promise<State> {
  * PHANTOMBOT_STATE_AUDIT still wins if set.
  */
 export function auditPath(): string {
-  if (process.env.PHANTOMBOT_STATE_AUDIT) return process.env.PHANTOMBOT_STATE_AUDIT;
+  const explicit = hostLocationEnv("PHANTOMBOT_STATE_AUDIT");
+  if (explicit) return explicit;
   return join(dirname(statePath()), "state-audit.log");
 }
 

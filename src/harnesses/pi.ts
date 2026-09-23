@@ -67,7 +67,7 @@ import { recordDecisionModelOutcome } from "../lib/decisionModelHealth.ts";
 import { classifyFailure } from "../lib/harnessAlert.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
-import { reloadVaultForPersona } from "../lib/vault.ts";
+import { harnessSpawnEnv } from "../lib/vault.ts";
 import {
   type HarnessActivity,
   isHardCapError,
@@ -142,9 +142,9 @@ export interface PiHarnessConfig {
   /**
    * The optional Jev brain-swap router (issue #597). Present only when the
    * operator configured [jev] and enabled the ROUTER consumer. The API key
-   * is NOT carried here — it is read per-turn from `process.env[keyEnv]`
-   * after the persona's vault is reconciled, the same contract as the Pi
-   * API key. An enabled router DECIDES — the keyword scorer is the fallback
+   * is NOT carried here — it is read per-turn from the spawn env
+   * (`harnessSpawnEnv`, the persona's vault applied), the same contract as
+   * the Pi API key. An enabled router DECIDES — the keyword scorer is the fallback
    * on any error, and there is no log-only mode (see DecisionModelConsumerSettings).
    */
   decisionModelRouter?: {
@@ -308,6 +308,15 @@ export class PiHarness implements Harness {
     // there is no distinct brain to swap to, so consulting the override store
     // and the scorer would be pure I/O and log noise (and a "swapped" turn on
     // an equal model would activate the retry ladder for nothing).
+    // The env this spawn starts from, with THIS persona's encrypted vault
+    // applied — the Pi API key and the router key are both vault secrets
+    // post-migration. On the daemon this reconciles `process.env` in place;
+    // inside an engine scope it is a per-spawn copy and the application's env
+    // is never written (see harnessSpawnEnv in lib/vault.ts). Resolved ONCE,
+    // up front, so the router below and the key relay further down read the
+    // same snapshot.
+    const spawnEnv = await harnessSpawnEnv(req.persona);
+
     const routing = this.routing();
     const primaryModel = routing?.primaryModel;
     const codingModel = routing?.codingModel;
@@ -345,12 +354,9 @@ export class PiHarness implements Harness {
       const decisionModelRouter = this.config.decisionModelRouter;
       let decision: SwapDecision | undefined;
       if (override === undefined && decisionModelRouter) {
-        // Resolve the router key per-turn from the env (vault-injected), the
-        // same contract as the Pi API key below. reloadVaultForPersona is
-        // idempotent; calling it here too keeps the router working on turns
-        // where Pi's own key comes from Pi's local store instead.
-        await reloadVaultForPersona(req.persona);
-        const decisionModelKey = process.env[decisionModelRouter.keyEnv]?.trim();
+        // Resolve the router key per-turn from the spawn env (the persona's
+        // vault applied), the same contract as the Pi API key below.
+        const decisionModelKey = spawnEnv[decisionModelRouter.keyEnv]?.trim();
         if (!decisionModelKey) {
           log.warn(
             `pi.invoke jev-router enabled but ${decisionModelRouter.keyEnv} is not set; using the keyword scorer`,
@@ -439,10 +445,6 @@ export class PiHarness implements Harness {
       ? PI_PROVIDER_CATALOG.find((p) => p.id === provider)?.envVar
       : undefined;
 
-    // Reconcile this persona's encrypted vault into the env BEFORE the Pi API
-    // key is read below — the key is a vault secret post-migration. See claude.ts.
-    await reloadVaultForPersona(req.persona);
-
     // Per-turn Pi auth: relay the API key to the child via its PROVIDER-SCOPED
     // env var (e.g. OPENROUTER_API_KEY) — exactly the var Pi reads when it has
     // no runtime/stored credential. The key must NEVER travel on the command
@@ -486,7 +488,7 @@ export class PiHarness implements Harness {
     // before anything depends on native.
     const piApiKey = this.config.mode !== "native" || routing?.useLocalConfig
       ? undefined
-      : process.env[this.config.apiKeyEnv ?? ENV_PI_API_KEY]?.trim();
+      : spawnEnv[this.config.apiKeyEnv ?? ENV_PI_API_KEY]?.trim();
     if (
       this.config.mode === "native" &&
       !routing?.useLocalConfig &&
@@ -563,7 +565,7 @@ export class PiHarness implements Harness {
     // unsets any stale ambient value rather than leaking it into the subtree.
     // withPersonaEnv returns a fresh copy with turn context and non-interactive defaults;
     // the spread guarantees we can freely assign child-specific vars without mutating parent state.
-    const childEnv = { ...withPersonaEnv(process.env, req.persona, req.conversation, req.turnId) };
+    const childEnv = { ...withPersonaEnv(spawnEnv, req.persona, req.conversation, req.turnId) };
     if (
       this.config.mode === "host" &&
       this.config.maxOldSpaceMb !== undefined

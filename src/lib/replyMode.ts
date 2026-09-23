@@ -1,3 +1,4 @@
+import { hostLocationEnv } from "./engineScope.ts";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { xdgStateHome } from "../config.ts";
@@ -32,7 +33,7 @@ type StoredOverrides = Record<string, StoredOverride>;
 
 export function replyModeStatePath(): string {
   return (
-    process.env.PHANTOMBOT_REPLY_MODE_STATE ??
+    hostLocationEnv("PHANTOMBOT_REPLY_MODE_STATE") ??
     join(xdgStateHome(), "phantombot", "reply-mode-overrides.json")
   );
 }

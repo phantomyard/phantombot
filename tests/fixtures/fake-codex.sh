@@ -18,6 +18,10 @@
 #   narration_only -> narration + tool call, then exit 0 WITHOUT turn.completed:
 #                 the truncated-stream failure mode of issue #598. Must surface
 #                 as a recoverable error, never a succeeded turn.
+#   env        -> echo `NAME=value` for every env var named in the
+#                 whitespace-separated FAKE_CODEX_ECHO_VARS list, as one agent
+#                 message. Used by the engine's credential-boundary regression
+#                 (which value a REAL adapter's child actually sees).
 
 mode="${FAKE_CODEX_MODE:-normal}"
 
@@ -76,6 +80,17 @@ case "$mode" in
       sleep 0.2
     done
     printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":6}}'
+    exit 0
+    ;;
+  env)
+    joined=""
+    for name in ${FAKE_CODEX_ECHO_VARS-}; do
+      joined+="${name}=${!name-} "
+    done
+    joined="${joined//\\/\\\\}"
+    joined="${joined//\"/\\\"}"
+    printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"env: ${joined}\"}}"
+    printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
     exit 0
     ;;
   argv)

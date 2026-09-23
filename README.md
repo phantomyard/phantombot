@@ -98,6 +98,7 @@ installs a harness for you.
 - [Memory](#memory)
 - [Maintenance](#maintenance)
 - [Architecture](#architecture)
+- [Embedding the engine in TypeScript](#embedding-the-engine-in-typescript)
 - [Build From Source](#build-from-source)
 - [Project Layout](#project-layout)
 - [Design Principles](#design-principles)
@@ -3169,6 +3170,60 @@ uses Nostr. ACP is a separate stdio process spawned by the editor, but enters
 the same turn coordinator and persona memory. `phantombot ask` is the
 non-interactive CLI entry point.
 
+## Embedding the engine in TypeScript
+
+The engine that runs the daemon can also be imported as a library, so an
+application of your own gets the whole brain as a TypeScript API. That
+includes personas, memory and retrieval, the threat screen, the harness chain
+with fallback and watchdogs, validated JSON output, and the decision model.
+
+```ts
+import { createEngine } from "phantombot/engine";
+
+const engine = await createEngine({ root: "/srv/myapp/phantom" });
+const aria = await engine.personas.create("aria", {
+  identity: "the support assistant for Acme",
+  soul: "Patient and precise. Never guesses a refund amount.", // optional
+});
+await aria.configure({
+  brain: { native: { provider: "openrouter", model: "z-ai/glm-5.3-flash", apiKey } },
+  decisionModel: { provider: "openrouter", apiKey, judge: true },
+});
+
+const reply = await aria.ask({ source: "untrusted", conversation: "user-42", message });
+const route = await aria.decide({ instructions, state: ticket, questions });
+await engine.close();
+```
+
+The embedded engine follows four rules:
+
+- **Its own root.** Everything lives under `root`: config, personas,
+  encrypted vault, memory database. The root is exclusively locked, and the
+  host's own phantombot is never read or written.
+- **Trust is required.** `source` has no default. An `"untrusted"` message is
+  screened before any capable harness runs, and the screen itself runs only
+  on a harness that is genuinely tool-less (`native`, `pi-host`, `claude`).
+- **Tools off by default.** Turns run with `tools: "none"` unless you opt in.
+  Codex only reaches read-only, so it never serves a `"none"` turn or the
+  screen; a codex-only chain cannot take untrusted input.
+- **Credentials stay in the vault.** Keys go to the persona's encrypted vault.
+  Each harness spawn gets a per-spawn environment with that vault applied, the
+  vault wins over the application's own variables, `process.env` is never
+  written, and a vault that cannot be read refuses the spawn rather than fall
+  back to the application's credentials.
+- **A stable surface.** Applications see `EngineEvent`, `TurnResult` and
+  `EngineError`, never the internal types.
+
+Install it from a release tag, with no build step:
+
+```bash
+bun add github:phantomyard/phantombot#v1.1.<N>
+```
+
+The daemon and the CLI are unchanged: they never enter an engine scope. It
+requires Bun. See [docs/engine.md](docs/engine.md) for the full API, the error
+codes and what is not included yet.
+
 ## Build From Source
 
 Bun is only required for source builds. Released binaries have no Bun runtime
@@ -3203,6 +3258,7 @@ phantombot/
   docs/
     architecture.md
     adding-a-harness.md
+    engine.md
   src/
     index.ts
     version.ts
@@ -3219,12 +3275,14 @@ phantombot/
       telegram.ts  backward-compat barrel re-export
     connectors/
       acp/          VS Code, Zed, and JetBrains stdio connector
+    engine/         embeddable TypeScript API (`phantombot/engine`)
     p2p/            WebRTC transport, signaling, capability advertisement
     cli/
     harnesses/
     lib/
   agents/phantom/
   tests/
+  types/engine/     generated public declarations for `phantombot/engine` (committed)
   .github/workflows/ci.yml
   .github/workflows/release.yml
   package.json

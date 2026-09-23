@@ -58,6 +58,7 @@ import {
 } from "../config.ts";
 import { defaultEnvFilePath, loadEnvFile } from "./envFile.ts";
 import { log } from "./logger.ts";
+import { ENV_ENGINE_SCOPE } from "./engineScope.ts";
 import { openPersonaVault, type Vault } from "./vault.ts";
 
 /** Sibling marker that records a plaintext file as already imported. */
@@ -416,6 +417,17 @@ async function migrateCentralEnv(
  * those keys in the persona that already has them.
  */
 export async function migratePlaintextToVault(config: Config): Promise<void> {
+  // A tool child of an EMBEDDED engine (src/engine/) carries the scope marker
+  // in its env. Its XDG roots point at the application's root, but the legacy
+  // files this migration reads are HOST paths (`~/.env`, and the central file
+  // under the host's config home only by coincidence of XDG) — importing them
+  // here would fold the host operator's plaintext secrets into the
+  // application's persona vaults. An engine root never has legacy files to
+  // migrate, so the whole pass is skipped, loudly at debug level.
+  if (process.env[ENV_ENGINE_SCOPE]) {
+    log.debug("vaultMigrate: skipped inside an engine scope (no host legacy import)");
+    return;
+  }
   const defaultPersona = config.defaultPersona;
 
   // Enumerate personas for the central fan-out. Ensure the default persona is

@@ -1,0 +1,61 @@
+/**
+ * Typed failures of the embeddable engine.
+ *
+ * The engine's internals report failure in several shapes (an `error`
+ * HarnessChunk, a thrown Error, a `{ ok: false }` decision). An application
+ * needs ONE shape it can switch on, so every public failure is an
+ * `EngineError` carrying a stable `code`. The codes are part of the public
+ * contract: add new ones freely, never repurpose an existing one.
+ */
+
+export type EngineErrorCode =
+  /** `root` is missing, relative, or otherwise unusable. */
+  | "invalid_root"
+  /** Another engine (in this or another process) already owns this root. */
+  | "root_locked"
+  /** The engine was closed; create a new one. */
+  | "engine_closed"
+  /** A persona name is invalid, or the persona does not exist. */
+  | "persona_not_found"
+  /** A persona name is taken (create). */
+  | "persona_exists"
+  /** A caller-supplied argument is invalid. */
+  | "invalid_argument"
+  /** The persona has no usable harness chain, or no decision model. */
+  | "not_configured"
+  /** Every harness in the chain failed; nothing was answered. */
+  | "harness_failed"
+  /** The turn was cancelled by the caller. */
+  | "cancelled"
+  /** Structured output never satisfied the schema. */
+  | "schema_invalid"
+  /**
+   * The threat screen held an untrusted message, so there is no answer to
+   * return (structured turns only; a plain turn reports `held: true`).
+   */
+  | "held"
+  /** The decision model could not produce an answer. */
+  | "decision_unavailable"
+  /** A persona-level write (config, vault) failed. */
+  | "write_failed";
+
+export class EngineError extends Error {
+  readonly code: EngineErrorCode;
+  /** Extra machine-readable context. Never contains secret values. */
+  readonly details?: Record<string, unknown>;
+
+  constructor(
+    code: EngineErrorCode,
+    message: string,
+    details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "EngineError";
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export function isEngineError(value: unknown): value is EngineError {
+  return value instanceof EngineError;
+}

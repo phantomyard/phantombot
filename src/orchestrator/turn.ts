@@ -170,9 +170,12 @@ export interface TurnInput {
    * the normal full surface. `{ allow: [...] }` is a positive grant used by
    * background turns whose job is known up front (nightly); claude honours
    * it, pi/codex ignore it. See HarnessRequest.toolsMode — and note it is
-   * defence-in-depth, NOT a trust boundary.
+   * defence-in-depth, NOT a trust boundary. `"none"` is the real boundary:
+   * every harness launches with its built-in tools disabled (the threat
+   * judge's mode), used by an embedding application's tool-less turns
+   * (src/engine/).
    */
-  toolsMode?: { allow: string[] };
+  toolsMode?: "none" | { allow: string[] };
   /**
    * Append PRE_TOOL_NARRATION_INSTRUCTION to the system prompt — asks
    * the model to say one short sentence before each tool call so
@@ -733,7 +736,11 @@ async function* runTurnBody(
       trusted: input.trusted === true,
       screening: effectiveScreening,
       mcpMode: input.mcpMode ?? "default",
-      tools: input.toolsMode?.allow,
+      // "none" fingerprints as an empty grant — distinct from the omitted
+      // (full) surface, so a tool-less turn never shares an epoch with a
+      // capable one.
+      tools:
+        input.toolsMode === "none" ? [] : input.toolsMode?.allow,
     }),
   };
   let epochPlan: PromptCacheEpochPlan | undefined;

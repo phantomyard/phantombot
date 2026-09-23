@@ -17,8 +17,14 @@
  * Three facts from the embedding spike (2026-09-13) shape this file:
  *   1. Import pi's UNBUNDLED `dist/` modules. Pi's `dist/bundle/cli.js` breaks
  *      extension loading inside a compiled binary (`Cannot find module jiti`).
- *      The package `exports` map does not expose `dist/`, so the imports are
- *      relative paths into node_modules; the bundler inlines them either way.
+ *      The package `exports` map does not expose `dist/`, so there are two
+ *      resolution paths (`piDistModule`, `piThemeFiles`). COMPILED: literal
+ *      relative paths into this checkout's node_modules, which the bundler
+ *      inlines at build time. FROM SOURCE — `bun src/index.ts`, and phantombot
+ *      installed as a DEPENDENCY, where the package manager hoists pi next to
+ *      phantombot and a relative node_modules path does not exist — files are
+ *      read from pi's real package root, located through its package.json
+ *      (the one subpath pi's exports map still answers).
  *   2. A compiled pi needs `PI_PACKAGE_DIR` pointing at a directory holding its
  *      `package.json` and `theme/*.json`, or it dies at startup with
  *      `ENOENT theme/dark.json`. Those files are embedded here (JSON imports)
@@ -39,16 +45,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { ENV_PI_AGENT_DIR, nativeAgentEnv } from "./nativeAgentDir.ts";
-import piPackageJson from "../../node_modules/@earendil-works/pi-coding-agent/package.json" with { type: "json" };
-import piDarkTheme from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json" with { type: "json" };
-import piLightTheme from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json" with { type: "json" };
 
 /** Hidden argv[2] that turns the phantombot binary into the pi CLI. */
 export const EMBEDDED_PI_SUBCOMMAND = "__pi";
 
 /** The pi version compiled into this binary (pinned exactly in package.json). */
-export const EMBEDDED_PI_VERSION: string = piPackageJson.version;
+export const EMBEDDED_PI_VERSION: string = (piPackageJson() as { version: string }).version;
 
 /**
  * Child-env var carrying the embedded pi invocation as a JSON argv array. The
@@ -120,13 +124,65 @@ export function embeddedPiCommand(
   return [execPath, entry, EMBEDDED_PI_SUBCOMMAND];
 }
 
-/** The files a compiled pi needs under PI_PACKAGE_DIR (relative path → content). */
+/**
+ * Pi's package.json. Compiled: the literal require is what makes the bundler
+ * embed it. From source: read from pi's real package root.
+ */
+function piPackageJson(): unknown {
+  if (isCompiledBinary()) {
+    return require("../../node_modules/@earendil-works/pi-coding-agent/package.json");
+  }
+  return JSON.parse(readFileSync(join(piPackageRoot(), "package.json"), "utf8"));
+}
+
+/**
+ * Pi's package root on disk. Only meaningful from source (a checkout or a
+ * dependency install); a compiled binary has no such directory. Located
+ * through pi's package.json — the one subpath its exports map answers.
+ */
+export function piPackageRoot(): string {
+  return dirname(
+    Bun.resolveSync("@earendil-works/pi-coding-agent/package.json", import.meta.dir),
+  );
+}
+
+const PI_THEME_DIR = "dist/modes/interactive/theme";
+
+/**
+ * Pi's two theme files. Compiled: the literal requires are what makes the
+ * bundler embed them. From source: read from pi's real package root.
+ */
+function piThemeFiles(): { dark: unknown; light: unknown } {
+  if (isCompiledBinary()) {
+    return {
+      dark: require("../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json"),
+      light: require("../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json"),
+    };
+  }
+  const dir = join(piPackageRoot(), PI_THEME_DIR);
+  return {
+    dark: JSON.parse(readFileSync(join(dir, "dark.json"), "utf8")),
+    light: JSON.parse(readFileSync(join(dir, "light.json"), "utf8")),
+  };
+}
+
+let assetFiles: Map<string, string> | undefined;
+
+/**
+ * The files a compiled pi needs under PI_PACKAGE_DIR (relative path → content).
+ * Serialised the same way on both resolution paths, so the content — and the
+ * hash in the extraction dir name — is identical wherever it was read from.
+ */
 export function embeddedPiAssetFiles(): Map<string, string> {
-  return new Map([
-    ["package.json", JSON.stringify(piPackageJson, null, 2) + "\n"],
-    ["theme/dark.json", JSON.stringify(piDarkTheme, null, 2) + "\n"],
-    ["theme/light.json", JSON.stringify(piLightTheme, null, 2) + "\n"],
-  ]);
+  if (!assetFiles) {
+    const themes = piThemeFiles();
+    assetFiles = new Map([
+      ["package.json", JSON.stringify(piPackageJson(), null, 2) + "\n"],
+      ["theme/dark.json", JSON.stringify(themes.dark, null, 2) + "\n"],
+      ["theme/light.json", JSON.stringify(themes.light, null, 2) + "\n"],
+    ]);
+  }
+  return new Map(assetFiles);
 }
 
 /** Short content hash of the asset set — part of the extraction dir name. */
@@ -246,14 +302,25 @@ export async function runEmbeddedPi(args: string[]): Promise<void> {
     const { installEmbeddedPhotonWasm } = await import("./embeddedPhoton.ts");
     installEmbeddedPhotonWasm();
   }
-  const { setupCli } = await import(
-    "../../node_modules/@earendil-works/pi-coding-agent/dist/cli/setup.js"
-  );
-  const { main } = await import(
-    "../../node_modules/@earendil-works/pi-coding-agent/dist/main.js"
-  );
+  const { setupCli } = await piDistModule("cli/setup.js");
+  const { main } = await piDistModule("main.js");
   setupCli();
   await main(args, {
     extensionFactories: [phantombotAttributionExtension as never],
   });
+}
+
+/**
+ * Load one of pi's unbundled `dist/` entry modules (see fact 1 above).
+ * Compiled: the literal specifiers are what the bundler inlines. From source:
+ * the same file, located from pi's real package root.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function piDistModule(rel: "cli/setup.js" | "main.js"): Promise<any> {
+  if (isCompiledBinary()) {
+    return rel === "main.js"
+      ? await import("../../node_modules/@earendil-works/pi-coding-agent/dist/main.js")
+      : await import("../../node_modules/@earendil-works/pi-coding-agent/dist/cli/setup.js");
+  }
+  return await import(pathToFileURL(join(piPackageRoot(), "dist", rel)).href);
 }

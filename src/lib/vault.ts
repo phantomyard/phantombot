@@ -32,12 +32,15 @@ import { sha256 } from "@noble/hashes/sha2.js";
 
 import {
   configOwnedEnvMirrorSetting,
+  hostLocationEnv,
   isConfigOwnedEnvMirror,
   isRoutingEnvName,
   loadConfig,
   personaDir as resolvePersonaDir,
   type Config,
+  xdgConfigHome,
 } from "../config.ts";
+import { currentEngineScope, scopedPersona } from "./engineScope.ts";
 import { log } from "./logger.ts";
 import {
   isVaultLoadedPersonaDir,
@@ -376,6 +379,7 @@ export function _resetVaultWarningsForTesting(): void {
   _warnedBadKeySets.clear();
   _warnedMirrorSets.clear();
   _warnedRoutingSets.clear();
+  _warnedShadowedSets.clear();
 }
 
 /** Warn once per process start about undecryptable vault rows. Never logs values. */
@@ -574,15 +578,25 @@ export async function loadVaultIntoEnv(
  * service), so cache it for the hot per-spawn reload path rather than re-reading
  * config.toml + state.json on every turn.
  */
-let _cachedConfig: Config | undefined;
+//
+// Keyed by the config home: an embedding application's engine scope
+// (src/engine/) resolves a different root than the daemon, and a single slot
+// would hand one root's persona dirs to another. Outside a scope there is
+// exactly one key, so the daemon's behaviour is unchanged.
+const _cachedConfigs = new Map<string, Config>();
 async function cachedConfig(): Promise<Config> {
-  if (!_cachedConfig) _cachedConfig = await loadConfig();
-  return _cachedConfig;
+  const key = `${xdgConfigHome()}\0${hostLocationEnv("PHANTOMBOT_CONFIG") ?? ""}`;
+  let config = _cachedConfigs.get(key);
+  if (!config) {
+    config = await loadConfig();
+    _cachedConfigs.set(key, config);
+  }
+  return config;
 }
 
 /** For tests: drop the cached config so a fresh one is loaded next call. */
 export function _resetConfigCacheForTesting(): void {
-  _cachedConfig = undefined;
+  _cachedConfigs.clear();
 }
 
 /**
@@ -605,4 +619,112 @@ export async function reloadVaultForPersona(
   } catch {
     return { updated: [], removed: [], badKeys: [] };
   }
+}
+
+/**
+ * Per-persona name sets already warned about for a vault value that shadows
+ * a value the embedding application's own `process.env` defines (engine
+ * scope only). Once per persona and set, not once per spawn.
+ */
+const _warnedShadowedSets = new Set<string>();
+
+/**
+ * The environment a harness spawn builds its child env FROM, with `persona`'s
+ * vault applied. Every harness adapter calls this right before it snapshots
+ * an env for `Bun.spawn`, so the two credential regimes live in ONE place:
+ *
+ *   - OUTSIDE an engine scope (the daemon, the CLI): exactly the pre-engine
+ *     behaviour. The vault is reconciled into `process.env`
+ *     (`reloadVaultForPersona`: a `vault set` from the previous turn becomes
+ *     visible, another persona's keys are removed, a shell export stays
+ *     sticky) and `process.env` itself is returned.
+ *
+ *   - INSIDE an engine scope (src/engine/): `process.env` belongs to the
+ *     embedding APPLICATION and is never written — a persona's secrets must
+ *     not become ambient variables the application, any library in it, or a
+ *     sibling persona's turn can read (PR #608 review). The spawn gets a
+ *     per-spawn COPY of `process.env` with the vault's values applied ON TOP:
+ *     inside an engine the vault WINS over an ambient value of the same name.
+ *     The daemon's sticky rule protects an operator's deliberate shell
+ *     export; inside an application the "shell" is the application's own
+ *     process, and honouring it there silently hands the host's credential to
+ *     every tenant persona (billed to the wrong account, with the host key's
+ *     entitlements) while `secrets.has()` keeps saying true. A shadowed name
+ *     is logged once per persona so the precedence is visible. Because the
+ *     copy is per spawn there is no shared state between two concurrent
+ *     turns on different personas, and nothing to reconcile away afterwards.
+ *
+ *     A request with NO persona (the threat judge, durable-fact extraction)
+ *     draws from the persona the scope is acting for (`scope.persona`): those
+ *     spawns run on that persona's behalf. Falling through to
+ *     `default_persona` — the daemon's rule — would resolve a host-shaped
+ *     default that has no vault under an engine root and leave the judge
+ *     with no credential at all.
+ *
+ *     Inside a scope the degraded path FAILS CLOSED (PR #608 round 2). The
+ *     daemon's tolerance — an unopenable vault keeps the already-injected
+ *     env, a row that will not decrypt is skipped and its neighbours load —
+ *     is right on an operator's own box and wrong for a tenant: the name
+ *     that fails is precisely the one whose ambient value must not stand in,
+ *     and "the vault could not be read" would otherwise mean "spawn with the
+ *     application's credentials", the wrong-account substitution this
+ *     function exists to prevent. So: a vault that cannot be opened (or a
+ *     persona directory that does not exist — a typo in a name) REFUSES the
+ *     spawn by throwing, which the chain surfaces as a failed harness and
+ *     never reaches `Bun.spawn`; and every row that fails to decrypt is
+ *     DELETED from the copy, so the child sees neither the vault's value nor
+ *     the application's for that name. The rest of the vault still applies.
+ *
+ * Outside a scope this never throws. Inside one it throws to REFUSE a spawn —
+ * the unreadable-vault case above, or any error resolving the persona — and
+ * always before anything is spawned; there is deliberately no catch that
+ * would turn such a failure back into the application's environment.
+ */
+export async function harnessSpawnEnv(
+  persona: string | undefined,
+): Promise<NodeJS.ProcessEnv> {
+  const scope = currentEngineScope();
+  if (!scope) {
+    await reloadVaultForPersona(persona);
+    return process.env;
+  }
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  // No try/catch here on purpose: a failure to resolve the persona or read
+  // its config is a thrown error, which refuses the spawn. A degradation
+  // branch that "returns env" would be exactly the fail-open this function
+  // must not have — and one nothing could prove, since readAllVaultValues
+  // already absorbs open/decrypt failures into null and badKeys.
+  const config = await cachedConfig();
+  const name = persona || scopedPersona() || config.defaultPersona;
+  const dir = resolvePersonaDir(config, name);
+  const result = await readAllVaultValues(dir);
+  if (result === null) {
+    throw new Error(
+      `vault: persona '${name}' has no readable vault (missing persona ` +
+        `directory, or the vault cannot be opened); refusing to spawn with the ` +
+        `application's credentials. Check the persona name and its identity/vault files.`,
+    );
+  }
+  warnBadVaultKeys(result.badKeys);
+  // A row that will not decrypt names a credential this persona OWNS; the
+  // ambient value under that name is somebody else's. Withhold both.
+  for (const k of result.badKeys) delete env[k];
+  const shadowed: string[] = [];
+  for (const [k, v] of result.values) {
+    if (env[k] !== undefined && env[k] !== v) shadowed.push(k);
+    env[k] = v;
+  }
+  if (shadowed.length > 0) {
+    const sorted = shadowed.sort();
+    const signature = `${dir}\0${sorted.join(" ")}`;
+    if (!_warnedShadowedSets.has(signature)) {
+      _warnedShadowedSets.add(signature);
+      log.warn(
+        `vault: persona '${name}' vault value overrides the application's ` +
+          `environment for ${sorted.join(", ")} (inside an engine the vault wins)`,
+        { persona: name, keys: sorted },
+      );
+    }
+  }
+  return env;
 }

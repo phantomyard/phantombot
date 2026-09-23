@@ -31,6 +31,7 @@ import {
   migratePlaintextToVault,
   migrationStampPath,
 } from "../src/lib/vaultMigrate.ts";
+import { ENV_ENGINE_SCOPE } from "../src/lib/engineScope.ts";
 
 /**
  * Write a legacy plaintext env file by hand. phantombot itself no longer has a
@@ -93,6 +94,30 @@ afterEach(async () => {
 });
 
 describe("migratePlaintextToVault", () => {
+  test("a tool child of an embedded engine imports NOTHING from the host's legacy files", async () => {
+    // `~/.env` is a HOST path. A `phantombot` spawned by an engine (XDG roots
+    // pointed at the application's root) must not fold the host operator's
+    // plaintext secrets into the application's persona vaults (PR #608 review).
+    await writeLegacyEnv(userEnv, { GITHUB_TOKEN: "ghp_host" });
+    await writeLegacyEnv(centralEnv, { TTS_KEY: "host-tts" });
+    const saved = process.env[ENV_ENGINE_SCOPE];
+    process.env[ENV_ENGINE_SCOPE] = "1";
+    try {
+      await migratePlaintextToVault(cfg());
+    } finally {
+      if (saved === undefined) delete process.env[ENV_ENGINE_SCOPE];
+      else process.env[ENV_ENGINE_SCOPE] = saved;
+    }
+    // No vault provisioned, no stamp written: the host files are untouched
+    // and a later HOST startup still imports them normally.
+    expect(existsSync(vaultPath(personaDir(cfg(), "robbie")))).toBe(false);
+    expect(existsSync(migrationStampPath(userEnv))).toBe(false);
+    expect(existsSync(migrationStampPath(centralEnv))).toBe(false);
+
+    await migratePlaintextToVault(cfg());
+    expect(await readVault("robbie", "GITHUB_TOKEN")).toBe("ghp_host");
+  });
+
   test("~/.env migrates into the default persona's vault and is stamped, not deleted", async () => {
     await writeLegacyEnv(userEnv, { GITHUB_TOKEN: "ghp_local", API_KEY: "abc123" });
 

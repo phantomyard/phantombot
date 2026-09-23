@@ -23,6 +23,12 @@
  * `tests/lib-envFile.test.ts` guards against new ones.
  */
 
+import {
+  currentEngineScope,
+  HOST_LOCATION_ENV,
+  scopedChildEnv,
+} from "./engineScope.ts";
+
 export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = Object.freeze({
   CI: "true",
   DEBIAN_FRONTEND: "noninteractive",
@@ -43,12 +49,23 @@ export function withPersonaEnv<T extends NodeJS.ProcessEnv>(
   conversation?: string,
   turnId?: string,
 ): T {
-  return {
+  const env = {
     ...NON_INTERACTIVE_ENV,
     ...base,
+    // Inside an engine scope (src/engine/) the child must resolve the same
+    // root as its parent — a tool that shells back into `phantombot`, and
+    // the embedded pi engine, read XDG_* to find personas, memory and vault.
+    // Outside a scope this spreads nothing: the daemon's env is unchanged.
+    ...scopedChildEnv(),
     ...(persona ? { PHANTOMBOT_PERSONA: persona } : {}),
     ...(conversation ? { PHANTOMBOT_CONVERSATION: conversation } : {}),
     ...(turnId ? { PHANTOMBOT_TURN_ID: turnId } : {}),
   } as T;
+  if (currentEngineScope()) {
+    // The host's own location overrides would point the child at the HOST's
+    // phantombot, not the embedding app's root (see hostLocationEnv).
+    for (const name of HOST_LOCATION_ENV) delete env[name];
+  }
+  return env;
 }
 

@@ -87,11 +87,14 @@ describe("round trip", () => {
     const p = join(dir, "c.json");
     let now = 1_000_000;
     const before = new CooldownStore(() => 0.5, () => now);
-    before.hydrate({}, fileCooldownPersistence(p));
+    const sink = fileCooldownPersistence(p);
+    before.hydrate({}, sink);
     before.markFailure("codex", { retryAfterMs: 4 * 3_600_000 });
 
-    // The sink is fire-and-forget by contract; let the write land.
-    await Bun.sleep(20);
+    // The sink is fire-and-forget by contract; wait for the queued write to
+    // settle rather than sleeping — a fixed 20 ms lost the race on a loaded
+    // CI runner (PR #608 run 35917775889) and read the file before it existed.
+    await sink.settled?.();
     expect(JSON.parse(await readFile(p, "utf8")).codex.cooldownUntilMs).toBe(
       now + 4 * 3_600_000,
     );
@@ -106,9 +109,12 @@ describe("round trip", () => {
     await Bun.write(join(readOnly, "keep"), "x");
     await chmod(readOnly, 0o500);
     const s = new CooldownStore(() => 0.5, () => 0);
-    s.hydrate({}, fileCooldownPersistence(join(readOnly, "c.json")));
+    const sink = fileCooldownPersistence(join(readOnly, "c.json"));
+    s.hydrate({}, sink);
     expect(() => s.markFailure("codex")).not.toThrow();
-    await Bun.sleep(20);
+    // Same wait as above: the failed write must have run (and been swallowed)
+    // before we assert the store is unaffected by it.
+    await sink.settled?.();
     expect(s.isCooledDown("codex").cooled).toBe(true);
     await chmod(readOnly, 0o700);
   });

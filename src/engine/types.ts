@@ -1,0 +1,323 @@
+/**
+ * Public types of the embeddable engine.
+ *
+ * These are deliberately NOT the internal types (`HarnessChunk`,
+ * `TurnInput`, `Config`): internals change in any PR, and an application
+ * built on the engine must not break when they do. `events.ts` maps the
+ * internal stream onto `EngineEvent`; everything else is translated at the
+ * facade in `engine.ts`.
+ */
+
+import type { EngineErrorCode } from "./errors.ts";
+
+// ─── engine ────────────────────────────────────────────────────────────────
+
+export interface EngineOptions {
+  /**
+   * Absolute directory that holds EVERYTHING this engine owns: config,
+   * personas (identity, vault, memory files), the memory database, the turn
+   * registry. Created if missing. It is exclusive: one engine per root at a
+   * time, across processes. Never point it at the host's own
+   * `~/.config` / `~/.local/share` — the host daemon owns those.
+   */
+  root: string;
+  /**
+   * Where the engine's structured log lines go. Default `"stderr"` (JSON
+   * lines, secrets redacted — the CLI's format). `"silent"` drops them. A
+   * function receives each parsed record.
+   */
+  log?: "stderr" | "silent" | ((record: EngineLogRecord) => void);
+}
+
+export interface EngineLogRecord {
+  ts: string;
+  level: "debug" | "info" | "warn" | "error";
+  msg: string;
+  [field: string]: unknown;
+}
+
+export interface CreatePersonaOptions {
+  /** One-line identity, e.g. "a support agent for Acme's billing API". */
+  identity?: string;
+  /** Default "professional". */
+  tone?: "blunt" | "professional" | "casual" | "warm" | "playful";
+  expertise?: string[];
+  /** Who the persona serves, for its identity file. */
+  owner?: string;
+  /** Non-negotiable rules, one per line. */
+  hardRules?: string;
+  /**
+   * How the persona carries itself, whatever the task — values, voice, how
+   * it treats people, what it refuses. Written verbatim as SOUL.md: one
+   * sentence, like `identity`, or a whole markdown document. Omitted:
+   * phantombot's shared behaviour anchor. The other options above become
+   * IDENTITY.md (who it is); the loader concatenates the two at every turn,
+   * so both reach the system prompt.
+   */
+  soul?: string;
+}
+
+// ─── configuration ────────────────────────────────────────────────────────
+
+/** Harness ids accepted in a chain; the engine validates against these. */
+export type HarnessId = "native" | "pi-host" | "claude" | "codex";
+
+export interface BrainConfig {
+  /** Ordered fallback chain. Default `["native"]` (the embedded Pi engine). */
+  chain?: HarnessId[];
+  /** Model routing for the native engine. */
+  native?: {
+    /** Provider id Pi understands, e.g. "openrouter", "anthropic", "openai". */
+    provider: string;
+    /** Model that runs the turn. */
+    model: string;
+    /** Model swapped in for substantial code work. Equal to `model` disables the swap; "" clears it; omitted keeps the stored value. */
+    coderModel?: string;
+    /** Model used to look at images when `model` is not multimodal. "" clears it; omitted keeps it. */
+    visionModel?: string;
+    /**
+     * Provider API key. Stored in the persona's ENCRYPTED vault, never in
+     * config.toml. Omit to keep the key already stored — for the SAME
+     * provider. Changing `provider` while a key is stored requires the new
+     * provider's key in the same call; otherwise `configure` rejects with
+     * `invalid_argument` and writes nothing, because the stored key belongs
+     * to the previous provider and would be sent to the new one.
+     */
+    apiKey?: string;
+  };
+}
+
+/**
+ * The decision model: a fast classifier that answers typed questions with
+ * calibrated probabilities (TypeSafe Jev is the model shipped today). It is a
+ * general slot, not a vendor: any service implementing the decisions API can
+ * fill it.
+ */
+export interface DecisionModelConfig {
+  /**
+   * `"openrouter"` (default) and `"typesafe"` are built-in transports with
+   * known endpoints. Any other name is a custom vendor and REQUIRES `baseUrl`
+   * — the engine never guesses where to send a credential. Changing the
+   * provider resets `model`, `baseUrl` and `keyName` to the new provider's
+   * defaults unless you pass them in the same call.
+   */
+  provider?: string;
+  /** Model id. Default: the transport's default decision model. */
+  model?: string;
+  /** Decisions endpoint base URL. Required for a custom provider. */
+  baseUrl?: string;
+  /** Vault name the key is stored under. Default `PHANTOMBOT_JEV_API_KEY`. */
+  keyName?: string;
+  /** Stored in the persona's encrypted vault under `keyName`. Omit to keep the stored key. */
+  apiKey?: string;
+  /**
+   * Let the decision model screen untrusted turns (the threat judge). When
+   * off, screening uses the harness chain.
+   */
+  judge?: boolean | { threshold?: number; timeoutMs?: number };
+  /** Let the decision model pick primary vs coder model per turn. */
+  router?: boolean | { timeoutMs?: number };
+}
+
+export interface PersonaConfig {
+  brain?: BrainConfig;
+  decisionModel?: DecisionModelConfig;
+}
+
+// ─── turns ─────────────────────────────────────────────────────────────────
+
+/**
+ * Who authored the message. REQUIRED, with no default, because it is the
+ * security boundary:
+ *   - "untrusted": anything a third party can influence (your app's end
+ *     users, email, web content, webhooks). Screened by the threat judge
+ *     before a capable harness sees it; a suspicious message is HELD. The
+ *     judge runs tool-less on `native`, `pi-host` or `claude` — never on
+ *     `codex` — so a chain with none of those cannot take untrusted input
+ *     and the turn fails with `not_configured`, whatever `tools` it asked
+ *     for and whether or not a decision model judge is enabled.
+ *   - "principal": the persona's owner speaking, from code you control.
+ *     Not screened. Never pass end-user input as "principal".
+ */
+export type MessageSource = "untrusted" | "principal";
+
+/**
+ * Tool surface for the turn. Default `"none"`: the model can think and
+ * answer but cannot run commands, edit files or call MCP servers. A harness
+ * that can only reach read-only rather than tool-less (`codex`) is left out
+ * of a `"none"` turn's chain, and out of the threat screen's chain on every
+ * turn; a chain with nothing else fails with `not_configured`. `"full"` is
+ * the persona's complete surface, MCP servers
+ * registered under the root included — only with input you trust and a
+ * `workingDir` you are willing to let it change. `{ allow }` is a positive
+ * grant that only claude honours (defence in depth, not a boundary).
+ */
+export type ToolsPolicy = "none" | "full" | { allow: string[] };
+
+export interface TurnOptions {
+  message: string;
+  source: MessageSource;
+  /**
+   * Conversation key, e.g. `user:42`. Namespaced by the engine as
+   * `app:<key>` so it can never collide with a chat channel's history.
+   * When set, history is loaded and saved (and memory retrieval runs)
+   * unless `history: false`. Omitted = a stateless one-off turn.
+   */
+  conversation?: string;
+  history?: boolean;
+  tools?: ToolsPolicy;
+  /** Harness cwd. Default: the persona's own directory. */
+  workingDir?: string;
+  /** Appended to the system prompt for this turn only. */
+  instructions?: string;
+  signal?: AbortSignal;
+}
+
+export type EngineEvent =
+  /** A delta of the reply text, in order. */
+  | { type: "text"; text: string }
+  /** A tool call started or progressed (only when tools are enabled). */
+  | {
+      type: "tool";
+      title: string;
+      kind?: string;
+      locations?: string[];
+    }
+  /** A human-readable progress/status note (fallback, resume, ...). */
+  | { type: "status"; note: string }
+  /** The untrusted message was held by the threat screen. Terminal. */
+  | { type: "held"; message: string }
+  /** The turn completed. Terminal. */
+  | { type: "done"; text: string; held: boolean }
+  /** The turn failed. Terminal. */
+  | { type: "error"; code: EngineErrorCode; message: string };
+
+export interface TurnResult {
+  /** Final reply text (the hold notice when `held`). */
+  text: string;
+  /** True when the threat screen held an untrusted message. */
+  held: boolean;
+  /** The namespaced conversation key the turn ran under. */
+  conversation: string;
+}
+
+export interface TurnStream extends AsyncIterable<EngineEvent> {
+  /** Resolves with the final result, or rejects with an EngineError. */
+  result(): Promise<TurnResult>;
+  /** Abort the turn; its harness process group is killed. */
+  cancel(): void;
+}
+
+// ─── structured output ─────────────────────────────────────────────────────
+
+/**
+ * Standard Schema v1 (https://standardschema.dev) — implemented by Zod
+ * (3.24+), Valibot, ArkType and others. Declared here so the engine carries
+ * no schema-library dependency.
+ */
+export interface StandardSchemaV1<Output = unknown> {
+  readonly "~standard": {
+    readonly version: 1;
+    readonly vendor: string;
+    readonly validate: (
+      value: unknown,
+    ) => StandardSchemaResult<Output> | Promise<StandardSchemaResult<Output>>;
+  };
+}
+
+export type StandardSchemaResult<Output> =
+  | { readonly value: Output; readonly issues?: undefined }
+  | {
+      readonly issues: ReadonlyArray<{
+        readonly message: string;
+        readonly path?: ReadonlyArray<PropertyKey | { readonly key: PropertyKey }>;
+      }>;
+    };
+
+/** A validator: a Standard Schema, or a function that returns the value or throws. */
+export type OutputValidator<T> = StandardSchemaV1<T> | ((value: unknown) => T);
+
+export interface StructuredTurnOptions<T> extends Omit<TurnOptions, "message"> {
+  message: string;
+  /** Validates (and may transform) the parsed JSON. */
+  schema: OutputValidator<T>;
+  /**
+   * JSON Schema shown to the model so it knows the shape to produce.
+   * Strongly recommended; the validator alone is not visible to the model.
+   */
+  jsonSchema?: Record<string, unknown>;
+  /**
+   * Extra attempts after an invalid answer, each told what was wrong.
+   * Default 1 when `tools` is "none", 0 otherwise — a retry re-runs the
+   * whole turn, and a turn with tools may already have had side effects.
+   */
+  retries?: number;
+}
+
+export interface StructuredResult<T> extends TurnResult {
+  value: T;
+  /** Attempts used (1 = first answer was valid). */
+  attempts: number;
+}
+
+// ─── decisions ─────────────────────────────────────────────────────────────
+
+export type DecisionQuestion =
+  /** Pick one of the keys; each value describes when to pick it. At most 255. */
+  | { type: "choice"; instructions: string; criteria: Record<string, string> }
+  /** Ordinal scale, lowest level first. At most 10 levels. */
+  | { type: "score"; instructions: string; criteria: string[] };
+
+export interface DecideOptions {
+  /** The frame: what is being decided and how. */
+  instructions: string;
+  /** The content the decision is about. */
+  state: string;
+  /** Typed questions keyed by an id you choose. */
+  questions: Record<string, DecisionQuestion>;
+  /** Hard cap. Default 5000 ms. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export type DecisionAnswer =
+  | {
+      type: "choice";
+      choice: string;
+      probabilities: Record<string, number>;
+      confidence: number;
+    }
+  | {
+      type: "score";
+      /** Expected level, 0 .. levels-1 (float). */
+      score: number;
+      probabilities: Record<string, number>;
+      confidence: number;
+    };
+
+export interface DecisionResult {
+  answers: Record<string, DecisionAnswer>;
+  latencyMs: number;
+}
+
+// ─── memory ────────────────────────────────────────────────────────────────
+
+export interface MemoryHit {
+  /** Persona-relative path of the note, e.g. `memory/2026-09-22.md`. */
+  path: string;
+  scope: "memory" | "kb" | "turns";
+  /** Lexical (BM25F) score, when the text matched. */
+  ftsScore?: number;
+  /** Cosine similarity, when embeddings are configured and matched. */
+  vecScore?: number;
+  /** Fused rank score (hybrid search). */
+  rrfScore?: number;
+  /** Pulled in by link-graph expansion rather than matching directly. */
+  expanded?: boolean;
+  snippet?: string;
+}
+
+export interface MemorySearchOptions {
+  limit?: number;
+  scope?: "memory" | "kb" | "turns" | "all";
+}
