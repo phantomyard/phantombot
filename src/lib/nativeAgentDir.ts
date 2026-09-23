@@ -52,7 +52,10 @@
  * provider's entry from the persona's own store — if that same turn had just
  * absorbed the legacy auth.json, the strip would consume the migrated
  * credential and the absorb's "already migrated" test (target file exists)
- * would then block the first tier-2 turn from ever inheriting it. So
+ * would then block the first tier-2 turn from ever inheriting it. With the
+ * issue-#609 sentinel the strip now ALSO deletes the marker, so the loss is
+ * no longer permanent — but the skip stays: it keeps relayed turns from
+ * pointless write+strip churn and preserves the reviewed behavior. So
  * ensure()/absorb() take an `absorbAuth: false` option, the harness passes it
  * on relayed turns, and the first genuinely tier-2 turn does the migration
  * intact. Local-config files still absorb on relayed turns — no strip touches
@@ -108,6 +111,17 @@ export function nativeAgentDir(
     : join(nativeAgentRoot(dataHome), "agent");
 }
 
+/** Sentinel file (written into the persona agent dir) marking the legacy
+ * auth.json migration as CONVERGED (issue #609). The persona store's own
+ * existence used to carry that meaning, but the relayed-turn strip empties
+ * the store one entry at a time and the `{}` it leaves behind is
+ * indistinguishable from an unmigrated store — "target exists" then blocked
+ * the re-absorb forever. The marker is the ONLY convergence signal, and the
+ * strip (removePiApiKey, lib/piAuthStore.ts) deletes it whenever it removes
+ * an entry, so a stripped store always becomes re-absorbable on the next
+ * ensure(). */
+export const LEGACY_ABSORBED_MARKER = ".legacy-absorbed";
+
 /** Pi LOCAL-CONFIG files that a persona dir must inherit from the legacy dir
  * so `useLocalConfig` (tier-2) turns keep resolving the same provider/models
  * after the scoping upgrade (PR #606 round-5, Kai): settings.json = default
@@ -128,8 +142,9 @@ export interface LegacyAbsorbResult {
 export interface NativeAgentDirOptions {
   /** Set `false` on a RELAYED turn (harnesses/pi.ts): skip the legacy
    * auth.json absorb — the pre-spawn strip would empty the migrated entry
-   * this same turn, and "target exists" would then block the first tier-2
-   * turn from ever inheriting the legacy credential (round-7, Robbie/Kai).
+   * this same turn (round-7, Robbie/Kai). The issue-#609 marker makes that
+   * loss recoverable (the strip deletes the marker too), but the skip still
+   * avoids write+strip churn on every relayed turn.
    * Local-config files are still absorbed; default `true`. */
   absorbAuth?: boolean;
 }
@@ -191,6 +206,54 @@ function filteredLegacyAuth(dataHome: string): Record<string, unknown> | undefin
   return filtered;
 }
 
+/** Best-effort write of the legacy-absorb sentinel (issue #609). Never
+ * throws: a failed marker write only costs a redundant legacy re-read (the
+ * merge is idempotent) on the next ensure(). */
+function markLegacyAuthAbsorbed(dir: string): void {
+  try {
+    writeFileSync(
+      join(dir, LEGACY_ABSORBED_MARKER),
+      "Written by phantombot (absorbLegacyNativeAgent): the legacy auth.json " +
+        "migration has converged. Deleted automatically whenever the " +
+        "relayed-turn strip removes a store entry, so the next ensure() " +
+        "re-absorbs.\n",
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Merge the (filtered) legacy providers a persona store is MISSING into a
+ * copy of that store — the restore path for a store the relayed-turn strip
+ * has emptied or thinned (issue #609). Never overwrites an existing entry
+ * (the persona's own / wizard-written choice always wins). Returns undefined
+ * when the target is unparseable or not a JSON object: unknown state is
+ * refused, not clobbered, and the absorb retries on the next ensure(). */
+function mergeMissingLegacyProviders(
+  targetPath: string,
+  filtered: Record<string, unknown>,
+): { store: Record<string, unknown>; added: number } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(targetPath, "utf8"));
+  } catch {
+    return undefined; // unparseable: refuse, retry next ensure()
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined; // not an auth store: refuse, retry next ensure()
+  }
+  const store = { ...(parsed as Record<string, unknown>) };
+  let added = 0;
+  for (const [provider, entry] of Object.entries(filtered)) {
+    if (!(provider in store)) {
+      store[provider] = entry;
+      added += 1;
+    }
+  }
+  return { store, added };
+}
+
 /**
  * One-time absorb of the LEGACY host-level agent dir into a persona's own
  * scope. Runs inside ensureNativeAgentDir for persona-scoped dirs:
@@ -198,7 +261,11 @@ function filteredLegacyAuth(dataHome: string): Record<string, unknown> | undefin
  *  - the local-config files pi resolves `useLocalConfig` turns from,
  *    verbatim (round-5, Kai),
  * each only when the persona doesn't already have that file (a store/config
- * written after the upgrade, or by the wizard, is never clobbered).
+ * written after the upgrade, or by the wizard, is never clobbered). auth.json
+ * is additionally gated on the LEGACY_ABSORBED_MARKER sentinel (issue #609)
+ * at PROVIDER level: an existing store only inherits the legacy providers
+ * it is MISSING, so a store the relayed-turn strip emptied or thinned is
+ * re-absorbed while the persona's own entries stay untouched.
  *
  * Best-effort, never throws: a failed copy degrades to "no stored fallback
  * this turn" (the vault-relayed key path is unaffected) rather than blocking
@@ -214,35 +281,63 @@ export function absorbLegacyNativeAgent(
   for (const name of LEGACY_AGENT_CONFIG_FILES) {
     if (absorbFileInto(dir, dataHome, name)) configFiles.push(name);
   }
-  // auth.json: filtered copy, only when the persona has no auth.json yet.
+  // auth.json (issue #609): gated on the SENTINEL marker, never on the
+  // target file's existence — the relayed-turn strip empties a migrated store
+  // entry by entry, and the `{}` it leaves behind must stay re-absorbable.
   // SKIPPED ENTIRELY on a relayed turn (absorbAuth: false, round-7): this
-  // turn's strip would empty the entry, and the write below would then mark
-  // the migration done (target exists) while the credential is gone.
+  // turn's strip would empty the entry the absorb just wrote. With the marker
+  // the strip also deletes the marker, so the loss is no longer permanent —
+  // but the skip still keeps relayed turns from write+strip churn.
   let auth = false;
   const target = join(dir, "auth.json");
-  if (opts?.absorbAuth !== false && !existsSync(target)) {
+  if (opts?.absorbAuth !== false && !existsSync(join(dir, LEGACY_ABSORBED_MARKER))) {
     const filtered = filteredLegacyAuth(dataHome);
     if (filtered !== undefined) {
-      const staged = `${target}.absorb-${process.pid}.tmp`;
-      try {
-        mkdirSync(dir, { recursive: true, mode: 0o700 });
-        // Explicit 0600: the copied store holds live API keys, so the file
-        // must not inherit the process umask (round-6, Kai — a 0002 umask
-        // would otherwise land it at 0664). rename() preserves the staged
-        // mode, so the final auth.json is 0600 too.
-        writeFileSync(staged, JSON.stringify(filtered, null, 2) + "\n", {
-          encoding: "utf8",
-          mode: 0o600,
-        });
-        renameSync(staged, target);
-        auth = true;
-      } catch {
+      const writeStore = (store: Record<string, unknown>): boolean => {
+        const staged = `${target}.absorb-${process.pid}.tmp`;
         try {
-          unlinkSync(staged);
+          mkdirSync(dir, { recursive: true, mode: 0o700 });
+          // Explicit 0600: the copied store holds live API keys, so the file
+          // must not inherit the process umask (round-6, Kai — a 0002 umask
+          // would otherwise land it at 0664). rename() preserves the staged
+          // mode, so the final auth.json is 0600 too.
+          writeFileSync(staged, JSON.stringify(store, null, 2) + "\n", {
+            encoding: "utf8",
+            mode: 0o600,
+          });
+          renameSync(staged, target);
+          return true;
         } catch {
-          /* nothing to clean up */
+          try {
+            unlinkSync(staged);
+          } catch {
+            /* nothing to clean up */
+          }
+          return false;
         }
+      };
+      // Converged = the migration decision is final for this legacy store:
+      // either the store was written, or the persona's existing store already
+      // covers every legacy provider. A failed write or an uninterpretable
+      // target stays UNconverged and retries on the next ensure().
+      let converged = false;
+      if (!existsSync(target)) {
+        auth = writeStore(filtered);
+        converged = auth;
+      } else {
+        const merged = mergeMissingLegacyProviders(target, filtered);
+        if (merged) {
+          if (merged.added > 0) {
+            auth = writeStore(merged.store);
+            converged = auth;
+          } else {
+            converged = true; // persona store already covers the legacy set
+          }
+        }
+        // merged === undefined: unparseable / not a JSON object — refuse to
+        // clobber unknown state, no marker, retry next ensure().
       }
+      if (converged) markLegacyAuthAbsorbed(dir);
     }
   }
   return { auth, configFiles };

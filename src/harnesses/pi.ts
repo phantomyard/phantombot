@@ -650,11 +650,12 @@ export class PiHarness implements Harness {
       } else {
         // absorbAuth: false on RELAYED turns (round-7, Robbie/Kai): this
         // turn's strip (below) empties the relayed provider's entry, so an
-        // auth absorb HERE would consume the legacy credential and mark the
-        // migration done while the key is gone — "target exists" would then
-        // block the first tier-2 turn from ever inheriting it. Config files
-        // still absorb (no strip touches those); the first genuinely tier-2
-        // turn does the auth migration intact.
+        // auth absorb HERE would consume the legacy credential and the strip
+        // would delete the migration marker the same turn. The issue-#609
+        // marker makes the loss recoverable, but the skip keeps relayed
+        // turns from write+strip churn — config files still absorb (no strip
+        // touches those); the first genuinely tier-2 turn does the auth
+        // migration intact.
         Object.assign(
           childEnv,
           nativeAgentEnv(xdgDataHome(), req.persona, {
@@ -700,9 +701,10 @@ export class PiHarness implements Harness {
         // Ephemeral scope for persona-less relayed turns (above): the strip
         // no-ops there and the legacy migration source is never touched.
         // absorbAuth: false — this ensure() runs on a RELAYED turn, and an
-        // auth absorb here is exactly the consume-and-block cycle of round-7
-        // (Robbie/Kai): absorb → strip empties it → "target exists" blocks
-        // the first tier-2 turn from ever re-inheriting the legacy key.
+        // auth absorb here would be consumed by this same turn's strip
+        // (round-7, Robbie/Kai). The issue-#609 marker makes that loss
+        // recoverable, but the skip keeps relayed turns from write+strip
+        // churn.
         agentDir:
           ephemeralAgentDir ??
           ensureNativeAgentDir(xdgDataHome(), req.persona, { absorbAuth: false }),

@@ -19,7 +19,11 @@
  *     a rollback of our own write, never a deletion of pre-existing user state.
  *   - `removePiApiKey`, which deletes a provider's api_key entry — but ONLY
  *     from an explicitly-named agentDir (type-enforced: the host's `~/.pi` is
- *     never deletable). The native (embedded) engine's agent dir is
+ *     never deletable), and which ALSO deletes the legacy-absorb sentinel
+ *     (LEGACY_ABSORBED_MARKER, lib/nativeAgentDir.ts) beside the store it
+ *     just thinned — a store the strip has touched must stay re-absorbable
+ *     (issue #609: an emptied `{}` behind an intact marker used to block the
+ *     legacy migration forever). The native (embedded) engine's agent dir is
  *     PER-PERSONA (lib/nativeAgentDir.ts), so a wizard-written api_key entry
  *     there would outvote the per-turn env relay and decide THIS persona's key
  *     even after a vault rotation (PR #606 review). Each relayed turn
@@ -51,6 +55,8 @@ import { existsSync } from "node:fs";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+import { LEGACY_ABSORBED_MARKER } from "./nativeAgentDir.ts";
 
 /**
  * In-process serialization of writers, keyed by target path. Pi's auth.json
@@ -306,6 +312,17 @@ async function removePiApiKeyInner(
         /* best-effort cleanup */
       }
       throw e;
+    }
+    // Issue #609: the strip must also invalidate the legacy-absorb sentinel.
+    // The marker claims "migration converged"; removing an entry UN-converges
+    // it — otherwise the `{}` left behind after the last entry would sit
+    // behind an intact marker forever, permanently blocking the legacy
+    // re-absorb. Best-effort: no marker (never absorbed / already stripped /
+    // an ephemeral relayed-turn dir) is the normal case.
+    try {
+      await unlink(join(dirname(path), LEGACY_ABSORBED_MARKER));
+    } catch {
+      /* best-effort: ENOENT is the common case */
     }
     return { ok: true, path, removed: true };
   } catch (e) {

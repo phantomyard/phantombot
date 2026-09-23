@@ -21,11 +21,13 @@ import { tmpdir } from "node:os";
 import {
   absorbLegacyNativeAgent,
   ensureNativeAgentDir,
+  LEGACY_ABSORBED_MARKER,
   nativeAgentDir,
   nativeAgentEnv,
   nativeAuthPath,
   seedEphemeralAgentConfig,
 } from "../src/lib/nativeAgentDir.ts";
+import { removePiApiKey } from "../src/lib/piAuthStore.ts";
 
 function workspace(): string {
   return mkdtempSync(join(tmpdir(), "native-agent-dir-"));
@@ -188,10 +190,171 @@ describe("nativeAgentDir persona scoping", () => {
     const dir = ensureNativeAgentDir(dataHome, "lena");
     expect(dir).toBe(join(dataHome, "pi-native", "personas", "lena", "agent"));
     expect(existsSync(join(dir, "auth.json"))).toBe(true);
-    // Idempotent: a second ensure leaves the (possibly since-stripped) store alone.
+    // Idempotent while the sentinel is intact: the marker — not the file's
+    // existence — is the migration marker now (issue #609), so a hand-emptied
+    // store behind an intact marker is left alone. The STRIP path deletes
+    // the marker, and THAT is what re-arms the absorb (see the #609 tests).
     writeFileSync(join(dir, "auth.json"), "{}\n");
     ensureNativeAgentDir(dataHome, "lena");
     expect(readFileSync(join(dir, "auth.json"), "utf8")).toBe("{}\n");
+  });
+});
+describe("nativeAgentDir issue #609 — sentinel migration marker (the strip re-arms the absorb)", () => {
+  /** Seed the LEGACY host-level store and create the persona dir. */
+  function seed(
+    dataHome: string,
+    legacy: Record<string, unknown>,
+    persona = "omar",
+  ): string {
+    const legacyDir = nativeAgentDir(dataHome);
+    mkdirSync(legacyDir, { recursive: true });
+    writeFileSync(
+      join(legacyDir, "auth.json"),
+      JSON.stringify(legacy, null, 2) + "\n",
+    );
+    return nativeAgentDir(dataHome, persona);
+  }
+
+  const LEGACY_KEYS = {
+    openrouter: { type: "api_key", key: "sk-legacy-or" },
+    google: { type: "api_key", key: "sk-legacy-goog" },
+  };
+
+  test("the #609 repro: absorb → strip until {} → re-ensure restores the legacy keys", async () => {
+    // The field sequence from the issue: a non-relayed ensure absorbs the
+    // legacy keys, subsequent relayed turns' pre-spawn strip removes them one
+    // by one until the persona store is {}, and (pre-fix) "target exists"
+    // then blocked the re-absorb permanently. The strip now deletes the
+    // sentinel, so the next ensure restores the store.
+    const dataHome = workspace();
+    const own = seed(dataHome, LEGACY_KEYS);
+    ensureNativeAgentDir(dataHome, "omar");
+    expect(JSON.parse(readFileSync(join(own, "auth.json"), "utf8"))).toEqual(LEGACY_KEYS);
+    expect(existsSync(join(own, LEGACY_ABSORBED_MARKER))).toBe(true);
+
+    // Relayed-turn strips, one per provider, until the store is {}.
+    for (const provider of ["openrouter", "google"]) {
+      const strip = await removePiApiKey(provider, { agentDir: own });
+      expect(strip).toMatchObject({ ok: true, removed: true });
+    }
+    expect(JSON.parse(readFileSync(join(own, "auth.json"), "utf8"))).toEqual({});
+    // The strip invalidated the sentinel — that is the whole fix.
+    expect(existsSync(join(own, LEGACY_ABSORBED_MARKER))).toBe(false);
+
+    // The next (non-relayed) ensure re-absorbs the legacy keys intact.
+    ensureNativeAgentDir(dataHome, "omar");
+    expect(JSON.parse(readFileSync(join(own, "auth.json"), "utf8"))).toEqual(LEGACY_KEYS);
+    expect(existsSync(join(own, LEGACY_ABSORBED_MARKER))).toBe(true);
+    // The legacy source is never touched.
+    expect(JSON.parse(readFileSync(join(nativeAgentDir(dataHome), "auth.json"), "utf8"))).toEqual(
+      LEGACY_KEYS,
+    );
+  });
+
+  test("the strip removes the sentinel only when it removes an entry", async () => {
+    const dataHome = workspace();
+    const own = seed(dataHome, LEGACY_KEYS);
+    ensureNativeAgentDir(dataHome, "omar");
+    const marker = join(own, LEGACY_ABSORBED_MARKER);
+
+    // A no-op strip (provider absent) must NOT un-converge the migration.
+    const noop = await removePiApiKey("anthropic", { agentDir: own });
+    expect(noop).toMatchObject({ ok: true, removed: false });
+    expect(existsSync(marker)).toBe(true);
+
+    // A real strip does.
+    const real = await removePiApiKey("openrouter", { agentDir: own });
+    expect(real).toMatchObject({ ok: true, removed: true });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("partial strip: re-ensure restores ONLY the stripped provider — siblings never clobbered", async () => {
+    // The common field case is partial: relayed turns strip only the relayed
+    // provider, so the store still holds the sibling when the next tier-2
+    // ensure runs. Provider-level merge restores the stripped entry and
+    // leaves the sibling byte-identical.
+    const dataHome = workspace();
+    const own = seed(dataHome, LEGACY_KEYS);
+    ensureNativeAgentDir(dataHome, "omar");
+    const strip = await removePiApiKey("openrouter", { agentDir: own });
+    expect(strip).toMatchObject({ ok: true, removed: true });
+    expect(JSON.parse(readFileSync(join(own, "auth.json"), "utf8"))).toEqual({
+      google: LEGACY_KEYS.google,
+    });
+
+    ensureNativeAgentDir(dataHome, "omar");
+    expect(JSON.parse(readFileSync(join(own, "auth.json"), "utf8"))).toEqual(LEGACY_KEYS);
+  });
+
+  test("wizard-written store: missing legacy providers merge in, own entries preserved, marker converges", () => {
+    // A store the wizard wrote post-upgrade (round-4/5 doctrine: never
+    // clobber) still inherits the legacy providers it is MISSING — pre-#606
+    // that legacy store WAS this persona's fallback — while the wizard's own
+    // entry wins over the legacy one for the same provider.
+    const dataHome = workspace();
+    const own = seed(dataHome, LEGACY_KEYS);
+    mkdirSync(own, { recursive: true });
+    const wizard = { openrouter: { type: "api_key", key: "sk-wizard-fresh" } };
+    writeFileSync(join(own, "auth.json"), JSON.stringify(wizard, null, 2) + "\n");
+
+    const result = absorbLegacyNativeAgent(dataHome, "omar");
+    // google was missing → added; openrouter keeps the wizard's fresh key.
+    expect(result.auth).toBe(true);
+    const stored = JSON.parse(readFileSync(join(own, "auth.json"), "utf8"));
+    expect(stored).toEqual({
+      openrouter: { type: "api_key", key: "sk-wizard-fresh" },
+      google: LEGACY_KEYS.google,
+    });
+    expect(existsSync(join(own, LEGACY_ABSORBED_MARKER))).toBe(true);
+  });
+
+  test("absorbAuth:false (a RELAYED turn) never writes the sentinel and never restores", async () => {
+    // After the strips emptied the store, a relayed ensure must not restore
+    // (the same turn's strip would empty it again) — restoration belongs to
+    // the first genuinely tier-2 ensure.
+    const dataHome = workspace();
+    const own = seed(dataHome, LEGACY_KEYS);
+    ensureNativeAgentDir(dataHome, "omar");
+    await removePiApiKey("openrouter", { agentDir: own });
+    await removePiApiKey("google", { agentDir: own });
+
+    ensureNativeAgentDir(dataHome, "omar", { absorbAuth: false });
+    expect(JSON.parse(readFileSync(join(own, "auth.json"), "utf8"))).toEqual({});
+    expect(existsSync(join(own, LEGACY_ABSORBED_MARKER))).toBe(false);
+
+    ensureNativeAgentDir(dataHome, "omar");
+    expect(JSON.parse(readFileSync(join(own, "auth.json"), "utf8"))).toEqual(LEGACY_KEYS);
+  });
+
+  test("unparseable persona store: refused, no marker — retried on the next ensure", () => {
+    // Unknown state is never clobbered (round-5 doctrine): a store we cannot
+    // interpret blocks the absorb AND the marker, so the migration retries
+    // once the store is fixed — it cannot silently converge away.
+    const dataHome = workspace();
+    const own = seed(dataHome, LEGACY_KEYS);
+    mkdirSync(own, { recursive: true });
+    writeFileSync(join(own, "auth.json"), "not json at all\n");
+
+    expect(absorbLegacyNativeAgent(dataHome, "omar").auth).toBe(false);
+    expect(existsSync(join(own, LEGACY_ABSORBED_MARKER))).toBe(false);
+    expect(readFileSync(join(own, "auth.json"), "utf8")).toBe("not json at all\n");
+
+    // Fixed by the operator → the retry absorbs.
+    writeFileSync(join(own, "auth.json"), "{}\n");
+    expect(absorbLegacyNativeAgent(dataHome, "omar").auth).toBe(true);
+    expect(JSON.parse(readFileSync(join(own, "auth.json"), "utf8"))).toEqual(LEGACY_KEYS);
+  });
+
+  test("oauth-only legacy store converges behind the marker: no re-absorb loop", () => {
+    // filteredLegacyAuth legitimately returns {} (oauth-only legacy store);
+    // the marker — not a non-empty store — is what converges it, so the next
+    // absorb is a no-op rather than a re-read every ensure().
+    const dataHome = workspace();
+    const own = seed(dataHome, { openrouter: { type: "oauth", access: "legacy-oauth" } });
+    expect(absorbLegacyNativeAgent(dataHome, "omar").auth).toBe(true);
+    expect(JSON.parse(readFileSync(join(own, "auth.json"), "utf8"))).toEqual({});
+    expect(existsSync(join(own, LEGACY_ABSORBED_MARKER))).toBe(true);
+    expect(absorbLegacyNativeAgent(dataHome, "omar")).toEqual({ auth: false, configFiles: [] });
   });
 });
 describe("nativeAgentDir round-7 — relayed-turn auth-absorb skip + dir modes", () => {
