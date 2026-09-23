@@ -54,14 +54,14 @@ describe("chat history timestamps", () => {
     });
     await session.close();
 
-    expect(session.history).toHaveLength(2);
-    for (const message of session.history) {
+    expect(session.transcript.getSnapshot()).toHaveLength(2);
+    for (const message of session.transcript.getSnapshot()) {
       // A second of slack each way: SQLite stores whole-second ISO stamps.
       expect(message.at).toBeGreaterThanOrEqual(before - 1000);
       expect(message.at).toBeLessThanOrEqual(after + 1000);
     }
 
-    const headers = transcriptLines(session.history, 80, {
+    const headers = transcriptLines(session.transcript.getSnapshot(), 80, {
       personaName: persona,
       formatDuration: () => "",
     }).filter((line) => line.kind === "header");
@@ -100,8 +100,8 @@ describe("chat history timestamps", () => {
     });
     await session.close();
 
-    expect(session.history[0]?.at).toBe(0);
-    const [header] = transcriptLines(session.history, 80, {
+    expect(session.transcript.getSnapshot()[0]?.at).toBe(0);
+    const [header] = transcriptLines(session.transcript.getSnapshot(), 80, {
       personaName: persona,
       formatDuration: () => "",
     });

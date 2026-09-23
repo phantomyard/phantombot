@@ -19,6 +19,8 @@ import { render } from "ink";
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import { SPINNER_FRAMES } from "../src/tui/components/Spinner.tsx";
 import type { ChatEvent, ChatSession } from "../src/tui/chatSession.ts";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
+import { createTurnRunner, TurnStore } from "../src/tui/turnRunner.ts";
 
 function fakeStdin() {
   const s = new PassThrough() as PassThrough & {
@@ -57,10 +59,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** A turn that stays in flight: the state the indicator exists for. */
 function pendingSession(events: ChatEvent[]): ChatSession {
-  return {
+  const base = {
     persona: "alice",
     conversation: "cli:tui:alice",
-    history: [],
+    transcript: new TranscriptStore([]),
     async *send() {
       for (const event of events) yield event;
       // Never returns: the harness is still working.
@@ -74,6 +76,8 @@ function pendingSession(events: ChatEvent[]): ChatSession {
     },
     async close() {},
   };
+  const runner = createTurnRunner(base.send, base.transcript);
+  return { ...base, ...runner };
 }
 
 async function mount(session: ChatSession) {
@@ -95,26 +99,6 @@ async function mount(session: ChatSession) {
   );
   await sleep(50);
   return { stdin, stdout, instance };
-}
-
-/** A turn that stays in flight AND records what was submitted. */
-function recordingSession(sent: string[]): ChatSession {
-  return {
-    persona: "alice",
-    conversation: "cli:tui:alice",
-    history: [],
-    async *send(text: string) {
-      sent.push(text);
-      await new Promise(() => {});
-    },
-    async command() {
-      return null;
-    },
-    async reloadHarnesses() {
-      return [];
-    },
-    async close() {},
-  };
 }
 
 const spinnerIn = (frame: string) =>
@@ -147,21 +131,33 @@ describe("chat input", () => {
     // the text is still never lost.
     const sent: string[] = [];
     const reasons: unknown[] = [];
+    const transcript = new TranscriptStore([]);
+    async function* send(text: string, signal?: AbortSignal) {
+      sent.push(text);
+      await new Promise<void>((resolve) =>
+        signal?.addEventListener(
+          "abort",
+          () => {
+            reasons.push(signal.reason);
+            resolve();
+          },
+          { once: true },
+        ),
+      );
+    }
     const session: ChatSession = {
-      ...recordingSession(sent),
-      async *send(text: string, signal?: AbortSignal) {
-        sent.push(text);
-        await new Promise<void>((resolve) =>
-          signal?.addEventListener(
-            "abort",
-            () => {
-              reasons.push(signal.reason);
-              resolve();
-            },
-            { once: true },
-          ),
-        );
+      persona: "alice",
+      conversation: "cli:tui:alice",
+      transcript,
+      send,
+      ...createTurnRunner(send, transcript),
+      async command() {
+        return null;
       },
+      async reloadHarnesses() {
+        return [];
+      },
+      async close() {},
     };
     const { stdin, instance } = await mount(session);
     try {
@@ -256,14 +252,18 @@ describe("chat activity indicator", () => {
   });
 
   test("the indicator is gone once the turn finishes", async () => {
+    const transcript = new TranscriptStore([]);
+    async function* send() {
+      yield { type: "text", text: "hello back" } as ChatEvent;
+      yield { type: "done", text: "hello back" } as ChatEvent;
+    }
+    const runner = createTurnRunner(send, transcript);
     const session: ChatSession = {
       persona: "alice",
       conversation: "cli:tui:alice",
-      history: [],
-      async *send() {
-        yield { type: "text", text: "hello back" } as ChatEvent;
-        yield { type: "done", text: "hello back" } as ChatEvent;
-      },
+      transcript,
+      send,
+      ...runner,
       async command() {
         return null;
       },
@@ -293,7 +293,10 @@ describe("message timestamps", () => {
     const session: ChatSession = {
       persona: "alice",
       conversation: "cli:tui:alice",
-      history: [{ role: "user", text: "from yesterday", at: 0 }],
+      transcript: new TranscriptStore([{ role: "user", text: "from yesterday", at: 0 }]),
+      turn: new TurnStore(),
+      submit: async () => {},
+      abortTurn: () => {},
       async *send() {},
       async command() {
         return null;

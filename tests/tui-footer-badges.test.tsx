@@ -20,6 +20,8 @@ import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import { badge } from "../src/tui/theme.ts";
 import { stripAnsi } from "./helpers/ansi.ts";
 import type { ChatSession } from "../src/tui/chatSession.ts";
+import { TranscriptStore } from "../src/tui/transcriptStore.ts";
+import { TurnStore } from "../src/tui/turnRunner.ts";
 
 function fakeStdin() {
   const s = new PassThrough() as PassThrough & {
@@ -56,7 +58,10 @@ const lastFrame = (frames: string[]) => frames.at(-1) ?? "";
 const idleSession: ChatSession = {
   persona: "alice",
   conversation: "cli:tui:alice",
-  history: [],
+  transcript: new TranscriptStore([]),
+  turn: new TurnStore(),
+  submit: async () => {},
+  abortTurn: () => {},
   async *send() {},
   async command() {
     return null;
