@@ -17,6 +17,9 @@
  *      personas, vault, memory database, turn registry. Paths are carried by
  *      an AsyncLocalStorage scope, never by rewriting `process.env`, and the
  *      root is exclusively locked so two engines cannot share memory.
+ *      Credentials follow the same rule: a harness spawn gets a per-spawn
+ *      env with the persona's vault applied (vault wins), and the
+ *      application's `process.env` is never written (`harnessSpawnEnv`).
  *   3. EXPLICIT TRUST. `source` has no default. "untrusted" is screened by
  *      the threat judge before any capable harness runs; "principal" is not.
  *      Tools default to "none".

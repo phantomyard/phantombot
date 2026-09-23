@@ -3181,7 +3181,10 @@ with fallback and watchdogs, validated JSON output, and the decision model.
 import { createEngine } from "phantombot/engine";
 
 const engine = await createEngine({ root: "/srv/myapp/phantom" });
-const aria = await engine.personas.create("aria", { identity: "the support assistant for Acme" });
+const aria = await engine.personas.create("aria", {
+  identity: "the support assistant for Acme",
+  soul: "Patient and precise. Never guesses a refund amount.", // optional
+});
 await aria.configure({
   brain: { native: { provider: "openrouter", model: "z-ai/glm-5.3-flash", apiKey } },
   decisionModel: { provider: "openrouter", apiKey, judge: true },
@@ -3198,8 +3201,15 @@ The embedded engine follows four rules:
   encrypted vault, memory database. The root is exclusively locked, and the
   host's own phantombot is never read or written.
 - **Trust is required.** `source` has no default. An `"untrusted"` message is
-  screened before any capable harness runs.
+  screened before any capable harness runs, and the screen itself runs only
+  on a harness that is genuinely tool-less (`native`, `pi-host`, `claude`).
 - **Tools off by default.** Turns run with `tools: "none"` unless you opt in.
+  Codex only reaches read-only, so it never serves a `"none"` turn or the
+  screen; a codex-only chain cannot take untrusted input.
+- **Credentials stay in the vault.** Keys go to the persona's encrypted vault.
+  Each harness spawn gets a per-spawn environment with that vault applied, the
+  vault wins over the application's own variables, and `process.env` is never
+  written.
 - **A stable surface.** Applications see `EngineEvent`, `TurnResult` and
   `EngineError`, never the internal types.
 

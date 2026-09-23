@@ -95,8 +95,13 @@ declarations are stale.
   timeouts still apply. Never point `root` at the host's own directories: the
   host daemon owns those.
 - **Harness subprocesses inherit it.** They receive the root as `XDG_*`
-  variables. A tool the model runs that calls `phantombot memory search`
-  therefore reads the same memory.
+  variables plus the marker `PHANTOMBOT_ENGINE_SCOPE=1`. A tool the model runs
+  that calls `phantombot memory search` therefore reads the same memory, and a
+  `phantombot` CLI started under the marker skips the host-only bootstrap: it
+  never imports the host's legacy plaintext `~/.env` into the root's vaults.
+- **Its directories are owner-only.** `config/`, `data/` and `state/` are
+  created `0700` (masked by your umask), because the tree holds the encrypted
+  vaults and the memory database.
 
 ## Trust: `source` is required
 
@@ -110,20 +115,36 @@ the security boundary.
 
 Never pass end-user input as `"principal"`.
 
+The judge is a tool-less turn, and it runs only on a harness that is genuinely
+tool-less: `native`, `pi-host` or `claude`, never `codex` (see below). A chain
+with none of those cannot screen, so an untrusted turn on it fails with
+`not_configured` before the text reaches any harness, whatever `tools` the
+turn asked for. `"principal"` turns on such a chain are unaffected.
+
 With `decisionModel.judge` enabled, the persona's decision model screens
-untrusted input. If it is unavailable, screening falls back to the harness
-judge, so it never goes dark.
+untrusted input first. If it is unavailable, screening falls back to the
+harness judge, so it never goes dark. The tool-less harness is therefore
+required either way: without it a decision-model outage would let the text
+through unscreened.
 
 ## Tools: `"none"` by default
 
 `tools` sets what the model can do during a turn:
 
 - **`"none"`** (default). It thinks and answers, and cannot run commands, edit
-  files or call MCP servers. Every harness enforces this.
-- **`"full"`**. The persona's whole surface. Use it only with input you trust
-  and a `workingDir` you are willing to let it change.
-- **`{ allow: [...] }`**. A positive grant. Claude honours it. Pi and Codex
-  ignore it, so it is defence in depth, not a boundary.
+  files or call MCP servers. `native`, `pi-host` and `claude` run genuinely
+  tool-less. Codex only reaches read-only (`--sandbox read-only`, a shell that
+  can still read files), so it is left out of a `"none"` turn's chain; a chain
+  with nothing else fails with `not_configured`. The threat screen's judge is
+  a tool-less turn spawned in the persona directory and handed the untrusted
+  text, so it is held to the same rule and never runs on codex either.
+- **`"full"`**. The persona's whole surface, including any MCP servers
+  registered under the root (`phantombot mcp` run with the root's `XDG_*`
+  variables). Use it only with input you trust and a `workingDir` you are
+  willing to let it change.
+- **`{ allow: [...] }`**. A positive grant of built-in tools; MCP stays on.
+  Claude honours it. Pi and Codex ignore it, so it is defence in depth, not a
+  boundary.
 
 `workingDir` defaults to the persona's own directory, never `$HOME`.
 
@@ -149,8 +170,22 @@ groups to die, closes the database and releases the root. It is idempotent.
 ```ts
 await engine.personas.list();                    // string[]
 await engine.personas.exists("aria");            // boolean
-await engine.personas.create("aria", { identity, tone, expertise, owner, hardRules });
+await engine.personas.create("aria", { identity, tone, expertise, owner, hardRules, soul });
 const aria = engine.persona("aria");             // cheap handle; existence checked on use
+```
+
+A persona is two files the loader concatenates at every turn. `identity`,
+`tone`, `expertise`, `owner` and `hardRules` become **IDENTITY.md** (who it
+is). `soul` is how it carries itself (values, voice, what it refuses), written
+verbatim as **SOUL.md**: a sentence like `identity`, or a whole markdown
+document, whichever you have. Omitted, the persona gets phantombot's shared
+behaviour anchor. An empty `soul` is rejected with `invalid_argument`.
+
+```ts
+await engine.personas.create("aria", {
+  identity: "the support assistant for Acme",
+  soul: "Patient and precise. Never guesses a refund amount.",
+});
 ```
 
 ### `persona.configure({ brain?, decisionModel? })`
@@ -161,7 +196,11 @@ persona's **encrypted vault** and are never written to `config.toml` or
 mirrored into `process.env`.
 
 Only the fields you pass change. For optional models, `""` clears the value
-and omitting it keeps the stored one.
+and omitting it keeps the stored one. Omitting `apiKey` keeps the stored key
+**for the same provider only**: the native key is one vault slot, so changing
+`native.provider` while a key is stored requires the new provider's `apiKey` in
+the same call. Otherwise `configure` rejects with `invalid_argument` and writes
+nothing, rather than send the previous provider's credential to the new one.
 
 ```ts
 await aria.configure({
@@ -306,7 +345,7 @@ Every public failure is an `EngineError` with a stable `code`:
 | `persona_not_found` | the persona is missing, or the name is invalid |
 | `persona_exists` | `create` found the name taken |
 | `invalid_argument` | a caller-supplied argument is invalid |
-| `not_configured` | no harness, or no decision model |
+| `not_configured` | no harness, no harness the turn or the threat screen can run tool-less, or no decision model |
 | `harness_failed` | every harness in the chain failed |
 | `cancelled` | the turn was cancelled |
 | `schema_invalid` | structured output never validated |
@@ -341,13 +380,27 @@ chat channel's history.
 - **Chat channels.** Telegram and PhantomChat stay in the daemon.
 - **Node and Deno.**
 
-## Secrets in `process.env`
+## Credentials and `process.env`
 
-`configure` and `secrets.set` never write to `process.env`. The harnesses,
-however, read their key from the environment of the process they are spawned
-from. Before each spawn the engine reconciles the persona's vault into
-`process.env`, exactly as the daemon does, and removes those values again when
-another persona's turn runs.
+`configure` and `secrets.set` write to the persona's encrypted vault and never
+to `process.env`. Before each harness spawn the engine builds a **per-spawn
+environment**: a copy of your `process.env` with the persona's vault applied
+on top. The child sees that copy; nothing is written back.
 
-A variable your application already exported with the same name wins over the
-vault.
+- **Inside an engine the vault wins.** A vault value overrides a variable of
+  the same name that your application exported. The daemon follows the
+  opposite rule, where an operator's shell export is sticky. Inside an
+  application that rule would silently hand your process's key to every
+  persona, so it does not apply here. A shadowed name is logged once per
+  persona.
+- **Your `process.env` is never written.** One persona's secrets are not
+  visible to your code, to libraries in your process, to subprocesses you
+  spawn, or to another persona's turn. There is no shared state between
+  concurrent turns.
+- **Ambient variables still reach the child.** A variable your process defines
+  that the vault does not name is inherited as usual (`PATH`, proxies, and
+  so on). To keep a host credential away from a persona's harness, store the
+  persona's own value under that name or do not define it in the process.
+- **Spawns made for a persona use its vault.** The threat judge and durable
+  fact extraction invoke the harness without a persona identity; under an
+  engine they still authenticate as the persona whose turn is running.

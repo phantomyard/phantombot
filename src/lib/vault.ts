@@ -40,6 +40,7 @@ import {
   type Config,
   xdgConfigHome,
 } from "../config.ts";
+import { currentEngineScope, scopedPersona } from "./engineScope.ts";
 import { log } from "./logger.ts";
 import {
   isVaultLoadedPersonaDir,
@@ -378,6 +379,7 @@ export function _resetVaultWarningsForTesting(): void {
   _warnedBadKeySets.clear();
   _warnedMirrorSets.clear();
   _warnedRoutingSets.clear();
+  _warnedShadowedSets.clear();
 }
 
 /** Warn once per process start about undecryptable vault rows. Never logs values. */
@@ -617,4 +619,87 @@ export async function reloadVaultForPersona(
   } catch {
     return { updated: [], removed: [], badKeys: [] };
   }
+}
+
+/**
+ * Per-persona name sets already warned about for a vault value that shadows
+ * a value the embedding application's own `process.env` defines (engine
+ * scope only). Once per persona and set, not once per spawn.
+ */
+const _warnedShadowedSets = new Set<string>();
+
+/**
+ * The environment a harness spawn builds its child env FROM, with `persona`'s
+ * vault applied. Every harness adapter calls this right before it snapshots
+ * an env for `Bun.spawn`, so the two credential regimes live in ONE place:
+ *
+ *   - OUTSIDE an engine scope (the daemon, the CLI): exactly the pre-engine
+ *     behaviour. The vault is reconciled into `process.env`
+ *     (`reloadVaultForPersona`: a `vault set` from the previous turn becomes
+ *     visible, another persona's keys are removed, a shell export stays
+ *     sticky) and `process.env` itself is returned.
+ *
+ *   - INSIDE an engine scope (src/engine/): `process.env` belongs to the
+ *     embedding APPLICATION and is never written — a persona's secrets must
+ *     not become ambient variables the application, any library in it, or a
+ *     sibling persona's turn can read (PR #608 review). The spawn gets a
+ *     per-spawn COPY of `process.env` with the vault's values applied ON TOP:
+ *     inside an engine the vault WINS over an ambient value of the same name.
+ *     The daemon's sticky rule protects an operator's deliberate shell
+ *     export; inside an application the "shell" is the application's own
+ *     process, and honouring it there silently hands the host's credential to
+ *     every tenant persona (billed to the wrong account, with the host key's
+ *     entitlements) while `secrets.has()` keeps saying true. A shadowed name
+ *     is logged once per persona so the precedence is visible. Because the
+ *     copy is per spawn there is no shared state between two concurrent
+ *     turns on different personas, and nothing to reconcile away afterwards.
+ *
+ *     A request with NO persona (the threat judge, durable-fact extraction)
+ *     draws from the persona the scope is acting for (`scope.persona`): those
+ *     spawns run on that persona's behalf. Falling through to
+ *     `default_persona` — the daemon's rule — would resolve a host-shaped
+ *     default that has no vault under an engine root and leave the judge
+ *     with no credential at all.
+ *
+ * Never throws: an unreadable vault degrades to the ambient copy.
+ */
+export async function harnessSpawnEnv(
+  persona: string | undefined,
+): Promise<NodeJS.ProcessEnv> {
+  const scope = currentEngineScope();
+  if (!scope) {
+    await reloadVaultForPersona(persona);
+    return process.env;
+  }
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  try {
+    const config = await cachedConfig();
+    const name = persona || scopedPersona() || config.defaultPersona;
+    const dir = resolvePersonaDir(config, name);
+    const result = await readAllVaultValues(dir);
+    if (result === null) return env;
+    warnBadVaultKeys(result.badKeys);
+    const shadowed: string[] = [];
+    for (const [k, v] of result.values) {
+      if (env[k] !== undefined && env[k] !== v) shadowed.push(k);
+      env[k] = v;
+    }
+    if (shadowed.length > 0) {
+      const sorted = shadowed.sort();
+      const signature = `${dir}\0${sorted.join(" ")}`;
+      if (!_warnedShadowedSets.has(signature)) {
+        _warnedShadowedSets.add(signature);
+        log.warn(
+          `vault: persona '${name}' vault value overrides the application's ` +
+            `environment for ${sorted.join(", ")} (inside an engine the vault wins)`,
+          { persona: name, keys: sorted },
+        );
+      }
+    }
+  } catch (e) {
+    log.warn("vault: spawn env could not apply the persona vault", {
+      error: (e as Error).message,
+    });
+  }
+  return env;
 }

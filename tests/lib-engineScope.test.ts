@@ -11,10 +11,12 @@ import { withPersonaEnv } from "../src/lib/envBootstrap.ts";
 import {
   bindToScope,
   currentEngineScope,
+  ENV_ENGINE_SCOPE,
   HOST_LOCATION_ENV,
   hostLocationEnv,
   runInEngineScope,
   scopedChildEnv,
+  scopedPersona,
 } from "../src/lib/engineScope.ts";
 import { writeLogLine } from "../src/lib/logSink.ts";
 import { statePath } from "../src/state.ts";
@@ -95,8 +97,21 @@ describe("inside a scope (embedded engine)", () => {
     expect(env.XDG_CONFIG_HOME).toBe("/engine/config");
     expect(env.XDG_DATA_HOME).toBe("/engine/data");
     expect(env.XDG_STATE_HOME).toBe("/engine/state");
+    expect(env[ENV_ENGINE_SCOPE]).toBe("1");
     expect(env.PHANTOMBOT_CONFIG).toBeUndefined();
     expect(env.PHANTOMBOT_PERSONA).toBe("ana");
+  });
+
+  test("the scope carries the persona it acts for; absent by default", () => {
+    expect(scopedPersona()).toBeUndefined();
+    runInEngineScope(scope, () => expect(scopedPersona()).toBeUndefined());
+    runInEngineScope({ ...scope, persona: "ana" }, () => expect(scopedPersona()).toBe("ana"));
+    expect(runInEngineScope({ ...scope, persona: "ana" }, () => scopedChildEnv())).toEqual({
+      XDG_CONFIG_HOME: "/engine/config",
+      XDG_DATA_HOME: "/engine/data",
+      XDG_STATE_HOME: "/engine/state",
+      [ENV_ENGINE_SCOPE]: "1",
+    });
   });
 
   test("log lines go to the scope's sink", () => {

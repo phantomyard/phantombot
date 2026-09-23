@@ -26,7 +26,7 @@ import {
   type ReasoningReplayConfig,
 } from "./reasoningReplay.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
-import { reloadVaultForPersona } from "../lib/vault.ts";
+import { harnessSpawnEnv } from "../lib/vault.ts";
 import {
   type HarnessActivity,
   runHarnessProcess,
@@ -72,12 +72,14 @@ export class CodexHarness implements Harness {
       argCount: args.length,
     });
 
-    // Reconcile this persona's encrypted vault into the env (see claude.ts).
-    await reloadVaultForPersona(req.persona);
+    // The spawn env with this persona's encrypted vault applied (see claude.ts
+    // and harnessSpawnEnv: process.env on the daemon, a per-spawn copy inside
+    // an engine scope).
+    const spawnEnv = await harnessSpawnEnv(req.persona);
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
-      env: withPersonaEnv(process.env, req.persona, req.conversation, req.turnId),
+      env: withPersonaEnv(spawnEnv, req.persona, req.conversation, req.turnId),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

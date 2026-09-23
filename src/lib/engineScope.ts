@@ -14,12 +14,21 @@
  *   - an application's own environment is never rewritten;
  *   - two engines on two roots in one process resolve independently.
  *
- * Only the XDG base directories and the log sink are scoped. Everything else
- * (config files, persona dirs, memory db, registry, digests, workspace locks)
- * already derives from those three helpers, which is what keeps this seam
- * small. Harness subprocesses receive the scoped roots as `XDG_*` variables
- * (`scopedChildEnv`), so a tool the model runs (`phantombot memory search`,
- * the embedded pi engine) resolves the same root as its parent.
+ * Only the XDG base directories, the log sink and the persona whose work is
+ * running are scoped. Everything else (config files, persona dirs, memory db,
+ * registry, digests, workspace locks) already derives from the three XDG
+ * helpers, which is what keeps this seam small. Harness subprocesses receive
+ * the scoped roots as `XDG_*` variables plus the `PHANTOMBOT_ENGINE_SCOPE`
+ * marker (`scopedChildEnv`), so a tool the model runs (`phantombot memory
+ * search`, the embedded pi engine) resolves the same root as its parent and
+ * knows it belongs to an engine root rather than to the host's phantombot.
+ *
+ * Credentials never cross the scope boundary through `process.env` either:
+ * inside a scope a harness builds its child environment from a per-spawn
+ * copy with the persona's vault applied on top (`harnessSpawnEnv` in
+ * vault.ts). `scope.persona` is what lets a persona-LESS spawn made on a
+ * persona's behalf — the threat judge, durable-fact extraction — draw that
+ * persona's credentials instead of the (host-shaped) default persona's.
  *
  * Async generators are the one trap: a generator body resumes in the context
  * of whoever calls `next()`, not the one that created it. `bindToScope` wraps
@@ -37,6 +46,14 @@ export interface EngineScope {
   stateHome: string;
   /** Receives every structured log line emitted inside the scope. */
   logSink?: (line: string) => void;
+  /**
+   * The persona whose work is running, when the engine is acting for one.
+   * Read by `harnessSpawnEnv` (vault.ts) as the credential source of a spawn
+   * whose request names no persona (the threat judge, the fact extractor):
+   * those run on a persona's behalf and must authenticate as that persona,
+   * never as whatever `default_persona` resolves to under the root.
+   */
+  persona?: string;
 }
 
 const storage = new AsyncLocalStorage<EngineScope>();
@@ -45,6 +62,21 @@ const storage = new AsyncLocalStorage<EngineScope>();
 export function currentEngineScope(): EngineScope | undefined {
   return storage.getStore();
 }
+
+/** The persona the active scope is acting for; undefined outside a scope. */
+export function scopedPersona(): string | undefined {
+  return storage.getStore()?.persona;
+}
+
+/**
+ * Child-env marker: set on every subprocess an engine spawns. A `phantombot`
+ * CLI that finds it is a tool child of an embedded engine, not the host's
+ * own phantombot, and must not run host-only bootstrap steps against the
+ * engine root — the legacy plaintext `.env` import in particular, which
+ * resolves `~/.env` (a HOST path) and would fold the host's secrets into the
+ * application's persona vaults (`vaultMigrate.ts`).
+ */
+export const ENV_ENGINE_SCOPE = "PHANTOMBOT_ENGINE_SCOPE";
 
 /** Run `fn` (and every async continuation it starts) inside `scope`. */
 export function runInEngineScope<T>(scope: EngineScope, fn: () => T): T {
@@ -81,8 +113,9 @@ export function bindToScope<T>(
 
 /**
  * The `XDG_*` variables a harness subprocess needs to resolve the same roots
- * as its parent. Empty outside a scope, so the daemon's child env is
- * byte-identical to what it was before the engine existed.
+ * as its parent, plus the `PHANTOMBOT_ENGINE_SCOPE` marker. Empty outside a
+ * scope, so the daemon's child env is byte-identical to what it was before
+ * the engine existed.
  */
 export function scopedChildEnv(): Record<string, string> {
   const scope = storage.getStore();
@@ -91,6 +124,7 @@ export function scopedChildEnv(): Record<string, string> {
     XDG_CONFIG_HOME: scope.configHome,
     XDG_DATA_HOME: scope.dataHome,
     XDG_STATE_HOME: scope.stateHome,
+    [ENV_ENGINE_SCOPE]: "1",
   };
 }
 

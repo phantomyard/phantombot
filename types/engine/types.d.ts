@@ -42,6 +42,15 @@ export interface CreatePersonaOptions {
     owner?: string;
     /** Non-negotiable rules, one per line. */
     hardRules?: string;
+    /**
+     * How the persona carries itself, whatever the task — values, voice, how
+     * it treats people, what it refuses. Written verbatim as SOUL.md: one
+     * sentence, like `identity`, or a whole markdown document. Omitted:
+     * phantombot's shared behaviour anchor. The other options above become
+     * IDENTITY.md (who it is); the loader concatenates the two at every turn,
+     * so both reach the system prompt.
+     */
+    soul?: string;
 }
 /** Harness ids accepted in a chain; the engine validates against these. */
 export type HarnessId = "native" | "pi-host" | "claude" | "codex";
@@ -60,7 +69,11 @@ export interface BrainConfig {
         visionModel?: string;
         /**
          * Provider API key. Stored in the persona's ENCRYPTED vault, never in
-         * config.toml. Omit to keep the key already stored.
+         * config.toml. Omit to keep the key already stored — for the SAME
+         * provider. Changing `provider` while a key is stored requires the new
+         * provider's key in the same call; otherwise `configure` rejects with
+         * `invalid_argument` and writes nothing, because the stored key belongs
+         * to the previous provider and would be sent to the new one.
          */
         apiKey?: string;
     };
@@ -110,16 +123,25 @@ export interface PersonaConfig {
  * security boundary:
  *   - "untrusted": anything a third party can influence (your app's end
  *     users, email, web content, webhooks). Screened by the threat judge
- *     before a capable harness sees it; a suspicious message is HELD.
+ *     before a capable harness sees it; a suspicious message is HELD. The
+ *     judge runs tool-less on `native`, `pi-host` or `claude` — never on
+ *     `codex` — so a chain with none of those cannot take untrusted input
+ *     and the turn fails with `not_configured`, whatever `tools` it asked
+ *     for and whether or not a decision model judge is enabled.
  *   - "principal": the persona's owner speaking, from code you control.
  *     Not screened. Never pass end-user input as "principal".
  */
 export type MessageSource = "untrusted" | "principal";
 /**
  * Tool surface for the turn. Default `"none"`: the model can think and
- * answer but cannot run commands, edit files or call MCP servers. `"full"`
- * is the persona's complete surface — only with input you trust and a
- * `workingDir` you are willing to let it change.
+ * answer but cannot run commands, edit files or call MCP servers. A harness
+ * that can only reach read-only rather than tool-less (`codex`) is left out
+ * of a `"none"` turn's chain, and out of the threat screen's chain on every
+ * turn; a chain with nothing else fails with `not_configured`. `"full"` is
+ * the persona's complete surface, MCP servers
+ * registered under the root included — only with input you trust and a
+ * `workingDir` you are willing to let it change. `{ allow }` is a positive
+ * grant that only claude honours (defence in depth, not a boundary).
  */
 export type ToolsPolicy = "none" | "full" | {
     allow: string[];

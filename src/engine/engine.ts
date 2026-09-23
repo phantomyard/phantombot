@@ -15,6 +15,9 @@
  *      personas, vault, memory database, turn registry. Paths are carried by
  *      an AsyncLocalStorage scope, never by rewriting `process.env`, and the
  *      root is exclusively locked so two engines cannot share memory.
+ *      Credentials follow the same rule: a harness spawn gets a per-spawn
+ *      env with the persona's vault applied (vault wins), and the
+ *      application's `process.env` is never written (`harnessSpawnEnv`).
  *   3. EXPLICIT TRUST. `source` has no default. "untrusted" is screened by
  *      the threat judge before any capable harness runs; "principal" is not.
  *      Tools default to "none".
@@ -91,6 +94,11 @@ import type {
 } from "./types.ts";
 
 const HARNESS_IDS: readonly HarnessId[] = ["native", "pi-host", "claude", "codex"];
+/**
+ * Harness ids whose `toolsMode: "none"` is READ-ONLY rather than tool-less
+ * (see HarnessRequest.toolsMode). A tool-less engine turn never runs on one.
+ */
+const READ_ONLY_TOOLLESS: ReadonlySet<string> = new Set(["codex"]);
 const CONVERSATION_PREFIX = APP_CONVERSATION_PREFIX;
 const MAX_CONVERSATION_KEY = 200;
 const DEFAULT_DECIDE_TIMEOUT_MS = 5000;
@@ -131,10 +139,13 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     logSink: makeLogSink(options.log),
   };
   try {
+    // Owner-only (umask-masked): the tree holds the encrypted vaults and the
+    // memory database, and a group-writable directory lets a same-group local
+    // user substitute files even when the files themselves are tight.
     await Promise.all([
-      mkdir(scope.configHome, { recursive: true }),
-      mkdir(scope.dataHome, { recursive: true }),
-      mkdir(scope.stateHome, { recursive: true }),
+      mkdir(scope.configHome, { recursive: true, mode: 0o700 }),
+      mkdir(scope.dataHome, { recursive: true, mode: 0o700 }),
+      mkdir(scope.stateHome, { recursive: true, mode: 0o700 }),
     ]);
   } catch (e) {
     throw new EngineError("invalid_root", `cannot create root: ${(e as Error).message}`, {
@@ -181,6 +192,8 @@ export class Engine {
   };
 
   #scope: EngineScope;
+  /** `#scope` plus `persona`, one per persona handle (identity-stable). */
+  #scopes = new Map<string, EngineScope>();
   #lock: LockHandle;
   #closed = false;
   #memory: Promise<MemoryStore> | undefined;
@@ -249,10 +262,15 @@ export class Engine {
 
   // ── internals shared with Persona ──────────────────────────────────────
 
-  /** @internal Run `fn` inside this engine's scope. */
-  run<T>(fn: () => Promise<T>): Promise<T> {
+  /**
+   * @internal Run `fn` inside this engine's scope. With `persona`, the scope
+   * also records whose work this is, so a persona-less harness spawn made on
+   * its behalf (the threat judge, fact extraction) draws that persona's vault
+   * (`harnessSpawnEnv`).
+   */
+  run<T>(fn: () => Promise<T>, persona?: string): Promise<T> {
     this.#assertOpen();
-    return runInEngineScope(this.#scope, fn);
+    return runInEngineScope(this.#scopeFor(persona), fn);
   }
 
   /**
@@ -260,13 +278,23 @@ export class Engine {
    * for abort listeners, which fire in whatever context called `abort()`
    * (the application's, usually) and would otherwise log to the host sink.
    */
-  enter<T>(fn: () => T): T {
-    return runInEngineScope(this.#scope, fn);
+  enter<T>(fn: () => T, persona?: string): T {
+    return runInEngineScope(this.#scopeFor(persona), fn);
   }
 
   /** @internal Bind an async iterable to this engine's scope. */
-  bind<T>(iterable: AsyncIterable<T>): AsyncIterableIterator<T> {
-    return bindToScope(this.#scope, iterable);
+  bind<T>(iterable: AsyncIterable<T>, persona?: string): AsyncIterableIterator<T> {
+    return bindToScope(this.#scopeFor(persona), iterable);
+  }
+
+  #scopeFor(persona: string | undefined): EngineScope {
+    if (!persona) return this.#scope;
+    let scope = this.#scopes.get(persona);
+    if (!scope) {
+      scope = { ...this.#scope, persona };
+      this.#scopes.set(persona, scope);
+    }
+    return scope;
   }
 
   /** @internal The shared memory database (turns, facts, captures). */
@@ -308,6 +336,11 @@ export class Engine {
         { name },
       );
     }
+    if (options.soul !== undefined && (typeof options.soul !== "string" || options.soul.trim() === "")) {
+      // An empty SOUL.md would load silently as "no soul" — almost certainly
+      // a bug in the caller, and one nothing downstream would report.
+      throw new EngineError("invalid_argument", "soul must be non-empty markdown when given");
+    }
     await this.run(async () => {
       const config = await loadConfig();
       if (existsSync(personaDir(config, name))) {
@@ -324,6 +357,7 @@ export class Engine {
         hardRules: options.hardRules ?? "",
         greeting: "",
         setDefault: false,
+        soul: options.soul,
       });
     });
     return this.persona(name);
@@ -360,9 +394,9 @@ export class Persona {
     this.#engine = engine;
     this.name = name;
     this.secrets = {
-      set: (key, value) => this.#engine.run(() => this.#setSecret(key, value)),
+      set: (key, value) => this.#run(() => this.#setSecret(key, value)),
       has: (key) =>
-        this.#engine.run(async () => {
+        this.#run(async () => {
           const vault = await openPersonaVault(await this.#dir());
           try {
             return vault.get(key) !== undefined;
@@ -371,7 +405,7 @@ export class Persona {
           }
         }),
       delete: (key) =>
-        this.#engine.run(async () => {
+        this.#run(async () => {
           const vault = await openPersonaVault(await this.#dir());
           try {
             vault.unset(key);
@@ -396,7 +430,7 @@ export class Persona {
    * Only the keys you pass are changed.
    */
   async configure(settings: PersonaConfig): Promise<void> {
-    await this.#engine.run(async () => {
+    await this.#run(async () => {
       const config = await loadConfig(this.name);
       const dir = personaDir(config, this.name);
       if (!existsSync(dir)) throw notFound(this.name);
@@ -429,6 +463,25 @@ export class Persona {
             );
           }
           const routing = table(table(harnesses, "pi"), "routing");
+          // The native key is ONE vault slot (PHANTOMBOT_PI_API_KEY) shared
+          // by whichever provider is routed. A provider SWITCH that keeps it
+          // would send the previous provider's credential to the new one on
+          // the next turn — the same no-carry-over rule the decision model
+          // applies below (AGENTS invariant 63). So a switch needs the new
+          // provider's key in the same call whenever a key is stored; with
+          // no stored key there is nothing stale to carry.
+          const previous = asStr(routing.provider)?.trim().toLowerCase();
+          const next = n.provider.trim().toLowerCase();
+          if (previous !== undefined && previous !== next && n.apiKey === undefined) {
+            if (await this.#hasSecret(ENV_PI_API_KEY, dir)) {
+              throw new EngineError(
+                "invalid_argument",
+                `native provider changes from '${previous}' to '${next}': pass apiKey ` +
+                  `for the new provider (the stored key belongs to '${previous}')`,
+                { from: previous, to: next },
+              );
+            }
+          }
           // Stating routing supersedes a "use Pi's own config" tombstone.
           delete routing.use_local_config;
           routing.provider = n.provider.trim();
@@ -533,14 +586,15 @@ export class Persona {
    */
   turn(options: TurnOptions): TurnStream {
     validateTurnOptions(options);
+    if (this.#engine.closed) throw new EngineError("engine_closed", "engine is closed");
     const controller = new AbortController();
-    const abort = () => this.#engine.enter(() => controller.abort());
+    const abort = () => this.#enter(() => controller.abort());
     const external = options.signal;
     if (external?.aborted) abort();
     else external?.addEventListener("abort", abort, { once: true });
 
     const conversation = CONVERSATION_PREFIX + (options.conversation ?? "default");
-    const events = this.#engine.bind(this.#turnEvents(options, conversation, controller));
+    const events = this.#bind(this.#turnEvents(options, conversation, controller));
     return new TurnStreamImpl(events, conversation, controller, abort);
   }
 
@@ -594,6 +648,14 @@ export class Persona {
     conversation: string,
     controller: AbortController,
   ): AsyncGenerator<EngineEvent> {
+    // A stream is lazy: this body runs on the first `next()`, which can come
+    // after `close()` released the root to another engine. Nothing below may
+    // open runtime state once the engine is closed — the check happens here,
+    // synchronously, before the turn is tracked and before any await.
+    if (this.#engine.closed) {
+      yield { type: "error", code: "engine_closed", message: "engine is closed" };
+      return;
+    }
     const untrack = this.#engine.track(controller);
     try {
       let runtime: PersonaRuntime;
@@ -606,18 +668,75 @@ export class Persona {
         yield { type: "error", code: err.code, message: err.message };
         return;
       }
-      const { config, harnesses } = runtime;
+      const { config } = runtime;
       const agentDir = personaDir(config, this.name);
       const trusted = options.source === "principal";
       const history = options.history ?? options.conversation !== undefined;
       const tools = options.tools ?? "none";
+
+      // `tools: "none"` promises the model cannot run commands. Codex maps a
+      // tool-less request to `--sandbox read-only`, which still has a shell
+      // for reads — enough to read `identity.json` and the vault from the
+      // default cwd (the persona dir) and quote them back. That is not an
+      // implementation of this contract, so codex is left out of a tool-less
+      // turn's chain.
+      //
+      // The threat SCREEN is a tool-less request too, and a worse one to run
+      // read-only: it is spawned in the persona dir and handed the untrusted
+      // text itself, so an injection that steers the judge steers a shell
+      // that can read the vault. The daemon accepts that floor because only
+      // a score comes back; an application embedding the engine cannot audit
+      // what the judge read, so the screen runs on the SAME tool-less set.
+      const toolless = runtime.harnesses.filter((h) => !READ_ONLY_TOOLLESS.has(h.id));
+      const readOnly = runtime.harnesses.filter((h) => READ_ONLY_TOOLLESS.has(h.id));
+      const readOnlyIds = readOnly.map((h) => h.id).join(", ");
+      let harnesses = runtime.harnesses;
+      if (tools === "none") {
+        if (readOnly.length > 0) {
+          harnesses = toolless;
+          log.warn("engine: harness skipped for a tool-less turn (read-only is not tool-less)", {
+            persona: this.name,
+            skipped: readOnly.map((h) => h.id),
+          });
+        }
+        if (harnesses.length === 0) {
+          yield {
+            type: "error",
+            code: "not_configured",
+            message:
+              `tools: "none" needs a harness that can run without tools ` +
+              `(native, pi-host or claude); '${readOnlyIds}' only reaches ` +
+              `read-only. Add one to the chain, or pass tools: "full" for input ` +
+              `you trust.`,
+          };
+          return;
+        }
+      }
+      // An untrusted turn needs a harness the screen can run on, whatever
+      // `tools` the turn itself was granted. This holds with the decision
+      // model judge enabled too: it decides first, the harness judge is its
+      // FALLBACK, and a screener with an empty chain fails OPEN — so on a
+      // codex-only chain a decision-model outage would hand the untrusted
+      // text to codex with full tools, unscreened. Refused before anything
+      // runs; the text never reaches a harness.
+      if (!trusted && toolless.length === 0) {
+        yield {
+          type: "error",
+          code: "not_configured",
+          message:
+            `untrusted input needs a harness the threat screen can run ` +
+            `tool-less (native, pi-host or claude); '${readOnlyIds}' only ` +
+            `reaches read-only. Add one to the chain.`,
+        };
+        return;
+      }
 
       // Untrusted turns are screened; the wrapper records a hold so the
       // loop below can tell a hold notice from a reply.
       let held = false;
       const screen = trusted
         ? undefined
-        : this.#screener(config, conversation, harnesses, memory, () => {
+        : this.#screener(config, conversation, toolless, memory, () => {
             held = true;
           });
 
@@ -721,7 +840,7 @@ export class Persona {
     if (!options.questions || Object.keys(options.questions).length === 0) {
       throw new EngineError("invalid_argument", "decide needs at least one question");
     }
-    return this.#engine.run(async () => {
+    return this.#run(async () => {
       const config = await loadConfig(this.name);
       if (!existsSync(personaDir(config, this.name))) throw notFound(this.name);
       const dm = config.jev; // the persona's decision model ([jev] on disk)
@@ -761,6 +880,19 @@ export class Persona {
 
   // ── internals ──────────────────────────────────────────────────────────
 
+  /** Engine scope acting for THIS persona (see `Engine.run`). */
+  #run<T>(fn: () => Promise<T>): Promise<T> {
+    return this.#engine.run(fn, this.name);
+  }
+
+  #enter<T>(fn: () => T): T {
+    return this.#engine.enter(fn, this.name);
+  }
+
+  #bind<T>(iterable: AsyncIterable<T>): AsyncIterableIterator<T> {
+    return this.#engine.bind(iterable, this.name);
+  }
+
   async #dir(): Promise<string> {
     const dir = personaDir(await loadConfig(this.name), this.name);
     if (!existsSync(dir)) throw notFound(this.name);
@@ -794,11 +926,23 @@ export class Persona {
     return this.#runtime;
   }
 
+  /** Read-only vault probe: is `key` stored? Never provisions (dir exists). */
+  async #hasSecret(key: string, dir: string): Promise<boolean> {
+    const vault = await openPersonaVault(dir);
+    try {
+      return vault.get(key) !== undefined;
+    } finally {
+      vault.close();
+    }
+  }
+
   /**
    * Vault write with read-back verification. Unlike the wizards'
    * `setPersonaSecret`, it does NOT mirror the value into `process.env`:
    * that would make it an ambient variable every other persona in this
-   * process could read. Harnesses reload the vault before each spawn.
+   * process could read. Harnesses apply the vault to a per-spawn env copy
+   * before each spawn (`harnessSpawnEnv`), so the value reaches the child
+   * and nothing else.
    */
   async #setSecret(key: string, value: string): Promise<void> {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
@@ -823,7 +967,7 @@ export class Persona {
     if (typeof query !== "string" || query.trim() === "") {
       throw new EngineError("invalid_argument", "query must be a non-empty string");
     }
-    return this.#engine.run(async () => {
+    return this.#run(async () => {
       const config = await loadConfig(this.name);
       const out = new StringSink();
       const err = new StringSink();
@@ -864,7 +1008,7 @@ export class Persona {
     if (tags.some((t) => !/^[a-z]+$/.test(t))) {
       throw new EngineError("invalid_argument", "tags are lowercase words, e.g. 'decision'");
     }
-    return this.#engine.run(async () => {
+    return this.#run(async () => {
       const config = await loadConfig(this.name);
       const err = new StringSink();
       const code = await runMemoryCapture({
