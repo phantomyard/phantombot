@@ -900,13 +900,35 @@ message is sent straight after.
   phantombot binary does not know the new ids, so do not roll a migrated host
   back.
 - When the `phantombot harness` wizard takes a native provider API key (e.g.
-  OpenRouter), it merge-writes the key into Pi's own auth store
-  (`~/.pi/agent/auth.json`) — the same place an interactive `pi` login
-  writes — so `pi --list-models` and the wizard's model pickers populate. An
-  existing OAuth entry for the same provider is left untouched. Note that
-  auth.json stores one API key per provider: if you have multiple keys for
-  the same provider (e.g. two OpenRouter keys), the merge-write replaces the
-  previous key, and Pi's model catalog only uses the one on file.
+  OpenRouter), it merge-writes the key into Pi's native auth store
+  (`<data>/pi-native/personas/<persona>/agent/auth.json` — the native agent
+  dir is PER-PERSONA, PR #606) so `pi --list-models` and the wizard's
+  model pickers populate. That entry is transient bookkeeping: on every turn
+  that actually relays the key, phantombot strips the provider's entry from
+  THAT persona's own store before spawning, and the key travels per-turn via the provider's
+  native env var (e.g. `OPENROUTER_API_KEY`) instead. Persona-scoping is what
+  makes the strip safe on a multi-persona host: each persona's store holds
+  only its own credential, so a relayed turn can never delete a sibling's
+  tier-2 fallback or trip over a sibling's OAuth login. A persona's first
+  scoped use absorbs the legacy shared dir
+  (`<data>/pi-native/agent/`): its `auth.json` OAUTH-FILTERED — only
+  `api_key` entries are inherited, because the shared file has no persona
+  attribution and one operator's interactive OAuth login must not become
+  every persona's stored fallback (or a fail-closed abort on their first
+  relayed turn; the operator who logged in re-runs Configure→Brain once) —
+  plus the local-config files Pi resolves "Use Pi's own config" turns from
+  (`settings.json`, `models.json`, `models-store.json`, verbatim), so a
+  pre-upgrade persona keeps its model/provider choice as well as its
+  credential. The legacy dir itself is a read-only migration source
+  afterwards; a persona-less relayed turn (threat judge, durable-fact
+  extraction) runs on a per-turn ephemeral agent dir instead of touching it. The strip is fail-closed: Pi
+  resolves any stored credential (api_key or an OAuth login) ahead of env
+  vars, so if the strip cannot complete, or an OAuth entry for the provider
+  survives it, phantombot aborts the relayed turn with a loud error before
+  spawning rather than risk authenticating as the wrong key. The store entry
+  only survives turns with no relayed key (the "install later, no key"
+  fallback), where an existing OAuth entry for the same provider is left
+  untouched as before.
 - Claude Code is normally authenticated with OAuth on the host.
 - Gemini and OpenAI-compatible endpoints are available for optional
   semantic-memory embeddings via `phantombot embedding`; they are not agent

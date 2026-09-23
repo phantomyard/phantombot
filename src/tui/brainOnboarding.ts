@@ -124,8 +124,9 @@ export async function createBrainOnboardingDeps(
     listModels: (extraEnv) =>
       // The embedded engine's catalog lives in its ISOLATED agent dir — merge
       // the isolation env so a plain listing reads NATIVE auth, never ~/.pi.
+      // PER-PERSONA (PR #606 review): this persona's own store.
       listPiModels(embeddedPiCommand(), undefined, {
-        ...nativeAgentEnv(),
+        ...nativeAgentEnv(undefined, persona),
         ...extraEnv,
       }),
     setSecret: (value, instanceId) =>
@@ -141,9 +142,12 @@ export async function createBrainOnboardingDeps(
         instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
         persona,
       ),
-    // Write into the NATIVE engine's isolated agent dir, never ~/.pi.
+    // Write into the NATIVE engine's agent dir — THIS persona's own (PR #606
+    // review) — never ~/.pi.
     writeAuth: (provider, value) =>
-      writePiApiKey(provider, value, { agentDir: nativeAgentDir() }),
+      writePiApiKey(provider, value, {
+        agentDir: nativeAgentDir(undefined, persona),
+      }),
     applyChain: (chain) =>
       applyHarnessChain(
         writeTarget.path,
@@ -170,7 +174,8 @@ export async function createBrainOnboardingDeps(
         // (PR #539 review, Kai/Lena).
         readVaultSecret: (name) =>
           getPersonaSecretStrict(config, name, persona),
-          snapshotAuth: () => snapshotPiAuth({ agentDir: nativeAgentDir() }),
+          snapshotAuth: () =>
+            snapshotPiAuth({ agentDir: nativeAgentDir(undefined, persona) }),
         },
       ),
     restoreWrites: (snapshot) =>
@@ -180,7 +185,8 @@ export async function createBrainOnboardingDeps(
         setVaultSecret: (name, value) =>
           setPersonaSecret(config, name, value, persona),
         unsetVaultSecret: (name) => unsetPersonaSecret(config, name, persona),
-        restoreAuth: (auth) => restorePiAuth(auth, { agentDir: nativeAgentDir() }),
+        restoreAuth: (auth) =>
+          restorePiAuth(auth, { agentDir: nativeAgentDir(undefined, persona) }),
       }),
     probe: async (id) => {
       const { probeHarness } = await import("../lib/harnessProbe.ts");

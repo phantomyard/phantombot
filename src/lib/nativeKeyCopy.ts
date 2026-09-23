@@ -12,7 +12,8 @@
  *
  *   1. RUNTIME — native never reads the host auth store (see
  *      lib/nativeAgentDir.ts; the embedded engine gets its own agent dir).
- *      The key travels per-turn from the vault via `--api-key`.
+ *      The key travels per-turn from the vault via the provider's native
+ *      env var (issue #602 — never on argv).
  *   2. MIGRATION — before anything depends on native, the key is COPIED into
  *      the persona vault from the legacy sources, and only sources. This
  *      module owns that copy: startup (run.ts) and `phantombot doctor` both

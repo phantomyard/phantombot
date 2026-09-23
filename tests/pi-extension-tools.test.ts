@@ -5,7 +5,13 @@
  * (the SDK glue + routing.json read) is verified manually against a live pi via
  * /reload. `planRouting` now takes the parsed routing.json config object.
  */
-import { describe, expect, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import {
   imageDelegationPrompt,
   planRouting,
@@ -40,22 +46,47 @@ describe("buildDelegateBaseArgs — provider/api-key threading for delegates", (
   const argsOf = (over: Parameters<typeof buildDelegateBaseArgs>[0]) =>
     buildDelegateBaseArgs(over).join(" ");
 
+  // PHANTOMBOT_PI_KEY_ENV decides HOW the key travels (env ⇒ never argv).
+  // Save/restore so ambient/other tests can't leak in.
+  let savedKeyEnv: string | undefined;
+  beforeEach(() => {
+    savedKeyEnv = process.env.PHANTOMBOT_PI_KEY_ENV;
+    delete process.env.PHANTOMBOT_PI_KEY_ENV;
+  });
+  afterEach(() => {
+    if (savedKeyEnv === undefined) delete process.env.PHANTOMBOT_PI_KEY_ENV;
+    else process.env.PHANTOMBOT_PI_KEY_ENV = savedKeyEnv;
+  });
+
   test("model is always pinned via --model", () => {
     expect(argsOf({ model: "z-ai/glm-5.2" })).toContain("--model z-ai/glm-5.2");
   });
 
-  test("provider + api-key are threaded as a pair (OpenRouter routes to openrouter, NOT google)", () => {
+  test("provider is threaded, api-key travels via ENV when the parent named a native var (#602)", () => {
+    process.env.PHANTOMBOT_PI_KEY_ENV = "OPENROUTER_API_KEY";
     const a = argsOf({ model: "z-ai/glm-5.2", provider: "openrouter", apiKey: "sk-or-1" });
     expect(a).toContain("--provider openrouter");
     expect(a).not.toContain("--provider google");
-    expect(a).toContain("--api-key sk-or-1");
+    // cmdline is world-readable — the key must NEVER be on argv when the
+    // native env var path is active (the delegate spawn spreads process.env,
+    // which already carries the native var).
+    expect(a).not.toContain("--api-key");
+    expect(a).not.toContain("sk-or-1");
   });
 
   test("a different harness can carry a different provider (openai), no collision", () => {
+    process.env.PHANTOMBOT_PI_KEY_ENV = "OPENAI_API_KEY";
     const a = argsOf({ model: "gpt-5.2", provider: "openai", apiKey: "sk-oa-2" });
     expect(a).toContain("--provider openai");
-    expect(a).toContain("--api-key sk-oa-2");
+    expect(a).not.toContain("--api-key");
     expect(a).not.toContain("openrouter");
+  });
+
+  test("legacy fallback: no named native var → the key rides --api-key argv (unmapped provider)", () => {
+    delete process.env.PHANTOMBOT_PI_KEY_ENV;
+    const a = argsOf({ model: "z-ai/glm-5.2", provider: "openrouter", apiKey: "sk-or-1" });
+    expect(a).toContain("--provider openrouter");
+    expect(a).toContain("--api-key sk-or-1");
   });
 
   test("no provider/key → neither flag (Pi falls back to its own default/store)", () => {

@@ -8,7 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import {
@@ -409,18 +409,18 @@ let originalMode: string | undefined;
 // that is now the leak this stub closes: on any machine where the running
 // persona genuinely has Pi configured (a dev box, Lena), the reload injects a
 // real PHANTOMBOT_PI_API_KEY / PHANTOMBOT_PI_PROVIDER into process.env, undoing
-// the `delete process.env…` these tests rely on and breaking the "no key → no
-// --api-key flag" assertions off the test author's machine. These tests assert
-// argv / child-env construction against the process.env each test sets, so the
-// reload is stubbed to a no-op and asserted separately below.
+// the `delete process.env…` these tests rely on and breaking the "no key →
+// native var cleared" assertions off the test author's machine. These tests
+// assert argv / child-env construction against the process.env each test sets,
+// so the reload is stubbed to a no-op and asserted separately below.
 let vaultReloadSpy: ReturnType<typeof spyOn> | undefined;
 
 // The same leak, one layer up: the shell running the suite may ALREADY carry a
-// vault-injected key (PHANTOMBOT_PI_API_KEY*, OPENROUTER_API_KEY). A native
-// slot with a provider and no key now fails loudly, so a test that forgot to
-// set a key passed on a dev box and failed on CI. Scrub them per test; a test
-// that needs a key sets its own.
-const AMBIENT_KEY = /^(PHANTOMBOT_PI_API_KEY(_[A-Z0-9_]+)?|OPENROUTER_API_KEY)$/;
+// vault-injected key (PHANTOMBOT_PI_API_KEY*, OPENROUTER_API_KEY, and the
+// #602 relay var PHANTOMBOT_PI_KEY_ENV). A native slot with a provider and no
+// key now fails loudly, so a test that forgot to set a key passed on a dev box
+// and failed on CI. Scrub them per test; a test that needs a key sets its own.
+const AMBIENT_KEY = /^(PHANTOMBOT_PI_API_KEY(_[A-Z0-9_]+)?|OPENROUTER_API_KEY|PHANTOMBOT_PI_KEY_ENV)$/;
 let savedKeys: Record<string, string> = {};
 
 beforeEach(() => {
@@ -879,42 +879,655 @@ describe("PiHarness routing (subprocess)", () => {
     }
   });
 
-  test("PHANTOMBOT_PI_API_KEY is threaded onto --api-key per turn", async () => {
+  test("PHANTOMBOT_PI_API_KEY travels via the provider's NATIVE env var, never argv (#602)", async () => {
+    // /proc/<pid>/cmdline is world-readable; environ is 0400. The key must be
+    // relayed under the provider's native var (resolved via the catalog), and
+    // PHANTOMBOT_PI_KEY_ENV must name that var for the extension's delegates.
     process.env.FAKE_PI_MODE = "argv";
     process.env.PHANTOMBOT_PI_API_KEY = "sk-test-key";
     try {
-      const chunks = await collect(mkHarness().invoke(newRequest()));
+      const chunks = await collect(
+        new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(newRequest()),
+      );
       const argv = chunks
         .filter((c) => c.type === "text")
         .map((c) => (c as { text: string }).text)
         .join("");
-      expect(argv).toContain("--api-key sk-test-key");
+      expect(argv).not.toContain("--api-key");
+      expect(argv).not.toContain("sk-test-key");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+    }
+    // Env path: the native var carries the key, ENV_PI_KEY_ENV names it.
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test-key";
+    try {
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(newRequest()),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(out).toContain("keyenv=OPENROUTER_API_KEY");
+      expect(out).toContain("native=OPENROUTER_API_KEY=sk-test-key");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+    }
+  });
+
+  test("native relay strips the stored credential — env is the ONLY source (#602 review)", async () => {
+    // Robbie's resolution-layer demand on PR #606: Pi prefers a STORED
+    // credential over env vars, and the native agent dir is PER-PERSONA.
+    // A left-behind api_key entry would decide this persona's key even
+    // after a vault rotation (last onboarded wins billing). So each relayed turn strips the provider's
+    // entry from the native store BEFORE spawn; this test asserts the key Pi
+    // would RESOLVE (store-first, per its real precedence), not just what the
+    // env carried.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-native-store-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const agentDir = join(workdir, "xdg", "pi-native", "personas", "persona-a", "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify(
+        {
+          openrouter: { type: "api_key", key: "sk-stale-persona-key" },
+          anthropic: { type: "oauth", access: "oauth-token" },
+          google: { type: "api_key", key: "sk-other-provider" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-fresh-vault-key";
+    try {
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(newRequest({ persona: "persona-a" })),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      // The child resolves the RELAYED key: the stored entry did not survive.
+      expect(out).toContain("resolved=sk-fresh-vault-key");
+      expect(out).not.toContain("sk-stale-persona-key");
+      // The store afterwards: our entry gone, everyone else's verbatim —
+      // including the oauth login we must never touch.
+      const after = JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8")) as Record<
+        string,
+        { type?: string; [k: string]: unknown }
+      >;
+      expect(after.openrouter).toBeUndefined();
+      expect(after.google).toEqual({ type: "api_key", key: "sk-other-provider" });
+      expect(after.anthropic).toEqual({ type: "oauth", access: "oauth-token" });
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("strip failure on a relayed turn is FAIL-CLOSED — abort before spawn (PR #606 re-review)", async () => {
+    // Pi resolves a STORED credential ahead of env vars, so spawning with an
+    // un-strippable entry risks silently authenticating as the wrong (possibly
+    // another persona's) key. A failed strip must ABORT the relayed turn —
+    // same loud-throw contract as the no-key path — never warn-and-spawn.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-native-strip-fail-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const agentDir = join(workdir, "xdg", "pi-native", "personas", "persona-a", "agent");
+    await mkdir(agentDir, { recursive: true });
+    // Unparseable auth.json: removePiApiKey refuses to touch it → strip fails.
+    const corrupt = "{ not json";
+    await writeFile(join(agentDir, "auth.json"), corrupt);
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-fresh-vault-key";
+    try {
+      await expect(
+        collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(newRequest({ persona: "persona-a" })),
+        ),
+      ).rejects.toThrow(/relayed turn aborted/);
+      // Nothing was spawned and nothing was mutated: the corrupt store is
+      // byte-identical (removePiApiKey's refuse-not-clobber guarantee holds
+      // even on the abort path).
+      expect(await readFile(join(agentDir, "auth.json"), "utf8")).toBe(corrupt);
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("surviving oauth entry on a relayed turn is FAIL-CLOSED — abort, login untouched (PR #606 re-review)", async () => {
+    // Pi resolves ANY stored credential ahead of env — including an oauth
+    // login. removePiApiKey refuses to delete logins, so an oauth entry for
+    // the provider must abort the relayed turn, not spawn past it.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-native-oauth-abort-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const agentDir = join(workdir, "xdg", "pi-native", "personas", "persona-a", "agent");
+    await mkdir(agentDir, { recursive: true });
+    const oauth = { openrouter: { type: "oauth", access: "oauth-token" } };
+    await writeFile(join(agentDir, "auth.json"), JSON.stringify(oauth, null, 2) + "\n");
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-fresh-vault-key";
+    try {
+      await expect(
+        collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(newRequest({ persona: "persona-a" })),
+        ),
+      ).rejects.toThrow(/oauth login/);
+      // The interactive login survives byte-for-byte: phantombot never deletes
+      // an oauth entry, even to unblock itself.
+      expect(JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8"))).toEqual(oauth);
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("tier-2 (no relayed key) with an oauth entry still runs — abort is coupled to the relay", async () => {
+    // The fail-closed abort must not break the "install later, no key"
+    // fallback: a turn with no relayed key has no env credential to outrank,
+    // so an oauth entry is exactly what pi SHOULD use. No abort, no strip.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-native-oauth-tier2-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const agentDir = join(workdir, "xdg", "pi-native", "agent");
+    await mkdir(agentDir, { recursive: true });
+    const oauth = { openrouter: { type: "oauth", access: "oauth-token" } };
+    await writeFile(join(agentDir, "auth.json"), JSON.stringify(oauth, null, 2) + "\n");
+    process.env.FAKE_PI_MODE = "env";
+    try {
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", useLocalConfig: true } }).invoke(newRequest()),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(out).toContain("resolved=oauth-token");
+      expect(JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8"))).toEqual(oauth);
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("no relayed key → the stored entry SURVIVES (tier-2 fallback stays usable)", async () => {
+    // The strip must be coupled to the relay, not to native mode: when no key
+    // is relayed this turn (keyless legacy path / providerless), Pi falls back
+    // to its own env/store settings — that contract ("install later, no key")
+    // must not be broken by an unconditional strip. Providerless native has no
+    // store entry to protect, so assert via a HOST-mode run with a provider in
+    // routing shape… host ignores routing entirely, so instead: the opted-out
+    // persona (useLocalConfig) relays nothing and must not strip either.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-native-store-keep-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const agentDir = join(workdir, "xdg", "pi-native", "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({ openrouter: { type: "api_key", key: "sk-keep-me" } }, null, 2) + "\n",
+    );
+    process.env.FAKE_PI_MODE = "env";
+    try {
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", useLocalConfig: true } }).invoke(newRequest()),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(out).toContain("resolved=sk-keep-me");
+      const after = JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8")) as Record<string, unknown>;
+      expect(after.openrouter).toEqual({ type: "api_key", key: "sk-keep-me" });
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("the strip is PERSONA-SCOPED — a sibling's tier-2 fallback survives a relayed turn (PR #606 round-4)", async () => {
+    // Robbie's round-3 blocker 2, now dissolved by persona-scoping the agent
+    // dir (lib/nativeAgentDir.ts): the strip targets THIS persona's own store
+    // only, so persona B's stored fallback must survive persona A's relayed
+    // turn against the SAME XDG_DATA_HOME — and B's next turn must still
+    // resolve it. The old host-level store failed exactly this sequence.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-persona-strip-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    // B's own store holds its tier-2 fallback.
+    const bStore = join(workdir, "xdg", "pi-native", "personas", "persona-b", "agent");
+    await mkdir(bStore, { recursive: true });
+    await writeFile(
+      join(bStore, "auth.json"),
+      JSON.stringify({ openrouter: { type: "api_key", key: "sk-keep-me" } }, null, 2) + "\n",
+    );
+    // A's own store holds a stale entry the relayed turn must strip.
+    const aStore = join(workdir, "xdg", "pi-native", "personas", "persona-a", "agent");
+    await mkdir(aStore, { recursive: true });
+    await writeFile(
+      join(aStore, "auth.json"),
+      JSON.stringify({ openrouter: { type: "api_key", key: "sk-stale-a" } }, null, 2) + "\n",
+    );
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-a-relayed";
+    try {
+      const out = async (persona: string, useLocalConfig?: boolean) =>
+        (
+          await collect(
+            new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a", ...(useLocalConfig ? { useLocalConfig } : {}) } }).invoke(
+              newRequest({ persona }),
+            ),
+          )
+        )
+          .filter((c) => c.type === "text")
+          .map((c) => (c as { text: string }).text)
+          .join("");
+      // A relays: env key wins, A's stale entry is stripped from A's store.
+      const a = await out("persona-a");
+      expect(a).toContain("resolved=sk-a-relayed");
+      expect(JSON.parse(await readFile(join(aStore, "auth.json"), "utf8"))).toEqual({});
+      // B is untouched by A's turn — store byte-identical...
+      expect(JSON.parse(await readFile(join(bStore, "auth.json"), "utf8"))).toEqual({
+        openrouter: { type: "api_key", key: "sk-keep-me" },
+      });
+      // ...and B's tier-2 turn still resolves its OWN stored fallback.
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      const b = await out("persona-b", true);
+      expect(b).toContain("resolved=sk-keep-me");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("one persona's oauth login never aborts another persona's relayed turn (PR #606 round-4)", async () => {
+    // Robbie's round-4 blocker 2: on the shared host-level store, B's
+    // legitimate interactive login hard-aborted EVERY persona's relayed turns.
+    // Persona-scoped stores dissolve the deadlock: B's oauth lives in B's
+    // store; A's relayed turn resolves A's env key and never sees it.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-persona-oauth-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const bStore = join(workdir, "xdg", "pi-native", "personas", "persona-b", "agent");
+    await mkdir(bStore, { recursive: true });
+    const oauth = { openrouter: { type: "oauth", access: "b-oauth-token" } };
+    await writeFile(join(bStore, "auth.json"), JSON.stringify(oauth, null, 2) + "\n");
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-a-relayed";
+    try {
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(
+            newRequest({ persona: "persona-a" }),
+          ),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      // A's relayed turn PROCEEDS on the env key — no abort — ...
+      expect(out).toContain("resolved=sk-a-relayed");
+      expect(out).not.toContain("b-oauth-token");
+      // ...and B's login is byte-identical.
+      expect(JSON.parse(await readFile(join(bStore, "auth.json"), "utf8"))).toEqual(oauth);
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("first persona-scoped use ABSORBS the legacy shared store — api_key entries only (upgrade migration)", async () => {
+    // Pre-persona-scoping installs keep their credentials in the legacy
+    // host-level store (<root>/agent/auth.json). The first persona-scoped
+    // ensure() must absorb it OAUTH-FILTERED (round-5, Robbie): api_key
+    // entries keep tier-2 fallbacks working after an upgrade without
+    // re-running Configure→Brain, while a legacy oauth login — made by
+    // exactly ONE operator, with no persona attribution in the shared file —
+    // is NOT manufactured into a persona that never logged in (that would
+    // abort that persona's first relayed turn fail-closed, a migration-
+    // delivered outage). The operator who logged in re-runs
+    // Configure→Brain once.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-persona-absorb-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const legacy = join(workdir, "xdg", "pi-native", "agent");
+    await mkdir(legacy, { recursive: true });
+    const legacyAuth = {
+      openrouter: { type: "api_key", key: "sk-legacy-shared" },
+      anthropic: { type: "oauth", access: "legacy-oauth" },
+    };
+    await writeFile(join(legacy, "auth.json"), JSON.stringify(legacyAuth, null, 2) + "\n");
+    const legacyBytes = await readFile(join(legacy, "auth.json"), "utf8");
+    process.env.FAKE_PI_MODE = "env";
+    try {
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", useLocalConfig: true } }).invoke(
+            newRequest({ persona: "persona-c" }),
+          ),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      // The persona's own store exists, holds the absorbed api_key ONLY ...
+      const personaStore = join(workdir, "xdg", "pi-native", "personas", "persona-c", "agent");
+      expect(JSON.parse(await readFile(join(personaStore, "auth.json"), "utf8"))).toEqual({
+        openrouter: { type: "api_key", key: "sk-legacy-shared" },
+      });
+      // ... and its tier-2 turn resolves it.
+      expect(out).toContain("resolved=sk-legacy-shared");
+      expect(out).not.toContain("legacy-oauth");
+      // The legacy file itself is byte-identical (read-only migration source
+      // for the other personas; nothing ever deletes user state).
+      expect(await readFile(join(legacy, "auth.json"), "utf8")).toBe(legacyBytes);
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy OAUTH entry → a persona's first RELAYED turn proceeds, no migration-delivered abort (round-5, Robbie)", async () => {
+    // Robbie's round-5 blocker 1 repro: on a pre-scoping host exactly one
+    // operator did the interactive login, but the shared store has no persona
+    // attribution — a verbatim absorb would push that login into EVERY
+    // persona, and the fail-closed oauth abort would then fire on every
+    // persona's first relayed turn. With the oauth-filtered absorb, a fresh
+    // persona has NO stored credential at all: the strip no-ops and the
+    // relayed env key resolves. Relayed turns ran pre-upgrade (argv --api-key
+    // beat the store); they must keep running post-upgrade.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-legacy-oauth-relay-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const legacy = join(workdir, "xdg", "pi-native", "agent");
+    await mkdir(legacy, { recursive: true });
+    await writeFile(
+      join(legacy, "auth.json"),
+      JSON.stringify({ openrouter: { type: "oauth", access: "legacy-oauth" } }, null, 2) + "\n",
+    );
+    const legacyBytes = await readFile(join(legacy, "auth.json"), "utf8");
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-a-relayed";
+    try {
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(
+            newRequest({ persona: "persona-a" }),
+          ),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      // The relayed turn PROCEEDS on the env key — no abort.
+      expect(out).toContain("resolved=sk-a-relayed");
+      expect(out).not.toContain("legacy-oauth");
+      // The relayed turn SKIPPED the auth absorb (round-7): no auth.json was
+      // written into the persona's own dir at all (pre-round-7 the absorb
+      // wrote the (filtered) store and the strip converged it to {} — fine for
+      // an oauth-only legacy, but it is exactly the consume-and-block cycle
+      // that destroys an api_key legacy; see the round-7 regression below).
+      const aStore = join(workdir, "xdg", "pi-native", "personas", "persona-a", "agent");
+      expect(existsSync(join(aStore, "auth.json"))).toBe(false);
+      // The legacy login survives byte-identical — its operator can re-onboard.
+      expect(await readFile(join(legacy, "auth.json"), "utf8")).toBe(legacyBytes);
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("a persona's first RELAYED turn does not consume the legacy credential — the next tier-2 turn still resolves it (round-7, Robbie/Kai)", async () => {
+    // The round-7 blocker both reviewers independently reproduced: the
+    // relayed turn used to absorb the legacy auth.json and its strip then
+    // emptied the provider entry — and since the absorb's "already migrated"
+    // test is `target exists`, the persona NEVER re-inherited the key. Every
+    // phantombot-routing persona takes relayed turns long before any
+    // tier-2 use, so the documented "upgrade keeps tier-2 working" promise
+    // silently failed for the normal case. The fix: a relayed turn skips the
+    // auth absorb entirely (absorbAuth:false at the harness boundary); the
+    // first genuinely tier-2 turn does the migration intact.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-relay-consume-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const legacy = join(workdir, "xdg", "pi-native", "agent");
+    await mkdir(legacy, { recursive: true });
+    await writeFile(
+      join(legacy, "auth.json"),
+      JSON.stringify({ openrouter: { type: "api_key", key: "sk-legacy-shared" } }, null, 2) + "\n",
+    );
+    const legacyBytes = await readFile(join(legacy, "auth.json"), "utf8");
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-relayed-first";
+    try {
+      // Persona P's FIRST post-upgrade turn is relayed (normal phantombot
+      // routing) — it must resolve the relayed env key ...
+      const relayed = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(
+            newRequest({ persona: "persona-p" }),
+          ),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(relayed).toContain("resolved=sk-relayed-first");
+      // ... and must NOT have written an auth.json into P's own dir (the
+      // strip would have emptied it, consuming the legacy credential).
+      const pStore = join(workdir, "xdg", "pi-native", "personas", "persona-p", "agent");
+      expect(existsSync(join(pStore, "auth.json"))).toBe(false);
+      expect(await readFile(join(legacy, "auth.json"), "utf8")).toBe(legacyBytes);
+      // P's NEXT turn is tier-2 (no relayed key) — it migrates intact.
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      const tier2 = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", useLocalConfig: true } }).invoke(
+            newRequest({ persona: "persona-p" }),
+          ),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(tier2).toContain("resolved=sk-legacy-shared");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("persona-less relayed turn (judge/extraction) runs on an EPHEMERAL dir — legacy store untouched, later personas still absorb (round-5, Robbie)", async () => {
+    // Robbie's round-5 blocker 2 repro: the threat judge and durable-fact
+    // extraction run persona-less WITH a relayed key. On the legacy host dir
+    // the strip would empty the migration source, and every not-yet-migrated
+    // persona would silently lose its tier-2 fallback. A persona-less
+    // relayed turn carries its key in env and needs no store: it gets a
+    // per-turn ephemeral agent dir, removed with the turn.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-personaless-relay-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const legacy = join(workdir, "xdg", "pi-native", "agent");
+    await mkdir(legacy, { recursive: true });
+    await writeFile(
+      join(legacy, "auth.json"),
+      JSON.stringify({ openrouter: { type: "api_key", key: "sk-legacy-shared" } }, null, 2) + "\n",
+    );
+    const legacyBytes = await readFile(join(legacy, "auth.json"), "utf8");
+    // A custom models.json: a persona-less relayed (judge/extraction) turn
+    // pins --provider/--model and needs no auth.json, but a host may define
+    // its judge routing through a custom provider — the ephemeral dir is
+    // seeded with the legacy local config (round-7, Robbie non-blocking 2),
+    // and the turn must SEED it without touching the legacy source.
+    await writeFile(
+      join(legacy, "models.json"),
+      JSON.stringify({ "custom-provider": { baseUrl: "https://custom.example" } }, null, 2) + "\n",
+    );
+    const legacyModelsBytes = await readFile(join(legacy, "models.json"), "utf8");
+    const judgeTmp = join(workdir, "judge-tmp");
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-judge-relayed";
+    try {
+      // A persona-less relayed turn — exactly what threatJudge.ts and
+      // durableFacts.ts send (no persona in the HarnessRequest).
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(
+            newRequest({ tmpBaseDir: judgeTmp }),
+          ),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(out).toContain("resolved=sk-judge-relayed");
+      // The judge turn SAW the legacy custom models.json (seeded into the
+      // ephemeral dir) but never inherited auth.json from it.
+      expect(out).toContain('models={"custom-provider":{"baseUrl":"https://custom.example"}}');
+      // The ephemeral agent dir was created 0700 (umask-masked), not with
+      // the process umask — a group-writable dir would let another local
+      // user substitute files in it (round-7, Kai: include the async
+      // ephemeral creation site).
+      expect(out).toContain("agentmode=700");
+      // The legacy migration source is BYTE-IDENTICAL afterwards ...
+      expect(await readFile(join(legacy, "auth.json"), "utf8")).toBe(legacyBytes);
+      expect(await readFile(join(legacy, "models.json"), "utf8")).toBe(legacyModelsBytes);
+      // ... and the ephemeral agent dir went with the turn's temp dir.
+      expect(existsSync(judgeTmp)).toBe(true); // the tmp base survives
+      expect((await readdir(judgeTmp)).length).toBe(0); // the turn's dir (pi-agent inside) is gone
+      // A later persona's FIRST scoped turn still absorbs the legacy key.
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      const later = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", useLocalConfig: true } }).invoke(
+            newRequest({ persona: "persona-d" }),
+          ),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(later).toContain("resolved=sk-legacy-shared");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("persona-scoped useLocalConfig turn keeps the LEGACY local model config after migration (round-5, Kai)", async () => {
+    // Kai's round-5 blocker: moving PI_CODING_AGENT_DIR per persona moves ALL
+    // of pi's local config. Absorbing only auth.json would keep the
+    // credential but silently drop settings.json (default model/provider),
+    // models.json (custom providers/models) and models-store.json — a
+    // pre-upgrade `useLocalConfig` persona would run on pi's defaults. The
+    // absorb must carry the local-config files verbatim, and the turn must
+    // prove the child actually SEES them.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-local-config-migration-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const legacy = join(workdir, "xdg", "pi-native", "agent");
+    await mkdir(legacy, { recursive: true });
+    await writeFile(
+      join(legacy, "auth.json"),
+      JSON.stringify({ openrouter: { type: "api_key", key: "sk-legacy-shared" } }) + "\n",
+    );
+    const settings = JSON.stringify({ defaultProvider: "openrouter", defaultModel: "legacy-model" });
+    await writeFile(join(legacy, "settings.json"), settings);
+    await writeFile(join(legacy, "models.json"), JSON.stringify({ "custom/pipe-model": { "reasoning": true } }));
+    process.env.FAKE_PI_MODE = "env";
+    try {
+      const out = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", useLocalConfig: true } }).invoke(
+            newRequest({ persona: "persona-c" }),
+          ),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      // The tier-2 turn resolves the absorbed credential AND the same
+      // provider/model the operator chose pre-upgrade.
+      expect(out).toContain("resolved=sk-legacy-shared");
+      expect(out).toContain(`settings=${settings}`);
+      expect(out).toContain(`models={"custom/pipe-model":{"reasoning":true}}`);
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("a provider missing from the catalog falls back to the legacy --api-key argv flag", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-exotic-key";
+    try {
+      const chunks = await collect(
+        new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "some-live-only-provider", primaryModel: "model-a" } }).invoke(newRequest()),
+      );
+      const argv = chunks
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(argv).toContain("--api-key sk-exotic-key");
     } finally {
       delete process.env.PHANTOMBOT_PI_API_KEY;
     }
   });
 
   test("a named Pi instance reads only its instance-specific API key", async () => {
-    process.env.FAKE_PI_MODE = "argv";
+    process.env.FAKE_PI_MODE = "env";
     process.env.PHANTOMBOT_PI_API_KEY = "legacy-wrong-key";
     process.env.PHANTOMBOT_PI_API_KEY_PI_PRIMARY = "primary-right-key";
     try {
-      const chunks = await collect(
-        new PiHarness({
-          bin: FAKE_PI,
-          mode: "native",
-          command: [FAKE_PI],
-          id: "pi-primary",
-          apiKeyEnv: "PHANTOMBOT_PI_API_KEY_PI_PRIMARY",
-          routing: { provider: "openrouter", primaryModel: "model-a" },
-        }).invoke(newRequest()),
-      );
-      const argv = chunks
+      const out = (
+        await collect(
+          new PiHarness({
+            bin: FAKE_PI,
+            mode: "native",
+            command: [FAKE_PI],
+            id: "pi-primary",
+            apiKeyEnv: "PHANTOMBOT_PI_API_KEY_PI_PRIMARY",
+            routing: { provider: "openrouter", primaryModel: "model-a" },
+          }).invoke(newRequest()),
+        )
+      )
         .filter((c) => c.type === "text")
         .map((c) => (c as { text: string }).text)
         .join("");
-      expect(argv).toContain("--api-key primary-right-key");
-      expect(argv).not.toContain("legacy-wrong-key");
+      // The native env var must carry ONLY the instance's own key — the legacy
+      // ambient value must never reach the child (#602: env is the relay).
+      expect(out).toContain("native=OPENROUTER_API_KEY=primary-right-key");
+      expect(out).not.toContain("legacy-wrong-key");
     } finally {
       delete process.env.PHANTOMBOT_PI_API_KEY;
       delete process.env.PHANTOMBOT_PI_API_KEY_PI_PRIMARY;
@@ -922,6 +1535,10 @@ describe("PiHarness routing (subprocess)", () => {
   });
 
   test("no PHANTOMBOT_PI_API_KEY → no --api-key flag (Pi falls back to its own store)", async () => {
+    // Native + provider + no key fails LOUDLY before spawn (asserted below), so
+    // the keyless-spawn path here is the providerless/native-legacy one: no
+    // native var is named, no flag is passed, and Pi reads its own env/store —
+    // the documented tier-2 fallback.
     process.env.FAKE_PI_MODE = "argv";
     delete process.env.PHANTOMBOT_PI_API_KEY;
     const chunks = await collect(mkHarness().invoke(newRequest()));
@@ -1367,6 +1984,72 @@ describe("PiHarness native vs pi-host (subprocess)", () => {
       expect(argv).toContain("--model gpt-5.2");
     } finally {
       restore();
+    }
+  });
+
+  test("native hands the managed capability-routing extension to pi via --extension (PR #606 round-4)", async () => {
+    // The agent dir is PERSONA-scoped, so pi's agentDir/extensions discovery
+    // sees nothing — the extension is stamped ONCE at the host level and must
+    // be handed to the child explicitly, or look_at_image silently vanishes
+    // for every native persona.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-managed-ext-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const managed = join(
+      workdir,
+      "xdg",
+      "pi-native",
+      "agent",
+      "extensions",
+      "capability-routing",
+    );
+    await mkdir(managed, { recursive: true });
+    await writeFile(join(managed, "index.ts"), "// managed stub\n");
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test";
+    try {
+      const chunks = await collect(
+        new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(
+          newRequest({ persona: "persona-a" }),
+        ),
+      );
+      const argv = chunks
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(argv).toContain(`--extension ${managed}`);
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("native with NO stamped managed extension passes no --extension flag", async () => {
+    // An unstamped install (no image model) has nothing to load — matching
+    // the old discovery semantics, and never an error for a missing path.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-no-ext-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test";
+    try {
+      const chunks = await collect(
+        new PiHarness({ bin: FAKE_PI, mode: "native", command: [FAKE_PI], routing: { provider: "openrouter", primaryModel: "model-a" } }).invoke(
+          newRequest({ persona: "persona-a" }),
+        ),
+      );
+      const argv = chunks
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(argv).not.toContain("--extension");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
     }
   });
 });
