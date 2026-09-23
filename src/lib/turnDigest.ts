@@ -46,6 +46,7 @@
  * and no injection — i.e. the pre-#405 behaviour, never a crash.
  */
 
+import { hostLocationEnv } from "./engineScope.ts";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -166,7 +167,7 @@ export function digestEnabled(): boolean {
 
 export function defaultDigestDir(): string {
   return (
-    process.env.PHANTOMBOT_TURN_DIGEST_DIR ??
+    hostLocationEnv("PHANTOMBOT_TURN_DIGEST_DIR") ??
     join(xdgStateHome(), "phantombot", "digests")
   );
 }

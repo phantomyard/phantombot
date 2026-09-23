@@ -64,6 +64,7 @@ import {
   DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS,
 } from "./lib/decisionModelJudge.ts";
 import { DECISION_MODEL_ROUTER_DEFAULT_TIMEOUT_MS } from "./lib/decisionModelRouter.ts";
+import { currentEngineScope, hostLocationEnv } from "./lib/engineScope.ts";
 
 /**
  * Read the legacy `turn_timeout_s` (TOML) or `PHANTOMBOT_TURN_TIMEOUT_MS`
@@ -1045,17 +1046,25 @@ export const DEFAULT_P2P: P2PSettings = {
  * take precedence everywhere, so an explicit override remains the escape hatch.
  */
 export function xdgConfigHome(): string {
+  const scope = currentEngineScope();
+  if (scope) return scope.configHome;
   if (process.env.XDG_CONFIG_HOME) return process.env.XDG_CONFIG_HOME;
   return join(homedir(), ".config");
 }
 export function xdgDataHome(): string {
+  const scope = currentEngineScope();
+  if (scope) return scope.dataHome;
   if (process.env.XDG_DATA_HOME) return process.env.XDG_DATA_HOME;
   return join(homedir(), ".local", "share");
 }
 export function xdgStateHome(): string {
+  const scope = currentEngineScope();
+  if (scope) return scope.stateHome;
   if (process.env.XDG_STATE_HOME) return process.env.XDG_STATE_HOME;
   return join(homedir(), ".local", "state");
 }
+
+export { hostLocationEnv } from "./lib/engineScope.ts";
 
 const DEFAULT_HARNESS_CHAIN = ["claude"] as const;
 
@@ -1198,7 +1207,7 @@ function statesTelegramAccount(table: TomlObject | undefined): boolean {
  */
 export async function loadConfig(persona?: string): Promise<Config> {
   const configPath =
-    process.env.PHANTOMBOT_CONFIG ??
+    hostLocationEnv("PHANTOMBOT_CONFIG") ??
     join(xdgConfigHome(), "phantombot", "config.toml");
 
   const globalToml = await tryReadToml(configPath);
@@ -1211,12 +1220,12 @@ export async function loadConfig(persona?: string): Promise<Config> {
   // they are what tells us which persona file to read, so they cannot
   // themselves come from it.
   const personasDir =
-    process.env.PHANTOMBOT_PERSONAS_DIR ??
+    hostLocationEnv("PHANTOMBOT_PERSONAS_DIR") ??
     asString(globalToml.personas_dir) ??
     join(dataDir, "personas");
   const personaLayer =
     persona ??
-    process.env.PHANTOMBOT_DEFAULT_PERSONA ??
+    hostLocationEnv("PHANTOMBOT_DEFAULT_PERSONA") ??
     state.default_persona ??
     asString(globalToml.default_persona) ??
     "phantom";
@@ -1235,7 +1244,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
   const personaToml = stripHostOnlyKeys(rawPersonaToml);
   const isDefaultPersona =
     personaLayer ===
-    (process.env.PHANTOMBOT_DEFAULT_PERSONA ??
+    (hostLocationEnv("PHANTOMBOT_DEFAULT_PERSONA") ??
       state.default_persona ??
       asString(globalToml.default_persona) ??
       "phantom");
@@ -1523,7 +1532,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
 
   return {
     defaultPersona:
-      process.env.PHANTOMBOT_DEFAULT_PERSONA ??
+      hostLocationEnv("PHANTOMBOT_DEFAULT_PERSONA") ??
       state.default_persona ??
       asString(globalToml.default_persona) ??
       "phantom",
@@ -1588,7 +1597,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
     personasDir,
 
     memoryDbPath:
-      process.env.PHANTOMBOT_MEMORY_DB ??
+      hostLocationEnv("PHANTOMBOT_MEMORY_DB") ??
       asString(globalToml.memory_db) ??
       join(dataDir, "memory.sqlite"),
 
@@ -3208,7 +3217,7 @@ export async function configOwnedEnvMirrorSetting(
   const key = `harnesses.${path.join(".")}`;
   const files = [
     join(personaDirPath, "config.toml"),
-    process.env.PHANTOMBOT_CONFIG ??
+    hostLocationEnv("PHANTOMBOT_CONFIG") ??
       join(xdgConfigHome(), "phantombot", "config.toml"),
   ];
   for (const file of files) {

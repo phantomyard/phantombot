@@ -32,11 +32,13 @@ import { sha256 } from "@noble/hashes/sha2.js";
 
 import {
   configOwnedEnvMirrorSetting,
+  hostLocationEnv,
   isConfigOwnedEnvMirror,
   isRoutingEnvName,
   loadConfig,
   personaDir as resolvePersonaDir,
   type Config,
+  xdgConfigHome,
 } from "../config.ts";
 import { log } from "./logger.ts";
 import {
@@ -574,15 +576,25 @@ export async function loadVaultIntoEnv(
  * service), so cache it for the hot per-spawn reload path rather than re-reading
  * config.toml + state.json on every turn.
  */
-let _cachedConfig: Config | undefined;
+//
+// Keyed by the config home: an embedding application's engine scope
+// (src/engine/) resolves a different root than the daemon, and a single slot
+// would hand one root's persona dirs to another. Outside a scope there is
+// exactly one key, so the daemon's behaviour is unchanged.
+const _cachedConfigs = new Map<string, Config>();
 async function cachedConfig(): Promise<Config> {
-  if (!_cachedConfig) _cachedConfig = await loadConfig();
-  return _cachedConfig;
+  const key = `${xdgConfigHome()}\0${hostLocationEnv("PHANTOMBOT_CONFIG") ?? ""}`;
+  let config = _cachedConfigs.get(key);
+  if (!config) {
+    config = await loadConfig();
+    _cachedConfigs.set(key, config);
+  }
+  return config;
 }
 
 /** For tests: drop the cached config so a fresh one is loaded next call. */
 export function _resetConfigCacheForTesting(): void {
-  _cachedConfig = undefined;
+  _cachedConfigs.clear();
 }
 
 /**

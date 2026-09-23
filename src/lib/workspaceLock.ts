@@ -62,6 +62,7 @@
  * succeeds and every query reports unheld, which is the pre-#405 behaviour.
  */
 
+import { hostLocationEnv } from "./engineScope.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdirSync,
@@ -148,7 +149,7 @@ export function locksEnabled(): boolean {
 
 export function defaultLockDir(): string {
   return (
-    process.env.PHANTOMBOT_WORKSPACE_LOCK_DIR ??
+    hostLocationEnv("PHANTOMBOT_WORKSPACE_LOCK_DIR") ??
     join(xdgStateHome(), "phantombot", "workspaces")
   );
 }

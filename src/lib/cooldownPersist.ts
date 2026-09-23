@@ -21,6 +21,7 @@
  * keeps a high-frequency write off the file whose corruption bricks startup.
  */
 
+import { hostLocationEnv } from "./engineScope.ts";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { xdgDataHome } from "../config.ts";
@@ -30,7 +31,7 @@ import type { CooldownPersistence, HarnessCooldownState } from "./cooldown.ts";
 
 export function cooldownPath(): string {
   return (
-    process.env.PHANTOMBOT_COOLDOWN_STATE ??
+    hostLocationEnv("PHANTOMBOT_COOLDOWN_STATE") ??
     join(xdgDataHome(), "phantombot", "harness-cooldown.json")
   );
 }

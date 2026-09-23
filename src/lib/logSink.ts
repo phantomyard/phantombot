@@ -17,6 +17,8 @@
  * writers to one terminal is the bug being fixed here, not a feature.
  */
 
+import { currentEngineScope } from "./engineScope.ts";
+
 export type LogSink = (line: string) => void;
 
 const defaultSink: LogSink = (line) => {
@@ -36,6 +38,14 @@ export function setLogSink(sink: LogSink): () => void {
 
 /** Route one already-formatted, already-redacted line. */
 export function writeLogLine(line: string): void {
+  // An embedding application's engine scope (src/engine/) routes its lines
+  // to the sink it chose. Outside a scope — the CLI, the daemon, the TUI —
+  // this is the process-wide sink exactly as before.
+  const scoped = currentEngineScope()?.logSink;
+  if (scoped) {
+    scoped(line);
+    return;
+  }
   current(line);
 }
 

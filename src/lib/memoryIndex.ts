@@ -109,6 +109,9 @@ export function classifyConversationAudience(
  * narrowest classification, so an unclassifiable turn is the least likely to
  * surface somewhere it should not.
  */
+/** Conversation keys of an embedding application (see `src/engine/`). */
+export const APP_CONVERSATION_PREFIX = "app:";
+
 export function turnAudience(conversation: string): TurnAudience {
   return classifyConversationAudience(conversation) ?? "private";
 }
@@ -128,6 +131,14 @@ export function turnAudience(conversation: string): TurnAudience {
 export function roomAudience(conversation: string): TurnAudience {
   const known = classifyConversationAudience(conversation);
   if (known) return known;
+  // An embedding application's conversation (src/engine/, `app:*`) is
+  // deliberately NOT in the classifier: its turns must stamp `private` (they
+  // belong to one end user and must never surface in anyone else's room)
+  // while its room must read `multi-party` (the application's users are third
+  // parties, so the persona's private memories stay out). That is exactly the
+  // unknown-shape asymmetry, so it takes the same defaults — minus the warning,
+  // since this shape is known and intended.
+  if (conversation.startsWith(APP_CONVERSATION_PREFIX)) return "multi-party";
   if (!warnedUnknownRooms.has(conversation)) {
     warnedUnknownRooms.add(conversation);
     log.warn(

@@ -239,6 +239,25 @@ describe("decisionModelDecide", () => {
     }
   });
 
+  it("names a gateway-firewall block instead of logging HTML (observed live on OpenRouter)", async () => {
+    const html = '<!DOCTYPE html>\n<!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]-->';
+    for (const body of [
+      JSON.stringify({ error: { message: `HTTP 403: ${html}` } }), // OpenRouter envelope
+      html, // bare Cloudflare page
+    ]) {
+      const r = await decisionModelDecide({
+        ...BASE,
+        fetchImpl: async () => new Response(body, { status: 403 }),
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error).toContain("http 403");
+        expect(r.error).toContain("web firewall");
+        expect(r.error).not.toContain("<");
+      }
+    }
+  });
+
   it("maps a network failure to { ok: false }", async () => {
     const r = await decisionModelDecide({
       ...BASE,

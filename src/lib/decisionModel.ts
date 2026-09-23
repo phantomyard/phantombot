@@ -299,6 +299,22 @@ export async function decisionModelDecide(
 
   const text = await res.text().catch(() => "");
   if (!res.ok) {
+    // A gateway firewall (Cloudflare in front of OpenRouter) answers with an
+    // HTML page — sometimes wrapped in OpenRouter's JSON error envelope. It
+    // blocks request BODIES that match attack signatures (e.g. a
+    // `curl … | sh` line), which for the threat judge is exactly the content
+    // it exists to see. Say so instead of logging the first 200 characters
+    // of markup; the caller's fallback (harness judge / keyword scorer) is
+    // unchanged.
+    if (/<!DOCTYPE html|<html[\s>]/i.test(text)) {
+      return {
+        ok: false,
+        error:
+          `jev http ${res.status}: blocked by the provider's web firewall (HTML error page) — ` +
+          "the request content likely matched an attack signature",
+        latencyMs: latencyMs(),
+      };
+    }
     const detail = text.replace(/\s+/g, " ").trim().slice(0, 200);
     return {
       ok: false,

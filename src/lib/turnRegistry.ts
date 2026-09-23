@@ -60,6 +60,7 @@
  * behaviour, so the kill switch degrades to the old bug and never to a crash.
  */
 
+import { hostLocationEnv } from "./engineScope.ts";
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
@@ -187,7 +188,7 @@ export function registryEnabled(): boolean {
  */
 export function defaultRegistryDir(): string {
   return (
-    process.env.PHANTOMBOT_TURN_REGISTRY_DIR ??
+    hostLocationEnv("PHANTOMBOT_TURN_REGISTRY_DIR") ??
     join(xdgStateHome(), "phantombot", "turns")
   );
 }

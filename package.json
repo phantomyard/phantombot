@@ -8,11 +8,20 @@
   "bin": {
     "phantombot": "src/index.ts"
   },
+  "exports": {
+    ".": "./src/index.ts",
+    "./engine": {
+      "types": "./types/engine/index.d.ts",
+      "default": "./src/engine/index.ts"
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "start": "bun src/index.ts",
     "dev": "bun --watch src/index.ts",
     "test": "bun test",
     "typecheck": "bun tsc --noEmit",
+    "build:engine-types": "bun scripts/buildEngineTypes.ts",
     "gen:pi-extension": "bun scripts/genPiExtensionAssets.ts",
     "gen:vscode-vsix": "bun scripts/genVscodeVsix.ts",
     "build": "bun run build:x64",

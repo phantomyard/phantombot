@@ -27,6 +27,7 @@
  *     conversation has no override; `/chattiness <on|off> default` writes it.
  */
 
+import { hostLocationEnv } from "./engineScope.ts";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { xdgStateHome } from "../config.ts";
@@ -80,7 +81,7 @@ type StoredOverrides = Record<string, StoredOverride>;
 
 export function chattinessStatePath(): string {
   return (
-    process.env.PHANTOMBOT_CHATTINESS_STATE ??
+    hostLocationEnv("PHANTOMBOT_CHATTINESS_STATE") ??
     join(xdgStateHome(), "phantombot", "chattiness-overrides.json")
   );
 }
