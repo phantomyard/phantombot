@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { refreshPersonaIndex } from "../src/lib/indexRefresh.ts";
@@ -59,6 +59,13 @@ describe("refreshPersonaIndex", () => {
     await writeFile(p, "x", "utf8");
     await refreshPersonaIndex({ config, personaDir, indexPath });
     await writeFile(p, "x and more", "utf8");
+    // Staleness is decided on mtime alone (refreshStale compares mtime_ms),
+    // and this whole test runs in about a millisecond, so the two writes can
+    // land on the same mtime tick and the change goes unseen. Move the mtime
+    // forward explicitly rather than sleeping: a real edit is never same-tick
+    // with the refresh that indexed the previous version.
+    const later = new Date(Date.now() + 2_000);
+    await utimes(p, later, later);
     expect(
       (await refreshPersonaIndex({ config, personaDir, indexPath })).indexed,
     ).toBe(1);
