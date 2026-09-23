@@ -23,11 +23,16 @@
  *   anything else (agent_start, agent_end, agent_settled,
  *     tool_execution_end, extension_*) → ignored
  *
- * Auth (per-turn, with local-store fallback): when PHANTOMBOT_PI_API_KEY is
- * set, phantombot threads it onto `--api-key` per turn (the same way it threads
- * `--model`) — never persisting it into Pi's own auth store. When it's UNSET,
- * phantombot passes no `--api-key` and Pi falls back to its own env / local
- * store settings, so an "install later, no key" or legacy install keeps working.
+ * Auth (per-turn, via env): when PHANTOMBOT_PI_API_KEY is set, phantombot
+ * relays the key to the child through the provider's NATIVE env var (e.g.
+ * OPENROUTER_API_KEY — resolved via PI_PROVIDER_CATALOG), never onto the
+ * command line: /proc/<pid>/cmdline is world-readable while environ is 0400
+ * (issue #602). It is still never persisted into Pi's own auth store. When
+ * the key is UNSET, phantombot actively clears the native var and Pi falls
+ * back to its own env / local store settings, so an "install later, no key"
+ * or legacy install keeps working. A provider missing from the catalog has
+ * no known native var — the key falls back to `--api-key` argv there (rare,
+ * live-only providers), with a logged warning.
  * `phantombot doctor` surfaces failure if neither path yields credentials.
  *
  * Provider: the configured routing provider is threaded onto `--provider` every
@@ -37,7 +42,9 @@
  * one provider, so a single `--provider` is correct even after a coding swap.
  */
 
-import { access, constants } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { access, constants, mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import type {
   Harness,
   HarnessChunk,
@@ -47,10 +54,12 @@ import type {
 import {
   ENV_PHANTOMBOT_TMP_DIR,
   ENV_PI_API_KEY,
+  ENV_PI_KEY_ENV,
   ENV_PI_PROVIDER,
   ENV_ROUTING_JSON,
   type PiRoutingConfig,
 } from "../lib/piRouting.ts";
+import { PI_PROVIDER_CATALOG } from "../lib/piModels.ts";
 import type { ParseEventResult } from "./reasoningReplay.ts";
 import { CODER_SWAP_MAX_ATTEMPTS, getCoderSwapOverride, resolveSwapModel, type SwapDecision } from "../lib/coderSwap.ts";
 import { decisionModelRoute } from "../lib/decisionModelRouter.ts";
@@ -78,7 +87,14 @@ import {
   embeddedPiCommand,
   ENV_PHANTOMBOT_PI_COMMAND,
 } from "../lib/embeddedPi.ts";
-import { nativeAgentEnv } from "../lib/nativeAgentDir.ts";
+import {
+  ensureNativeAgentDir,
+  ENV_PI_AGENT_DIR,
+  nativeAgentEnv,
+  nativeExtensionsDir,
+  seedEphemeralAgentConfig,
+} from "../lib/nativeAgentDir.ts";
+import { removePiApiKey } from "../lib/piAuthStore.ts";
 import type { WriteSink } from "../lib/io.ts";
 
 export const EXPECTED_PI_HEAP_MB = 2_048;
@@ -253,6 +269,24 @@ export class PiHarness implements Harness {
       "--offline",
       "--no-session",
     ];
+    // Managed capability-routing extension (PR #606 review): the agent dir is
+    // PERSONA-scoped (nativeAgentEnv above), but the extension is stamped ONCE
+    // at the host level (lib/piExtensionProvision.ts) — so hand it to pi
+    // explicitly via `--extension` instead of stamping a copy into every
+    // persona's dir. Without this the persona child would discover no
+    // extensions at all and look_at_image would silently vanish. Only when the
+    // stamp exists: an unstamped install (no image model) has nothing to load,
+    // matching the old discovery semantics. `-e` a DIRECTORY: pi discovers the
+    // package (index.ts) inside it.
+    if (this.config.mode === "native") {
+      const managedExtDir = join(
+        nativeExtensionsDir(xdgDataHome()),
+        "capability-routing",
+      );
+      if (existsSync(managedExtDir)) {
+        baseArgs.push("--extension", managedExtDir);
+      }
+    }
     // Capability routing: pin the orchestrator model. Without this `--model`
     // the saved primary is never honored — Pi falls back to its own default
     // and the routing config is silently inert. The delegate models reach the
@@ -397,24 +431,48 @@ export class PiHarness implements Harness {
     // choice that pairs with the saved models.
     const provider = routing?.provider;
 
+    // The provider's NATIVE env var — the one Pi itself resolves the key from
+    // when no runtime/stored credential exists (issue #602). Undefined for a
+    // provider missing from the catalog (rare, live-only): those fall back to
+    // the legacy `--api-key` argv flag below, with a logged warning.
+    const nativeKeyEnv = provider
+      ? PI_PROVIDER_CATALOG.find((p) => p.id === provider)?.envVar
+      : undefined;
+
     // Reconcile this persona's encrypted vault into the env BEFORE the Pi API
     // key is read below — the key is a vault secret post-migration. See claude.ts.
     await reloadVaultForPersona(req.persona);
 
-    // Per-turn Pi auth: thread the API key onto `--api-key` exactly the way the
-    // model is threaded onto `--model`. We do NOT persist it into Pi's own auth
-    // store — Phantomops owns key storage; this just relays whatever is in the
-    // env this turn. Three-tier fallback (see ENV_PI_API_KEY): key present ⇒
-    // pass it (wins); ABSENT ⇒ omit the flag so Pi falls back to its OWN env /
-    // local store settings (the "install later, no key" path keeps legacy
-    // installs working); neither ⇒ Pi errors as usual. Must precede the
-    // positional payload below.
+    // Per-turn Pi auth: relay the API key to the child via its PROVIDER-SCOPED
+    // env var (e.g. OPENROUTER_API_KEY) — exactly the var Pi reads when it has
+    // no runtime/stored credential. The key must NEVER travel on the command
+    // line: /proc/<pid>/cmdline is world-readable (0444) for the process's
+    // lifetime, so any local user could read the provider key; environ is 0400
+    // owner-only (issue #602). We do NOT persist it into Pi's own auth store —
+    // Phantomops owns key storage; this just relays whatever is in the env this
+    // turn. Three-tier fallback (see ENV_PI_API_KEY): key present ⇒ project it
+    // (wins over an ambient value, and natively scoped to the right provider);
+    // ABSENT ⇒ actively CLEAR the native var so no stale ambient value reaches
+    // Pi, which then falls back to its OWN env / local store settings (the
+    // "install later, no key" path keeps legacy installs working); neither ⇒
+    // Pi errors as usual.
+    // Precedence note: Pi prefers a STORED credential over env vars, and the
+    // native agent dir is PER-PERSONA (lib/nativeAgentDir.ts) — a wizard-written
+    // api_key entry there would outvote this relay and decide THIS persona's
+    // key even after a vault rotation (PR #606 review). So a relayed turn
+    // STRIPS the provider's entry from THIS persona's own store below (see the
+    // removePiApiKey call before spawn): while a key is relayed, env is the
+    // only resolution source. Tier-2 (no relayed key) keeps the entry —
+    // the documented "install later, no key" fallback stays usable. The store
+    // being persona-scoped is what makes the strip safe on a multi-persona
+    // host: a sibling's tier-2 fallback lives in the sibling's own store and
+    // is never touched by this persona's turns.
     // ...UNLESS this persona explicitly opted out of phantombot's routing
     // ("Use Pi's own config"). That opt-out has to cover the key as well as the
     // models: the key is read from the ambient env, which on a multi-persona
     // host is the HOST's key, so honouring it here would fire another persona's
-    // credential at a provider this persona never chose. Withholding the flag
-    // is what "Pi decides for itself" actually means.
+    // credential at a provider this persona never chose. Withholding (and
+    // clearing) the native var is what "Pi decides for itself" actually means.
     // A host pi (`pi-host`) never gets phantombot's key either: its owner
     // configured its auth, and the ambient key may belong to another persona.
     //
@@ -465,7 +523,15 @@ export class PiHarness implements Harness {
       if (req.toolsMode === "none") {
         argv.push("--no-tools");
       }
-      if (piApiKey) {
+      // Legacy fallback ONLY: a provider missing from PI_PROVIDER_CATALOG has no
+      // known native env var, so the key still has to travel on argv there.
+      // World-readable /proc cmdline exposure (issue #602) — keep this path rare.
+      if (piApiKey && !nativeKeyEnv) {
+        log.warn(
+          `${this.id}: provider '${provider ?? "(none)"}' is not in the provider catalog — ` +
+            "relaying the API key via the legacy --api-key argv flag (visible in /proc/<pid>/cmdline). " +
+            "Add the provider to PI_PROVIDER_CATALOG to close this.",
+        );
         argv.push("--api-key", piApiKey);
       }
       // Payload is the LAST positional arg (pi reads it from argv, not stdin).
@@ -482,8 +548,10 @@ export class PiHarness implements Harness {
     });
 
     // Relay THIS harness's provider + api-key into the child env so the bundled
-    // capability-routing extension threads them onto its OWN delegate children
-    // (look_at_image / coder) as `--provider`/`--api-key`. Delegate MODELS still
+    // capability-routing extension can relay them to its OWN delegate children
+    // (look_at_image / coder) — provider via `--provider`, key via the native
+    // env var named in ENV_PI_KEY_ENV, never onto delegate argv (#602). Delegate
+    // MODELS still
     // travel via the managed routing.json, but the auth PAIR is per-turn and
     // scoped to the active harness — projecting it here (rather than leaning on a
     // shared ambient env var) is what keeps a primary-Pi→OpenRouter /
@@ -507,6 +575,16 @@ export class PiHarness implements Harness {
     }
     childEnv[ENV_PI_PROVIDER] = provider ?? "";
     childEnv[ENV_PI_API_KEY] = piApiKey ?? "";
+    // The key itself travels via the provider's NATIVE env var (issue #602):
+    // set when both provider and key resolve, actively CLEARED otherwise so a
+    // stale ambient value (the host's own OPENROUTER_API_KEY etc.) can't leak
+    // into a subtree that didn't configure that provider. ENV_PI_KEY_ENV names
+    // the var for the capability-routing extension, which must relay the key to
+    // its OWN delegate children via env too — never onto their argv.
+    if (nativeKeyEnv) {
+      childEnv[nativeKeyEnv] = piApiKey ?? "";
+    }
+    childEnv[ENV_PI_KEY_ENV] = nativeKeyEnv ?? "";
     // Point the extension at THIS persona's delegate models (phantombot#441).
     // Delegate models still travel as a routing.json, NOT as env vars — that
     // contract is unchanged. What changes is WHICH routing.json: the managed
@@ -533,18 +611,121 @@ export class PiHarness implements Harness {
     // extension's delegates re-enter THIS engine rather than hunting for a
     // host pi. Host: blank the var so a host pi's delegates never inherit a
     // native invocation from an ambient environment.
+    // EPHEMERAL SCOPE (PR #606 round-5, Robbie): a RELAYED turn with NO
+    // persona (threat judge, durable-fact extraction — HarnessRequest.persona
+    // deliberately undefined) must never touch the LEGACY host-level store —
+    // that file is the read-only migration source every persona's first
+    // scoped turn absorbs from, and the strip below would empty it (and a
+    // legacy oauth entry would abort every judge/extraction turn host-wide).
+    // The turn carries its key in env, so it needs no stored credential at
+    // all: it gets a per-turn ephemeral agent dir under the harness temp dir,
+    // removed with the turn (temp.cleanup) and reaped by the tmp sweep on a
+    // crash. The strip below then no-ops against an empty store.
+    // It still gets the LEGACY local-config files seeded read-only
+    // (seedEphemeralAgentConfig, round-7 Robbie non-blocking 2): the turn
+    // pins --provider/--model explicitly, but a host may define its judge
+    // routing model through a custom models.json provider, and these turns
+    // ran on the legacy config pre-upgrade. auth.json is NEVER seeded — no
+    // stored credential on a relayed turn, ever.
+    const relayingKey = Boolean(piApiKey && nativeKeyEnv);
+    const ephemeralAgentDir =
+      this.config.mode === "native" && relayingKey && !req.persona
+        ? join(temp.dir, "pi-agent")
+        : undefined;
     if (this.config.mode === "native") {
       Object.assign(childEnv, embeddedPiChildEnv(xdgDataHome()));
       // ISOLATION: the embedded engine gets a phantombot-owned agent dir
-      // (auth.json, models-store.json, extensions). It never reads or writes
-      // the user's ~/.pi — that dependency broke Atlas when her owner deleted
-      // pi. Host mode: leave the var UNSET so the host pi keeps ~/.pi.
-      Object.assign(childEnv, nativeAgentEnv(xdgDataHome()));
+      // (auth.json, models-store.json) — PER-PERSONA (lib/nativeAgentDir.ts),
+      // so one persona's stored credential can never decide another persona's
+      // turns (PR #606 review). It never reads or writes the user's ~/.pi —
+      // that dependency broke Atlas when her owner deleted pi. Host mode:
+      // leave the var UNSET so the host pi keeps ~/.pi.
+      if (ephemeralAgentDir) {
+        // Explicit 0700 (umask-masked): the dir can hold seeded config and the
+        // store pi writes; group-writable would let another local user
+        // substitute files in it (round-7, Kai).
+        await mkdir(ephemeralAgentDir, { recursive: true, mode: 0o700 });
+        seedEphemeralAgentConfig(ephemeralAgentDir, xdgDataHome());
+        childEnv[ENV_PI_AGENT_DIR] = ephemeralAgentDir;
+      } else {
+        // absorbAuth: false on RELAYED turns (round-7, Robbie/Kai): this
+        // turn's strip (below) empties the relayed provider's entry, so an
+        // auth absorb HERE would consume the legacy credential and the strip
+        // would delete the migration marker the same turn. The issue-#609
+        // marker makes the loss recoverable, but the skip keeps relayed
+        // turns from write+strip churn — config files still absorb (no strip
+        // touches those); the first genuinely tier-2 turn does the auth
+        // migration intact.
+        Object.assign(
+          childEnv,
+          nativeAgentEnv(xdgDataHome(), req.persona, {
+            absorbAuth: !relayingKey,
+          }),
+        );
+      }
       if (this.config.command) {
         childEnv[ENV_PHANTOMBOT_PI_COMMAND] = JSON.stringify(this.config.command);
       }
     } else {
       childEnv[ENV_PHANTOMBOT_PI_COMMAND] = "";
+    }
+
+    // STRIP (PR #606 review): on a RELAYED turn, remove the provider's api_key
+    // entry from THIS PERSONA'S native auth store BEFORE spawn so Pi's
+    // store-first precedence can't resurrect a stale key — env is the only
+    // source while we relay. Coupled to the relay, not to native mode: no
+    // relayed key ⇒ no strip (tier-2 fallback stays usable). Persona-scoped
+    // (lib/nativeAgentDir.ts): the strip can only ever touch THIS persona's
+    // own store — a sibling's tier-2 fallback or oauth login is unreachable
+    // here. agentDir-targeted only, so the host's ~/.pi is unreachable too.
+    // A persona-less relayed turn strips its own EPHEMERAL dir instead (an
+    // empty store: a clean no-op), so the LEGACY migration source is never
+    // written by anything (PR #606 round-5, Robbie).
+    //
+    // FAIL-CLOSED (PR #606 re-review, Kai): a relayed turn must never spawn
+    // while ANY stored credential of ITS OWN could still outrank the relayed
+    // env key — Pi resolves any store entry, api_key AND oauth login, ahead of
+    // env vars, so a survivor means the turn may silently authenticate as the
+    // wrong credential.
+    //   - Strip failed (locked file, unparseable JSON, IO error) → ABORT this
+    //     turn: throw, which the orchestrator converts into the standard
+    //     fall-through + cooldown + alerter path. Same contract as the
+    //     loud no-key throw above.
+    //   - OAuth entry present → ABORT too. phantombot never deletes an
+    //     interactive login; the error tells the operator how to clear it.
+    //     Persona-scoped, this is self-inflicted only: one persona's own oauth
+    //     login aborts ITS relayed turns and nobody else's.
+    // No relayed key ⇒ no strip (tier-2 fallback stays usable, oauth and all).
+    if (piApiKey && nativeKeyEnv) {
+      const strip = await removePiApiKey(provider as string, {
+        // Ephemeral scope for persona-less relayed turns (above): the strip
+        // no-ops there and the legacy migration source is never touched.
+        // absorbAuth: false — this ensure() runs on a RELAYED turn, and an
+        // auth absorb here would be consumed by this same turn's strip
+        // (round-7, Robbie/Kai). The issue-#609 marker makes that loss
+        // recoverable, but the skip keeps relayed turns from write+strip
+        // churn.
+        agentDir:
+          ephemeralAgentDir ??
+          ensureNativeAgentDir(xdgDataHome(), req.persona, { absorbAuth: false }),
+      });
+      if (!strip.ok) {
+        throw new Error(
+          `${this.id}: relayed turn aborted — could not remove the stored ` +
+            `'${provider}' credential from the native auth store ` +
+            `(${strip.reason}). Pi resolves a stored credential AHEAD of the ` +
+            `relayed env key, so spawning now could authenticate as the wrong ` +
+            `key. Fix the store (or clear the entry) and retry; nothing was spawned.`,
+        );
+      }
+      if (strip.skipped === "oauth-present") {
+        throw new Error(
+          `${this.id}: relayed turn aborted — the native auth store holds an ` +
+            `oauth login for '${provider}', which outranks the relayed env key. ` +
+            `phantombot never deletes an interactive login: clear it from the ` +
+            `native store (or re-onboard this persona) and retry; nothing was spawned.`,
+        );
+      }
     }
 
     /**

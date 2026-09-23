@@ -63,14 +63,18 @@ const DELEGATE_IDLE_TIMEOUT_MS = 240_000;
  * these into THIS process's environment when it spawns us, scoped to whichever
  * pi harness is running this turn — so a box with a primary Pi→OpenRouter and a
  * fallback Pi→OpenAI never collides two providers in one namespace: each pi
- * subtree carries exactly its own pair. We thread them onto the delegate child
- * as `--provider`/`--api-key` flags (see spawnPi.ts) rather than leaning on
- * ambient env, so the bare child can't guess the wrong provider. Blank ⇒
- * undefined (the flag is omitted and Pi uses its own default/local store).
+ * subtree carries exactly its own pair. The provider is threaded onto the
+ * delegate child as `--provider`; the api-key travels via ENV — the parent
+ * names the provider's native var in PHANTOMBOT_PI_KEY_ENV, this process
+ * already holds it, and the delegate spawn spreads process.env, so it flows
+ * down without ever touching argv (issue #602: cmdline is world-readable).
+ * Blank ⇒ undefined (nothing is threaded and Pi uses its own default/local
+ * store).
  *
  * The extension is dependency-free and cannot import src/lib/piRouting.ts, so
  * the env-var names are duplicated here as string literals; keep them in sync
- * with ENV_PI_PROVIDER / ENV_PI_API_KEY in src/lib/piRouting.ts.
+ * with ENV_PI_PROVIDER / ENV_PI_API_KEY / ENV_PI_KEY_ENV in
+ * src/lib/piRouting.ts.
  */
 function piAuthFromEnv(): { provider?: string; apiKey?: string } {
   const provider = process.env.PHANTOMBOT_PI_PROVIDER?.trim();

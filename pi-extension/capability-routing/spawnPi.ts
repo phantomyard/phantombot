@@ -87,10 +87,13 @@ export interface DelegateOptions {
    */
   provider?: string;
   /**
-   * Per-turn Pi api-key, threaded onto `--api-key` exactly like the model is
-   * threaded onto `--model` — never persisted into Pi's own auth store. Omit ⇒
-   * no `--api-key`, and Pi falls back to its own env / local-store settings
-   * (the "install later, no key" path). Pairs with `provider` above.
+   * Per-turn Pi api-key. When the parent harness named a native provider env
+   * var (PHANTOMBOT_PI_KEY_ENV — the normal path since issue #602), the key
+   * ALREADY travels via env (this process inherited it, and the delegate spawn
+   * spreads process.env), so it must NOT be threaded onto `--api-key` —
+   * /proc/<pid>/cmdline is world-readable. The argv flag is only the legacy
+   * fallback for providers with no known native var. Never persisted into Pi's
+   * own auth store either way. Pairs with `provider` above.
    */
   apiKey?: string;
   /** Comma-list passed to --tools. Omit/empty = pi's default tool set. */
@@ -321,6 +324,14 @@ export function delegateFailureText(kind: string, r: DelegateResult): string {
  * (e.g. OpenRouter) with no matching `--provider` is fired at the wrong endpoint
  * and auth fails. Either omitted ⇒ its flag is dropped and Pi falls back to its
  * own default / local store for that piece.
+ *
+ * The api-key travels via ENV, not argv (issue #602 — /proc/<pid>/cmdline is
+ * world-readable, environ is 0400): the parent harness sets the provider's
+ * native var (e.g. OPENROUTER_API_KEY) in this process and names it in
+ * PHANTOMBOT_PI_KEY_ENV; the delegate spawn spreads process.env, so the var
+ * flows down unchanged. Only when no native var was named (provider missing
+ * from the parent's catalog) does the key fall back to the legacy `--api-key`
+ * argv flag, matching the parent harness's own fallback.
  */
 export function buildDelegateBaseArgs(
   opts: Pick<DelegateOptions, "model" | "provider" | "apiKey" | "tools">,
@@ -329,7 +340,8 @@ export function buildDelegateBaseArgs(
   const provider = opts.provider?.trim();
   if (provider) args.push("--provider", provider);
   const apiKey = opts.apiKey?.trim();
-  if (apiKey) args.push("--api-key", apiKey);
+  const keyEnv = process.env.PHANTOMBOT_PI_KEY_ENV?.trim();
+  if (apiKey && !keyEnv) args.push("--api-key", apiKey);
   if (opts.tools && opts.tools.length > 0) args.push("--tools", opts.tools.join(","));
   return args;
 }

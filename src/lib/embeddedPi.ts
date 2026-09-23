@@ -46,7 +46,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ENV_PI_AGENT_DIR, nativeAgentDir } from "./nativeAgentDir.ts";
+import { ENV_PI_AGENT_DIR, nativeAgentEnv } from "./nativeAgentDir.ts";
 
 /** Hidden argv[2] that turns the phantombot binary into the pi CLI. */
 export const EMBEDDED_PI_SUBCOMMAND = "__pi";
@@ -285,10 +285,13 @@ export async function runEmbeddedPi(args: string[]): Promise<void> {
   // ISOLATION for hand-runs too: `phantombot __pi` IS the embedded engine, so
   // it gets the same phantombot-owned agent dir the harness gives it (the
   // harness sets this per-spawn; a hand-run would otherwise fall back to the
-  // user's ~/.pi). An explicit override wins.
+  // user's ~/.pi). An explicit override wins. PER-PERSONA (lib/nativeAgentDir.ts):
+  // a hand-run inside a persona's context (PHANTOMBOT_PERSONA set) resolves
+  // that persona's own store; a bare hand-run gets the legacy host-level dir.
   if (!process.env[ENV_PI_AGENT_DIR]) {
-    process.env[ENV_PI_AGENT_DIR] = nativeAgentDir();
-    mkdirSync(nativeAgentDir(), { recursive: true });
+    // nativeAgentEnv ensures (mkdir + legacy absorb) and returns the dir.
+    const persona = process.env.PHANTOMBOT_PERSONA;
+    process.env[ENV_PI_AGENT_DIR] = nativeAgentEnv(undefined, persona)[ENV_PI_AGENT_DIR];
   }
   // Pi reads process.argv in places besides the args it is handed; make it
   // look exactly like `pi <args>`.

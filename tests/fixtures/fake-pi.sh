@@ -80,7 +80,56 @@ case "$mode" in
     if [ -n "${PHANTOMBOT_ROUTING_JSON-}" ] && [ -f "${PHANTOMBOT_ROUTING_JSON}" ]; then
       routejson=$(tr -d '\n ' < "${PHANTOMBOT_ROUTING_JSON}" | sed 's/"/\\"/g')
     fi
-    joined="primary=${PHANTOMBOT_PRIMARY_MODEL-} image=${PHANTOMBOT_IMAGE_MODEL-} coding=${PHANTOMBOT_CODING_MODEL-} provider=${PHANTOMBOT_PI_PROVIDER-} apikey=${PHANTOMBOT_PI_API_KEY-} nodeopts=${NODE_OPTIONS-} routing=${routejson}"
+    joined="primary=${PHANTOMBOT_PRIMARY_MODEL-} image=${PHANTOMBOT_IMAGE_MODEL-} coding=${PHANTOMBOT_CODING_MODEL-} provider=${PHANTOMBOT_PI_PROVIDER-} apikey=${PHANTOMBOT_PI_API_KEY-} nodeopts=${NODE_OPTIONS-} routing=${routejson} keyenv=${PHANTOMBOT_PI_KEY_ENV-}"
+    # The provider's NATIVE key var (named by PHANTOMBOT_PI_KEY_ENV), echoed via
+    # indirect expansion so tests can assert the key relayed under it (#602).
+    if [ -n "${PHANTOMBOT_PI_KEY_ENV-}" ]; then
+      joined+=" native=${PHANTOMBOT_PI_KEY_ENV}=${!PHANTOMBOT_PI_KEY_ENV}"
+    fi
+    # RESOLUTION LAYER (PR #606 review): mimic real pi's precedence — a STORED
+    # credential in the agent dir's auth.json beats env vars — and report which
+    # key this child would ACTUALLY authenticate with. This is the assertion
+    # surface for the env-only-resolution contract: if the harness left the
+    # provider's entry in the persona's native store, `resolved=` shows the
+    # stale stored key, not the relayed one.
+    resolved=""
+    if [ -n "${PI_CODING_AGENT_DIR-}" ] && [ -f "${PI_CODING_AGENT_DIR}/auth.json" ] && [ -n "${PHANTOMBOT_PI_PROVIDER-}" ]; then
+      # Stored credential beats env — ANY stored credential: an api_key entry
+      # resolves its "key", an oauth login its "access" token (PR #606
+      # re-review: an oauth survivor outranks the relayed env key too).
+      stored=$(grep -A3 "\"${PHANTOMBOT_PI_PROVIDER}\"" "${PI_CODING_AGENT_DIR}/auth.json" \
+        | grep -o '"\(access\|key\)"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -1 | sed 's/.*:[[:space:]]*"//;s/"$//')
+      resolved="$stored"
+    fi
+    if [ -z "$resolved" ] && [ -n "${PHANTOMBOT_PI_KEY_ENV-}" ]; then
+      resolved="${!PHANTOMBOT_PI_KEY_ENV}"
+    fi
+    joined+=" resolved=${resolved}"
+    # LOCAL CONFIG (PR #606 round-5, Kai): pi resolves its default
+    # provider/model for `useLocalConfig` (tier-2) turns from the agent dir's
+    # settings.json — and custom providers/models from models.json /
+    # models-store.json. Echoing what this child ACTUALLY sees lets the
+    # upgrade regression prove a persona-scoped dir kept the legacy local
+    # config (a filtered auth.json alone would leave the persona running on
+    # pi's defaults instead of the operator's chosen model).
+    if [ -n "${PI_CODING_AGENT_DIR-}" ] && [ -f "${PI_CODING_AGENT_DIR}/settings.json" ]; then
+      settingsjson=$(tr -d '\n ' < "${PI_CODING_AGENT_DIR}/settings.json" | sed 's/"/\\"/g')
+      joined+=" settings=${settingsjson}"
+    fi
+    if [ -n "${PI_CODING_AGENT_DIR-}" ] && [ -f "${PI_CODING_AGENT_DIR}/models.json" ]; then
+      modelsjson=$(tr -d '\n ' < "${PI_CODING_AGENT_DIR}/models.json" | sed 's/"/\\"/g')
+      joined+=" models=${modelsjson}"
+    fi
+    # AGENT DIR MODE (PR #606 round-7, Kai): the agent dir holds credential
+    # and model-config files; a group-writable dir lets another local user
+    # unlink/substitute them even when the files are 0600. Echo the dir's
+    # mode so the ephemeral-dir regression (created 0700, umask-masked) can
+    # prove it at the harness boundary. `?` only on a stat-less platform.
+    if [ -n "${PI_CODING_AGENT_DIR-}" ] && [ -d "${PI_CODING_AGENT_DIR}" ]; then
+      agentmode=$(stat -c %a "${PI_CODING_AGENT_DIR}" 2>/dev/null || echo "?")
+      joined+=" agentmode=${agentmode}"
+    fi
     printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"env: ${joined}\",\"partial\":{}},\"message\":{}}"
     printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
     exit 0

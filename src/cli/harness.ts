@@ -562,7 +562,18 @@ async function configureNative(
   // scopes the key prompt label and the model pickers. Query the model catalog
   // once here: it yields the models the routing wizard will filter (and marks
   // which providers are already keyed), so we don't shell out twice.
-  let models = await listPiModels(piCommand, undefined, nativeAgentEnv());
+  // The listing runs against THIS persona's native agent dir (PR #606 review):
+  // relayed turns strip the provider's api_key entry from the persona's own
+  // store (the key travels via env instead), so on a relay-configured persona
+  // this FIRST listing can legitimately come back unkeyed — the provider
+  // picker loses its "already keyed" markers until the refresh below re-keys
+  // the store. That is cosmetic and self-healing; it is NOT a reason to read
+  // the shared/legacy store, which belongs to no single persona.
+  let models = await listPiModels(
+    piCommand,
+    undefined,
+    nativeAgentEnv(undefined, target.persona),
+  );
   // Read the EFFECTIVE routing for the persona being configured, not the raw
   // global file: with a persona layer the file on disk is only half the answer
   // (its own config.toml wins per key), and pre-selecting the host's models for
@@ -590,11 +601,11 @@ async function configureNative(
     });
     if (apiKey === undefined) return true;
     // Blank means "keep current" ONLY when the provider is unchanged. The
-    // api-key is provider-scoped (threaded onto `--api-key` alongside
-    // `--provider`), so a blank key after a provider switch/clear must DROP
-    // the stale key — otherwise the old provider's key is fired at the new
-    // `--provider` and auth fails. The decision is a pure, tested function;
-    // here we just enact it.
+    // api-key is provider-scoped (relayed per-turn via the provider's native
+    // env var alongside `--provider`), so a blank key after a provider
+    // switch/clear must DROP the stale key — otherwise the old provider's key
+    // is fired at the new `--provider` and auth fails. The decision is a pure,
+    // tested function; here we just enact it.
     keyWrite = resolvePiApiKeyWrite(apiKey, provider, currentRouting.provider);
     const candidate =
       keyWrite.action === "set"
@@ -662,11 +673,13 @@ async function configureNative(
     // rather than dead-ending.
     let refreshed: PiModel[] = [];
     if (provider) {
-      // Key the NATIVE engine's own auth store (the isolated agent dir) so the
-      // embedded `--list-models` sees the provider. NEVER the user's ~/.pi —
-      // native must not read or write the host pi's files (2026-09-13 Atlas).
+      // Key the NATIVE engine's auth store — THIS persona's own dir (PR #606
+      // review): the embedded `--list-models` then sees the provider, and the
+      // persona's relayed turns will strip exactly this entry before spawning
+      // (the key relays via env instead). NEVER the user's ~/.pi — native must
+      // not read or write the host pi's files (2026-09-13 Atlas).
       const authWrite = await writePiApiKey(provider, keyWrite.value, {
-        agentDir: nativeAgentDir(),
+        agentDir: nativeAgentDir(undefined, target.persona),
       });
       if (authWrite.ok && !authWrite.skipped) {
         q.note(
@@ -682,16 +695,23 @@ async function configureNative(
       }
       // Plain listing first whenever the store keys this provider — either we
       // just wrote the key, or an oauth login already did (skipped ⇒ the
-      // provider is keyed, so a plain listing is populated).
+      // provider is keyed, so a plain listing is populated). On a
+      // relay-configured persona the first listing (above) may have been
+      // unkeyed precisely because relayed turns strip this entry; the write
+      // just above is what re-keys it.
       if (authWrite.ok) {
-        refreshed = await listPiModels(piCommand, undefined, nativeAgentEnv());
+        refreshed = await listPiModels(
+          piCommand,
+          undefined,
+          nativeAgentEnv(undefined, target.persona),
+        );
       }
     }
     if (refreshed.length === 0) {
       const envVar = provider ? providerEnvVar(provider) : undefined;
       if (envVar) {
         refreshed = await listPiModels(piCommand, undefined, {
-          ...nativeAgentEnv(),
+          ...nativeAgentEnv(undefined, target.persona),
           [envVar]: keyWrite.value,
         });
       }
