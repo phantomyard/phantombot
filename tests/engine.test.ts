@@ -37,7 +37,8 @@ import { ENV_ENGINE_SCOPE, runInEngineScope } from "../src/lib/engineScope.ts";
 import { log } from "../src/lib/logger.ts";
 import { setLogSink } from "../src/lib/logSink.ts";
 import { roomAudience, turnAudience } from "../src/lib/memoryIndex.ts";
-import { harnessSpawnEnv, openPersonaVault } from "../src/lib/vault.ts";
+import { harnessSpawnEnv, openPersonaVault, vaultPath } from "../src/lib/vault.ts";
+import { Database } from "bun:sqlite";
 
 const FAKE_CODEX = resolve(import.meta.dir, "fixtures/fake-codex.sh");
 
@@ -1069,5 +1070,90 @@ describe("credentials", () => {
   test("outside a scope the spawn env IS process.env (the daemon is unchanged)", async () => {
     const env = await harnessSpawnEnv("no-such-persona");
     expect(env).toBe(process.env);
+  });
+
+  // PR #608 round 2 (Kai, confirmed by Robbie): the degraded path must fail
+  // CLOSED inside an engine. The daemon's tolerance — skip a row that will
+  // not decrypt, keep going on an unopenable vault — is the wrong-account
+  // substitution here, because the ambient value under that name is the
+  // application's, not the tenant's.
+  function personaScope(persona: string) {
+    return {
+      configHome: join(root, "config"),
+      dataHome: join(root, "data"),
+      stateHome: join(root, "state"),
+      persona,
+    };
+  }
+  function corruptRow(dir: string, name: string): void {
+    const db = new Database(vaultPath(dir));
+    db.prepare("UPDATE secrets SET ciphertext = ? WHERE name = ?").run(
+      Buffer.from(crypto.getRandomValues(new Uint8Array(48))),
+      name,
+    );
+    db.close();
+  }
+
+  test("an undecryptable row withholds BOTH the vault's and the application's value for that name", async () => {
+    setEnv("OPENAI_API_KEY", "HOST-APP-KEY");
+    const e = await openEngine();
+    const ana = await e.personas.create("ana");
+    await ana.secrets.set("OPENAI_API_KEY", "TENANT-VAULT-KEY");
+    await ana.secrets.set("OTHER_KEY", "still-fine");
+    const dir = join(root, "data", "phantombot", "personas", "ana");
+    corruptRow(dir, "OPENAI_API_KEY");
+
+    const env = await runInEngineScope(personaScope("ana"), () => harnessSpawnEnv(undefined));
+    expect(env.OPENAI_API_KEY).toBeUndefined(); // not HOST-APP-KEY
+    expect(env.OTHER_KEY).toBe("still-fine"); // the rest of the vault applies
+    expect(process.env.OPENAI_API_KEY).toBe("HOST-APP-KEY");
+  });
+
+  test("an unopenable vault, or a persona that does not exist, refuses the spawn", async () => {
+    setEnv("OPENAI_API_KEY", "HOST-APP-KEY");
+    const e = await openEngine();
+    const ana = await e.personas.create("ana");
+    await ana.secrets.set("OPENAI_API_KEY", "TENANT-VAULT-KEY");
+    const dir = join(root, "data", "phantombot", "personas", "ana");
+    writeFileSync(vaultPath(dir), "not a sqlite database");
+
+    await expect(
+      runInEngineScope(personaScope("ana"), () => harnessSpawnEnv(undefined)),
+    ).rejects.toThrow(/refusing to spawn/);
+    // A typo in a persona name is the same refusal, not the host's keys.
+    await expect(
+      runInEngineScope(personaScope("ana"), () => harnessSpawnEnv("anna")),
+    ).rejects.toThrow(/refusing to spawn/);
+    expect(process.env.OPENAI_API_KEY).toBe("HOST-APP-KEY");
+  });
+
+  test("through a REAL adapter, an unopenable vault fails the turn before anything is spawned", async () => {
+    if (process.platform === "win32") return;
+    chmodSync(FAKE_CODEX, 0o755);
+    _setHarnessFactoryForTesting(undefined);
+    mkdirSync(join(root, "config", "phantombot"), { recursive: true });
+    writeFileSync(
+      join(root, "config", "phantombot", "config.toml"),
+      `[harnesses.codex]\nbin = ${JSON.stringify(FAKE_CODEX)}\n`,
+    );
+    setEnv("OPENAI_API_KEY", "HOST-APP-KEY");
+    setEnv("FAKE_CODEX_MODE", "env");
+    setEnv("FAKE_CODEX_ECHO_VARS", "OPENAI_API_KEY");
+
+    const e = await openEngine();
+    const tenant = await e.personas.create("tenant");
+    await tenant.configure({ brain: { chain: ["codex"] } });
+    await tenant.secrets.set("OPENAI_API_KEY", "TENANT-VAULT-KEY");
+    const dir = join(root, "data", "phantombot", "personas", "tenant");
+    writeFileSync(vaultPath(dir), "not a sqlite database");
+
+    const err = await rejectsWith(
+      tenant.ask({ message: "hi", source: "principal", tools: "full" }),
+      "harness_failed",
+    );
+    expect(err.message).toContain("refusing to spawn");
+    // The fake child echoes its env when it runs; it never did.
+    expect(err.message).not.toContain("HOST-APP-KEY");
+    expect(logs.some((m) => m.includes("env: OPENAI_API_KEY"))).toBe(false);
   });
 });

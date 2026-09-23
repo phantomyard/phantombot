@@ -346,7 +346,7 @@ Every public failure is an `EngineError` with a stable `code`:
 | `persona_exists` | `create` found the name taken |
 | `invalid_argument` | a caller-supplied argument is invalid |
 | `not_configured` | no harness, no harness the turn or the threat screen can run tool-less, or no decision model |
-| `harness_failed` | every harness in the chain failed |
+| `harness_failed` | every harness in the chain failed, including a spawn refused because the persona's vault could not be read |
 | `cancelled` | the turn was cancelled |
 | `schema_invalid` | structured output never validated |
 | `held` | `askJson` on a held message |
@@ -404,3 +404,11 @@ on top. The child sees that copy; nothing is written back.
 - **Spawns made for a persona use its vault.** The threat judge and durable
   fact extraction invoke the harness without a persona identity; under an
   engine they still authenticate as the persona whose turn is running.
+- **A vault that cannot be read fails closed.** If the persona's vault cannot
+  be opened, or the persona directory does not exist, the spawn is refused
+  and the turn fails with `harness_failed` (the message names the persona);
+  the harness never runs with your process's credentials in the vault's
+  place. A single row that cannot be decrypted is withheld together with any
+  variable of the same name from your environment, and the rest of the vault
+  still applies. The daemon keeps its more tolerant rules; they are right on
+  an operator's own machine and wrong for a tenant.

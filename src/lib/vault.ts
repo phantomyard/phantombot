@@ -661,7 +661,24 @@ const _warnedShadowedSets = new Set<string>();
  *     default that has no vault under an engine root and leave the judge
  *     with no credential at all.
  *
- * Never throws: an unreadable vault degrades to the ambient copy.
+ *     Inside a scope the degraded path FAILS CLOSED (PR #608 round 2). The
+ *     daemon's tolerance — an unopenable vault keeps the already-injected
+ *     env, a row that will not decrypt is skipped and its neighbours load —
+ *     is right on an operator's own box and wrong for a tenant: the name
+ *     that fails is precisely the one whose ambient value must not stand in,
+ *     and "the vault could not be read" would otherwise mean "spawn with the
+ *     application's credentials", the wrong-account substitution this
+ *     function exists to prevent. So: a vault that cannot be opened (or a
+ *     persona directory that does not exist — a typo in a name) REFUSES the
+ *     spawn by throwing, which the chain surfaces as a failed harness and
+ *     never reaches `Bun.spawn`; and every row that fails to decrypt is
+ *     DELETED from the copy, so the child sees neither the vault's value nor
+ *     the application's for that name. The rest of the vault still applies.
+ *
+ * Outside a scope this never throws. Inside one it throws to REFUSE a spawn —
+ * the unreadable-vault case above, or any error resolving the persona — and
+ * always before anything is spawned; there is deliberately no catch that
+ * would turn such a failure back into the application's environment.
  */
 export async function harnessSpawnEnv(
   persona: string | undefined,
@@ -672,34 +689,42 @@ export async function harnessSpawnEnv(
     return process.env;
   }
   const env: NodeJS.ProcessEnv = { ...process.env };
-  try {
-    const config = await cachedConfig();
-    const name = persona || scopedPersona() || config.defaultPersona;
-    const dir = resolvePersonaDir(config, name);
-    const result = await readAllVaultValues(dir);
-    if (result === null) return env;
-    warnBadVaultKeys(result.badKeys);
-    const shadowed: string[] = [];
-    for (const [k, v] of result.values) {
-      if (env[k] !== undefined && env[k] !== v) shadowed.push(k);
-      env[k] = v;
+  // No try/catch here on purpose: a failure to resolve the persona or read
+  // its config is a thrown error, which refuses the spawn. A degradation
+  // branch that "returns env" would be exactly the fail-open this function
+  // must not have — and one nothing could prove, since readAllVaultValues
+  // already absorbs open/decrypt failures into null and badKeys.
+  const config = await cachedConfig();
+  const name = persona || scopedPersona() || config.defaultPersona;
+  const dir = resolvePersonaDir(config, name);
+  const result = await readAllVaultValues(dir);
+  if (result === null) {
+    throw new Error(
+      `vault: persona '${name}' has no readable vault (missing persona ` +
+        `directory, or the vault cannot be opened); refusing to spawn with the ` +
+        `application's credentials. Check the persona name and its identity/vault files.`,
+    );
+  }
+  warnBadVaultKeys(result.badKeys);
+  // A row that will not decrypt names a credential this persona OWNS; the
+  // ambient value under that name is somebody else's. Withhold both.
+  for (const k of result.badKeys) delete env[k];
+  const shadowed: string[] = [];
+  for (const [k, v] of result.values) {
+    if (env[k] !== undefined && env[k] !== v) shadowed.push(k);
+    env[k] = v;
+  }
+  if (shadowed.length > 0) {
+    const sorted = shadowed.sort();
+    const signature = `${dir}\0${sorted.join(" ")}`;
+    if (!_warnedShadowedSets.has(signature)) {
+      _warnedShadowedSets.add(signature);
+      log.warn(
+        `vault: persona '${name}' vault value overrides the application's ` +
+          `environment for ${sorted.join(", ")} (inside an engine the vault wins)`,
+        { persona: name, keys: sorted },
+      );
     }
-    if (shadowed.length > 0) {
-      const sorted = shadowed.sort();
-      const signature = `${dir}\0${sorted.join(" ")}`;
-      if (!_warnedShadowedSets.has(signature)) {
-        _warnedShadowedSets.add(signature);
-        log.warn(
-          `vault: persona '${name}' vault value overrides the application's ` +
-            `environment for ${sorted.join(", ")} (inside an engine the vault wins)`,
-          { persona: name, keys: sorted },
-        );
-      }
-    }
-  } catch (e) {
-    log.warn("vault: spawn env could not apply the persona vault", {
-      error: (e as Error).message,
-    });
   }
   return env;
 }

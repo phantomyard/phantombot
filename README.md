@@ -3208,8 +3208,9 @@ The embedded engine follows four rules:
   screen; a codex-only chain cannot take untrusted input.
 - **Credentials stay in the vault.** Keys go to the persona's encrypted vault.
   Each harness spawn gets a per-spawn environment with that vault applied, the
-  vault wins over the application's own variables, and `process.env` is never
-  written.
+  vault wins over the application's own variables, `process.env` is never
+  written, and a vault that cannot be read refuses the spawn rather than fall
+  back to the application's credentials.
 - **A stable surface.** Applications see `EngineEvent`, `TurnResult` and
   `EngineError`, never the internal types.
 
