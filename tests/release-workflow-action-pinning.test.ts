@@ -24,6 +24,7 @@ function collectUses(text: string): UseRef[] {
     const m = raw.match(/^\s*(?:-\s+)?uses:\s*(\S+)\s*(#.*)?$/);
     if (!m) return;
     const value = m[1];
+    if (value === undefined) return;
     // Local (./path) and docker:// references are not fetched from a mutable
     // upstream git ref, so they are out of scope for this rule.
     if (value.startsWith('./') || value.startsWith('docker://')) return;
