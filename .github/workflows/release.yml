@@ -134,7 +134,12 @@ jobs:
 
     steps:
       - name: Checkout pushed commit
-        uses: actions/checkout@v4
+        # Pinned to a reviewed commit sha, not a mutable major tag: this job
+        # later hands four eSigner secrets to the signing steps, and anything
+        # that runs before that point can alter the workspace, append to
+        # GITHUB_PATH/GITHUB_ENV, or leave a process behind to observe them.
+        # A moving @v4 is deletable and re-pushable at the same ref.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # github.sha on a push to main is the merge commit itself.
           ref: ${{ github.sha }}
@@ -161,7 +166,9 @@ jobs:
           echo "Resolved PR number='$NUMBER' title='$TITLE'"
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        # Pinned to a reviewed commit sha for the same reason as the checkout
+        # above — this runs on the credential path.
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           # Pinned to a major to keep releases reproducible. A point-release
           # regression in `bun --compile` would otherwise silently break
@@ -273,9 +280,9 @@ jobs:
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          # Cross-compiled from the Linux runner; Bun emits an unsigned PE
-          # (.exe). Windows SmartScreen may warn on first run for an
-          # unsigned binary - see release notes. --windows-hide-console is
+          # Cross-compiled from the Linux runner; Bun emits an UNSIGNED PE
+          # (.exe). It is Authenticode signed further down, before checksums
+          # are taken - see the signing block. --windows-hide-console is
           # NOT set: phantombot is a console agent and needs its stdio.
           bun build --compile --target=bun-windows-x64 \
             ./src/index.ts \
@@ -287,10 +294,246 @@ jobs:
         run: |
           # ARM64 Windows (e.g. Surface Pro X, Dev Kit). Bun's compile
           # target id is bun-windows-arm64; the emitted PE is Aarch64.
-          # Same unsigned/SmartScreen caveat as windows-x64.
+          # Signed alongside windows-x64 below, before checksums.
           bun build --compile --target=bun-windows-arm64 \
             ./src/index.ts \
             --outfile "dist/phantombot-${TAG}-windows-arm64.exe"
+
+      # ---------------------------------------------------------------
+      # Windows Authenticode signing (SSL.com eSigner, cloud HSM)
+      # ---------------------------------------------------------------
+      #
+      # WHY AT BUILD AND NOT AT PROMOTE: promote.yml never rebuilds. It flips
+      # an existing release to stable precisely so the bytes that soaked on
+      # the preview ring are the bytes stable installs, and it verifies the
+      # published SHA256SUMS before flipping. Signing at promote time would
+      # have to mutate already-published assets and regenerate those
+      # checksums, i.e. stable would ship something no one had run. So the
+      # signature is part of the build — which also means every prerelease is
+      # signed, and a preview host is exercising the exact artifact stable
+      # will later serve.
+      #
+      # ORDERING IS LOAD-BEARING: this runs BEFORE "Compute SHA256SUMS".
+      # Authenticode embeds the signature inside the PE, so signing changes
+      # the file's hash. Checksums taken first would describe a file that no
+      # longer exists and every `sha256sum -c SHA256SUMS` would fail.
+      #
+      # WHY A LINUX RUNNER CAN SIGN WINDOWS BINARIES: the private key never
+      # leaves SSL.com's cloud HSM (it is not downloadable — there is no .pfx
+      # to install). CodeSignTool is a Java client that uploads the digest and
+      # gets a signature back, so the host OS is irrelevant. That keeps the
+      # whole release on one runner, with the .exe files already on disk.
+      #
+      # WHY THE ACTION IS PINNED TO A COMMIT SHA: this step receives our
+      # signing credentials. A moving tag (or @develop, which the vendor's own
+      # README suggests) lets upstream change what executes here after review.
+      # The sha below is v1.3.2. Re-pin deliberately when upgrading.
+      #
+      # WHY THAT PIN IS NOT ENOUGH ON ITS OWN: the action sha freezes the
+      # action's code, not the code it RUNS. Its setup() downloads
+      # CodeSignTool-v1.3.0.zip from a GitHub *release asset* URL and executes
+      # the Java program inside it with no digest check, and release assets are
+      # mutable - they can be deleted and re-uploaded at the same URL. So the
+      # bytes that actually receive ES_PASSWORD and the TOTP seed were not
+      # pinned by the sha at all. The two steps below close that: we fetch the
+      # archive ourselves, check it against a reviewed SHA-256, and hand the
+      # action a pre-verified copy (setup() treats an existing
+      # CODESIGNTOOL_PATH as installed and skips its own download). Same
+      # reasoning for the JDK: left alone, the action fetches an Amazon
+      # Corretto build unverified, so we give it the runner's JDK instead.
+      #
+      # CREDENTIALS: ES_USERNAME / ES_PASSWORD are the SSL.com account,
+      # ES_CREDENTIAL_ID selects WHICH credential on that account to sign with
+      # (the account also holds a document-sealing "eSeal" credential which is
+      # marked default and would otherwise be picked), ES_TOTP_SECRET is the
+      # seed CodeSignTool uses to mint the one-time code. All four live in the
+      # repo secrets; none of them is recoverable from the issued certificate.
+      #
+      # This workflow only ever runs on push to main, so secrets are always
+      # available — a fork PR cannot reach this job at all.
+      - name: Assert signing credentials are present
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          # Fail here with a readable message rather than deep inside a Java
+          # stack trace. Do NOT turn this into a "skip signing" branch: a
+          # release that silently ships unsigned .exe files while the notes
+          # promise a signature is worse than a failed release.
+          missing=""
+          for v in ES_USERNAME ES_PASSWORD ES_CREDENTIAL_ID ES_TOTP_SECRET; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::missing eSigner secret(s):$missing"
+            exit 1
+          fi
+
+      # Pinned bytes for the signer itself. The digest was taken from the
+      # published v1.3.0 asset and corroborated independently: the
+      # code_sign_tool-1.3.0.jar inside the archive is itself EV code signed by
+      # "SSL Corp" (SSL.com EV Code Signing Intermediate CA RSA R3), so this is
+      # a digest of genuine vendor bytes and not merely of whatever the URL
+      # happened to serve on the day. Bump both URL and digest together, and
+      # re-check that jar signer, when upgrading CodeSignTool.
+      - name: Fetch and verify CodeSignTool
+        env:
+          CST_URL: https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.0/CodeSignTool-v1.3.0.zip
+          CST_SHA256: 359782cee5c709b172610e2abd8cb49445bfadd26f44073ca18600c585b91b8d
+        run: |
+          set -euo pipefail
+          # Deliberately under RUNNER_TEMP, i.e. OUTSIDE the checkout: a 34 MB
+          # Java tree inside the workspace is one careless glob away from being
+          # treated as a build input or uploaded as a release asset.
+          root="$RUNNER_TEMP/codesigntool"
+          mkdir -p "$root"
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-connrefused --retry-delay 2 \
+            -o "$root/CodeSignTool.zip" "$CST_URL"
+          # Mismatch fails the release. There is no fallback branch on purpose:
+          # an unexpected signer binary is exactly when NOT to keep going.
+          ( cd "$root" && printf '%s  %s\n' "$CST_SHA256" CodeSignTool.zip | sha256sum -c - )
+          # The archive is flat - CodeSignTool.sh, conf/ and jar/ sit at its
+          # root with no wrapping folder - so extract into the versioned
+          # directory ourselves. CODESIGNTOOL_PATH must be the directory that
+          # DIRECTLY contains those entries, and it has to stay writable: the
+          # action rewrites CodeSignTool.sh and conf/code_sign_tool.properties
+          # in place before running them.
+          dest="$root/CodeSignTool-v1.3.0"
+          rm -rf "$dest"
+          unzip -q "$root/CodeSignTool.zip" -d "$dest"
+          test -f "$dest/CodeSignTool.sh"
+          test -f "$dest/conf/code_sign_tool.properties"
+          test -f "$dest/jar/code_sign_tool-1.3.0.jar"
+          echo "CODESIGNTOOL_PATH=$dest" >> "$GITHUB_ENV"
+
+      # CodeSignTool is a Java program. Rather than let anything download a JDK
+      # onto the credential path, use the one baked into the runner image.
+      #
+      # Two things have to be true for zero JDK downloads to happen:
+      #
+      #   1. The esigner action installs its own JDK unless it sees
+      #      JAVA_VERSION >= 11 in the environment (src/main.ts). The runner
+      #      image sets JAVA_HOME but NOT JAVA_VERSION, so we must export it.
+      #   2. With the default signing_method (v1) the action rewrites
+      #      CodeSignTool.sh and runs it, and that script invokes a bare
+      #      `java` - resolved from PATH, NOT from JAVA_HOME. So PATH is what
+      #      actually decides which binary receives the four eSigner secrets;
+      #      setting JAVA_HOME alone would not pin it.
+      #
+      # JAVA_HOME_17_X64 is provided by the ubuntu-* runner images and is part
+      # of the already-trusted image, so there are no unchecksummed bytes on
+      # the credential path. Assert it rather than assuming: if a future runner
+      # image drops it, fail here loudly instead of silently falling back to
+      # whatever `java` happens to be first on PATH.
+      - name: Use the runner's preinstalled JDK 17 for CodeSignTool
+        run: |
+          set -euo pipefail
+          if [ -z "${JAVA_HOME_17_X64:-}" ] || [ ! -x "${JAVA_HOME_17_X64}/bin/java" ]; then
+            echo "::error::JAVA_HOME_17_X64 is not a usable JDK on this runner image." >&2
+            echo "Refusing to sign: the JDK that handles the signing credentials must" >&2
+            echo "come from the runner image, not a run-time download." >&2
+            exit 1
+          fi
+          # Confirm it really is 17 before putting it on the credential path.
+          ver="$("${JAVA_HOME_17_X64}/bin/java" -version 2>&1 | head -1)"
+          echo "Runner JDK: ${ver}"
+          case "${ver}" in
+            *'"17'*) ;;
+            *) echo "::error::Expected a Java 17 build, got: ${ver}" >&2; exit 1 ;;
+          esac
+          # PATH entry is what CodeSignTool.sh resolves `java` through; JAVA_HOME
+          # and JAVA_VERSION together stop the action fetching its own JDK.
+          echo "${JAVA_HOME_17_X64}/bin" >> "$GITHUB_PATH"
+          echo "JAVA_HOME=${JAVA_HOME_17_X64}" >> "$GITHUB_ENV"
+          echo "JAVA_VERSION=17" >> "$GITHUB_ENV"
+
+      - name: Sign windows-x64 .exe
+        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        env:
+          # Tells the action a JDK is already present so it does not fetch one.
+          JAVA_VERSION: '17'
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/dist/phantombot-${{ steps.version.outputs.tag }}-windows-x64.exe
+          output_path: ${{ github.workspace }}/signed
+          environment_name: PROD
+          # The malware pre-scan is a separate SSL.com service; leaving it off
+          # keeps signing to one operation per file. Bun-compiled single-file
+          # executables are also a known false-positive shape for scanners.
+          malware_block: false
+
+      - name: Sign windows-arm64 .exe
+        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        env:
+          # Tells the action a JDK is already present so it does not fetch one.
+          JAVA_VERSION: '17'
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/dist/phantombot-${{ steps.version.outputs.tag }}-windows-arm64.exe
+          output_path: ${{ github.workspace }}/signed
+          environment_name: PROD
+          malware_block: false
+
+      # CodeSignTool writes the signed copy into output_path and leaves the
+      # input untouched, so put the signed files back where every downstream
+      # step (checksums, release upload) already expects them.
+      - name: Replace the unsigned .exe files with the signed ones
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for arch in x64 arm64; do
+            name="phantombot-${TAG}-windows-${arch}.exe"
+            src="signed/${name}"
+            # A missing output is the silent-failure mode that matters: the
+            # vendor action decides success by grepping its own stdout, so it
+            # can report green having produced nothing.
+            [ -s "$src" ] || { echo "::error::$src missing or empty — signing produced no artifact"; exit 1; }
+            mv "$src" "dist/${name}"
+          done
+
+      # Independent proof that a signature is actually embedded, checked
+      # against the certificate we expect rather than against the signing
+      # tool's own say-so. Chain/timestamp validation is deliberately NOT
+      # asserted here — the runner has no reason to trust SSL.com's roots and
+      # a transient TSA hiccup should not fail a release — but "there is a
+      # signature and it is OUR certificate" is exactly the property that
+      # would regress silently if the credential id ever pointed at the wrong
+      # credential (e.g. the eSeal one) or the step were reordered.
+      - name: Verify the embedded Authenticode signatures
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          EXPECTED_SIGNER: Andrew Hodges
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq osslsigncode
+          for arch in x64 arm64; do
+            f="dist/phantombot-${TAG}-windows-${arch}.exe"
+            echo "--- $f"
+            # osslsigncode exits non-zero when it cannot verify the chain,
+            # which we are not asserting, so capture output and judge on
+            # content instead of exit status.
+            out=$(osslsigncode verify -in "$f" 2>&1 || true)
+            echo "$out"
+            case "$out" in
+              *"No signature found"*)
+                echo "::error::$f is NOT signed"; exit 1 ;;
+            esac
+            echo "$out" | grep -qi "CN=${EXPECTED_SIGNER}" \
+              || { echo "::error::$f is signed by an unexpected certificate (expected CN=${EXPECTED_SIGNER})"; exit 1; }
+          done
 
       - name: Compute SHA256SUMS
         working-directory: dist
@@ -340,8 +583,8 @@ jobs:
           - phantombot-${TAG}-linux-arm64 — ARM64
           - phantombot-${TAG}-darwin-x64 — macOS x86-64 (unsigned; see below)
           - phantombot-${TAG}-darwin-arm64 — macOS Apple Silicon (unsigned; see below)
-          - phantombot-${TAG}-windows-x64.exe - Windows x86-64 (unsigned; see below)
-          - phantombot-${TAG}-windows-arm64.exe - Windows ARM64 (unsigned; see below)
+          - phantombot-${TAG}-windows-x64.exe - Windows x86-64 (Authenticode signed)
+          - phantombot-${TAG}-windows-arm64.exe - Windows ARM64 (Authenticode signed)
 
           Verify with: sha256sum -c SHA256SUMS
 
@@ -361,9 +604,13 @@ jobs:
             xattr -d com.apple.quarantine ./phantombot-${TAG}-darwin-arm64
             xattr -d com.apple.quarantine ./phantombot-${TAG}-darwin-x64
 
-          Windows note: the .exe binaries are cross-compiled and unsigned, so
-          SmartScreen may show a "Windows protected your PC" prompt on first
-          run - choose More info then Run anyway, or unblock the file:
+          Windows note: the .exe binaries are Authenticode signed by
+          "Andrew Hodges" (SSL.com code-signing certificate, cloud HSM). Check
+          the signature before running:
+            Get-AuthenticodeSignature .\\phantombot-${TAG}-windows-x64.exe
+          SmartScreen may still show a "Windows protected your PC" prompt until
+          this certificate builds reputation - choose More info then Run
+          anyway, or unblock the file:
             Unblock-File .\\phantombot-${TAG}-windows-x64.exe
           EOF
 
