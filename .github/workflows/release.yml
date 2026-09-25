@@ -402,24 +402,46 @@ jobs:
           test -f "$dest/jar/code_sign_tool-1.3.0.jar"
           echo "CODESIGNTOOL_PATH=$dest" >> "$GITHUB_ENV"
 
-      # CodeSignTool is a Java program. The action only skips installing a JDK
-      # when it sees JAVA_VERSION >= 11 in the environment; the runner image
-      # sets JAVA_HOME but not JAVA_VERSION, so without this the action would
-      # download a Corretto build (also unverified) on every release. Pin the
-      # JDK here and export JAVA_VERSION so it uses this one.
+      # CodeSignTool is a Java program. Rather than let anything download a JDK
+      # onto the credential path, use the one baked into the runner image.
       #
-      # SHA-pinned for the same reason the esigner action is: it runs in this
-      # job immediately before the signing steps and it decides WHICH java
-      # binary handles our credentials, so a moving tag here would reopen
-      # exactly the supply-chain class this patch closes, one step earlier.
-      # The sha is v4.9.1 (v4 resolves here today). Note upstream has
-      # deprecated the v4 line in favour of v6 - deliberately not bundling a
-      # major-version bump into a security fix; that is its own change.
-      - name: Set up the JDK CodeSignTool runs on
-        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
-        with:
-          distribution: temurin
-          java-version: '17'
+      # Two things have to be true for zero JDK downloads to happen:
+      #
+      #   1. The esigner action installs its own JDK unless it sees
+      #      JAVA_VERSION >= 11 in the environment (src/main.ts). The runner
+      #      image sets JAVA_HOME but NOT JAVA_VERSION, so we must export it.
+      #   2. With the default signing_method (v1) the action rewrites
+      #      CodeSignTool.sh and runs it, and that script invokes a bare
+      #      `java` - resolved from PATH, NOT from JAVA_HOME. So PATH is what
+      #      actually decides which binary receives the four eSigner secrets;
+      #      setting JAVA_HOME alone would not pin it.
+      #
+      # JAVA_HOME_17_X64 is provided by the ubuntu-* runner images and is part
+      # of the already-trusted image, so there are no unchecksummed bytes on
+      # the credential path. Assert it rather than assuming: if a future runner
+      # image drops it, fail here loudly instead of silently falling back to
+      # whatever `java` happens to be first on PATH.
+      - name: Use the runner's preinstalled JDK 17 for CodeSignTool
+        run: |
+          set -euo pipefail
+          if [ -z "${JAVA_HOME_17_X64:-}" ] || [ ! -x "${JAVA_HOME_17_X64}/bin/java" ]; then
+            echo "::error::JAVA_HOME_17_X64 is not a usable JDK on this runner image." >&2
+            echo "Refusing to sign: the JDK that handles the signing credentials must" >&2
+            echo "come from the runner image, not a run-time download." >&2
+            exit 1
+          fi
+          # Confirm it really is 17 before putting it on the credential path.
+          ver="$("${JAVA_HOME_17_X64}/bin/java" -version 2>&1 | head -1)"
+          echo "Runner JDK: ${ver}"
+          case "${ver}" in
+            *'"17'*) ;;
+            *) echo "::error::Expected a Java 17 build, got: ${ver}" >&2; exit 1 ;;
+          esac
+          # PATH entry is what CodeSignTool.sh resolves `java` through; JAVA_HOME
+          # and JAVA_VERSION together stop the action fetching its own JDK.
+          echo "${JAVA_HOME_17_X64}/bin" >> "$GITHUB_PATH"
+          echo "JAVA_HOME=${JAVA_HOME_17_X64}" >> "$GITHUB_ENV"
+          echo "JAVA_VERSION=17" >> "$GITHUB_ENV"
 
       - name: Sign windows-x64 .exe
         uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b
