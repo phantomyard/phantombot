@@ -273,9 +273,9 @@ jobs:
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          # Cross-compiled from the Linux runner; Bun emits an unsigned PE
-          # (.exe). Windows SmartScreen may warn on first run for an
-          # unsigned binary - see release notes. --windows-hide-console is
+          # Cross-compiled from the Linux runner; Bun emits an UNSIGNED PE
+          # (.exe). It is Authenticode signed further down, before checksums
+          # are taken - see the signing block. --windows-hide-console is
           # NOT set: phantombot is a console agent and needs its stdio.
           bun build --compile --target=bun-windows-x64 \
             ./src/index.ts \
@@ -287,10 +287,148 @@ jobs:
         run: |
           # ARM64 Windows (e.g. Surface Pro X, Dev Kit). Bun's compile
           # target id is bun-windows-arm64; the emitted PE is Aarch64.
-          # Same unsigned/SmartScreen caveat as windows-x64.
+          # Signed alongside windows-x64 below, before checksums.
           bun build --compile --target=bun-windows-arm64 \
             ./src/index.ts \
             --outfile "dist/phantombot-${TAG}-windows-arm64.exe"
+
+      # ---------------------------------------------------------------
+      # Windows Authenticode signing (SSL.com eSigner, cloud HSM)
+      # ---------------------------------------------------------------
+      #
+      # WHY AT BUILD AND NOT AT PROMOTE: promote.yml never rebuilds. It flips
+      # an existing release to stable precisely so the bytes that soaked on
+      # the preview ring are the bytes stable installs, and it verifies the
+      # published SHA256SUMS before flipping. Signing at promote time would
+      # have to mutate already-published assets and regenerate those
+      # checksums, i.e. stable would ship something no one had run. So the
+      # signature is part of the build — which also means every prerelease is
+      # signed, and a preview host is exercising the exact artifact stable
+      # will later serve.
+      #
+      # ORDERING IS LOAD-BEARING: this runs BEFORE "Compute SHA256SUMS".
+      # Authenticode embeds the signature inside the PE, so signing changes
+      # the file's hash. Checksums taken first would describe a file that no
+      # longer exists and every `sha256sum -c SHA256SUMS` would fail.
+      #
+      # WHY A LINUX RUNNER CAN SIGN WINDOWS BINARIES: the private key never
+      # leaves SSL.com's cloud HSM (it is not downloadable — there is no .pfx
+      # to install). CodeSignTool is a Java client that uploads the digest and
+      # gets a signature back, so the host OS is irrelevant. That keeps the
+      # whole release on one runner, with the .exe files already on disk.
+      #
+      # WHY THE ACTION IS PINNED TO A COMMIT SHA: this step receives our
+      # signing credentials. A moving tag (or @develop, which the vendor's own
+      # README suggests) lets upstream change what executes here after review.
+      # The sha below is v1.3.2. Re-pin deliberately when upgrading.
+      #
+      # CREDENTIALS: ES_USERNAME / ES_PASSWORD are the SSL.com account,
+      # ES_CREDENTIAL_ID selects WHICH credential on that account to sign with
+      # (the account also holds a document-sealing "eSeal" credential which is
+      # marked default and would otherwise be picked), ES_TOTP_SECRET is the
+      # seed CodeSignTool uses to mint the one-time code. All four live in the
+      # repo secrets; none of them is recoverable from the issued certificate.
+      #
+      # This workflow only ever runs on push to main, so secrets are always
+      # available — a fork PR cannot reach this job at all.
+      - name: Assert signing credentials are present
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          # Fail here with a readable message rather than deep inside a Java
+          # stack trace. Do NOT turn this into a "skip signing" branch: a
+          # release that silently ships unsigned .exe files while the notes
+          # promise a signature is worse than a failed release.
+          missing=""
+          for v in ES_USERNAME ES_PASSWORD ES_CREDENTIAL_ID ES_TOTP_SECRET; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::missing eSigner secret(s):$missing"
+            exit 1
+          fi
+
+      - name: Sign windows-x64 .exe
+        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/dist/phantombot-${{ steps.version.outputs.tag }}-windows-x64.exe
+          output_path: ${{ github.workspace }}/signed
+          environment_name: PROD
+          # The malware pre-scan is a separate SSL.com service; leaving it off
+          # keeps signing to one operation per file. Bun-compiled single-file
+          # executables are also a known false-positive shape for scanners.
+          malware_block: false
+
+      - name: Sign windows-arm64 .exe
+        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/dist/phantombot-${{ steps.version.outputs.tag }}-windows-arm64.exe
+          output_path: ${{ github.workspace }}/signed
+          environment_name: PROD
+          malware_block: false
+
+      # CodeSignTool writes the signed copy into output_path and leaves the
+      # input untouched, so put the signed files back where every downstream
+      # step (checksums, release upload) already expects them.
+      - name: Replace the unsigned .exe files with the signed ones
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for arch in x64 arm64; do
+            name="phantombot-${TAG}-windows-${arch}.exe"
+            src="signed/${name}"
+            # A missing output is the silent-failure mode that matters: the
+            # vendor action decides success by grepping its own stdout, so it
+            # can report green having produced nothing.
+            [ -s "$src" ] || { echo "::error::$src missing or empty — signing produced no artifact"; exit 1; }
+            mv "$src" "dist/${name}"
+          done
+
+      # Independent proof that a signature is actually embedded, checked
+      # against the certificate we expect rather than against the signing
+      # tool's own say-so. Chain/timestamp validation is deliberately NOT
+      # asserted here — the runner has no reason to trust SSL.com's roots and
+      # a transient TSA hiccup should not fail a release — but "there is a
+      # signature and it is OUR certificate" is exactly the property that
+      # would regress silently if the credential id ever pointed at the wrong
+      # credential (e.g. the eSeal one) or the step were reordered.
+      - name: Verify the embedded Authenticode signatures
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          EXPECTED_SIGNER: Andrew Hodges
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq osslsigncode
+          for arch in x64 arm64; do
+            f="dist/phantombot-${TAG}-windows-${arch}.exe"
+            echo "--- $f"
+            # osslsigncode exits non-zero when it cannot verify the chain,
+            # which we are not asserting, so capture output and judge on
+            # content instead of exit status.
+            out=$(osslsigncode verify -in "$f" 2>&1 || true)
+            echo "$out"
+            case "$out" in
+              *"No signature found"*)
+                echo "::error::$f is NOT signed"; exit 1 ;;
+            esac
+            echo "$out" | grep -qi "CN=${EXPECTED_SIGNER}" \
+              || { echo "::error::$f is signed by an unexpected certificate (expected CN=${EXPECTED_SIGNER})"; exit 1; }
+          done
 
       - name: Compute SHA256SUMS
         working-directory: dist
@@ -340,8 +478,8 @@ jobs:
           - phantombot-${TAG}-linux-arm64 — ARM64
           - phantombot-${TAG}-darwin-x64 — macOS x86-64 (unsigned; see below)
           - phantombot-${TAG}-darwin-arm64 — macOS Apple Silicon (unsigned; see below)
-          - phantombot-${TAG}-windows-x64.exe - Windows x86-64 (unsigned; see below)
-          - phantombot-${TAG}-windows-arm64.exe - Windows ARM64 (unsigned; see below)
+          - phantombot-${TAG}-windows-x64.exe - Windows x86-64 (Authenticode signed)
+          - phantombot-${TAG}-windows-arm64.exe - Windows ARM64 (Authenticode signed)
 
           Verify with: sha256sum -c SHA256SUMS
 
@@ -361,9 +499,13 @@ jobs:
             xattr -d com.apple.quarantine ./phantombot-${TAG}-darwin-arm64
             xattr -d com.apple.quarantine ./phantombot-${TAG}-darwin-x64
 
-          Windows note: the .exe binaries are cross-compiled and unsigned, so
-          SmartScreen may show a "Windows protected your PC" prompt on first
-          run - choose More info then Run anyway, or unblock the file:
+          Windows note: the .exe binaries are Authenticode signed by
+          "Andrew Hodges" (SSL.com code-signing certificate, cloud HSM). Check
+          the signature before running:
+            Get-AuthenticodeSignature .\\phantombot-${TAG}-windows-x64.exe
+          SmartScreen may still show a "Windows protected your PC" prompt until
+          this certificate builds reputation - choose More info then Run
+          anyway, or unblock the file:
             Unblock-File .\\phantombot-${TAG}-windows-x64.exe
           EOF
 

@@ -465,9 +465,11 @@ with the Linux and macOS builds; the platform-specific pieces (data paths,
 process tree-kill, run-lock, credential-store ACL, the background service, and
 self-update) have native Windows implementations.
 
-Every release publishes prebuilt, unsigned Windows binaries -
+Every release publishes prebuilt Windows binaries -
 `phantombot-<tag>-windows-x64.exe` and `phantombot-<tag>-windows-arm64.exe` -
-alongside the SHA256SUMS file.
+alongside the SHA256SUMS file. Both are Authenticode signed as "Andrew Hodges"
+(SSL.com code-signing certificate); verify with
+`Get-AuthenticodeSignature .\phantombot-<tag>-windows-x64.exe`.
 
 **Install - PowerShell one-liner:**
 
@@ -479,8 +481,8 @@ This detects your architecture (x64/arm64), downloads the matching binary,
 verifies its SHA256, runs `Unblock-File` to remove the download-zone marker,
 installs to `%LOCALAPPDATA%\Programs\phantombot\phantombot.exe` (per-user, no
 admin), adds that dir to your PATH, and launches `phantombot init`. The binary
-is unsigned, so SmartScreen or antivirus may still warn or block it. This is
-the Windows parallel to the Linux/macOS `install.sh`.
+is signed, but SmartScreen may still warn until the certificate accumulates
+reputation. This is the Windows parallel to the Linux/macOS `install.sh`.
 
 **Or install manually** - download the `.exe` for your architecture, verify its
 checksum, and drop it into the same per-user location:
@@ -611,8 +613,9 @@ rotates files over 16 MiB and keeps three generations by default; see
 Status: every pull request runs the full suite and typecheck on Linux. A
 dedicated `windows-latest` job runs typecheck plus a curated set of
 Windows-relevant suites. There is no macOS pull-request runner; macOS and all
-six release targets are built only after merge. Published Windows and macOS
-binaries are unsigned, so operating-system warnings remain possible.
+six release targets are built only after merge. Published Windows binaries are
+Authenticode signed; the macOS binaries are still unsigned, so Gatekeeper
+warnings remain possible there.
 
 ## Service lifecycle (`start` / `stop` / `restart` / `logs`)
 
