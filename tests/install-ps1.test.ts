@@ -12,6 +12,15 @@
  *     banner's box-drawing glyphs became mojibake mid-string and the file
  *     failed to parse.
  *
+ * The BOM has a second consequence, which is what these tests were extended for:
+ * `Invoke-WebRequest` hands the BOM through to `iex` as a leading U+FEFF
+ * character, and 5.1 then cannot parse the script at all - the `<#` opener is
+ * lost, so the help text is parsed as code (`Unexpected token 'Clears' ...`) and
+ * `[CmdletBinding()]` is no longer the first statement. No layout of the script
+ * survives that (verified on 5.1.26100), so the documented one-liner must strip
+ * the BOM itself - hence the assertions on README.md, www/index.html and the
+ * script's own usage line below.
+ *
  * CI also parses and dry-runs the script on windows-latest (see ci.yml); these
  * tests are the fast local mirror so the failure shows up before a push.
  */
@@ -19,7 +28,16 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const PATH = join(import.meta.dir, "..", "install.ps1");
+const ROOT = join(import.meta.dir, "..");
+const PATH = join(ROOT, "install.ps1");
+
+// The one and only Windows install command we publish. Any doc that shows a way
+// to run install.ps1 from the network must show exactly this.
+const ONE_LINER =
+  "iex ((iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1)" +
+  ".Content.TrimStart([char]0xFEFF))";
+
+const DOCS = ["README.md", "www/index.html", "install.ps1"];
 
 describe("install.ps1", () => {
   test("starts with a UTF-8 BOM so PowerShell 5.1 decodes it as UTF-8", () => {
@@ -51,5 +69,31 @@ describe("install.ps1", () => {
     // "$boldLearns ..." parses as a variable named `boldLearns`, which under
     // Set-StrictMode is a hard runtime error, not a cosmetic one.
     expect(text).not.toMatch(/\$(bold|dim|reset|c\d+)[A-Za-z]/);
+  });
+});
+
+describe("the published one-liner", () => {
+  test.each(DOCS)("%s publishes the BOM-stripping one-liner", (doc) => {
+    const text = readFileSync(join(ROOT, doc), "utf8");
+    expect(text).toContain(ONE_LINER);
+  });
+
+  test.each(DOCS)("%s never pipes the raw download into iex", (doc) => {
+    const text = readFileSync(join(ROOT, doc), "utf8");
+    // `iwr ... install.ps1 | iex` hands the BOM straight to the parser, which is
+    // the exact command that failed for a user on a fresh Windows box.
+    const piped = /install\.ps1(?![^\n]*TrimStart)[^\n]*\|\s*iex/i;
+    expect(text).not.toMatch(piped);
+  });
+
+  test("every network invocation in the docs strips the BOM first", () => {
+    for (const doc of DOCS) {
+      const text = readFileSync(join(ROOT, doc), "utf8");
+      for (const line of text.split("\n")) {
+        if (!/iex/.test(line)) continue;
+        if (!/raw\.githubusercontent\.com.*install\.ps1/.test(line)) continue;
+        expect(line).toContain("TrimStart([char]0xFEFF)");
+      }
+    }
   });
 });

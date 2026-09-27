@@ -474,8 +474,15 @@ alongside the SHA256SUMS file. Both are Authenticode signed as "Andrew Hodges"
 **Install - PowerShell one-liner:**
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1 | iex
+iex ((iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1).Content.TrimStart([char]0xFEFF))
 ```
+
+`install.ps1` is stored with a UTF-8 BOM, which Windows PowerShell 5.1 needs to
+decode the file correctly when you run it from disk. `Invoke-WebRequest` hands
+that BOM through as a leading U+FEFF character, and `iex` then fails to parse
+the script at all (`Unexpected token 'Clears' in expression or statement.`, plus
+six more) - so `.TrimStart([char]0xFEFF)` is load-bearing, not noise. Do not
+simplify the command back to `iwr ... | iex`.
 
 This detects your architecture (x64/arm64), downloads the matching binary,
 verifies its SHA256, runs `Unblock-File` to remove the download-zone marker,

@@ -39,10 +39,14 @@
                     <code>curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh</code>
                     <button class="copy-button" type="button" aria-label="Copy install command" data-clipboard-text="curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh">Copy</button>
                 </div>
+                <!-- The .TrimStart([char]0xFEFF) is load-bearing: install.ps1 ships with a
+                     UTF-8 BOM (Windows PowerShell 5.1 needs it to decode the file from disk),
+                     Invoke-WebRequest passes that BOM through as U+FEFF, and iex cannot parse a
+                     script that starts with it. Never shorten this back to `iwr ... | iex`. -->
                 <p class="cta-label">Install on Windows (x64/ARM64) - PowerShell:</p>
                 <div class="cta-command">
-                    <code>iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1 | iex</code>
-                    <button class="copy-button" type="button" aria-label="Copy Windows install command" data-clipboard-text="iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1 | iex">Copy</button>
+                    <code>iex ((iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1).Content.TrimStart([char]0xFEFF))</code>
+                    <button class="copy-button" type="button" aria-label="Copy Windows install command" data-clipboard-text="iex ((iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1).Content.TrimStart([char]0xFEFF))">Copy</button>
                 </div>
                 <p class="cta-note">A built-in <strong>native</strong> harness works out of the box: just add a provider key. Or use your own <strong>Claude&nbsp;Code</strong>, <strong>Codex</strong>, or <strong>Pi</strong>. The Install Wizard sets it up for you.</p>
             </div>

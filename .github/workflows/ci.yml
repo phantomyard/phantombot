@@ -131,3 +131,34 @@ jobs:
           }
           & .\install.ps1 -DryRun
           if ($LASTEXITCODE -ne 0) { throw "install.ps1 -DryRun exited $LASTEXITCODE" }
+
+      # The published one-liner does NOT run the file - it pipes the downloaded
+      # text into iex, and Invoke-WebRequest passes install.ps1's UTF-8 BOM
+      # through as a leading U+FEFF. 5.1 cannot parse a script that starts with
+      # it (the `<#` opener is lost, so the help text parses as code), which is
+      # why the docs strip it. This step parses the same string iex would get;
+      # whether the docs actually publish that command is asserted precisely in
+      # tests/install-ps1.test.ts (a substring check here matched its own prose).
+      - name: Smoke-test the published one-liner (BOM strip, Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path install.ps1))
+          # UTF8.GetString keeps the BOM as U+FEFF, exactly as iwr hands it to iex.
+          $downloaded = [System.Text.Encoding]::UTF8.GetString($bytes)
+          if ($downloaded[0] -ne [char]0xFEFF) {
+            throw "install.ps1 lost its UTF-8 BOM - 5.1 will decode the file as ANSI"
+          }
+          $raw = $null
+          [System.Management.Automation.Language.Parser]::ParseInput(
+            $downloaded, [ref]$null, [ref]$raw) | Out-Null
+          if ($raw.Count -eq 0) {
+            throw "A BOM-led script now parses under PowerShell $($PSVersionTable.PSVersion): re-check the docs and simplify this guard."
+          }
+          $stripped = $downloaded.TrimStart([char]0xFEFF)
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseInput(
+            $stripped, [ref]$null, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            throw "the documented one-liner would fail to parse under Windows PowerShell $($PSVersionTable.PSVersion)"
+          }
