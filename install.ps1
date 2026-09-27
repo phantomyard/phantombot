@@ -5,7 +5,7 @@
 .DESCRIPTION
   PowerShell parallel to install.sh. Usage:
 
-    iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1 | iex
+    iex ((iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1).Content.TrimStart([char]0xFEFF))
     .\install.ps1 [-DryRun]
 
   What it does:
