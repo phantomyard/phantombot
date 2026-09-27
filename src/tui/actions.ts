@@ -209,25 +209,12 @@ export interface ApplyVoiceInputTui {
   serviceControl?: ServiceControl;
 }
 
-export function describeVoiceChange(voice: VoiceConfig): Consequence {
-  // `[voice] provider` is ONE key driving TWO capabilities. `transcribe()`
-  // supports exactly elevenlabs (scribe) and openai (whisper-1); every other
-  // provider returns "STT not supported". So azure_edge yields a phantom that
-  // speaks but silently REJECTS every voice note sent to it — a nasty thing to
-  // discover by sending one, and therefore something the screen has to say at
-  // the point of choice rather than in a footnote.
-  const speaksOnly = voice.provider === "azure_edge";
+export function describeVoiceChange(_voice: VoiceConfig): Consequence {
   return {
-    summary: speaksOnly
-      ? "speaks, but cannot hear — inbound voice notes will be rejected"
-      : "validates the key, then restarts the voice listener",
-    detail: speaksOnly
-      ? "azure_edge needs no credential and is the fastest way to hear your " +
-        "phantom, but speech-to-text is only implemented for openai " +
-        "(whisper-1) and elevenlabs (scribe). Until one of those is " +
-        "configured, every voice note you send is refused."
-      : "The key is checked with one live call before anything is stored; a " +
-        "key that fails validation never reaches the vault.",
+    summary: "validates the key, then restarts the voice listener",
+    detail:
+      "The key is checked with one live call before anything is stored; a " +
+      "key that fails validation never reaches the vault.",
     longRunning: false,
     restarts: true,
   };

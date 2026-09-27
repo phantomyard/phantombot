@@ -218,6 +218,8 @@ export interface PersonaSnapshot {
   brainConfigured: boolean;
   channels: string[];
   voiceProvider?: string;
+  /** Vault name selected by an endpoint-based voice provider. */
+  voiceKeyEnv?: string;
   /** The configured voice NAME for that provider ("en-US-JennyNeural"). */
   voiceName?: string;
   /** Whether the configured provider can transcribe, not just speak. */
@@ -367,7 +369,9 @@ function voiceNameOf(config: Config): string | undefined {
   const voice = config.voice;
   if (!voice) return undefined;
   if (voice.provider === "azure_edge") return voice.azure_edge?.voice;
-  if (voice.provider === "openai") return voice.openai?.voice;
+  if (voice.provider === "openai-compatible") {
+    return voice.openaiCompatible?.voice;
+  }
   if (voice.provider === "elevenlabs") return voice.elevenlabs?.voiceId;
   return undefined;
 }
@@ -560,6 +564,7 @@ export async function personaSnapshot(
     resolvedHarness,
     channels: channelsFor(config, dir),
     voiceProvider: config.voice?.provider,
+    voiceKeyEnv: config.voice?.openaiCompatible?.keyEnv,
     voiceName: voiceNameOf(config),
     voiceHears: config.voice
       ? providerHearsVoice(config.voice.provider)

@@ -357,6 +357,9 @@ function describeAudioFailure(
     // the same provider, but TS still wants the branch covered.
     return `${s.provider} has no STT (shouldn't happen on tts path)`;
   }
+  if (s.reason === "provider_removed") {
+    return "Azure Edge TTS was removed; run `phantombot voice` to migrate";
+  }
   return `key missing for ${s.provider} (vault key ${s.envVar})`;
 }
 

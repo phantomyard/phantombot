@@ -20,20 +20,28 @@ import {
 import type { WriteSink } from "../lib/io.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
-import { setPersonaSecret } from "../lib/vaultSecrets.ts";
+import {
+  getPersonaSecretStrict,
+  setPersonaSecret,
+} from "../lib/vaultSecrets.ts";
+import {
+  findOpenAICompatibleCredential,
+  type StoredOpenAICompatibleCredential,
+} from "../lib/openAICompatibleCredentials.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import {
-  AZURE_EDGE_DEFAULTS,
-  AZURE_EDGE_VOICE_OPTIONS,
   ELEVENLABS_DEFAULTS,
   ENV_KEY_FOR_PROVIDER,
-  OPENAI_DEFAULTS,
+  OPENAI_COMPATIBLE_DEFAULTS,
+  OPENAI_BASE_URL,
+  OPENROUTER_BASE_URL,
+  normalizeOpenAICompatibleBaseUrl,
+  openAICompatibleKeyEnv,
+  openAICompatibleProviderLabel,
   type VoiceConfig,
   type VoiceProvider,
-  fetchOpenAIVoiceOptions,
-  openAIVoiceMenuOptions,
   validateElevenLabsKey,
-  validateOpenAIKey,
+  validateOpenAICompatibleKey,
 } from "../lib/voice.ts";
 import { maybePromptRestart } from "./harness.ts";
 
@@ -49,8 +57,20 @@ export interface ApplyVoiceInput {
 }
 
 export async function applyVoiceConfig(input: ApplyVoiceInput): Promise<void> {
+  if (input.voice.provider === "azure_edge") {
+    throw new Error(
+      "Azure Edge TTS was removed — choose ElevenLabs or OpenAI Compatible",
+    );
+  }
   await updateConfigToml(input.configPath, (toml) => {
     setIn(toml, ["voice", "provider"], input.voice.provider);
+    const voiceToml = toml.voice;
+    if (voiceToml && typeof voiceToml === "object" && !Array.isArray(voiceToml)) {
+      // Retired wire shapes remain readable for migration, but a successful
+      // save must not carry them forward indefinitely.
+      delete (voiceToml as Record<string, unknown>).openai;
+      delete (voiceToml as Record<string, unknown>).azure_edge;
+    }
     if (input.voice.provider === "elevenlabs" && input.voice.elevenlabs) {
       const e = input.voice.elevenlabs;
       setIn(toml, ["voice", "elevenlabs", "voice_id"], e.voiceId);
@@ -59,24 +79,26 @@ export async function applyVoiceConfig(input: ApplyVoiceInput): Promise<void> {
       setIn(toml, ["voice", "elevenlabs", "similarity_boost"], e.similarityBoost);
       setIn(toml, ["voice", "elevenlabs", "style"], e.style);
     }
-    if (input.voice.provider === "openai" && input.voice.openai) {
-      const o = input.voice.openai;
-      setIn(toml, ["voice", "openai", "model"], o.model);
-      setIn(toml, ["voice", "openai", "voice"], o.voice);
-      setIn(toml, ["voice", "openai", "speed"], o.speed);
-    }
-    if (input.voice.provider === "azure_edge" && input.voice.azure_edge) {
-      const a = input.voice.azure_edge;
-      setIn(toml, ["voice", "azure_edge", "voice"], a.voice);
-      setIn(toml, ["voice", "azure_edge", "rate"], a.rate);
-      setIn(toml, ["voice", "azure_edge", "pitch"], a.pitch);
+    if (
+      input.voice.provider === "openai-compatible" &&
+      input.voice.openaiCompatible
+    ) {
+      const o = input.voice.openaiCompatible;
+      setIn(toml, ["voice", "openai_compatible", "base_url"], o.baseUrl);
+      setIn(toml, ["voice", "openai_compatible", "key_env"], o.keyEnv);
+      setIn(toml, ["voice", "openai_compatible", "stt_model"], o.sttModel);
+      setIn(toml, ["voice", "openai_compatible", "tts_model"], o.ttsModel);
+      setIn(toml, ["voice", "openai_compatible", "voice"], o.voice);
+      setIn(toml, ["voice", "openai_compatible", "speed"], o.speed);
     }
   });
 
   if (input.apiKey !== undefined && input.apiKey !== "") {
     const provider = input.voice.provider;
-    if (provider === "elevenlabs" || provider === "openai") {
-      const envVar = ENV_KEY_FOR_PROVIDER[provider];
+    if (provider === "elevenlabs" || provider === "openai-compatible") {
+      const envVar = provider === "openai-compatible"
+        ? input.voice.openaiCompatible!.keyEnv
+        : ENV_KEY_FOR_PROVIDER[provider];
       const r = await setPersonaSecret(
         input.config,
         envVar,
@@ -119,6 +141,25 @@ interface RunInput {
   err?: WriteSink;
 }
 
+export type StoredVoiceCredential = StoredOpenAICompatibleCredential;
+
+/** Find a matching credential in this persona only; never prints the value. */
+export async function findStoredVoiceCredential(
+  config: Config,
+  persona: string,
+  provider: VoiceProvider,
+  baseUrl?: string,
+): Promise<StoredVoiceCredential | undefined> {
+  if (provider === "elevenlabs") {
+    const name = ENV_KEY_FOR_PROVIDER.elevenlabs;
+    const value = await getPersonaSecretStrict(config, name, persona);
+    return value ? { name, value, needsWrite: false } : undefined;
+  }
+  if (provider !== "openai-compatible" || !baseUrl) return undefined;
+
+  return findOpenAICompatibleCredential(config, persona, baseUrl);
+}
+
 export async function runVoice(input: RunInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
   const { config, persona } = input.config
@@ -156,20 +197,12 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
                 : "premium · paid (API key required)",
           },
           {
-            value: "openai",
-            label: "OpenAI",
+            value: "openai-compatible",
+            label: "OpenAI Compatible",
             hint:
-              existing.provider === "openai"
+              existing.provider === "openai-compatible"
                 ? "current · paid (API key required)"
                 : "paid (API key required)",
-          },
-          {
-            value: "azure_edge",
-            label: "Azure Edge TTS",
-            hint:
-              existing.provider === "azure_edge"
-                ? "current · free · no key · speaks only"
-                : "free · no key · speaks only",
           },
           {
             value: "none",
@@ -197,18 +230,15 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
         questions,
         {
           existing,
-          hasKey: (pr) => {
-            if (pr !== "elevenlabs" && pr !== "openai") return false;
-            const envVar = ENV_KEY_FOR_PROVIDER[pr];
-            return Boolean(envVar && process.env[envVar]);
-          },
-          validateKey: async (pr, key) => {
+          findCredential: async (pr, baseUrl) =>
+            findStoredVoiceCredential(config, persona, pr, baseUrl),
+          validateKey: async (pr, key, baseUrl) => {
             if (pr === "elevenlabs") return validateElevenLabsKey(key);
-            if (pr === "openai") return validateOpenAIKey(key);
+            if (pr === "openai-compatible") {
+              return validateOpenAICompatibleKey(key, baseUrl ?? OPENAI_BASE_URL);
+            }
             return { ok: true };
           },
-          openaiKeyForVoices:
-            process.env[ENV_KEY_FOR_PROVIDER.openai] ?? undefined,
         },
       );
 
@@ -266,14 +296,9 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
         hint: "premium, custom voices, paid (API key required)",
       },
       {
-        value: "openai",
-        label: "OpenAI",
-        hint: "paid (API key required)",
-      },
-      {
-        value: "azure_edge",
-        label: "Azure Edge TTS",
-        hint: "Microsoft's free Edge endpoint (no key needed)",
+        value: "openai-compatible",
+        label: "OpenAI Compatible",
+        hint: "OpenAI, OpenRouter, or another /audio endpoint",
       },
       { value: "none", label: "None — disable TTS/STT" },
       { value: "cancel", label: "Cancel" },
@@ -302,10 +327,15 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
 
   if (provider === "elevenlabs")
     return runElevenLabsFlow(voiceConfigPath, config, persona, svc, existing, embedded);
-  if (provider === "openai")
-    return runOpenAIFlow(voiceConfigPath, config, persona, svc, existing, embedded);
-  if (provider === "azure_edge")
-    return runAzureEdgeFlow(voiceConfigPath, config, persona, svc, existing, embedded);
+  if (provider === "openai-compatible")
+    return runOpenAICompatibleFlow(
+      voiceConfigPath,
+      config,
+      persona,
+      svc,
+      existing,
+      embedded,
+    );
   return 0;
 }
 
@@ -387,7 +417,7 @@ async function runElevenLabsFlow(
   return 0;
 }
 
-async function runOpenAIFlow(
+async function runOpenAICompatibleFlow(
   /** The persona config file these settings are written to. */
   voiceConfigPath: string,
   config: Config,
@@ -396,18 +426,54 @@ async function runOpenAIFlow(
   existing: VoiceConfig,
   embedded: boolean,
 ): Promise<number> {
-  const cur = existing.openai ?? OPENAI_DEFAULTS;
-  const key = await p.password({
-    message: "OpenAI API key (https://platform.openai.com/api-keys)",
-    validate: (v) => (!v || v.length === 0 ? "key is required" : undefined),
+  const cur = existing.openaiCompatible ?? OPENAI_COMPATIBLE_DEFAULTS;
+  const baseUrlAnswer = await p.text({
+    message: "OpenAI Compatible base URL (include /v1)",
+    placeholder:
+      `${OPENAI_BASE_URL} · ${OPENROUTER_BASE_URL}`,
+    defaultValue: cur.baseUrl,
+    validate: (v) => (!v?.trim() ? "base URL is required" : undefined),
   });
-  if (p.isCancel(key)) {
+  if (p.isCancel(baseUrlAnswer)) {
     p.cancel("cancelled");
     return 0;
   }
+  const baseUrl = normalizeOpenAICompatibleBaseUrl(String(baseUrlAnswer));
+  const stored = await findStoredVoiceCredential(
+    config,
+    persona,
+    "openai-compatible",
+    baseUrl,
+  );
+  let key = stored?.value;
+  let keyEnv = stored?.name ?? openAICompatibleKeyEnv(baseUrl);
+  if (stored) {
+    const reuse = await p.confirm({
+      message: `Use stored key for ${openAICompatibleProviderLabel(baseUrl)}?`,
+      initialValue: true,
+    });
+    if (p.isCancel(reuse)) {
+      p.cancel("cancelled");
+      return 0;
+    }
+    if (!reuse) key = undefined;
+  }
+  if (!key) {
+    const typed = await p.password({
+      message: `${openAICompatibleProviderLabel(baseUrl)} API key`,
+      validate: (v) => (!v || v.length === 0 ? "key is required" : undefined),
+    });
+    if (p.isCancel(typed)) {
+      p.cancel("cancelled");
+      return 0;
+    }
+    key = String(typed);
+    keyEnv = openAICompatibleKeyEnv(baseUrl);
+  }
+
   const spinner = p.spinner();
-  spinner.start("validating key against /v1/models…");
-  const r = await validateOpenAIKey(key as string);
+  spinner.start("validating key against /models…");
+  const r = await validateOpenAICompatibleKey(key, baseUrl);
   if (!r.ok) {
     spinner.stop(`key rejected: ${r.error}`);
     p.cancel("aborting — key did not validate");
@@ -415,40 +481,29 @@ async function runOpenAIFlow(
   }
   spinner.stop(`key validated (${r.modelCount} models visible)`);
 
-  // Model FIRST, then its voice menu: the OpenAI voice set is model-scoped
-  // (13 for gpt-4o-mini-tts, 9 for tts-1/-hd), so asking the voice before the
-  // model could persist an invalid pair. The probe costs no quota; the
-  // fallback (offline / unparsed error) is filtered by the chosen model.
-  const model = await p.select<string>({
-    message: "Model",
-    options: [
-      {
-        value: "gpt-4o-mini-tts",
-        label: "gpt-4o-mini-tts (13 voices, promptable style)",
-      },
-      { value: "tts-1", label: "tts-1 (9 voices, fast, lower quality)" },
-      {
-        value: "tts-1-hd",
-        label: "tts-1-hd (9 voices, slower, higher quality)",
-      },
-    ],
-    initialValue: cur.model,
+  const sttModel = await p.text({
+    message: "Speech-to-text model",
+    defaultValue: cur.sttModel,
+    validate: (v) => (!v?.trim() ? "STT model is required" : undefined),
   });
-  if (p.isCancel(model)) {
+  if (p.isCancel(sttModel)) {
+    p.cancel("cancelled");
+    return 0;
+  }
+  const ttsModel = await p.text({
+    message: "Text-to-speech model",
+    defaultValue: cur.ttsModel,
+    validate: (v) => (!v?.trim() ? "TTS model is required" : undefined),
+  });
+  if (p.isCancel(ttsModel)) {
     p.cancel("cancelled");
     return 0;
   }
 
-  spinner.start("fetching the voice list for this model…");
-  const live = await fetchOpenAIVoiceOptions(key as string, model as string);
-  spinner.stop(live.length ? `${live.length} voices` : "offline — using the built-in list");
-  const voice = await p.select<string>({
+  const voice = await p.text({
     message: "Voice",
-    options: openAIVoiceMenuOptions(model as string, live).map((v) => ({
-      value: v,
-      label: v,
-    })),
-    initialValue: cur.voice,
+    defaultValue: cur.voice,
+    validate: (v) => (!v?.trim() ? "voice is required" : undefined),
   });
   if (p.isCancel(voice)) {
     p.cancel("cancelled");
@@ -459,67 +514,29 @@ async function runOpenAIFlow(
     configPath: voiceConfigPath,
     config,
     persona,
-    apiKey: key as string,
+    apiKey:
+      stored?.value === key && stored.name === keyEnv && !stored.needsWrite
+        ? undefined
+        : key,
     voice: {
-      provider: "openai",
-      openai: {
-        model: model as string,
-        voice: voice as string,
+      provider: "openai-compatible",
+      openaiCompatible: {
+        baseUrl,
+        keyEnv,
+        sttModel: String(sttModel).trim(),
+        ttsModel: String(ttsModel).trim(),
+        voice: String(voice).trim(),
         speed: cur.speed,
       },
     },
   });
   p.note(
-    `provider:  openai\n` +
+    `provider:  openai-compatible\n` +
+      `base URL:  ${baseUrl}\n` +
       `voice:     ${voice}\n` +
-      `model:     ${model}\n` +
-      `key saved to the ${persona} vault as ${ENV_KEY_FOR_PROVIDER.openai}`,
-    "Saved",
-  );
-  if (!embedded) {
-    await maybePromptRestart(svc);
-    p.outro("done");
-  }
-  return 0;
-}
-
-async function runAzureEdgeFlow(
-  /** The persona config file these settings are written to. */
-  voiceConfigPath: string,
-  config: Config,
-  persona: string,
-  svc: ServiceControl,
-  existing: VoiceConfig,
-  embedded: boolean,
-): Promise<number> {
-  const cur = existing.azure_edge ?? AZURE_EDGE_DEFAULTS;
-  const voice = await p.select<string>({
-    message: "Voice (Azure Edge — free, no key)",
-    options: AZURE_EDGE_VOICE_OPTIONS.map((v) => ({ value: v, label: v })),
-    initialValue: cur.voice,
-  });
-  if (p.isCancel(voice)) {
-    p.cancel("cancelled");
-    return 0;
-  }
-
-  await applyVoiceConfig({
-    configPath: voiceConfigPath,
-    config,
-    persona,
-    voice: {
-      provider: "azure_edge",
-      azure_edge: {
-        voice: voice as string,
-        rate: cur.rate,
-        pitch: cur.pitch,
-      },
-    },
-  });
-  p.note(
-    `provider:  azure_edge\n` +
-      `voice:     ${voice}\n` +
-      `(no API key required)`,
+      `STT model: ${sttModel}\n` +
+      `TTS model: ${ttsModel}\n` +
+      `key:       ${stored?.value === key ? `reused from ${keyEnv}` : `saved as ${keyEnv}`}`,
     "Saved",
   );
   if (!embedded) {
@@ -533,11 +550,16 @@ function formatExistingDetails(v: VoiceConfig): string {
   if (v.provider === "elevenlabs" && v.elevenlabs) {
     return `voice id:  ${v.elevenlabs.voiceId}\nmodel:     ${v.elevenlabs.modelId}`;
   }
-  if (v.provider === "openai" && v.openai) {
-    return `voice:     ${v.openai.voice}\nmodel:     ${v.openai.model}`;
+  if (v.provider === "openai-compatible" && v.openaiCompatible) {
+    return (
+      `base URL:  ${v.openaiCompatible.baseUrl}\n` +
+      `voice:     ${v.openaiCompatible.voice}\n` +
+      `STT model: ${v.openaiCompatible.sttModel}\n` +
+      `TTS model: ${v.openaiCompatible.ttsModel}`
+    );
   }
   if (v.provider === "azure_edge" && v.azure_edge) {
-    return `voice:     ${v.azure_edge.voice}`;
+    return `REMOVED: run phantombot voice and choose another provider`;
   }
   return "";
 }
@@ -546,7 +568,7 @@ export default defineCommand({
   meta: {
     name: "voice",
     description:
-      "Configure TTS / STT provider (ElevenLabs / OpenAI / Azure Edge). Validates the API key before saving.",
+      "Configure TTS / STT provider (ElevenLabs / OpenAI Compatible). Validates the API key before saving.",
   },
   args: {
     persona: {

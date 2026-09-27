@@ -205,6 +205,47 @@ describe("loadConfig — defaults (no file)", () => {
   });
 });
 
+describe("loadConfig — OpenAI-compatible voice migration", () => {
+  test("reads the new endpoint-based block with independent models", async () => {
+    const dir = join(workdir, "config", "phantombot");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "config.toml"),
+      '[voice]\nprovider = "openai-compatible"\n\n' +
+        '[voice.openai_compatible]\nbase_url = "https://openrouter.ai/api/v1"\n' +
+        'key_env = "OPENROUTER_API_KEY"\nstt_model = "stt-x"\n' +
+        'tts_model = "tts-y"\nvoice = "coral"\nspeed = 1.25\n',
+    );
+    const c = await loadConfig();
+    expect(c.voice.openaiCompatible).toEqual({
+      baseUrl: "https://openrouter.ai/api/v1",
+      keyEnv: "OPENROUTER_API_KEY",
+      sttModel: "stt-x",
+      ttsModel: "tts-y",
+      voice: "coral",
+      speed: 1.25,
+    });
+  });
+
+  test("maps the legacy OpenAI block into the new runtime shape", async () => {
+    const dir = join(workdir, "config", "phantombot");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "config.toml"),
+      '[voice]\nprovider = "openai"\n\n' +
+        '[voice.openai]\nmodel = "tts-1"\nvoice = "nova"\nspeed = 1\n',
+    );
+    const c = await loadConfig();
+    expect(c.voice.provider).toBe("openai-compatible");
+    expect(c.voice.openaiCompatible).toMatchObject({
+      baseUrl: "https://api.openai.com/v1",
+      keyEnv: "PHANTOMBOT_OPENAI_API_KEY",
+      sttModel: "whisper-1",
+      ttsModel: "tts-1",
+    });
+  });
+});
+
 describe("loadConfig — tool timeout", () => {
   test("reads TOML seconds and clamps to the hard timeout", async () => {
     const path = join(workdir, "config", "phantombot", "config.toml");

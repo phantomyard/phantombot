@@ -71,12 +71,12 @@ function makeConfig(provider: Config["voice"]["provider"]): Config {
       },
     };
   }
-  if (provider === "openai") {
+  if (provider === "openai-compatible") {
     return {
       ...base,
       voice: {
-        provider: "openai",
-        openai: { model: "tts-1", voice: "nova", speed: 1 },
+        provider: "openai-compatible",
+        openaiCompatible: { baseUrl: "https://api.openai.com/v1", keyEnv: "PHANTOMBOT_OPENAI_API_KEY", sttModel: "whisper-1", ttsModel: "tts-1", voice: "nova", speed: 1 },
       },
     };
   }
@@ -113,18 +113,18 @@ describe("ttsSupported / sttSupported", () => {
     expect(await ttsSupported(makeConfig("none"))).toBe(false);
     expect(await sttSupported(makeConfig("none"))).toBe(false);
   });
-  test("azure_edge → tts true, stt false", async () => {
-    expect(await ttsSupported(makeConfig("azure_edge"))).toBe(true);
+  test("azure_edge → both false after removal", async () => {
+    expect(await ttsSupported(makeConfig("azure_edge"))).toBe(false);
     expect(await sttSupported(makeConfig("azure_edge"))).toBe(false);
   });
   test("openai with key → both true", async () => {
     process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
-    expect(await ttsSupported(makeConfig("openai"))).toBe(true);
-    expect(await sttSupported(makeConfig("openai"))).toBe(true);
+    expect(await ttsSupported(makeConfig("openai-compatible"))).toBe(true);
+    expect(await sttSupported(makeConfig("openai-compatible"))).toBe(true);
   });
   test("openai without key → both false", async () => {
-    expect(await ttsSupported(makeConfig("openai"))).toBe(false);
-    expect(await sttSupported(makeConfig("openai"))).toBe(false);
+    expect(await ttsSupported(makeConfig("openai-compatible"))).toBe(false);
+    expect(await sttSupported(makeConfig("openai-compatible"))).toBe(false);
   });
   test("elevenlabs with key → both true", async () => {
     process.env.PHANTOMBOT_ELEVENLABS_API_KEY = "k";
@@ -147,34 +147,38 @@ describe("ttsSupport / sttSupport (diagnostic variants)", () => {
     });
   });
 
-  test("azure_edge → ok for tts, provider_no_stt for stt", async () => {
-    expect(await ttsSupport(makeConfig("azure_edge"))).toEqual({ ok: true });
+  test("azure_edge → provider_removed for both directions", async () => {
+    expect(await ttsSupport(makeConfig("azure_edge"))).toEqual({
+      ok: false,
+      reason: "provider_removed",
+      provider: "azure_edge",
+    });
     expect(await sttSupport(makeConfig("azure_edge"))).toEqual({
       ok: false,
-      reason: "provider_no_stt",
+      reason: "provider_removed",
       provider: "azure_edge",
     });
   });
 
   test("openai without key → key_missing names env var for both", async () => {
-    expect(await ttsSupport(makeConfig("openai"))).toEqual({
+    expect(await ttsSupport(makeConfig("openai-compatible"))).toEqual({
       ok: false,
       reason: "key_missing",
-      provider: "openai",
+      provider: "openai-compatible",
       envVar: "PHANTOMBOT_OPENAI_API_KEY",
     });
-    expect(await sttSupport(makeConfig("openai"))).toEqual({
+    expect(await sttSupport(makeConfig("openai-compatible"))).toEqual({
       ok: false,
       reason: "key_missing",
-      provider: "openai",
+      provider: "openai-compatible",
       envVar: "PHANTOMBOT_OPENAI_API_KEY",
     });
   });
 
   test("openai with key → ok for both", async () => {
     process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
-    expect(await ttsSupport(makeConfig("openai"))).toEqual({ ok: true });
-    expect(await sttSupport(makeConfig("openai"))).toEqual({ ok: true });
+    expect(await ttsSupport(makeConfig("openai-compatible"))).toEqual({ ok: true });
+    expect(await sttSupport(makeConfig("openai-compatible"))).toEqual({ ok: true });
   });
 
   test("elevenlabs without key → key_missing names env var for both", async () => {
@@ -215,21 +219,32 @@ describe("synthesize", () => {
     }
   });
 
-  test("openai returns ogg buffer on success", async () => {
+  test("OpenAI-compatible TTS uses the configured endpoint and TTS model", async () => {
     process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
     const fakeAudio = Buffer.from([7, 8, 9]);
+    const config = makeConfig("openai-compatible");
+    config.voice.openaiCompatible!.baseUrl = "https://openrouter.ai/api/v1/";
+    config.voice.openaiCompatible!.ttsModel = "openai/gpt-4o-mini-tts";
+    let seenUrl = "";
+    let seenBody: Record<string, unknown> = {};
     const r = await synthesize(
-      makeConfig("openai"),
+      config,
       "hello",
-      fakeBytesFetch(fakeAudio),
+      (async (url, init) => {
+        seenUrl = String(url);
+        seenBody = JSON.parse(String(init?.body));
+        return new Response(fakeAudio, { status: 200 });
+      }) as typeof fetch,
     );
     expect(r.ok).toBe(true);
+    expect(seenUrl).toBe("https://openrouter.ai/api/v1/audio/speech");
+    expect(seenBody.model).toBe("openai/gpt-4o-mini-tts");
   });
 
-  test("azure_edge → not implemented error (clear message)", async () => {
+  test("azure_edge → removal error with migration guidance", async () => {
     const r = await synthesize(makeConfig("azure_edge"), "hello");
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toContain("not implemented");
+    if (!r.ok) expect(r.error).toContain("was removed");
   });
 
   test("none → error", async () => {
@@ -247,7 +262,7 @@ describe("synthesize", () => {
   test("HTTP 401 → error with status", async () => {
     process.env.PHANTOMBOT_OPENAI_API_KEY = "bad";
     const r = await synthesize(
-      makeConfig("openai"),
+      makeConfig("openai-compatible"),
       "hello",
       fakeBytesFetch(Buffer.from(""), 401),
     );
@@ -257,16 +272,27 @@ describe("synthesize", () => {
 });
 
 describe("transcribe", () => {
-  test("openai whisper returns text", async () => {
+  test("OpenAI-compatible STT uses the configured endpoint and independent model", async () => {
     process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
+    const config = makeConfig("openai-compatible");
+    config.voice.openaiCompatible!.baseUrl = "https://openrouter.ai/api/v1/";
+    config.voice.openaiCompatible!.sttModel = "openai/whisper-large-v3";
+    let seenUrl = "";
+    let seenModel = "";
     const r = await transcribe(
-      makeConfig("openai"),
+      config,
       Buffer.from("audio bytes"),
       "audio/ogg",
-      fakeJsonFetch({ text: "hello world" }),
+      (async (url, init) => {
+        seenUrl = String(url);
+        seenModel = String((init?.body as FormData).get("model"));
+        return Response.json({ text: "hello world" });
+      }) as typeof fetch,
     );
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.text).toBe("hello world");
+    expect(seenUrl).toBe("https://openrouter.ai/api/v1/audio/transcriptions");
+    expect(seenModel).toBe("openai/whisper-large-v3");
   });
 
   test("elevenlabs scribe returns text", async () => {
@@ -281,20 +307,20 @@ describe("transcribe", () => {
     if (r.ok) expect(r.text).toBe("transcript here");
   });
 
-  test("azure_edge → STT not supported", async () => {
+  test("azure_edge → STT removal error with migration guidance", async () => {
     const r = await transcribe(
       makeConfig("azure_edge"),
       Buffer.from(""),
       "audio/ogg",
     );
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toContain("not supported");
+    if (!r.ok) expect(r.error).toContain("was removed");
   });
 
   test("HTTP error returns clear message", async () => {
     process.env.PHANTOMBOT_OPENAI_API_KEY = "bad";
     const r = await transcribe(
-      makeConfig("openai"),
+      makeConfig("openai-compatible"),
       Buffer.from(""),
       "audio/ogg",
       fakeJsonFetch({ error: { message: "bad" } }, 401),
@@ -306,7 +332,7 @@ describe("transcribe", () => {
   test("response without text → error", async () => {
     process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
     const r = await transcribe(
-      makeConfig("openai"),
+      makeConfig("openai-compatible"),
       Buffer.from(""),
       "audio/ogg",
       fakeJsonFetch({}),
@@ -331,7 +357,7 @@ describe("voiceApiKey — the key follows the persona, not the environment", () 
 
   function cfgFor(persona: string): Config {
     return {
-      ...makeConfig("openai"),
+      ...makeConfig("openai-compatible"),
       personasDir: workdir,
       defaultPersona: "robbie",
       personaLayer: persona,
@@ -370,7 +396,7 @@ describe("voiceApiKey — the key follows the persona, not the environment", () 
     expect(await ttsSupport(cfgFor("lena"))).toEqual({
       ok: false,
       reason: "key_missing",
-      provider: "openai",
+      provider: "openai-compatible",
       envVar: "PHANTOMBOT_OPENAI_API_KEY",
     });
     expect(await ttsSupport(cfgFor("kai"))).toEqual({ ok: true });

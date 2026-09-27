@@ -66,7 +66,7 @@ afterEach(async () => {
 });
 
 describe("runVoice — PHANTOMBOT_PERSONA env fallback", () => {
-  test("env persona's layer drives the wizard (leo → openai, not phantom's elevenlabs)", async () => {
+  test("env persona's layer drives the wizard (leo → OpenAI-compatible, not phantom's elevenlabs)", async () => {
     process.env.PHANTOMBOT_PERSONA = "leo";
     const errors: string[] = [];
 
@@ -76,7 +76,7 @@ describe("runVoice — PHANTOMBOT_PERSONA env fallback", () => {
 
     expect(code).toBe(0); // isCancel bails cleanly, nothing written
     expect(errors.join("")).not.toContain("no persona");
-    expect(captured.initialValue).toBe("openai");
+    expect(captured.initialValue).toBe("openai-compatible");
   });
 
   test("without env, the default persona's layer is used (elevenlabs)", async () => {

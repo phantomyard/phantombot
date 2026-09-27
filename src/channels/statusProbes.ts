@@ -32,9 +32,10 @@ import { timeoutSignal } from "../lib/fetchTimeout.ts";
 import { telegramGetMe as realTelegramGetMe } from "../lib/telegramApi.ts";
 import {
   validateElevenLabsKey as realValidateElevenLabsKey,
-  validateOpenAIKey as realValidateOpenAIKey,
+  validateOpenAICompatibleKey as realValidateOpenAICompatibleKey,
   ENV_KEY_FOR_PROVIDER,
 } from "../lib/voice.ts";
+import { voiceApiKey } from "../lib/audio.ts";
 import { geminiEmbed as realGeminiEmbed } from "../lib/geminiEmbed.ts";
 import { openaiCompatibleEmbed as realOpenAICompatibleEmbed } from "../lib/openaiCompatibleEmbed.ts";
 import {
@@ -85,7 +86,7 @@ export interface StatusProbeLines {
 export interface StatusProbeDeps {
   telegramGetMe?: typeof realTelegramGetMe;
   validateElevenLabsKey?: typeof realValidateElevenLabsKey;
-  validateOpenAIKey?: typeof realValidateOpenAIKey;
+  validateOpenAICompatibleKey?: typeof realValidateOpenAICompatibleKey;
   geminiEmbed?: typeof realGeminiEmbed;
   openaiCompatibleEmbed?: typeof realOpenAICompatibleEmbed;
   reconcileEditorConnectors?: typeof realReconcileEditorConnectors;
@@ -184,7 +185,7 @@ async function probeVoice(
   config: Config | undefined,
   deps: {
     validateElevenLabsKey: typeof realValidateElevenLabsKey;
-    validateOpenAIKey: typeof realValidateOpenAIKey;
+    validateOpenAICompatibleKey: typeof realValidateOpenAICompatibleKey;
     env: Record<string, string | undefined>;
     signal?: AbortSignal;
   },
@@ -193,22 +194,29 @@ async function probeVoice(
   if (!v) return undefined;
   if (v.provider === "none") return "none";
   if (v.provider === "azure_edge") {
-    // Azure Edge TTS needs no API key (unofficial free endpoint).
-    return `azure_edge ${v.azure_edge?.voice ?? "?"} (no key)`;
+    return "azure_edge REMOVED — run `phantombot voice` to migrate";
   }
 
   const voiceName =
     v.provider === "elevenlabs"
       ? v.elevenlabs?.voiceId ?? "?"
-      : v.openai?.voice ?? "?";
-  const envVar = ENV_KEY_FOR_PROVIDER[v.provider];
-  const key = deps.env[envVar];
+      : v.openaiCompatible?.voice ?? "?";
+  const envVar = v.provider === "openai-compatible"
+    ? v.openaiCompatible?.keyEnv ?? ENV_KEY_FOR_PROVIDER[v.provider]
+    : ENV_KEY_FOR_PROVIDER[v.provider];
+  const key =
+    (await voiceApiKey(config!).catch(() => undefined)) ?? deps.env[envVar];
   if (!key) return `${v.provider} ${voiceName} — no key`;
 
   const r =
     v.provider === "elevenlabs"
       ? await deps.validateElevenLabsKey(key, fetch, deps.signal)
-      : await deps.validateOpenAIKey(key, fetch, deps.signal);
+      : await deps.validateOpenAICompatibleKey(
+          key,
+          v.openaiCompatible?.baseUrl ?? "",
+          fetch,
+          deps.signal,
+        );
   return r.ok
     ? `${v.provider} ${voiceName} OK`
     : `${v.provider} ${voiceName} ERR (${shortErr(r.error)})`;
@@ -303,7 +311,8 @@ export async function gatherStatusProbes(
   const isBinary = deps.isPhantombotBinary ?? realIsPhantombotBinary;
   const env = deps.env ?? process.env;
   const validateEl = deps.validateElevenLabsKey ?? realValidateElevenLabsKey;
-  const validateOa = deps.validateOpenAIKey ?? realValidateOpenAIKey;
+  const validateOa =
+    deps.validateOpenAICompatibleKey ?? realValidateOpenAICompatibleKey;
   const validateDecisionModel = deps.validateDecisionModelKey ?? realValidateDecisionModelKey;
   const nightly = deps.nightlyHealth ?? realNightlyHealth;
 
@@ -334,7 +343,7 @@ export async function gatherStatusProbes(
     settle(
       probeVoice(config, {
         validateElevenLabsKey: validateEl,
-        validateOpenAIKey: validateOa,
+        validateOpenAICompatibleKey: validateOa,
         env,
         signal: deadline,
       }),

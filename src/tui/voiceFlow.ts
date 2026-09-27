@@ -2,7 +2,7 @@
  * The rest of `phantombot voice`, as SCREEN questions.
  *
  * The Voice screen picked a provider and saved it — and nothing else. For
- * `elevenlabs` and `openai` that wrote a provider with no key and no voice: a
+ * `elevenlabs` and `openai-compatible` that wrote a provider with no key and no voice: a
  * phantom that looks configured and is mute on the first turn. This module asks
  * the questions the CLI asks (key, voice, model defaults) and hands back
  * exactly what `applyVoiceConfig` takes, so the two write the same block.
@@ -12,12 +12,13 @@
  */
 
 import {
-  AZURE_EDGE_DEFAULTS,
-  AZURE_EDGE_VOICE_OPTIONS,
   ELEVENLABS_DEFAULTS,
-  OPENAI_DEFAULTS,
-  fetchOpenAIVoiceOptions,
-  openAIVoiceMenuOptions,
+  OPENAI_COMPATIBLE_DEFAULTS,
+  OPENAI_BASE_URL,
+  OPENROUTER_BASE_URL,
+  normalizeOpenAICompatibleBaseUrl,
+  openAICompatibleKeyEnv,
+  openAICompatibleProviderLabel,
   type VoiceConfig,
   type VoiceProvider,
 } from "../lib/voice.ts";
@@ -26,23 +27,17 @@ import type { ChannelsQuestions } from "./channelsFlow.ts";
 export interface VoiceFlowDeps {
   /** The persona's current voice block, so nothing already answered is asked again. */
   existing?: VoiceConfig;
-  /** True when the provider's key is ALREADY in this persona's vault/env. */
-  hasKey(provider: VoiceProvider): boolean;
+  /** Matching credential from this persona only. The value is never rendered. */
+  findCredential(
+    provider: VoiceProvider,
+    baseUrl?: string,
+  ): Promise<{ name: string; value: string; needsWrite: boolean } | undefined>;
   /** One live call before the key is stored. */
   validateKey(
     provider: VoiceProvider,
     key: string,
+    baseUrl?: string,
   ): Promise<{ ok: true } | { ok: false; error: string }>;
-  /**
-   * The OpenAI key to probe with — the stored one ("" → hasKey) or the one
-   * just typed in this flow. Undefined when neither exists.
-   */
-  openaiKeyForVoices?: string;
-  /** Live voice list for one model; [] means fall back. Injectable for tests. */
-  fetchVoiceOptions?: (
-    key: string,
-    model: string,
-  ) => Promise<string[]>;
 }
 
 export interface VoiceFlowResult {
@@ -73,23 +68,11 @@ export async function configureVoice(
   }
 
   if (provider === "azure_edge") {
-    const cur = deps.existing?.azure_edge ?? AZURE_EDGE_DEFAULTS;
-    const voice = await q.choose({
-      title: `Voice for ${persona} (Azure Edge — free, no key)`,
-      options: AZURE_EDGE_VOICE_OPTIONS.map((v) => ({
-        value: v,
-        label: v,
-        hint: v === cur.voice ? "current" : undefined,
-      })),
-    });
-    if (!voice) return undefined;
-    return {
-      voice: {
-        provider: "azure_edge",
-        azure_edge: { voice, rate: cur.rate, pitch: cur.pitch },
-      },
-      summary: `azure_edge · ${voice}`,
-    };
+    return { rejected: "Azure Edge TTS was removed; choose another provider" };
+  }
+
+  if (provider === "openai-compatible") {
+    return openAICompatibleFlow(persona, q, deps);
   }
 
   // elevenlabs and openai both need a key. An existing one is offered back
@@ -99,43 +82,6 @@ export async function configureVoice(
   if (key === undefined) return undefined;
   if (typeof key === "object") return key;
   const apiKey = key;
-
-  if (provider === "openai") {
-    const cur = deps.existing?.openai ?? OPENAI_DEFAULTS;
-    // A key typed THIS flow wins over the stored one: the env may still hold
-    // the old key the user is replacing, and the probe must not fail (or show
-    // a stale list) because of it.
-    const probeKey = apiKey || deps.openaiKeyForVoices;
-    const fetchVoices = deps.fetchVoiceOptions ?? fetchOpenAIVoiceOptions;
-    // Model-scoped live list. The probe costs no quota (it is rejected
-    // before synthesis); an empty result means no key, offline, or an
-    // unparsed error — and the fallback is FILTERED BY MODEL, so an offline
-    // tts-1 persona is never offered ballad/verse/marin/cedar.
-    const live = probeKey
-      ? await fetchVoices(probeKey, cur.model)
-      : [];
-    const options = openAIVoiceMenuOptions(cur.model, live);
-    const title = `Voice for ${persona}${
-      live.length ? "" : " (offline list — full set with a working key)"
-    }`;
-    const voice = await q.choose({
-      title,
-      options: options.map((v) => ({
-        value: v,
-        label: v,
-        hint: v === cur.voice ? "current" : undefined,
-      })),
-    });
-    if (!voice) return undefined;
-    return {
-      voice: {
-        provider: "openai",
-        openai: { model: cur.model, voice, speed: cur.speed },
-      },
-      apiKey: apiKey || undefined,
-      summary: `openai · ${voice}`,
-    };
-  }
 
   const cur = deps.existing?.elevenlabs ?? ELEVENLABS_DEFAULTS;
   const voiceId = await q.value({
@@ -170,8 +116,9 @@ async function askKey(
   q: ChannelsQuestions,
   deps: VoiceFlowDeps,
 ): Promise<string | VoiceFlowRejected | undefined> {
-  const label = provider === "openai" ? "OpenAI" : "ElevenLabs";
-  if (deps.hasKey(provider)) {
+  const label = "ElevenLabs";
+  const stored = await deps.findCredential(provider);
+  if (stored) {
     const action = await q.choose({
       title: `${label} key for ${persona}`,
       options: [
@@ -180,14 +127,11 @@ async function askKey(
       ],
     });
     if (!action) return undefined;
-    if (action === "keep") return "";
+    if (action === "keep") return stored.needsWrite ? stored.value : "";
   }
   const typed = await q.value({
     title: `${label} API key for ${persona}`,
-    hint:
-      provider === "openai"
-        ? "platform.openai.com/api-keys — checked before it is stored"
-        : "elevenlabs.io/app/settings/api-keys — checked before it is stored",
+    hint: "elevenlabs.io/app/settings/api-keys — checked before it is stored",
     masked: true,
   });
   if (!typed) return undefined;
@@ -196,4 +140,86 @@ async function askKey(
   const r = await deps.validateKey(provider, typed);
   if (!r.ok) return { rejected: r.error };
   return typed;
+}
+
+async function openAICompatibleFlow(
+  persona: string,
+  q: ChannelsQuestions,
+  deps: VoiceFlowDeps,
+): Promise<VoiceFlowResult | VoiceFlowRejected | undefined> {
+  const cur = deps.existing?.openaiCompatible ?? OPENAI_COMPATIBLE_DEFAULTS;
+  const baseAnswer = await q.value({
+    title: "OpenAI Compatible base URL (include /v1)",
+    hint: `${OPENAI_BASE_URL} · ${OPENROUTER_BASE_URL}`,
+    initial: cur.baseUrl,
+  });
+  if (baseAnswer === undefined) return undefined;
+  if (!baseAnswer.trim()) return { rejected: "base URL is required" };
+  const baseUrl = normalizeOpenAICompatibleBaseUrl(baseAnswer);
+  const stored = await deps.findCredential("openai-compatible", baseUrl);
+  let key = stored?.value;
+  let keyEnv = stored?.name ?? openAICompatibleKeyEnv(baseUrl);
+  let needsWrite = stored?.needsWrite ?? false;
+  if (stored) {
+    const use = await q.confirm({
+      title: `Use stored key for ${openAICompatibleProviderLabel(baseUrl)}?`,
+      consequence: {
+        summary: "reuses this persona's stored credential",
+        detail: "The secret value is not displayed or copied from another persona.",
+        longRunning: false,
+        restarts: false,
+      },
+    });
+    if (use === undefined) return undefined;
+    if (!use) key = undefined;
+  }
+  if (!key) {
+    const typed = await q.value({
+      title: `${openAICompatibleProviderLabel(baseUrl)} API key for ${persona}`,
+      hint: "checked against the endpoint before it is stored",
+      masked: true,
+    });
+    if (typed === undefined) return undefined;
+    if (!typed.trim()) return { rejected: "key is required" };
+    key = typed.trim();
+    keyEnv = openAICompatibleKeyEnv(baseUrl);
+    needsWrite = true;
+  }
+  const validated = await deps.validateKey("openai-compatible", key, baseUrl);
+  if (!validated.ok) return { rejected: validated.error };
+
+  const sttModel = await q.value({
+    title: "Speech-to-text model",
+    initial: cur.sttModel,
+  });
+  if (sttModel === undefined) return undefined;
+  if (!sttModel.trim()) return { rejected: "STT model is required" };
+  const ttsModel = await q.value({
+    title: "Text-to-speech model",
+    initial: cur.ttsModel,
+  });
+  if (ttsModel === undefined) return undefined;
+  if (!ttsModel.trim()) return { rejected: "TTS model is required" };
+  const voice = await q.value({
+    title: "Voice",
+    initial: cur.voice,
+  });
+  if (voice === undefined) return undefined;
+  if (!voice.trim()) return { rejected: "voice is required" };
+
+  return {
+    voice: {
+      provider: "openai-compatible",
+      openaiCompatible: {
+        baseUrl,
+        keyEnv,
+        sttModel: sttModel.trim(),
+        ttsModel: ttsModel.trim(),
+        voice: voice.trim(),
+        speed: cur.speed,
+      },
+    },
+    apiKey: needsWrite ? key : undefined,
+    summary: `openai-compatible · ${voice.trim()}`,
+  };
 }

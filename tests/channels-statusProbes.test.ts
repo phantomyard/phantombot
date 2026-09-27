@@ -37,7 +37,7 @@ function stubDeps(over: Partial<StatusProbeDeps> = {}): StatusProbeDeps {
   return {
     telegramGetMe: async () => ({ ok: false, error: "stub" }),
     validateElevenLabsKey: async () => ({ ok: true, voiceCount: 3 }),
-    validateOpenAIKey: async () => ({ ok: true, modelCount: 5 }),
+    validateOpenAICompatibleKey: async () => ({ ok: true, modelCount: 5 }),
     geminiEmbed: async () => ({
       ok: true,
       values: new Float32Array([0.1]),
@@ -287,17 +287,17 @@ describe("gatherStatusProbes — voice", () => {
     const r = await gatherStatusProbes(
       cfg({
         voice: {
-          provider: "openai",
-          openai: { model: "tts-1", voice: "nova", speed: 1 },
+          provider: "openai-compatible",
+          openaiCompatible: { baseUrl: "https://api.openai.com/v1", keyEnv: "PHANTOMBOT_OPENAI_API_KEY", sttModel: "whisper-1", ttsModel: "tts-1", voice: "nova", speed: 1 },
         } as unknown as Config["voice"],
       }),
       "phantom",
       stubDeps({ env: {} }),
     );
-    expect(r.voice).toBe("openai nova — no key");
+    expect(r.voice).toBe("openai-compatible nova — no key");
   });
 
-  test("azure_edge needs no key", async () => {
+  test("azure_edge reports actionable removal guidance", async () => {
     const r = await gatherStatusProbes(
       cfg({
         voice: {
@@ -308,7 +308,7 @@ describe("gatherStatusProbes — voice", () => {
       "phantom",
       stubDeps(),
     );
-    expect(r.voice).toContain("azure_edge en-US-JennyNeural");
+    expect(r.voice).toContain("azure_edge REMOVED");
   });
 });
 

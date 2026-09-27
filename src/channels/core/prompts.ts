@@ -175,6 +175,9 @@ export function voiceUnavailableMessage(
   if (s.reason === "provider_no_stt") {
     return `current provider '${s.provider}' has no STT — switch via \`phantombot voice\``;
   }
+  if (s.reason === "provider_removed") {
+    return "Azure Edge TTS was removed — run `phantombot voice` and choose ElevenLabs or OpenAI Compatible";
+  }
   // key_missing
   return `voice key not loaded into the service environment — run \`phantombot install\` to upgrade the systemd unit, then try again. (provider '${s.provider}', expected env var ${s.envVar})`;
 }

@@ -50,8 +50,11 @@ export function expectedSecrets(
   }
   if (persona.voiceProvider === "elevenlabs") {
     out.push({ name: "ELEVENLABS_API_KEY", usedBy: "voice" });
-  } else if (persona.voiceProvider === "openai") {
-    out.push({ name: "OPENAI_API_KEY", usedBy: "voice" });
+  } else if (persona.voiceProvider === "openai-compatible") {
+    out.push({
+      name: persona.voiceKeyEnv ?? "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
+      usedBy: "voice",
+    });
   }
   return out;
 }

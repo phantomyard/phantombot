@@ -7,7 +7,11 @@
  */
 
 import type { Config } from "../config.ts";
-import { ENV_KEY_FOR_PROVIDER, type VoiceProvider } from "./voice.ts";
+import {
+  ENV_KEY_FOR_PROVIDER,
+  normalizeOpenAICompatibleBaseUrl,
+  type VoiceProvider,
+} from "./voice.ts";
 import { getPersonaSecret } from "./vaultSecrets.ts";
 import { timeoutSignal } from "./fetchTimeout.ts";
 
@@ -47,6 +51,7 @@ export type AudioSupport =
   | { ok: true }
   | { ok: false; reason: "provider_none"; provider: VoiceProvider }
   | { ok: false; reason: "provider_no_stt"; provider: VoiceProvider }
+  | { ok: false; reason: "provider_removed"; provider: VoiceProvider }
   | { ok: false; reason: "key_missing"; provider: VoiceProvider; envVar: string };
 
 /**
@@ -62,12 +67,18 @@ export type AudioSupport =
  *
  * `config.personaLayer` is the persona this Config was loaded for, so the key
  * follows whichever listener is asking. Returns undefined for providers that
- * need no key (`azure_edge`, `none`).
+ * need no key (`none`) and for the retired Azure value.
  */
 export async function voiceApiKey(config: Config): Promise<string | undefined> {
   const provider = config.voice.provider;
-  if (provider !== "openai" && provider !== "elevenlabs") return undefined;
-  return await getPersonaSecret(config, ENV_KEY_FOR_PROVIDER[provider]);
+  if (provider === "elevenlabs") {
+    return await getPersonaSecret(config, ENV_KEY_FOR_PROVIDER.elevenlabs);
+  }
+  if (provider === "openai-compatible") {
+    const keyEnv = config.voice.openaiCompatible?.keyEnv;
+    return keyEnv ? await getPersonaSecret(config, keyEnv) : undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -82,9 +93,11 @@ export async function sttSupport(config: Config): Promise<AudioSupport> {
     return { ok: false, reason: "provider_none", provider };
   }
   if (provider === "azure_edge") {
-    return { ok: false, reason: "provider_no_stt", provider };
+    return { ok: false, reason: "provider_removed", provider };
   }
-  const envVar = ENV_KEY_FOR_PROVIDER[provider];
+  const envVar = provider === "openai-compatible"
+    ? config.voice.openaiCompatible?.keyEnv ?? ENV_KEY_FOR_PROVIDER[provider]
+    : ENV_KEY_FOR_PROVIDER[provider];
   return (await voiceApiKey(config))
     ? { ok: true }
     : { ok: false, reason: "key_missing", provider, envVar };
@@ -96,8 +109,12 @@ export async function ttsSupport(config: Config): Promise<AudioSupport> {
   if (provider === "none") {
     return { ok: false, reason: "provider_none", provider };
   }
-  if (provider === "azure_edge") return { ok: true }; // free, no key
-  const envVar = ENV_KEY_FOR_PROVIDER[provider];
+  if (provider === "azure_edge") {
+    return { ok: false, reason: "provider_removed", provider };
+  }
+  const envVar = provider === "openai-compatible"
+    ? config.voice.openaiCompatible?.keyEnv ?? ENV_KEY_FOR_PROVIDER[provider]
+    : ENV_KEY_FOR_PROVIDER[provider];
   return (await voiceApiKey(config))
     ? { ok: true }
     : { ok: false, reason: "key_missing", provider, envVar };
@@ -124,15 +141,15 @@ export async function synthesize(
     if (!key) return { ok: false, error: "no ElevenLabs API key in the persona vault" };
     return elevenlabsTts(key, text, config.voice.elevenlabs!, fetchImpl);
   }
-  if (p === "openai") {
-    if (!key) return { ok: false, error: "no OpenAI API key in the persona vault" };
-    return openaiTts(key, text, config.voice.openai!, fetchImpl);
+  if (p === "openai-compatible") {
+    if (!key) return { ok: false, error: "no OpenAI-compatible API key in the persona vault" };
+    return openaiCompatibleTts(key, text, config.voice.openaiCompatible!, fetchImpl);
   }
   if (p === "azure_edge") {
     return {
       ok: false,
       error:
-        "Azure Edge TTS not implemented yet — configure ElevenLabs or OpenAI for voice replies",
+        "Azure Edge TTS was removed — run `phantombot voice` and choose ElevenLabs or OpenAI Compatible",
     };
   }
   return { ok: false, error: "TTS provider is 'none'" };
@@ -151,13 +168,21 @@ export async function transcribe(
       return { ok: false, error: "no ElevenLabs API key in the persona vault" };
     return elevenlabsScribe(key, audio, mime, fetchImpl);
   }
-  if (p === "openai") {
-    if (!key) return { ok: false, error: "no OpenAI API key in the persona vault" };
-    return openaiWhisper(key, audio, mime, fetchImpl);
+  if (p === "openai-compatible") {
+    if (!key) return { ok: false, error: "no OpenAI-compatible API key in the persona vault" };
+    return openaiCompatibleTranscribe(
+      key,
+      audio,
+      mime,
+      config.voice.openaiCompatible!,
+      fetchImpl,
+    );
   }
   return {
     ok: false,
-    error: `STT not supported for provider '${p}' — configure ElevenLabs or OpenAI to accept voice messages`,
+    error: p === "azure_edge"
+      ? "Azure Edge TTS was removed — run `phantombot voice` and choose ElevenLabs or OpenAI Compatible"
+      : `STT not supported for provider '${p}' — configure ElevenLabs or OpenAI Compatible to accept voice messages`,
   };
 }
 
@@ -207,22 +232,22 @@ async function elevenlabsTts(
   return { ok: true, audio: { data: buf, mime: "audio/ogg" } };
 }
 
-async function openaiTts(
+async function openaiCompatibleTts(
   apiKey: string,
   text: string,
-  cfg: NonNullable<Config["voice"]["openai"]>,
+  cfg: NonNullable<Config["voice"]["openaiCompatible"]>,
   fetchImpl: typeof fetch,
 ): Promise<SynthesizeResult> {
   let res: Response;
   try {
-    res = await fetchImpl("https://api.openai.com/v1/audio/speech", {
+    res = await fetchImpl(`${normalizeOpenAICompatibleBaseUrl(cfg.baseUrl)}/audio/speech`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: cfg.model,
+        model: cfg.ttsModel,
         voice: cfg.voice,
         input: text,
         speed: cfg.speed,
@@ -237,7 +262,7 @@ async function openaiTts(
     const errText = await res.text().catch(() => "");
     return {
       ok: false,
-      error: `openai HTTP ${res.status}: ${errText.slice(0, 200)}`,
+      error: `OpenAI-compatible TTS endpoint/model unavailable (HTTP ${res.status}): ${errText.slice(0, 200)}`,
     };
   }
   const buf = Buffer.from(await res.arrayBuffer());
@@ -282,10 +307,11 @@ async function elevenlabsScribe(
   return { ok: true, text: body.text };
 }
 
-async function openaiWhisper(
+async function openaiCompatibleTranscribe(
   apiKey: string,
   audio: Buffer,
   mime: string,
+  cfg: NonNullable<Config["voice"]["openaiCompatible"]>,
   fetchImpl: typeof fetch,
 ): Promise<TranscribeResult> {
   const form = new FormData();
@@ -294,11 +320,11 @@ async function openaiWhisper(
     new Blob([audio], { type: mime || "audio/ogg" }),
     "voice.ogg",
   );
-  form.set("model", "whisper-1");
+  form.set("model", cfg.sttModel);
   let res: Response;
   try {
     res = await fetchImpl(
-      "https://api.openai.com/v1/audio/transcriptions",
+      `${normalizeOpenAICompatibleBaseUrl(cfg.baseUrl)}/audio/transcriptions`,
       {
         method: "POST",
         headers: { authorization: `Bearer ${apiKey}` },
@@ -313,7 +339,7 @@ async function openaiWhisper(
     const errText = await res.text().catch(() => "");
     return {
       ok: false,
-      error: `whisper HTTP ${res.status}: ${errText.slice(0, 200)}`,
+      error: `OpenAI-compatible STT endpoint/model unavailable (HTTP ${res.status}): ${errText.slice(0, 200)}`,
     };
   }
   const body = (await res.json()) as { text?: string };
