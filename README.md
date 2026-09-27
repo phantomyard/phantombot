@@ -188,6 +188,17 @@ phantombot builds the persona prompt, loads relevant memory, sends the turn to
 the harness, and relays the final answer to Telegram. The harness performs the
 SSH, file edits, searches, and command execution through its native tool loop.
 
+Every persona's prompt also carries a short **runtime** section, generated from
+live state rather than written by hand: the phantombot version and platform
+serving this turn, the subsystems the surrounding process owns (channels, the
+turn orchestrator, the scheduler, memory, the vault, the other isolated
+personas), and two pointers - `phantombot --help` for the current command
+surface and <https://github.com/phantomyard/phantombot> for the implementation
+behind it. Without it the agent knew its tools but not what it was running
+inside, so it guessed at its own plumbing instead of reading it. The section
+claims nothing host-specific: which channels, harnesses, MCP servers or
+personas exist comes from the sections built off live config.
+
 PhantomBot remains the owner of conversation history and durable memory. An
 opt-in prompt-cache setting keeps persona instructions and security policy in
 the stable system prompt, places each turn's retrieved context, durable facts,

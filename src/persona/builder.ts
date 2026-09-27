@@ -8,6 +8,7 @@
  */
 
 import { OKF_AGENT_TYPES, OKF_CORE_TYPES } from "../lib/okf.js";
+import { VERSION } from "../version.ts";
 import type { PersonaFiles } from "./loader.js";
 import { TURN_CONTEXT_SYSTEM_RULE } from "./turnContext.ts";
 
@@ -103,6 +104,7 @@ function buildStableSections(
     sections.push("# Tools available to you\n\n" + persona.tools.trim());
   }
 
+  sections.push(buildRuntimeSection());
   sections.push(MEMORY_TOOLS_SECTION);
   sections.push(SCHEDULING_TOOLS_SECTION);
   sections.push(buildMcpToolsSection(persona.mcpServers));
@@ -190,6 +192,81 @@ directs privileged actions.`;
 }
 
 export const MCP_TOOLS_SECTION = buildMcpToolsSection();
+
+/** Human-facing name for a `process.platform` value. Mapped locally rather
+ * than through lib/platform.ts on purpose: that module pulls in the service
+ * managers and task scheduler, and the prompt builder must stay dependency-light
+ * (it is imported by the greeter and the threat-judge screen too). */
+function platformLabel(platform: string): string {
+  if (platform === "linux") return "Linux";
+  if (platform === "darwin") return "macOS";
+  if (platform === "win32") return "Windows";
+  return platform;
+}
+
+/**
+ * What the agent is RUNNING INSIDE (issue #616).
+ *
+ * Every other capability section describes a tool. None of them told the model
+ * that it is a persona inside a long-running phantombot process — so it
+ * under-reached: it guessed at its own plumbing, re-derived facts about itself
+ * that `phantombot --help` answers, and sometimes denied capabilities it had.
+ *
+ * Generated from LIVE state (version, platform), never hand-maintained prose
+ * about a release: a stale self-description is worse than none, because the
+ * model has no way to tell it is stale. Both values are constant for the
+ * process lifetime, so this stays in the CACHEABLE stable prefix.
+ *
+ * Deliberately short, and deliberately NOT a copy of the README: the README
+ * sells and installs the product to a human, while this answers "what am I
+ * and what does the thing around me own". The repo URL is a POINTER for when
+ * the agent wants to read its own implementation — not a substitute for the
+ * facts, which is why they are inlined. A bare link would cost a turn to
+ * follow and may not be fetchable at all (a native Windows turn has no fetch
+ * tool).
+ *
+ * Capability CLAIMS are limited to what is true of every install: the
+ * subsystems phantombot always owns. Nothing here asserts which channels,
+ * harnesses, MCP servers or personas a particular host has configured — those
+ * are covered by the sections built from live config, and guessing would put a
+ * confident falsehood in the prompt.
+ */
+export function buildRuntimeSection(
+  version: string = VERSION,
+  platform: string = process.platform,
+): string {
+  return `# The runtime you are running in
+
+You are a PERSONA inside **phantombot ${version}**, running on ${platformLabel(platform)}.
+Phantombot is not a wrapper around your session — it is the long-running
+process that owns everything around the model:
+
+- the channel adapters that deliver messages to you and your replies back
+- the turn orchestrator: the harness chain, retries, timeouts, the security
+  perimeter, and the voice/text reply routing
+- your scheduler (\`phantombot task\`), which fires turns while nobody is talking
+  to you
+- your memory: the journal, the drawers, the knowledge base and the embedding
+  index behind \`phantombot memory\`
+- your encrypted per-persona vault, and the credentials it injects into your
+  environment
+- the other personas on this host, each isolated from you: separate identity,
+  memory, vault and agent dir
+
+Two pointers, so you never have to guess at your own capabilities:
+
+- \`phantombot --help\` (and \`phantombot <command> --help\`) is the complete,
+  current command surface. Read it rather than assuming a command does or does
+  not exist.
+- the implementation is open source at https://github.com/phantomyard/phantombot
+  — the same code as the binary serving this turn, with \`AGENTS.md\` documenting
+  its invariants. When a question is really "how does phantombot do X", the
+  answer is readable, not guesswork.
+
+Treat both as authoritative over anything you remember about yourself: memory
+records how the runtime behaved when the note was written, and you may have been
+updated since.`;
+}
 
 export const MEMORY_TOOLS_SECTION =
   `# Memory tools
