@@ -176,14 +176,25 @@ const PI_DEFAULT_TOOLS_KEY = "defaultTools";
  * tools including extension tools, so it would silently disable the managed
  * capability-routing extension's tools (piExtensionProvision).
  *
- * Rules, because this file is also the operator's:
- *   - `defaultTools` ABSENT → write pi's defaults + powershell.
- *   - `defaultTools` PRESENT → only APPEND powershell when missing. An
- *     operator's own selection is never reordered or removed; we guarantee a
- *     reachable shell, we don't own their tool list.
- *   - already contains powershell → no write at all.
+ * Rules, because this file is also the operator's. ONLY AN ABSENT KEY IS THE
+ * SEED CASE — a present `defaultTools` is authoritative whatever its shape,
+ * and is left byte-for-byte alone (PR #615 round 1, Kai + Lena):
+ *   - `defaultTools` ABSENT → write pi's defaults + powershell. Absent means
+ *     "pi decides", so substituting a superset of pi's own default takes
+ *     nothing away from anyone.
+ *   - `defaultTools` PRESENT → NO WRITE, ever. An explicit list is an explicit
+ *     selection, and a tool list is exactly the place an operator disables
+ *     shell execution: pi documents `defaultTools: []` as "no built-in tools"
+ *     and a list like `["read"]` omits every shell on purpose. Appending
+ *     `powershell` to those re-arms a model-callable shell that was
+ *     deliberately turned off — a security regression, not a convenience. The
+ *     cost of the strict rule is that an operator who hand-writes a list on
+ *     Windows does not get powershell for free; that is their list to fix, and
+ *     it fails closed.
  *   - unparseable / non-object settings.json → left completely alone. Unknown
- *     state is refused, not clobbered (same rule as the auth absorb).
+ *     state is refused, not clobbered (same rule as the auth absorb). A
+ *     present-but-non-array `defaultTools` (a string, say) is the same case:
+ *     refused, never replaced with our list.
  *
  * Best-effort, never throws: a failed seed degrades to pi's own defaults
  * (i.e. today's behaviour) rather than blocking a spawn.
@@ -207,16 +218,12 @@ export function ensureWindowsShellTools(
     }
     settings = { ...(parsed as Record<string, unknown>) };
   }
-  const configured = settings[PI_DEFAULT_TOOLS_KEY];
-  let tools: string[];
-  if (Array.isArray(configured)) {
-    if (configured.includes(PI_POWERSHELL_TOOL)) return false; // already reachable
-    // APPEND only — the operator's own order and choices survive verbatim.
-    tools = [...(configured as unknown[]).map((t) => String(t)), PI_POWERSHELL_TOOL];
-  } else {
-    tools = [...PI_DEFAULT_TOOLS, PI_POWERSHELL_TOOL];
-  }
-  settings[PI_DEFAULT_TOOLS_KEY] = tools;
+  // PRESENT means the operator (or an earlier seed) owns this key: refuse. Not
+  // `Array.isArray` — `defaultTools: []` and `defaultTools: "read"` are both
+  // present, and neither is ours to rewrite. `in` rather than a truthiness or
+  // undefined check so an explicit `null`/`[]`/`""` is still recognised as set.
+  if (PI_DEFAULT_TOOLS_KEY in settings) return false;
+  settings[PI_DEFAULT_TOOLS_KEY] = [...PI_DEFAULT_TOOLS, PI_POWERSHELL_TOOL];
   const staged = `${target}.tools-${process.pid}.tmp`;
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });

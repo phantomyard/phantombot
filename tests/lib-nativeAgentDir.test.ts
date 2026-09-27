@@ -491,16 +491,67 @@ describe("nativeAgentDir issue #614 — win32 seeds pi's opt-in powershell tool"
     });
   });
 
-  test("an operator's OWN defaultTools is appended to, never reordered or pruned", () => {
+  // ── Round 1 (Kai blocking, Lena concurring): a PRESENT `defaultTools` is an
+  // explicit selection and the seed must not touch it. Appending powershell to
+  // an operator's list re-arms a model-callable shell they disabled — which is
+  // exactly what a tool list is for.
+
+  test("an operator's OWN defaultTools is left byte-for-byte alone — never appended to", () => {
     const dataHome = workspace();
     const dir = nativeAgentDir(dataHome, "omar");
     mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      join(dir, "settings.json"),
-      JSON.stringify({ defaultTools: ["ls", "read", "grep"] }),
-    );
+    const before = JSON.stringify({ defaultTools: ["ls", "read", "grep"] });
+    writeFileSync(join(dir, "settings.json"), before);
     ensureNativeAgentDir(dataHome, "omar", { platform: "win32" });
-    expect(read(dir).defaultTools).toEqual(["ls", "read", "grep", "powershell"]);
+    expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe(before);
+  });
+
+  test("defaultTools: [] — pi's documented no-built-ins denylist — is NOT re-armed", () => {
+    // pi docs/settings.md: "An empty array starts with no built-in tools while
+    // preserving extension and SDK custom tools." Appending powershell here
+    // would hand the model a shell on the one configuration that says no tools.
+    const dataHome = workspace();
+    const dir = nativeAgentDir(dataHome, "omar");
+    mkdirSync(dir, { recursive: true });
+    const before = JSON.stringify({ defaultTools: [], defaultModel: "gpt-5" });
+    writeFileSync(join(dir, "settings.json"), before);
+    expect(ensureWindowsShellTools(dir, "win32")).toBe(false);
+    expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe(before);
+  });
+
+  test('defaultTools: ["read"] — a shell-denied selection — is NOT re-armed', () => {
+    const dataHome = workspace();
+    const dir = nativeAgentDir(dataHome, "omar");
+    mkdirSync(dir, { recursive: true });
+    const before = JSON.stringify({ defaultTools: ["read"] });
+    writeFileSync(join(dir, "settings.json"), before);
+    expect(ensureWindowsShellTools(dir, "win32")).toBe(false);
+    expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe(before);
+    expect(read(dir).defaultTools).not.toContain("powershell");
+    expect(read(dir).defaultTools).not.toContain("bash");
+  });
+
+  test("a PRESENT-but-non-array defaultTools is refused, never replaced with our list", () => {
+    // Lena's second finding: the old else branch clobbered operator state of
+    // any unexpected shape with the default list.
+    for (const value of ['"read"', "null", "42", "{}"]) {
+      const dataHome = workspace();
+      const dir = nativeAgentDir(dataHome, "omar");
+      mkdirSync(dir, { recursive: true });
+      const before = `{"defaultTools":${value}}`;
+      writeFileSync(join(dir, "settings.json"), before);
+      expect(ensureWindowsShellTools(dir, "win32")).toBe(false);
+      expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe(before);
+    }
+  });
+
+  test("the seed is idempotent: the second ensure sees a present key and writes nothing", () => {
+    const dataHome = workspace();
+    const dir = ensureNativeAgentDir(dataHome, "omar", { platform: "win32" });
+    const seeded = readFileSync(join(dir, "settings.json"), "utf8");
+    expect(read(dir).defaultTools).toEqual(["read", "bash", "edit", "write", "powershell"]);
+    expect(ensureWindowsShellTools(dir, "win32")).toBe(false);
+    expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe(seeded);
   });
 
   test("defaultTools already naming powershell → the file is not rewritten", () => {
@@ -540,9 +591,12 @@ describe("nativeAgentDir issue #614 — win32 seeds pi's opt-in powershell tool"
       JSON.stringify({ defaultTools: ["read", "bash"], defaultModel: "gpt-5" }),
     );
     const dir = ensureNativeAgentDir(dataHome, "omar", { platform: "win32" });
-    // The operator's migrated list is intact, with the shell appended.
+    // The migrated list is a PRESENT key by the time the seed runs, so it is
+    // authoritative and survives untouched — no powershell appended. The
+    // ordering still matters: seeding FIRST would have written a list the
+    // absorb then refuses to clobber, losing the operator's choice entirely.
     expect(read(dir)).toEqual({
-      defaultTools: ["read", "bash", "powershell"],
+      defaultTools: ["read", "bash"],
       defaultModel: "gpt-5",
     });
   });

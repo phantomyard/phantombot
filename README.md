@@ -530,10 +530,14 @@ at `%USERPROFILE%\.local\share\phantombot\pi-native\personas\<persona>\agent\set
 with `"defaultTools": ["read", "bash", "edit", "write", "powershell"]`, so the
 model always has a shell it can run: Git Bash where it exists, PowerShell
 (`pwsh.exe`, else Windows PowerShell) where it does not. Without the seed a box
-with no Git Bash failed every command with *"No bash shell found"*. If you list
-your own `defaultTools`, phantombot only appends `powershell` when it is absent
-— your selection is never reordered or pruned, and a file it cannot parse is
-left untouched.
+with no Git Bash failed every command with *"No bash shell found"*.
+
+The seed only ever fills in a `defaultTools` key that is **absent**. If you set
+it yourself, your value is authoritative and is left byte-for-byte alone —
+including `[]`, which pi documents as "no built-in tools", and any list that
+deliberately omits a shell. Phantombot will not add `powershell` back to a
+selection you made, so if you hand-write a list on Windows and want PowerShell,
+name it. A `settings.json` phantombot cannot parse is also left untouched.
 
 **Install as a background service.**
 
