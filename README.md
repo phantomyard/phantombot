@@ -522,6 +522,19 @@ macOS, so a persona's on-disk tree is identical across all three: config in
 Linux. The crown-jewel `identity.json` is created with an owner-only ACL
 (`icacls`, inheritance stripped) so other accounts on the box cannot read it.
 
+**Shell tools on the native harness.** The embedded pi engine exposes its
+`powershell` tool only when `defaultTools` in its `settings.json` names it, and
+its built-in default set is `read, bash, edit, write` — bash resolved from Git
+Bash. On Windows phantombot therefore seeds its own (persona-scoped) agent dir
+at `%USERPROFILE%\.local\share\phantombot\pi-native\personas\<persona>\agent\settings.json`
+with `"defaultTools": ["read", "bash", "edit", "write", "powershell"]`, so the
+model always has a shell it can run: Git Bash where it exists, PowerShell
+(`pwsh.exe`, else Windows PowerShell) where it does not. Without the seed a box
+with no Git Bash failed every command with *"No bash shell found"*. If you list
+your own `defaultTools`, phantombot only appends `powershell` when it is absent
+— your selection is never reordered or pruned, and a file it cannot parse is
+left untouched.
+
 **Install as a background service.**
 
 ```powershell

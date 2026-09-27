@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import {
   absorbLegacyNativeAgent,
   ensureNativeAgentDir,
+  ensureWindowsShellTools,
   LEGACY_ABSORBED_MARKER,
   nativeAgentDir,
   nativeAgentEnv,
@@ -435,5 +436,165 @@ describe("nativeAgentDir round-7 — relayed-turn auth-absorb skip + dir modes",
     } finally {
       rmSync(ephemeral, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * WINDOWS SHELL REACHABILITY (issue #614).
+ *
+ * Pi's `powershell` tool is opt-in through `defaultTools` (pi 0.85.1
+ * docs/settings.md, docs/windows.md); pi's own default set is
+ * `read, bash, edit, write`. Phantombot never wrote `defaultTools`, so on a
+ * Windows box without Git Bash the model held exactly one shell tool (`bash`)
+ * and pi's getShellConfig() threw "No bash shell found" on every command —
+ * with getPowerShellConfig() unreachable in the same bundle. Every agent dir
+ * this module creates now seeds both shells.
+ */
+describe("nativeAgentDir issue #614 — win32 seeds pi's opt-in powershell tool", () => {
+  const read = (dir: string): Record<string, unknown> =>
+    JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+
+  test("no settings.json on win32 → pi's own defaults PLUS powershell", () => {
+    const dataHome = workspace();
+    const dir = ensureNativeAgentDir(dataHome, "omar", { platform: "win32" });
+    expect(read(dir).defaultTools).toEqual(["read", "bash", "edit", "write", "powershell"]);
+  });
+
+  test("bash is KEPT alongside powershell — a box with Git Bash keeps today's behaviour", () => {
+    const dataHome = workspace();
+    const dir = ensureNativeAgentDir(dataHome, "omar", { platform: "win32" });
+    expect(read(dir).defaultTools).toContain("bash");
+    expect(read(dir).defaultTools).toContain("powershell");
+  });
+
+  test("non-win32 (the default) never writes settings.json at all", () => {
+    const dataHome = workspace();
+    const dir = ensureNativeAgentDir(dataHome, "omar", { platform: "linux" });
+    expect(existsSync(join(dir, "settings.json"))).toBe(false);
+    const other = ensureNativeAgentDir(workspace(), "omar");
+    expect(existsSync(join(other, "settings.json"))).toBe(false);
+  });
+
+  test("an existing settings.json keeps every other key — only defaultTools is added", () => {
+    const dataHome = workspace();
+    const dir = nativeAgentDir(dataHome, "omar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ defaultModel: "gpt-5", theme: "dark" }),
+    );
+    ensureNativeAgentDir(dataHome, "omar", { platform: "win32" });
+    expect(read(dir)).toEqual({
+      defaultModel: "gpt-5",
+      theme: "dark",
+      defaultTools: ["read", "bash", "edit", "write", "powershell"],
+    });
+  });
+
+  test("an operator's OWN defaultTools is appended to, never reordered or pruned", () => {
+    const dataHome = workspace();
+    const dir = nativeAgentDir(dataHome, "omar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ defaultTools: ["ls", "read", "grep"] }),
+    );
+    ensureNativeAgentDir(dataHome, "omar", { platform: "win32" });
+    expect(read(dir).defaultTools).toEqual(["ls", "read", "grep", "powershell"]);
+  });
+
+  test("defaultTools already naming powershell → the file is not rewritten", () => {
+    const dataHome = workspace();
+    const dir = nativeAgentDir(dataHome, "omar");
+    mkdirSync(dir, { recursive: true });
+    const before = JSON.stringify({ defaultTools: ["powershell"] });
+    writeFileSync(join(dir, "settings.json"), before);
+    expect(ensureWindowsShellTools(dir, "win32")).toBe(false);
+    expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe(before);
+  });
+
+  test("an unparseable settings.json is REFUSED, never clobbered", () => {
+    const dataHome = workspace();
+    const dir = nativeAgentDir(dataHome, "omar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "settings.json"), "{ not json");
+    expect(ensureWindowsShellTools(dir, "win32")).toBe(false);
+    expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe("{ not json");
+  });
+
+  test("a non-object settings.json (array) is REFUSED too", () => {
+    const dataHome = workspace();
+    const dir = nativeAgentDir(dataHome, "omar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "settings.json"), "[]");
+    expect(ensureWindowsShellTools(dir, "win32")).toBe(false);
+    expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe("[]");
+  });
+
+  test("the seed runs AFTER the legacy absorb — a migrated defaultTools survives", () => {
+    const dataHome = workspace();
+    const legacy = nativeAgentDir(dataHome);
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(
+      join(legacy, "settings.json"),
+      JSON.stringify({ defaultTools: ["read", "bash"], defaultModel: "gpt-5" }),
+    );
+    const dir = ensureNativeAgentDir(dataHome, "omar", { platform: "win32" });
+    // The operator's migrated list is intact, with the shell appended.
+    expect(read(dir)).toEqual({
+      defaultTools: ["read", "bash", "powershell"],
+      defaultModel: "gpt-5",
+    });
+  });
+
+  test("the seeded settings.json lands at 0600 under a 0002 umask", () => {
+    const dataHome = workspace();
+    const previous = process.umask(0o002);
+    try {
+      const dir = ensureNativeAgentDir(dataHome, "omar", { platform: "win32" });
+      expect(statSync(join(dir, "settings.json")).mode & 0o777).toBe(0o600);
+    } finally {
+      process.umask(previous);
+    }
+  });
+
+  test("an EPHEMERAL relayed-turn dir gets the seed too (harnesses/pi.ts)", () => {
+    const dataHome = workspace();
+    const ephemeral = join(workspace(), "pi-agent");
+    mkdirSync(ephemeral, { recursive: true });
+    seedEphemeralAgentConfig(ephemeral, dataHome, "win32");
+    expect(read(ephemeral).defaultTools).toEqual([
+      "read",
+      "bash",
+      "edit",
+      "write",
+      "powershell",
+    ]);
+  });
+
+  test("pi 0.85.1 still treats powershell as opt-in — the premise this fix rests on", () => {
+    // If a pi upgrade ever makes powershell a default, this assertion fails and
+    // the seed can be reconsidered instead of quietly duplicating pi's work.
+    const sdk = readFileSync(
+      join(
+        import.meta.dir,
+        "..",
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "dist",
+        "core",
+        "sdk.js",
+      ),
+      "utf8",
+    );
+    const defaults = sdk.match(/defaultActiveToolNames = (\[[^\]]*\])/)?.[1];
+    expect(defaults).toBeDefined();
+    expect(JSON.parse(defaults!.replace(/'/g, '"'))).toEqual([
+      "read",
+      "bash",
+      "edit",
+      "write",
+    ]);
   });
 });

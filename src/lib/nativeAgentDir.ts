@@ -80,6 +80,13 @@
  *   - sessions/, skills/, themes/ are NOT absorbed: conversation history and
  *     cosmetics are per-persona by nature and duplicating them per persona
  *     buys nothing the config files don't already cover.
+ *
+ * WINDOWS SHELL TOOLS (issue #614): because this module owns every native
+ * agent dir, it is also where phantombot guarantees the model on win32 is
+ * handed a shell it can actually run. Pi's `powershell` tool is opt-in via
+ * `defaultTools` in settings.json, so a Windows box without Git Bash had NO
+ * working shell at all. Every dir this module creates gets that seed — see
+ * ensureWindowsShellTools below.
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -130,6 +137,106 @@ export const LEGACY_ABSORBED_MARKER = ".legacy-absorbed";
  * (oauth-filtered) in absorbLegacyNativeAgent. */
 const LEGACY_AGENT_CONFIG_FILES = ["settings.json", "models.json", "models-store.json"] as const;
 
+/** Pi's OWN built-in default tool set when `defaultTools` is absent from
+ * settings.json (pi 0.85.1 `dist/core/sdk.js`: `defaultActiveToolNames`).
+ * Reproduced here as the BASE we extend on win32 — seeding a list means pi no
+ * longer applies its own default, so anything left out would be silently
+ * dropped. */
+const PI_DEFAULT_TOOLS = ["read", "bash", "edit", "write"] as const;
+
+/** The shell tool pi only exposes when `defaultTools` names it explicitly
+ * (pi docs/windows.md). */
+const PI_POWERSHELL_TOOL = "powershell";
+
+/** Settings file inside an agent dir that carries `defaultTools`. */
+const PI_SETTINGS_FILE = "settings.json";
+
+/** The settings.json key pi reads the initial built-in tool selection from. */
+const PI_DEFAULT_TOOLS_KEY = "defaultTools";
+
+/** WINDOWS SHELL REACHABILITY (issue #614).
+ *
+ * Pi's `powershell` tool is OPT-IN: its built-in default set is
+ * `read, bash, edit, write`, and `powershell` is only instantiated when
+ * `defaultTools` in settings.json names it. Phantombot never wrote
+ * `defaultTools` and passes no tool flags, so on Windows the model was only
+ * ever handed `bash` — and pi's `getShellConfig()` on win32 resolves bash from
+ * `%ProgramFiles%\Git\bin\bash.exe`, the x86 variant, then `bash.exe` on
+ * PATH. With no Git Bash installed EVERY shell command failed with "No bash
+ * shell found" and there was no reachable fallback, even though
+ * `getPowerShellConfig()` (pwsh.exe ?? powershell.exe) sits right there in the
+ * same bundle.
+ *
+ * So on win32 phantombot seeds `defaultTools` with pi's own defaults PLUS
+ * `powershell`: both shells stay available, so a box that does have Git Bash
+ * keeps the bash behaviour every existing prompt and skill assumes, and a box
+ * that doesn't can still run commands.
+ *
+ * Deliberately NOT pi's `--tools` flag: that is a strict allowlist over ALL
+ * tools including extension tools, so it would silently disable the managed
+ * capability-routing extension's tools (piExtensionProvision).
+ *
+ * Rules, because this file is also the operator's:
+ *   - `defaultTools` ABSENT → write pi's defaults + powershell.
+ *   - `defaultTools` PRESENT → only APPEND powershell when missing. An
+ *     operator's own selection is never reordered or removed; we guarantee a
+ *     reachable shell, we don't own their tool list.
+ *   - already contains powershell → no write at all.
+ *   - unparseable / non-object settings.json → left completely alone. Unknown
+ *     state is refused, not clobbered (same rule as the auth absorb).
+ *
+ * Best-effort, never throws: a failed seed degrades to pi's own defaults
+ * (i.e. today's behaviour) rather than blocking a spawn.
+ */
+export function ensureWindowsShellTools(
+  dir: string,
+  platform: string = process.platform,
+): boolean {
+  if (platform !== "win32") return false;
+  const target = join(dir, PI_SETTINGS_FILE);
+  let settings: Record<string, unknown> = {};
+  if (existsSync(target)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(target, "utf8"));
+    } catch {
+      return false; // unparseable: refuse to interpret, retry next ensure()
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return false; // not a settings object: refuse, retry next ensure()
+    }
+    settings = { ...(parsed as Record<string, unknown>) };
+  }
+  const configured = settings[PI_DEFAULT_TOOLS_KEY];
+  let tools: string[];
+  if (Array.isArray(configured)) {
+    if (configured.includes(PI_POWERSHELL_TOOL)) return false; // already reachable
+    // APPEND only — the operator's own order and choices survive verbatim.
+    tools = [...(configured as unknown[]).map((t) => String(t)), PI_POWERSHELL_TOOL];
+  } else {
+    tools = [...PI_DEFAULT_TOOLS, PI_POWERSHELL_TOOL];
+  }
+  settings[PI_DEFAULT_TOOLS_KEY] = tools;
+  const staged = `${target}.tools-${process.pid}.tmp`;
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(staged, JSON.stringify(settings, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    renameSync(staged, target);
+    return true;
+  } catch {
+    try {
+      unlinkSync(staged);
+    } catch {
+      /* nothing to clean up */
+    }
+    return false;
+  }
+}
+
+
 /** What absorbLegacyNativeAgent inherited from the legacy dir. */
 export interface LegacyAbsorbResult {
   /** True when a (filtered) auth.json was written into the persona store. */
@@ -147,6 +254,9 @@ export interface NativeAgentDirOptions {
    * avoids write+strip churn on every relayed turn.
    * Local-config files are still absorbed; default `true`. */
   absorbAuth?: boolean;
+  /** Platform override for the win32 shell-tool seed (issue #614). Tests set
+   * `"win32"`; production leaves it undefined so `process.platform` decides. */
+  platform?: string;
 }
 
 /** Copy one legacy agent-dir file into a persona's own dir without clobbering
@@ -361,6 +471,11 @@ export function ensureNativeAgentDir(
   const dir = nativeAgentDir(dataHome, persona);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (persona) absorbLegacyNativeAgent(dataHome, persona, opts);
+  // AFTER the absorb (issue #614): the absorb may have just inherited the
+  // legacy settings.json, and the win32 seed must see that file's real
+  // `defaultTools` — seeding first would write a list the absorb then refuses
+  // to clobber, silently losing the operator's migrated tool selection.
+  ensureWindowsShellTools(dir, opts?.platform);
   return dir;
 }
 
@@ -378,6 +493,7 @@ export function ensureNativeAgentDir(
 export function seedEphemeralAgentConfig(
   dir: string,
   dataHome: string = xdgDataHome(),
+  platform?: string,
 ): void {
   for (const name of LEGACY_AGENT_CONFIG_FILES) {
     const legacy = join(nativeAgentDir(dataHome), name);
@@ -389,6 +505,12 @@ export function seedEphemeralAgentConfig(
       /* best-effort: a config that can't be seeded degrades to pi defaults */
     }
   }
+  // An ephemeral dir starts empty, so it needs the win32 shell-tool seed too
+  // (issue #614) — and AFTER the copy, for the same reason ensure() does it
+  // last. These turns are usually `--no-tools` (threat judge), where the flag
+  // wins over `defaultTools` and the seed is simply inert; a relayed turn that
+  // DOES get tools must not be the one Windows spawn with no reachable shell.
+  ensureWindowsShellTools(dir, platform);
 }
 
 /**
