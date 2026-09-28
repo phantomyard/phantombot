@@ -1424,7 +1424,7 @@ export function App(props: AppProps): React.ReactElement {
           validateElevenLabsKey,
           validateOpenAICompatibleKey,
           validateOpenAIVoice,
-          fetchOpenAIAudioModelOptions,
+          fetchOpenAIAudioModels,
           fetchOpenAIVoiceOptions,
         } = await import("../lib/voice.ts");
         const { findStoredVoiceCredential } = await import("../cli/voice.ts");
@@ -1484,7 +1484,7 @@ export function App(props: AppProps): React.ReactElement {
                 ? validateOpenAICompatibleKey(key, baseUrl!)
                 : validateElevenLabsKey(key),
             probeModels: ({ key, baseUrl, modality }) =>
-              fetchOpenAIAudioModelOptions(key, baseUrl, modality),
+              fetchOpenAIAudioModels(key, baseUrl, modality),
             probeVoices: ({ key, baseUrl, model }) =>
               fetchOpenAIVoiceOptions(key, model, fetch, undefined, baseUrl),
             checkVoice: ({ key, baseUrl, model, voice }) =>

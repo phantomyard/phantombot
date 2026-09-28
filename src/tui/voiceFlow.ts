@@ -24,6 +24,7 @@ import {
   openAIVoiceMenuOptions,
   OTHER_VOICE,
   type OpenAIVoiceCheck,
+  type OpenAIAudioModelOption,
   type VoiceConfig,
   type VoiceProvider,
 } from "../lib/voice.ts";
@@ -48,7 +49,7 @@ export interface VoiceFlowDeps {
     key: string;
     baseUrl: string;
     modality: "transcription" | "speech";
-  }): Promise<string[]>;
+  }): Promise<OpenAIAudioModelOption[]>;
   /**
    * The voices this TTS model actually accepts, asked live. `[]` means the
    * endpoint would not say, and the caller falls back to the known list.
@@ -225,10 +226,12 @@ async function openAICompatibleFlow(
   const validated = await deps.validateKey("openai-compatible", key, baseUrl);
   if (!validated.ok) return { rejected: validated.error };
 
-  const [sttModels, ttsModels] = await Promise.all([
+  const [sttCatalog, ttsCatalog] = await Promise.all([
     deps.probeModels({ key, baseUrl, modality: "transcription" }),
     deps.probeModels({ key, baseUrl, modality: "speech" }),
   ]);
+  const sttModels = sttCatalog.map((entry) => entry.id);
+  const ttsModels = ttsCatalog.map((entry) => entry.id);
   const sameEndpoint = existingEndpoint !== undefined &&
     normalizeOpenAICompatibleBaseUrl(existingEndpoint.baseUrl) === baseUrl;
   const sttModel = await askAudioModel(
@@ -248,7 +251,10 @@ async function openAICompatibleFlow(
   if (ttsModel === undefined) return undefined;
   if (!ttsModel) return { rejected: "TTS model is required" };
   const model = ttsModel;
-  const live = await deps.probeVoices({ key, baseUrl, model });
+  const catalogVoices = ttsCatalog.find((entry) => entry.id === model)?.voices ?? [];
+  const live = catalogVoices.length
+    ? catalogVoices
+    : await deps.probeVoices({ key, baseUrl, model });
   const menu = openAIVoiceMenuOptions(model, live);
   const picked = await q.choose({
     title: live.length ? `Voice — ${model}` : `Voice — ${model} (unverified)`,

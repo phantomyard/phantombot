@@ -184,8 +184,8 @@ describe("configureVoice — voice availability", () => {
         probeModels: async ({ modality }) => {
           seen.push(modality);
           return modality === "transcription"
-            ? ["openai/whisper-1"]
-            : ["deepgram/aura-2"];
+            ? [{ id: "openai/whisper-1", voices: [] }]
+            : [{ id: "deepgram/aura-2", voices: [] }];
         },
         probeVoices: async () => ["aura-2-beatrix-nl"],
       }),
@@ -235,6 +235,50 @@ describe("configureVoice — voice availability", () => {
     // Enumerated by the endpoint one moment ago: proving it again would bill
     // a synthesis for nothing.
     expect(checks).toBe(0);
+  });
+
+  test("prefers voices published on the selected model catalogue row", async () => {
+    let probes = 0;
+    let checks = 0;
+    const { q, offered } = menuQuestions(
+      ["https://openrouter.ai/api/v1", "or-key"],
+      (options) => {
+        if (options.includes("openai/whisper-1")) return "openai/whisper-1";
+        if (options.includes("x-ai/grok-voice-tts-1.0"))
+          return "x-ai/grok-voice-tts-1.0";
+        return "leo";
+      },
+    );
+
+    const result = await configureVoice(
+      "phantom",
+      "openai-compatible",
+      q,
+      deps({
+        probeModels: async ({ modality }) => modality === "transcription"
+          ? [{ id: "openai/whisper-1", voices: [] }]
+          : [{
+            id: "x-ai/grok-voice-tts-1.0",
+            voices: ["eve", "ara", "rex", "sal", "leo"],
+          }],
+        probeVoices: async () => {
+          probes += 1;
+          return [];
+        },
+        checkVoice: async () => {
+          checks += 1;
+          return { ok: true };
+        },
+      }),
+    );
+
+    expect(offered.at(-1)).toEqual([
+      "ara", "eve", "leo", "rex", "sal", "__other__",
+    ]);
+    expect(probes).toBe(0);
+    expect(checks).toBe(0);
+    expect(result && "voice" in result && result.voice.openaiCompatible?.voice)
+      .toBe("leo");
   });
 
   test("falls back to the known list and PROVES the pick when the endpoint will not enumerate", async () => {

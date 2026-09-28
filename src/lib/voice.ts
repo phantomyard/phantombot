@@ -98,8 +98,22 @@ export const OPENAI_COMPATIBLE_VOICE_KEY_ENV =
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 export const OTHER_AUDIO_MODEL = "__other_audio_model__";
+/**
+ * Menu sentinel for "none of the above — let me type one". Shared by the CLI
+ * picker and the TUI flow so a provider-specific voice name is never locked
+ * out by our own list; catalogue parsing reserves it so it cannot collide with
+ * a published provider voice.
+ */
+export const OTHER_VOICE = "__other__";
 
 export type OpenAIAudioModality = "transcription" | "speech";
+
+/** One audio model published by an OpenAI-compatible Models API. */
+export interface OpenAIAudioModelOption {
+  id: string;
+  /** Model-scoped TTS voices, when the catalogue publishes them. */
+  voices: string[];
+}
 
 /** Normalize for matching and safe endpoint construction. */
 export function normalizeOpenAICompatibleBaseUrl(value: string): string {
@@ -292,13 +306,13 @@ export async function validateOpenAIKey(
  * An empty result is deliberately non-fatal. Generic compatible endpoints
  * are still configurable through the picker's "Other" / typed fallback.
  */
-export async function fetchOpenAIAudioModelOptions(
+export async function fetchOpenAIAudioModels(
   apiKey: string,
   baseUrl: string,
   modality: OpenAIAudioModality,
   fetchImpl: typeof fetch = fetch,
   signal?: AbortSignal,
-): Promise<string[]> {
+): Promise<OpenAIAudioModelOption[]> {
   try {
     const url = new URL(`${normalizeOpenAICompatibleBaseUrl(baseUrl)}/models`);
     url.searchParams.set("output_modalities", modality);
@@ -311,21 +325,51 @@ export async function fetchOpenAIAudioModelOptions(
       | {
           data?: Array<{
             id?: unknown;
+            supported_voices?: unknown;
             architecture?: { output_modalities?: unknown };
           }>;
         }
       | null;
-    const ids = (body?.data ?? [])
+    const models = (body?.data ?? [])
       .filter((row) =>
         Array.isArray(row.architecture?.output_modalities) &&
         row.architecture.output_modalities.includes(modality)
       )
-      .map((row) => row.id)
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
-    return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
+      .flatMap((row) => {
+        if (typeof row.id !== "string" || row.id.length === 0) return [];
+        const voices = Array.isArray(row.supported_voices)
+          ? [...new Set(row.supported_voices.filter(
+            (voice): voice is string =>
+              typeof voice === "string" && voice.length > 0 &&
+              voice !== OTHER_VOICE && voice !== OTHER_AUDIO_MODEL,
+          ))]
+          : [];
+        return [{ id: row.id, voices }];
+      });
+    const unique = new Map<string, OpenAIAudioModelOption>();
+    for (const model of models) {
+      const previous = unique.get(model.id);
+      unique.set(model.id, {
+        id: model.id,
+        voices: [...new Set([...(previous?.voices ?? []), ...model.voices])],
+      });
+    }
+    return [...unique.values()].sort((a, b) => a.id.localeCompare(b.id));
   } catch {
     return [];
   }
+}
+
+/** Backward-compatible IDs-only view of the audio model catalogue. */
+export async function fetchOpenAIAudioModelOptions(
+  apiKey: string,
+  baseUrl: string,
+  modality: OpenAIAudioModality,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return (await fetchOpenAIAudioModels(apiKey, baseUrl, modality, fetchImpl, signal))
+    .map((model) => model.id);
 }
 
 /**
@@ -409,14 +453,6 @@ export async function fetchOpenAIVoiceOptions(
 }
 
 /**
- * Menu sentinel for "none of the above — let me type one". Shared by the CLI
- * picker and the TUI flow so a provider-specific voice name is never locked
- * out by our own list; it cannot collide with a real voice because every
- * voice name the endpoints use is a bare lowercase word.
- */
-export const OTHER_VOICE = "__other__";
-
-/**
  * The outcome of proving one (model, voice) pair against a live endpoint.
  * `supported` carries whatever the rejection enumerated, so the caller can
  * show the real choices instead of just the failure.
@@ -472,7 +508,10 @@ export async function validateOpenAIVoice(
       if (isUnsupportedSpeechFormatError(firstBody?.error?.message ?? "")) {
         res = await request(false);
       } else {
-        if (res.status === 401 || res.status === 403 || res.status === 429) {
+        if (
+          res.status === 401 || res.status === 403 || res.status === 429 ||
+          res.status >= 500
+        ) {
           return { ok: true };
         }
         const message = firstBody?.error?.message?.trim();
@@ -487,7 +526,10 @@ export async function validateOpenAIVoice(
     return { ok: true };
   }
   if (res.ok) return { ok: true };
-  if (res.status === 401 || res.status === 403 || res.status === 429) {
+  if (
+    res.status === 401 || res.status === 403 || res.status === 429 ||
+    res.status >= 500
+  ) {
     return { ok: true };
   }
   const body = (await res.json().catch(() => null)) as
