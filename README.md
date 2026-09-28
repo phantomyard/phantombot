@@ -2025,8 +2025,10 @@ catalogues separately (`output_modalities=transcription` and `speech`) and
 offers two model pickers. **Other** keeps provider-specific and generic
 OpenAI-compatible model IDs available when discovery is unsupported or
 incomplete. OpenRouter remains one provider configuration — the model choices,
-not the URL or credential, are split. OpenAI-compatible synthesis requests MP3
-and carries the response's actual MIME type through to the channel transport.
+not the URL or credential, are split. OpenAI-compatible synthesis prefers MP3,
+then retries without a format when the model requires provider-selected PCM.
+Raw PCM is wrapped as WAV; Telegram sends it as a playable audio attachment
+because its voice-note API accepts MP3/M4A/OGG but not WAV.
 
 Before asking for a key, the wizard checks the current persona's vault and
 matching OpenAI-compatible embeddings configuration. It offers a matching key

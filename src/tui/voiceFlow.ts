@@ -313,7 +313,9 @@ async function askAudioModel(
   current?: string,
 ): Promise<string | undefined> {
   if (live.length) {
-    const pick = q.search ?? q.choose;
+    const pick = q.search
+      ? (options: Parameters<ChannelsQuestions["choose"]>[0]) => q.search!(options)
+      : (options: Parameters<ChannelsQuestions["choose"]>[0]) => q.choose(options);
     const picked = await pick({
       title,
       description: "Select the model for this audio direction, or search by model ID.",

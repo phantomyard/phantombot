@@ -53,7 +53,7 @@ export interface TelegramTransport extends ChannelTransport {
   // inside each method, at the wire boundary.
   sendMessage(conversationId: string, text: string): Promise<void>;
   sendTyping(conversationId: string): Promise<void>;
-  /** Send an OGG-Opus voice note. */
+  /** Send a voice note, or playable audio when Telegram cannot voice-wrap it. */
   sendVoice(conversationId: string, audio: Buffer, mime: string): Promise<void>;
   /** Send the "recording voice" status indicator. */
   sendRecording(conversationId: string): Promise<void>;
@@ -352,18 +352,21 @@ export class HttpTelegramTransport implements TelegramTransport {
     const chatId = Number(conversationId);
     const form = new FormData();
     form.set("chat_id", String(chatId));
+    const wav = mime === "audio/wav" || mime === "audio/x-wav";
     const filename = mime === "audio/mpeg"
       ? "voice.mp3"
       : mime === "audio/mp4" || mime === "audio/x-m4a"
       ? "voice.m4a"
+      : wav
+      ? "voice.wav"
       : "voice.ogg";
     form.set(
-      "voice",
+      wav ? "audio" : "voice",
       new Blob([audio], { type: mime || "audio/ogg" }),
       filename,
     );
     const res = await fetch(
-      `https://api.telegram.org/bot${this.token}/sendVoice`,
+      `https://api.telegram.org/bot${this.token}/${wav ? "sendAudio" : "sendVoice"}`,
       {
         method: "POST",
         body: form,

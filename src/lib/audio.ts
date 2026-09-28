@@ -10,6 +10,7 @@
 import type { Config } from "../config.ts";
 import {
   ENV_KEY_FOR_PROVIDER,
+  isUnsupportedSpeechFormatError,
   normalizeOpenAICompatibleBaseUrl,
   type VoiceProvider,
 } from "./voice.ts";
@@ -240,36 +241,92 @@ async function openaiCompatibleTts(
   fetchImpl: typeof fetch,
 ): Promise<SynthesizeResult> {
   let res: Response;
+  let errText = "";
   try {
-    res = await fetchImpl(`${normalizeOpenAICompatibleBaseUrl(cfg.baseUrl)}/audio/speech`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: cfg.ttsModel,
-        voice: cfg.voice,
-        input: text,
-        speed: cfg.speed,
-        response_format: "mp3",
-      }),
-      signal: timeoutSignal(AUDIO_FETCH_TIMEOUT_MS),
-    });
+    const url = `${normalizeOpenAICompatibleBaseUrl(cfg.baseUrl)}/audio/speech`;
+    const signal = timeoutSignal(AUDIO_FETCH_TIMEOUT_MS);
+    const request = (preferMp3: boolean) =>
+      fetchImpl(url, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: cfg.ttsModel,
+          voice: cfg.voice,
+          input: text,
+          speed: cfg.speed,
+          ...(preferMp3 ? { response_format: "mp3" } : {}),
+        }),
+        signal,
+      });
+    res = await request(true);
+    if (!res.ok) {
+      errText = await res.text().catch(() => "");
+      if (isUnsupportedSpeechFormatError(errText)) {
+        res = await request(false);
+        errText = res.ok ? "" : await res.text().catch(() => "");
+      }
+    }
   } catch (e) {
     return { ok: false, error: `network: ${(e as Error).message}` };
   }
   if (!res.ok) {
-    const errText = await res.text().catch(() => "");
     return {
       ok: false,
       error: `OpenAI-compatible TTS endpoint/model unavailable (HTTP ${res.status}): ${errText.slice(0, 200)}`,
     };
   }
   const buf = Buffer.from(await res.arrayBuffer());
-  const mime = res.headers.get("content-type")?.split(";", 1)[0]?.trim() ||
-    "audio/mpeg";
+  const contentType = res.headers.get("content-type")?.trim() || "audio/mpeg";
+  const mime = contentType.split(";", 1)[0]?.trim().toLowerCase() || "audio/mpeg";
+  if (mime === "audio/pcm") {
+    return {
+      ok: true,
+      audio: {
+        data: pcm16leToWav(
+          buf,
+          parsePositiveContentTypeParam(contentType, "rate", 24_000, 768_000),
+          parsePositiveContentTypeParam(contentType, "channels", 1, 32),
+        ),
+        mime: "audio/wav",
+      },
+    };
+  }
   return { ok: true, audio: { data: buf, mime } };
+}
+
+function parsePositiveContentTypeParam(
+  contentType: string,
+  name: string,
+  fallback: number,
+  maximum: number,
+): number {
+  const value = new RegExp(`(?:^|;)\\s*${name}=([0-9]+)`, "i").exec(contentType)?.[1];
+  const parsed = value === undefined ? NaN : Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= maximum
+    ? parsed
+    : fallback;
+}
+
+/** OpenRouter's PCM speech responses are signed 16-bit little-endian samples. */
+function pcm16leToWav(pcm: Buffer, sampleRate: number, channels: number): Buffer {
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * channels * 2, 28);
+  header.writeUInt16LE(channels * 2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
 }
 
 async function elevenlabsScribe(

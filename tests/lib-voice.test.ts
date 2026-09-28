@@ -176,6 +176,27 @@ describe("fetchOpenAIVoiceOptions", () => {
     expect(body.voice).toBe("__phantombot_probe__");
   });
 
+  test("retries without a format when PCM-only models reject MP3", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fakeFetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return bodies.length === 1
+        ? Response.json(
+          { error: { message: 'Only response_format="pcm" is supported, not mp3.' } },
+          { status: 400 },
+        )
+        : Response.json(
+          { error: { message: "Unknown voice. Supported voices: Kore, Puck." } },
+          { status: 400 },
+        );
+    }) as unknown as typeof fetch;
+    expect(
+      await fetchOpenAIVoiceOptions("k", "gemini-tts", fakeFetch),
+    ).toEqual(["Kore", "Puck"]);
+    expect(bodies[0]!.response_format).toBe("mp3");
+    expect(bodies[1]!.response_format).toBeUndefined();
+  });
+
   test("returns [] on 401", async () => {
     const fakeFetch = (async () =>
       new Response(JSON.stringify({ error: { message: "401" } }), {
@@ -300,6 +321,24 @@ describe("validateOpenAIVoice", () => {
       input: ".",
       response_format: "mp3",
     });
+  });
+
+  test("proves a valid voice after a PCM-only model rejects MP3", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fakeFetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return bodies.length === 1
+        ? Response.json(
+          { error: { message: 'Gemini only supports response_format="pcm". Got "mp3".' } },
+          { status: 400 },
+        )
+        : new Response("pcm", { status: 200 });
+    }) as unknown as typeof fetch;
+    expect(
+      await validateOpenAIVoice("k", "gemini-tts", "Kore", fakeFetch),
+    ).toEqual({ ok: true });
+    expect(bodies[0]!.response_format).toBe("mp3");
+    expect(bodies[1]!.response_format).toBeUndefined();
   });
 
   test("reports a rejection and the voices the model does accept", async () => {

@@ -3998,6 +3998,29 @@ describe("HttpTelegramTransport HTML rendering", () => {
       (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
     }
   });
+
+  test("sendVoice routes WAV through Telegram's playable audio endpoint", async () => {
+    const originalFetch = globalThis.fetch;
+    let sent: File | undefined;
+    let endpoint = "";
+    try {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+        url: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        endpoint = String(url);
+        sent = (init?.body as FormData).get("audio") as File;
+        return Response.json({ ok: true, result: {} });
+      }) as unknown as typeof fetch;
+      const t = new HttpTelegramTransport("test-token");
+      await t.sendVoice("7", Buffer.from("wav"), "audio/wav");
+      expect(endpoint).toEndWith("/sendAudio");
+      expect(sent?.name).toBe("voice.wav");
+      expect(sent?.type).toBe("audio/wav");
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
 });
 
 describe("HttpTelegramTransport AbortSignal", () => {

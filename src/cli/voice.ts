@@ -258,7 +258,7 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
 
       if (!result) return "voice unchanged";
       if ("rejected" in result)
-        return `voice unchanged — rejected: ${result.rejected}`;
+        return `voice unchanged — ${result.rejected}`;
 
       await applyVoiceConfig({
         configPath: voiceConfigPath,

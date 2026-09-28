@@ -106,6 +106,11 @@ export function normalizeOpenAICompatibleBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, "");
 }
 
+/** True when a speech endpoint rejected the requested output encoding, not the voice. */
+export function isUnsupportedSpeechFormatError(message: string): boolean {
+  return /response[_ -]?format/i.test(message) && /\b(?:mp3|pcm)\b/i.test(message);
+}
+
 export function openAICompatibleProviderLabel(baseUrl: string): string {
   const host = (() => {
     try {
@@ -369,24 +374,34 @@ export async function fetchOpenAIVoiceOptions(
   baseUrl: string = OPENAI_BASE_URL,
 ): Promise<string[]> {
   try {
-    const res = await fetchImpl(`${normalizeOpenAICompatibleBaseUrl(baseUrl)}/audio/speech`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        voice: "__phantombot_probe__",
-        input: ".",
-        response_format: "mp3",
-      }),
-      signal,
-    });
+    const url = `${normalizeOpenAICompatibleBaseUrl(baseUrl)}/audio/speech`;
+    const request = (preferMp3: boolean) =>
+      fetchImpl(url, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          voice: "__phantombot_probe__",
+          input: ".",
+          ...(preferMp3 ? { response_format: "mp3" } : {}),
+        }),
+        signal,
+      });
+    let res = await request(true);
     if (res.ok) return []; // probe voice accepted — can't enumerate; fall back
-    const body = (await res.json().catch(() => null)) as
+    let body = (await res.json().catch(() => null)) as
       | { error?: { message?: string } }
       | null;
+    if (isUnsupportedSpeechFormatError(body?.error?.message ?? "")) {
+      res = await request(false);
+      if (res.ok) return [];
+      body = (await res.json().catch(() => null)) as
+        | { error?: { message?: string } }
+        | null;
+    }
     return parseOpenAIVoiceOptions(body?.error?.message ?? "");
   } catch {
     return [];
@@ -433,15 +448,41 @@ export async function validateOpenAIVoice(
 ): Promise<OpenAIVoiceCheck> {
   let res: Response;
   try {
-    res = await fetchImpl(`${normalizeOpenAICompatibleBaseUrl(baseUrl)}/audio/speech`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ model, voice, input: ".", response_format: "mp3" }),
-      signal,
-    });
+    const url = `${normalizeOpenAICompatibleBaseUrl(baseUrl)}/audio/speech`;
+    const request = (preferMp3: boolean) =>
+      fetchImpl(url, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          voice,
+          input: ".",
+          ...(preferMp3 ? { response_format: "mp3" } : {}),
+        }),
+        signal,
+      });
+    res = await request(true);
+    if (!res.ok) {
+      const firstBody = (await res.json().catch(() => null)) as
+        | { error?: { message?: string } }
+        | null;
+      if (isUnsupportedSpeechFormatError(firstBody?.error?.message ?? "")) {
+        res = await request(false);
+      } else {
+        if (res.status === 401 || res.status === 403 || res.status === 429) {
+          return { ok: true };
+        }
+        const message = firstBody?.error?.message?.trim();
+        return {
+          ok: false,
+          error: message ? `HTTP ${res.status}: ${message}` : `HTTP ${res.status}`,
+          supported: parseOpenAIVoiceOptions(message ?? ""),
+        };
+      }
+    }
   } catch {
     return { ok: true };
   }
