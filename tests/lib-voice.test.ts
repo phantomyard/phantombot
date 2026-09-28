@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   fetchOpenAIAudioModels,
-  fetchOpenAIAudioModelOptions,
   fetchOpenAIVoiceOptions,
+  isUnsupportedSpeechFormatError,
   validateOpenAIVoice,
   fallbackVoiceOptions,
   openAIVoiceMenuOptions,
@@ -102,7 +102,30 @@ describe("parseOpenAIVoiceOptions", () => {
   });
 });
 
-describe("fetchOpenAIAudioModelOptions", () => {
+describe("isUnsupportedSpeechFormatError", () => {
+  test("either half of the format signal is enough — providers word it any way", () => {
+    // Only the response_format mention:
+    expect(
+      isUnsupportedSpeechFormatError(
+        'error: response_format "mp3" is not supported by this model',
+      ),
+    ).toBe(true);
+    // Only the codec mention:
+    expect(
+      isUnsupportedSpeechFormatError("Invalid value: requested codec pcm."),
+    ).toBe(true);
+    expect(
+      isUnsupportedSpeechFormatError("mp3 is not supported by this provider"),
+    ).toBe(true);
+    // No format signal at all — no retry:
+    expect(isUnsupportedSpeechFormatError("Provider returned 400")).toBe(false);
+    expect(
+      isUnsupportedSpeechFormatError("Invalid value: 'ballad'. Supported values are: 'alloy'."),
+    ).toBe(false);
+  });
+});
+
+describe("fetchOpenAIAudioModels", () => {
   test("preserves model-scoped voices published by OpenRouter", async () => {
     const fakeFetch = (async () => Response.json({
       data: [{
@@ -146,13 +169,15 @@ describe("fetchOpenAIAudioModelOptions", () => {
       });
     }) as unknown as typeof fetch;
     expect(
-      await fetchOpenAIAudioModelOptions(
+      await fetchOpenAIAudioModels(
         "k",
         "https://openrouter.ai/api/v1/",
         "speech",
         fakeFetch,
       ),
-    ).toEqual(["deepgram/aura-2"]);
+    ).toEqual([
+      { id: "deepgram/aura-2", voices: [] },
+    ]);
     expect(seen).toBe(
       "https://openrouter.ai/api/v1/models?output_modalities=speech",
     );
@@ -162,7 +187,7 @@ describe("fetchOpenAIAudioModelOptions", () => {
     const fakeFetch = (async () =>
       Response.json({ data: [{ id: "gpt-4.1" }] })) as unknown as typeof fetch;
     expect(
-      await fetchOpenAIAudioModelOptions(
+      await fetchOpenAIAudioModels(
         "k",
         "https://api.openai.com/v1",
         "speech",

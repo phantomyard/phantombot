@@ -234,6 +234,17 @@ async function elevenlabsTts(
   return { ok: true, audio: { data: buf, mime: "audio/ogg" } };
 }
 
+/** MIME types carrying raw PCM samples (not a container format). */
+function isRawPcmMime(mime: string): boolean {
+  return /^audio\/(?:pcm|l16|x-pcm)$/i.test(mime);
+}
+
+/**
+ * Endpoints known to reject response_format="mp3", so synthesis never asks
+ * them for it again. Keyed baseUrl + model, probed once per process.
+ */
+const pcmOnlyEndpoints = new Set<string>();
+
 async function openaiCompatibleTts(
   apiKey: string,
   text: string,
@@ -243,6 +254,8 @@ async function openaiCompatibleTts(
   let res: Response;
   let errText = "";
   try {
+    const endpointKey = `${normalizeOpenAICompatibleBaseUrl(cfg.baseUrl)}::${cfg.ttsModel}`;
+    const skipMp3 = pcmOnlyEndpoints.has(endpointKey);
     const url = `${normalizeOpenAICompatibleBaseUrl(cfg.baseUrl)}/audio/speech`;
     const signal = timeoutSignal(AUDIO_FETCH_TIMEOUT_MS);
     const request = (preferMp3: boolean) =>
@@ -261,10 +274,13 @@ async function openaiCompatibleTts(
         }),
         signal,
       });
-    res = await request(true);
-    if (!res.ok) {
+    res = await request(!skipMp3);
+    if (!res.ok && !skipMp3) {
       errText = await res.text().catch(() => "");
       if (isUnsupportedSpeechFormatError(errText)) {
+        // Remember this (baseUrl, model) as pcm-only for the whole process,
+        // so the next synthesis skips the wasted mp3 probe entirely.
+        pcmOnlyEndpoints.add(endpointKey);
         res = await request(false);
         errText = res.ok ? "" : await res.text().catch(() => "");
       }
@@ -281,7 +297,7 @@ async function openaiCompatibleTts(
   const buf = Buffer.from(await res.arrayBuffer());
   const contentType = res.headers.get("content-type")?.trim() || "audio/mpeg";
   const mime = contentType.split(";", 1)[0]?.trim().toLowerCase() || "audio/mpeg";
-  if (mime === "audio/pcm") {
+  if (isRawPcmMime(mime)) {
     return {
       ok: true,
       audio: {

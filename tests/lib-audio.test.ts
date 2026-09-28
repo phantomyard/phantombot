@@ -284,6 +284,86 @@ describe("synthesize", () => {
     expect(r.audio.data.subarray(44)).toEqual(pcm);
   });
 
+  test("raw PCM under audio/L16 is WAV-wrapped too", async () => {
+    process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
+    const config = makeConfig("openai-compatible");
+    config.voice.openaiCompatible!.baseUrl = "https://openrouter.ai/api/v1";
+    config.voice.openaiCompatible!.ttsModel = "test/l16-alias-model";
+    config.voice.openaiCompatible!.voice = "Kore";
+    const pcm = Buffer.from([0x10, 0x20, 0x30, 0x40]);
+    const r = await synthesize(
+      config,
+      "hello",
+      (async (_url: string) =>
+        new Response(pcm, {
+          status: 200,
+          headers: { "content-type": "audio/L16;rate=16000;channels=1" },
+        })) as typeof fetch,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.audio.mime).toBe("audio/wav");
+    expect(r.audio.data.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    expect(r.audio.data.readUInt32LE(24)).toBe(16_000);
+    expect(r.audio.data.subarray(44)).toEqual(pcm);
+  });
+
+  test("an mp3 rejection is remembered — the next synthesis asks for pcm directly", async () => {
+    process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
+    const config = makeConfig("openai-compatible");
+    config.voice.openaiCompatible!.baseUrl = "https://openrouter.ai/api/v1";
+    config.voice.openaiCompatible!.ttsModel = "test/neg-cache-model";
+    config.voice.openaiCompatible!.voice = "Kore";
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      if (body.response_format) {
+        return Response.json(
+          { error: { message: "mp3 is not supported by this provider" } },
+          { status: 400 },
+        );
+      }
+      return new Response("audi", { status: 200 });
+    }) as typeof fetch;
+
+    const first = await synthesize(config, "hello", fetchImpl);
+    expect(first.ok).toBe(true);
+    // Probe + retry on the first call:
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.response_format).toBe("mp3");
+    expect(bodies[1]!.response_format).toBeUndefined();
+
+    bodies.length = 0;
+    const second = await synthesize(config, "again", fetchImpl);
+    expect(second.ok).toBe(true);
+    // No wasted mp3 probe the second time around:
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.response_format).toBeUndefined();
+  });
+
+  test("the pcm-only cache is scoped per model — another model still probes once", async () => {
+    process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
+    const config = makeConfig("openai-compatible");
+    config.voice.openaiCompatible!.baseUrl = "https://openrouter.ai/api/v1";
+    // "test/neg-cache-model" was cached by the test above; a different model
+    // on the same baseUrl must NOT inherit that verdict.
+    config.voice.openaiCompatible!.ttsModel = "test/neg-cache-other-model";
+    config.voice.openaiCompatible!.voice = "Kore";
+    const bodies: Array<Record<string, unknown>> = [];
+    const r = await synthesize(
+      config,
+      "hello",
+      (async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response("audi", { status: 200 });
+      }) as typeof fetch,
+    );
+    expect(r.ok).toBe(true);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.response_format).toBe("mp3");
+  });
+
   test("azure_edge → removal error with migration guidance", async () => {
     const r = await synthesize(makeConfig("azure_edge"), "hello");
     expect(r.ok).toBe(false);
