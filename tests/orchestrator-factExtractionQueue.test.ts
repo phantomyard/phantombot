@@ -5,7 +5,10 @@
  * daemon DRAIN loop runs the passes. Pins:
  *
  *   - the request row upserts (N turns in one conversation = one row);
- *   - the enqueue helper honours the enabled flag;
+ *   - the enqueue helper honours the enabled flag, and a write failure
+ *     THROWS (durable-before-teardown is the whole point — Kai, PR #629);
+ *   - the clear is generation-aware: a stale snapshot cannot delete a row a
+ *     concurrent writer refreshed mid-pass (Kai's race pin, PR #629);
  *   - the drain clears a row only after a CLEAN pass — a harness failure or
  *     a blown-up pass keeps the row queued so the next sweep retries
  *     (at-least-once, the same guarantee the lease ledger gives turns);
@@ -66,7 +69,12 @@ describe("store: extraction request queue", () => {
     expect(rows[0]!.conversation).toBe(CONV);
     expect(rows[0]!.requestedAt.getTime()).toBeGreaterThan(0);
 
-    await memory.clearFactExtractionRequest(PERSONA, CONV);
+    const cleared = await memory.clearFactExtractionRequest(
+      PERSONA,
+      CONV,
+      rows[0]!.requestedAt,
+    );
+    expect(cleared).toBe(true);
     expect(await memory.listFactExtractionRequests()).toEqual([]);
   });
 
@@ -84,10 +92,35 @@ describe("store: extraction request queue", () => {
   test("clear is scoped to (persona, conversation)", async () => {
     await memory.requestFactExtraction(PERSONA, CONV);
     await memory.requestFactExtraction("other", CONV);
-    await memory.clearFactExtractionRequest(PERSONA, CONV);
+    const rows = await memory.listFactExtractionRequests();
+    const cleared = await memory.clearFactExtractionRequest(
+      PERSONA,
+      CONV,
+      rows.find((r) => r.persona === PERSONA)!.requestedAt,
+    );
+    expect(cleared).toBe(true);
+    const remaining = await memory.listFactExtractionRequests();
+    expect(remaining.length).toBe(1);
+    expect(remaining[0]!.persona).toBe("other");
+  });
+
+  test("a stale snapshot does NOT clear a refreshed row (Kai's race, PR #629)", async () => {
+    await memory.requestFactExtraction(PERSONA, CONV);
+    const snapshot = (await memory.listFactExtractionRequests())[0]!.requestedAt;
+    // A writer refreshes the row AFTER the drain snapshotted it — the clear
+    // must refuse to delete, or the newer request is lost mid-drain. Wait
+    // one tick so the two requested_at stamps definitely differ (ISO ms
+    // precision would otherwise alias).
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await memory.requestFactExtraction(PERSONA, CONV);
+    const cleared = await memory.clearFactExtractionRequest(
+      PERSONA,
+      CONV,
+      snapshot,
+    );
+    expect(cleared).toBe(false);
     const rows = await memory.listFactExtractionRequests();
     expect(rows.length).toBe(1);
-    expect(rows[0]!.persona).toBe("other");
   });
 });
 
@@ -100,6 +133,27 @@ describe("requestFactExtractionIfEnabled", () => {
   test("disabled config is a no-op", async () => {
     await requestFactExtractionIfEnabled(disabledConfig(), PERSONA, CONV, memory);
     expect(await memory.listFactExtractionRequests()).toEqual([]);
+  });
+
+  test("a failed write THROWS — a swallowed warn would defeat the guarantee", async () => {
+    await expect(
+      requestFactExtractionIfEnabled(
+        enabledConfig(),
+        PERSONA,
+        CONV,
+        new Proxy(memory, {
+          get(target, prop, receiver) {
+            if (prop === "requestFactExtraction") {
+              return async () => {
+                throw new Error("database is locked");
+              };
+            }
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        }),
+      ),
+    ).rejects.toThrow("database is locked");
   });
 });
 
@@ -192,6 +246,27 @@ describe("drainFactExtractionRequests", () => {
     });
     expect(result).toEqual({ drained: 1, retried: 0 });
     expect(await memory.listFactExtractionRequests()).toEqual([]);
+  });
+
+  test("a writer refreshing the row mid-pass survives the clear (Kai's race, PR #629)", async () => {
+    await seedTurns(31, "survive-me");
+    await memory.requestFactExtraction(PERSONA, CONV);
+    const requeue: ExtractComplete = async () => {
+      // A short-lived turn enqueues the SAME conversation while the drain's
+      // extraction pass is in flight — the final clear must not delete it.
+      // The 2ms gap models the real model-call latency: ISOms timestamps
+      // otherwise alias and the refresh would land on the same generation.
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      await memory.requestFactExtraction(PERSONA, CONV);
+      return "[]";
+    };
+    const result = await drainFactExtractionRequests({
+      memory,
+      resolvePersona: () => ({ settings: SETTINGS, complete: requeue }),
+    });
+    expect(result).toEqual({ drained: 0, retried: 1 });
+    // The pin: exactly one row remains — the refreshed request.
+    expect((await memory.listFactExtractionRequests()).length).toBe(1);
   });
 
   test("an aborted signal stops the sweep between rows", async () => {

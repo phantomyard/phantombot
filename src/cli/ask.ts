@@ -240,9 +240,23 @@ export async function runAsk(input: RunAskInput): Promise<number> {
 
   // #626 — hand eviction-cliff extraction to the daemon drain. AWAITED (a
   // plain INSERT) so the request is durable BEFORE the handle closes — the
-  // guarantee the old fire-and-forget extraction could not give.
+  // guarantee the old fire-and-forget extraction could not give. A failed
+  // enqueue FAILS THE COMMAND (exit 1): permanent silent loss is the bug.
   if (input.history) {
-    await requestFactExtractionIfEnabled(config, persona, conversation, memory);
+    try {
+      await requestFactExtractionIfEnabled(
+        config,
+        persona,
+        conversation,
+        memory,
+      );
+    } catch (e) {
+      err.write(
+        `phantombot ask: durable-facts extraction enqueue failed: ${(e as Error).message}\n`,
+      );
+      if (ownsMemory) await memory.close();
+      return 1;
+    }
   }
 
   if (ownsMemory) await memory.close();

@@ -404,7 +404,8 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
           // #626 — hand eviction-cliff extraction to the daemon drain. This
           // is AWAITED (a plain INSERT) so the request is durable BEFORE the
           // finally below closes the DB — the exact guarantee the old
-          // fire-and-forget extraction could not give.
+          // fire-and-forget extraction could not give. A failed insert
+          // THROWS into the catch below: visible failure, not silent loss.
           await requestFactExtractionIfEnabled(
             taskConfig,
             task.persona,

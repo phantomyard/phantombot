@@ -391,7 +391,9 @@ export async function extractDurableFactsOnEviction(
  * a fire-and-forget pass and the facts are lost with only a swallowed warn
  * (issue #626 — Matt: 1072 losses vs 22 wins). The daemon's drain loop picks
  * the row up. AWAITED by design — durability before teardown is the whole
- * point. No-op when durable facts are disabled; never throws.
+ * point. Throws on INSERT failure by design too: a swallowed warn defeats
+ * durability-before-teardown, so the caller must see the write fail and
+ * surface it. No-op when durable facts are disabled.
  */
 export async function requestFactExtractionIfEnabled(
   config: Config,
@@ -400,15 +402,7 @@ export async function requestFactExtractionIfEnabled(
   memory: MemoryStore,
 ): Promise<void> {
   if (!config.durableFacts?.enabled) return;
-  try {
-    await memory.requestFactExtraction(persona, conversation);
-  } catch (e) {
-    log.warn("durable-facts: extraction request enqueue failed", {
-      persona,
-      conversation,
-      error: (e as Error).message,
-    });
-  }
+  await memory.requestFactExtraction(persona, conversation);
 }
 
 /**
@@ -451,11 +445,13 @@ export async function drainFactExtractionRequests(input: {
     try {
       const target = input.resolvePersona(req.persona);
       if (!target) {
-        await input.memory.clearFactExtractionRequest(
+        const cleared = await input.memory.clearFactExtractionRequest(
           req.persona,
           req.conversation,
+          req.requestedAt,
         );
-        drained++;
+        if (cleared) drained++;
+        else retried++;
         continue;
       }
       const result = await extractDurableFactsOnEviction({
@@ -471,11 +467,17 @@ export async function drainFactExtractionRequests(input: {
         retried++;
         continue;
       }
-      await input.memory.clearFactExtractionRequest(
+      const cleared = await input.memory.clearFactExtractionRequest(
         req.persona,
         req.conversation,
+        req.requestedAt,
       );
-      drained++;
+      if (cleared) drained++;
+      else {
+        // A writer refreshed the row mid-pass — its newer request survives
+        // for the next sweep. Not a failure, just not ours to clear.
+        retried++;
+      }
     } catch (e) {
       retried++;
       log.warn("durable-facts: drain pass failed; request stays queued", {

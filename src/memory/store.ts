@@ -454,13 +454,17 @@ export interface MemoryStore {
   listFactExtractionRequests(): Promise<FactExtractionRequest[]>;
   /**
    * Delete a queued extraction request after a drain pass has handled it.
-   * Callers leave the row in place after a FAILED pass so the next sweep
-   * retries — the queue is at-least-once, like the lease ledger it feeds.
+   * Generation-aware compare-and-swap on requested_at: the delete only
+   * removes the row when its requested_at still equals the SNAPSHOT the
+   * drain pass was given — a concurrent upsert wins the race and its newer
+   * row survives for a later sweep (Kai's race, PR #629). Returns true when
+   * this call actually removed the row, false when a refresh replaced it.
    */
   clearFactExtractionRequest(
     persona: string,
     conversation: string,
-  ): Promise<void>;
+    snapshotRequestedAt: Date,
+  ): Promise<boolean>;
   /**
    * Insert a durable fact, or — when the same normalized text already exists
    * for this PERSONA — bump its recency (`last_seen_at`), keep the higher
@@ -1049,7 +1053,7 @@ class SqliteMemoryStore implements MemoryStore {
     );
     this.clearFactExtractionRequestStmt = db.prepare(
       `DELETE FROM durable_fact_extract_requests
-       WHERE persona = ? AND conversation = ?`,
+       WHERE persona = ? AND conversation = ? AND requested_at = ?`,
     );
     // Claim SELECT for the lease-based extractor. Returns evicted turns that are
     // eligible to claim: those ABOVE the high-water cursor (newly evicted), OR
@@ -1606,8 +1610,14 @@ class SqliteMemoryStore implements MemoryStore {
   async clearFactExtractionRequest(
     persona: string,
     conversation: string,
-  ): Promise<void> {
-    this.clearFactExtractionRequestStmt.run(persona, conversation);
+    snapshotRequestedAt: Date,
+  ): Promise<boolean> {
+    const res = this.clearFactExtractionRequestStmt.run(
+      persona,
+      conversation,
+      snapshotRequestedAt.toISOString(),
+    );
+    return res.changes > 0;
   }
 
   async durableFactCursor(
