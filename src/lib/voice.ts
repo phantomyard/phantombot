@@ -120,9 +120,13 @@ export function normalizeOpenAICompatibleBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, "");
 }
 
-/** True when a speech endpoint rejected the requested output encoding, not the voice. */
+/**
+ * True when a speech endpoint rejected the requested output encoding, not the
+ * voice. Either half of the format signal is enough — providers word the
+ * rejection differently, and requiring both halves leaves retries undone.
+ */
 export function isUnsupportedSpeechFormatError(message: string): boolean {
-  return /response[_ -]?format/i.test(message) && /\b(?:mp3|pcm)\b/i.test(message);
+  return /response[_ -]?format/i.test(message) || /\b(?:mp3|pcm)\b/i.test(message);
 }
 
 export function openAICompatibleProviderLabel(baseUrl: string): string {
@@ -358,18 +362,6 @@ export async function fetchOpenAIAudioModels(
   } catch {
     return [];
   }
-}
-
-/** Backward-compatible IDs-only view of the audio model catalogue. */
-export async function fetchOpenAIAudioModelOptions(
-  apiKey: string,
-  baseUrl: string,
-  modality: OpenAIAudioModality,
-  fetchImpl: typeof fetch = fetch,
-  signal?: AbortSignal,
-): Promise<string[]> {
-  return (await fetchOpenAIAudioModels(apiKey, baseUrl, modality, fetchImpl, signal))
-    .map((model) => model.id);
 }
 
 /**

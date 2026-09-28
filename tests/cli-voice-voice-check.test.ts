@@ -33,7 +33,10 @@ mock.module("@clack/prompts", () => ({
     throw new Error(`unexpected prompt: ${opts.message}`);
   },
   isCancel: () => false,
-  spinner: () => ({ start: () => {}, stop: () => {} }),
+  spinner: () => ({
+    start: () => {},
+    stop: (message?: string) => spinnerStops.push(message ?? ""),
+  }),
 }));
 
 const { runVoice } = await import("../src/cli/voice.ts");
@@ -44,6 +47,8 @@ let personaConfig: string;
 let config: Config;
 let realFetch: typeof fetch;
 let voiceMenus: string[][] = [];
+/** Every spinner.stop() message, in order — the user-facing labels. */
+let spinnerStops: string[] = []
 /** Every voice POSTed to /audio/speech, in order. */
 let speechCalls: string[] = [];
 /** Voices this fake endpoint accepts; anything else is a 400. */
@@ -69,6 +74,7 @@ beforeEach(async () => {
   } as unknown as Config;
 
   voiceMenus = [];
+  spinnerStops = [];
   speechCalls = [];
   chosenVoice = "nova";
   accepted = [];
@@ -155,6 +161,19 @@ test("a voice the endpoint rejects aborts the wizard instead of saving a mute co
   // Nothing persisted: a config naming a voice this model refuses would be
   // silently mute on the persona's first spoken turn.
   await expect(readFile(personaConfig, "utf8")).rejects.toThrow();
+});
+
+test("a rejected voice is labelled 'voice rejected', never mislabelled as a bad key", async () => {
+  accepted = ["echo", "nova"];
+  chosenVoice = "aura-asteria";
+
+  expect(await runVoice({ config, embedded: true })).toBe(1);
+
+  // CLI twin pin (TUI pinned in tests/tui-voiceFlow.test.ts): the label must
+  // say "voice rejected", so a bad voice name never reads as a bad API key.
+  const rejected = spinnerStops.find((m) => m.includes("rejected"));
+  expect(rejected).toContain("voice rejected");
+  expect(spinnerStops.some((m) => m.includes("key rejected"))).toBe(false);
 });
 
 test("a non-enumerating endpoint still proves the chosen fallback voice", async () => {

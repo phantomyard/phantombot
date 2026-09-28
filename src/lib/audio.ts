@@ -234,6 +234,17 @@ async function elevenlabsTts(
   return { ok: true, audio: { data: buf, mime: "audio/ogg" } };
 }
 
+/** MIME types carrying raw PCM samples (not a container format). */
+function isRawPcmMime(mime: string): boolean {
+  return /^audio\/(?:pcm|l16|x-pcm)$/i.test(mime);
+}
+
+/**
+ * Endpoints known to reject response_format="mp3", so synthesis never asks
+ * them for it again. Keyed baseUrl + model, probed once per process.
+ */
+const pcmOnlyEndpoints = new Set<string>();
+
 async function openaiCompatibleTts(
   apiKey: string,
   text: string,
@@ -243,6 +254,8 @@ async function openaiCompatibleTts(
   let res: Response;
   let errText = "";
   try {
+    const endpointKey = `${normalizeOpenAICompatibleBaseUrl(cfg.baseUrl)}::${cfg.ttsModel}`;
+    const skipMp3 = pcmOnlyEndpoints.has(endpointKey);
     const url = `${normalizeOpenAICompatibleBaseUrl(cfg.baseUrl)}/audio/speech`;
     const signal = timeoutSignal(AUDIO_FETCH_TIMEOUT_MS);
     const request = (preferMp3: boolean) =>
@@ -261,10 +274,16 @@ async function openaiCompatibleTts(
         }),
         signal,
       });
-    res = await request(true);
+    res = await request(!skipMp3);
     if (!res.ok) {
+      // Read the diagnostic body on EVERY failure — including a cached
+      // pcm-only endpoint whose direct pcm request fails (quota, auth,
+      // provider error) — so the returned error never drops it.
       errText = await res.text().catch(() => "");
-      if (isUnsupportedSpeechFormatError(errText)) {
+      if (!skipMp3 && isUnsupportedSpeechFormatError(errText)) {
+        // Remember this (baseUrl, model) as pcm-only for the whole process,
+        // so the next synthesis skips the wasted mp3 probe entirely.
+        pcmOnlyEndpoints.add(endpointKey);
         res = await request(false);
         errText = res.ok ? "" : await res.text().catch(() => "");
       }
@@ -281,12 +300,20 @@ async function openaiCompatibleTts(
   const buf = Buffer.from(await res.arrayBuffer());
   const contentType = res.headers.get("content-type")?.trim() || "audio/mpeg";
   const mime = contentType.split(";", 1)[0]?.trim().toLowerCase() || "audio/mpeg";
-  if (mime === "audio/pcm") {
+  if (isRawPcmMime(mime)) {
+    if (buf.length % 2 !== 0) {
+      return {
+        ok: false,
+        error: `${mime} payload has an odd byte count (${buf.length}): not whole 16-bit samples`,
+      };
+    }
     return {
       ok: true,
       audio: {
         data: pcm16leToWav(
-          buf,
+          // audio/L16 is RFC 2586 big-endian; audio/pcm and audio/x-pcm are
+          // already little-endian. Correct into LE before the WAV header.
+          mime === "audio/l16" ? swap16InPlace(buf) : buf,
           parsePositiveContentTypeParam(contentType, "rate", 24_000, 768_000),
           parsePositiveContentTypeParam(contentType, "channels", 1, 32),
         ),
@@ -308,6 +335,15 @@ function parsePositiveContentTypeParam(
   return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= maximum
     ? parsed
     : fallback;
+}
+
+/**
+ * RFC 2586 `audio/L16` samples are network byte order, so each 16-bit sample
+ * must be swapped before the little-endian WAV wrapper. Mutates and returns
+ * `buf` (callers pass an owned buffer copied from the network response).
+ */
+function swap16InPlace(buf: Buffer): Buffer {
+  return buf.swap16();
 }
 
 /** OpenRouter's PCM speech responses are signed 16-bit little-endian samples. */
