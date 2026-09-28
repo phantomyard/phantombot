@@ -448,7 +448,7 @@ export async function drainFactExtractionRequests(input: {
         const cleared = await input.memory.clearFactExtractionRequest(
           req.persona,
           req.conversation,
-          req.requestedAt,
+          req.generation,
         );
         if (cleared) drained++;
         else retried++;
@@ -470,7 +470,7 @@ export async function drainFactExtractionRequests(input: {
       const cleared = await input.memory.clearFactExtractionRequest(
         req.persona,
         req.conversation,
-        req.requestedAt,
+        req.generation,
       );
       if (cleared) drained++;
       else {

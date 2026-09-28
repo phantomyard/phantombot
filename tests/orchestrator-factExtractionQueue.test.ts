@@ -68,11 +68,12 @@ describe("store: extraction request queue", () => {
     expect(rows[0]!.persona).toBe(PERSONA);
     expect(rows[0]!.conversation).toBe(CONV);
     expect(rows[0]!.requestedAt.getTime()).toBeGreaterThan(0);
+    expect(rows[0]!.generation).toBe(1);
 
     const cleared = await memory.clearFactExtractionRequest(
       PERSONA,
       CONV,
-      rows[0]!.requestedAt,
+      rows[0]!.generation,
     );
     expect(cleared).toBe(true);
     expect(await memory.listFactExtractionRequests()).toEqual([]);
@@ -96,7 +97,7 @@ describe("store: extraction request queue", () => {
     const cleared = await memory.clearFactExtractionRequest(
       PERSONA,
       CONV,
-      rows.find((r) => r.persona === PERSONA)!.requestedAt,
+      rows.find((r) => r.persona === PERSONA)!.generation,
     );
     expect(cleared).toBe(true);
     const remaining = await memory.listFactExtractionRequests();
@@ -106,21 +107,79 @@ describe("store: extraction request queue", () => {
 
   test("a stale snapshot does NOT clear a refreshed row (Kai's race, PR #629)", async () => {
     await memory.requestFactExtraction(PERSONA, CONV);
-    const snapshot = (await memory.listFactExtractionRequests())[0]!.requestedAt;
+    const snapshot = (await memory.listFactExtractionRequests())[0]!;
     // A writer refreshes the row AFTER the drain snapshotted it — the clear
-    // must refuse to delete, or the newer request is lost mid-drain. Wait
-    // one tick so the two requested_at stamps definitely differ (ISO ms
-    // precision would otherwise alias).
-    await new Promise((resolve) => setTimeout(resolve, 2));
+    // must refuse to delete, or the newer request is lost mid-drain. NO
+    // artificial delay: the two enqueues may land in the same millisecond,
+    // which is exactly the aliasing Kai's probe exploited when the CAS token
+    // was requested_at. The monotonic generation makes the race unwinnable
+    // for the stale snapshot regardless of clock granularity.
     await memory.requestFactExtraction(PERSONA, CONV);
     const cleared = await memory.clearFactExtractionRequest(
       PERSONA,
       CONV,
-      snapshot,
+      snapshot.generation,
     );
     expect(cleared).toBe(false);
     const rows = await memory.listFactExtractionRequests();
     expect(rows.length).toBe(1);
+    expect(rows[0]!.generation).toBe(snapshot.generation + 1);
+  });
+
+  test("a same-millisecond refresh ALWAYS survives a stale clear (Kai's 100x probe, PR #629 round 3)", async () => {
+    // The exact shape of Kai's probe: two immediate enqueues (no delay, so
+    // they routinely land in the same millisecond), then a clear with the
+    // FIRST snapshot. With requested_at as the CAS token this deleted 95%
+    // of refreshed rows; with the generation token every one must survive.
+    let deleted = 0;
+    for (let i = 0; i < 100; i++) {
+      await memory.requestFactExtraction(PERSONA, CONV);
+      const snapshot = (await memory.listFactExtractionRequests())[0]!;
+      await memory.requestFactExtraction(PERSONA, CONV);
+      if (await memory.clearFactExtractionRequest(PERSONA, CONV, snapshot.generation)) {
+        deleted++;
+        // Re-enqueue so the next iteration starts from a row again.
+        await memory.requestFactExtraction(PERSONA, CONV);
+      }
+    }
+    expect(deleted).toBe(0);
+    expect((await memory.listFactExtractionRequests()).length).toBe(1);
+  });
+
+  test("a DB from the pre-generation revision gains the column (migration)", async () => {
+    // Recreate the original #626 queue shape (requested_at only), then open
+    // the store over it: the constructor's idempotent migration must add
+    // generation, and the queue must work against the migrated table.
+    const dir = await import("node:fs/promises").then((fs) =>
+      fs.mkdtemp("/tmp/phantombot-extract-migration-"),
+    );
+    const path = `${dir}/memory.sqlite`;
+    const { Database } = await import("bun:sqlite");
+    const raw = new Database(path);
+    raw.exec(`CREATE TABLE durable_fact_extract_requests (
+      persona      TEXT NOT NULL,
+      conversation TEXT NOT NULL,
+      requested_at TEXT NOT NULL,
+      PRIMARY KEY (persona, conversation)
+    );`);
+    raw.exec(
+      "INSERT INTO durable_fact_extract_requests VALUES ('ghost', 'tick:1', '2026-09-28T00:00:00.000Z')",
+    );
+    raw.close();
+
+    const migrated = await openMemoryStore(path);
+    try {
+      const rows = await migrated.listFactExtractionRequests();
+      expect(rows.length).toBe(1);
+      // Legacy rows start at generation 1 so no stale snapshot can hold a 0.
+      expect(rows[0]!.generation).toBe(1);
+      await migrated.requestFactExtraction(PERSONA, CONV);
+      await migrated.requestFactExtraction(PERSONA, CONV);
+      const after = await migrated.listFactExtractionRequests();
+      expect(after.find((r) => r.persona === PERSONA)!.generation).toBe(2);
+    } finally {
+      await migrated.close();
+    }
   });
 });
 
@@ -254,9 +313,8 @@ describe("drainFactExtractionRequests", () => {
     const requeue: ExtractComplete = async () => {
       // A short-lived turn enqueues the SAME conversation while the drain's
       // extraction pass is in flight — the final clear must not delete it.
-      // The 2ms gap models the real model-call latency: ISOms timestamps
-      // otherwise alias and the refresh would land on the same generation.
-      await new Promise((resolve) => setTimeout(resolve, 2));
+      // No artificial delay: same-millisecond refresh must also survive,
+      // which the generation CAS guarantees (Kai's probe, PR #629 round 3).
       await memory.requestFactExtraction(PERSONA, CONV);
       return "[]";
     };

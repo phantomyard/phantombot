@@ -242,6 +242,13 @@ export interface FactExtractionRequest {
   persona: string;
   conversation: string;
   requestedAt: Date;
+  /**
+   * Monotonic per-row generation, bumped on every upsert. This is the CAS
+   * token for clearFactExtractionRequest — requested_at cannot serve that
+   * role because ISO strings carry only millisecond precision, so two
+   * enqueues inside the same millisecond alias (Kai's probe, PR #629).
+   */
+  generation: number;
 }
 
 export interface TopDurableFactsOptions {
@@ -454,16 +461,19 @@ export interface MemoryStore {
   listFactExtractionRequests(): Promise<FactExtractionRequest[]>;
   /**
    * Delete a queued extraction request after a drain pass has handled it.
-   * Generation-aware compare-and-swap on requested_at: the delete only
-   * removes the row when its requested_at still equals the SNAPSHOT the
-   * drain pass was given — a concurrent upsert wins the race and its newer
-   * row survives for a later sweep (Kai's race, PR #629). Returns true when
-   * this call actually removed the row, false when a refresh replaced it.
+   * Generation-aware compare-and-swap: the delete only removes the row when
+   * its generation still equals the SNAPSHOT the drain pass was given — a
+   * concurrent upsert bumps the generation, wins the race, and its newer
+   * row survives for a later sweep (Kai's race, PR #629). The generation is
+   * a monotonic per-row counter, collision-free by construction — unlike
+   * requested_at, which aliases on same-millisecond refreshes. Returns true
+   * when this call actually removed the row, false when a refresh replaced
+   * it.
    */
   clearFactExtractionRequest(
     persona: string,
     conversation: string,
-    snapshotRequestedAt: Date,
+    snapshotGeneration: number,
   ): Promise<boolean>;
   /**
    * Insert a durable fact, or — when the same normalized text already exists
@@ -676,6 +686,7 @@ CREATE TABLE IF NOT EXISTS durable_fact_extract_requests (
   persona      TEXT NOT NULL,
   conversation TEXT NOT NULL,
   requested_at TEXT NOT NULL,
+  generation   INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (persona, conversation)
 );
 
@@ -857,6 +868,22 @@ class SqliteMemoryStore implements MemoryStore {
             ON durable_facts (persona, confidence DESC, last_seen_at DESC);
         `);
       })();
+    }
+    // Idempotent migration: add durable_fact_extract_requests.generation (the
+    // monotonic CAS token) for DBs created by an earlier revision of the
+    // #626 queue, whose CREATE TABLE had requested_at as the only version
+    // marker. Existing rows start at generation 1 — they were enqueued
+    // before the column existed, so no snapshot can hold a stale 0.
+    const hasExtractGeneration = (
+      db
+        .query("PRAGMA table_info(durable_fact_extract_requests)")
+        .all() as Array<{ name: string }>
+    ).some((c) => c.name === "generation");
+    if (!hasExtractGeneration) {
+      db.exec(
+        "ALTER TABLE durable_fact_extract_requests " +
+          "ADD COLUMN generation INTEGER NOT NULL DEFAULT 1",
+      );
     }
     this.appendStmt = db.prepare(
       "INSERT INTO turns (persona, conversation, role, text, created_at, embeddable, source, origin) " +
@@ -1041,19 +1068,20 @@ class SqliteMemoryStore implements MemoryStore {
     // Extraction-request queue (#626): upsert / read-all / clear.
     this.requestFactExtractionStmt = db.prepare(
       `INSERT INTO durable_fact_extract_requests
-         (persona, conversation, requested_at)
-       VALUES (?, ?, ?)
+         (persona, conversation, requested_at, generation)
+       VALUES (?, ?, ?, 1)
        ON CONFLICT (persona, conversation) DO UPDATE SET
-         requested_at = excluded.requested_at`,
+         requested_at = excluded.requested_at,
+         generation   = durable_fact_extract_requests.generation + 1`,
     );
     this.listFactExtractionRequestsStmt = db.prepare(
-      `SELECT persona, conversation, requested_at
+      `SELECT persona, conversation, requested_at, generation
        FROM durable_fact_extract_requests
        ORDER BY requested_at ASC`,
     );
     this.clearFactExtractionRequestStmt = db.prepare(
       `DELETE FROM durable_fact_extract_requests
-       WHERE persona = ? AND conversation = ? AND requested_at = ?`,
+       WHERE persona = ? AND conversation = ? AND generation = ?`,
     );
     // Claim SELECT for the lease-based extractor. Returns evicted turns that are
     // eligible to claim: those ABOVE the high-water cursor (newly evicted), OR
@@ -1599,23 +1627,25 @@ class SqliteMemoryStore implements MemoryStore {
       persona: string;
       conversation: string;
       requested_at: string;
+      generation: number;
     }>;
     return rows.map((r) => ({
       persona: r.persona,
       conversation: r.conversation,
       requestedAt: new Date(r.requested_at),
+      generation: r.generation,
     }));
   }
 
   async clearFactExtractionRequest(
     persona: string,
     conversation: string,
-    snapshotRequestedAt: Date,
+    snapshotGeneration: number,
   ): Promise<boolean> {
     const res = this.clearFactExtractionRequestStmt.run(
       persona,
       conversation,
-      snapshotRequestedAt.toISOString(),
+      snapshotGeneration,
     );
     return res.changes > 0;
   }
