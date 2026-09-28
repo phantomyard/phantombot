@@ -1864,8 +1864,8 @@ describe("runTelegramServer voice round-trip", () => {
     return {
       ...c,
       voice: {
-        provider: "openai",
-        openai: { model: "tts-1", voice: "nova", speed: 1 },
+        provider: "openai-compatible",
+        openaiCompatible: { baseUrl: "https://api.openai.com/v1", keyEnv: "PHANTOMBOT_OPENAI_API_KEY", sttModel: "whisper-1", ttsModel: "tts-1", voice: "nova", speed: 1 },
       },
     };
   }
@@ -1992,8 +1992,8 @@ describe("runTelegramServer voice round-trip", () => {
     });
     expect(harness.invocations).toBe(0);
     expect(transport.sent).toHaveLength(1);
-    // provider_no_stt diagnostic — names the provider and points at the fix.
-    expect(transport.sent[0]?.text).toContain("'azure_edge'");
+    // Removed-provider diagnostic points at the migration command.
+    expect(transport.sent[0]?.text).toContain("was removed");
     expect(transport.sent[0]?.text).toContain("phantombot voice");
   });
 
@@ -2025,7 +2025,7 @@ describe("runTelegramServer voice round-trip", () => {
       expect(harness.invocations).toBe(0);
       expect(transport.sent).toHaveLength(1);
       const text = transport.sent[0]!.text;
-      expect(text).toContain("'openai'");
+      expect(text).toContain("'openai-compatible'");
       expect(text).toContain("PHANTOMBOT_OPENAI_API_KEY");
       expect(text).toContain("phantombot install");
     } finally {
@@ -2476,8 +2476,8 @@ describe("runTelegramServer system-prompt suffixes", () => {
     return {
       ...c,
       voice: {
-        provider: "openai",
-        openai: { model: "tts-1", voice: "nova", speed: 1 },
+        provider: "openai-compatible",
+        openaiCompatible: { baseUrl: "https://api.openai.com/v1", keyEnv: "PHANTOMBOT_OPENAI_API_KEY", sttModel: "whisper-1", ttsModel: "tts-1", voice: "nova", speed: 1 },
       },
     };
   }
@@ -3065,8 +3065,8 @@ describe("runTelegramServer narration flush (voice-out)", () => {
     return {
       ...c,
       voice: {
-        provider: "openai",
-        openai: { model: "tts-1", voice: "nova", speed: 1 },
+        provider: "openai-compatible",
+        openaiCompatible: { baseUrl: "https://api.openai.com/v1", keyEnv: "PHANTOMBOT_OPENAI_API_KEY", sttModel: "whisper-1", ttsModel: "tts-1", voice: "nova", speed: 1 },
       },
     };
   }

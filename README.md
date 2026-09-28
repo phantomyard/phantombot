@@ -2012,15 +2012,37 @@ Per-message modality overrides:
 
 If TTS is not configured, phantombot degrades to text.
 
-### OpenAI voice list
+### OpenAI-compatible audio
 
-The `phantombot voice` TUI and CLI fetch the OpenAI voice menu live from the
-speech endpoint (its validation error enumerates every voice the chosen model
-accepts), so new OpenAI voices appear without a phantombot release. The list
-is model-scoped: `gpt-4o-mini-tts` speaks 13 voices, `tts-1`/`tts-1-hd` only
-9. When the probe can't run (no key yet, offline), a built-in 13-voice
-fallback list is shown instead, and new personas default to
-`gpt-4o-mini-tts`.
+`phantombot voice` labels the provider **OpenAI Compatible**. One configuration
+supplies the versioned base URL, persona-scoped credential, independent STT and
+TTS models, and voice. Phantombot calls `<base_url>/audio/transcriptions` for
+incoming voice notes and `<base_url>/audio/speech` for replies. Common base
+URLs are `https://api.openai.com/v1` and `https://openrouter.ai/api/v1`.
+
+Before asking for a key, the wizard checks the current persona's vault and
+matching OpenAI-compatible embeddings configuration. It offers a matching key
+for reuse without displaying it; credentials are never searched across
+personas. If that shared credential is declined, the replacement is saved to
+the voice-only `PHANTOMBOT_VOICE_OPENAI_COMPATIBLE_API_KEY` slot rather than
+overwriting model-routing or embeddings credentials. Azure Edge TTS is no
+longer selectable because it cannot provide the
+full STT/TTS loop. A legacy `provider = "azure_edge"` configuration stays
+readable only to emit an actionable error: run `phantombot voice` and select
+ElevenLabs or OpenAI Compatible.
+
+```toml
+[voice]
+provider = "openai-compatible"
+
+[voice.openai_compatible]
+base_url = "https://openrouter.ai/api/v1"
+key_env = "OPENROUTER_API_KEY"
+stt_model = "openai/whisper-1"
+tts_model = "openai/gpt-4o-mini-tts"
+voice = "nova"
+speed = 1
+```
 
 ## Reply Language
 
@@ -2387,7 +2409,7 @@ Not every secret is a vault row. Current canonical locations are:
 
 | Credential or setting | Canonical location |
 |---|---|
-| Agent, MCP, voice-provider, and persona routing API keys | `<persona>/vault.sqlite`; shell/service exports remain higher-precedence host overrides |
+| Agent, MCP, voice-provider, and persona routing API keys | `<persona>/vault.sqlite`; OpenAI-compatible audio records the matching vault name in `key_env`, so OpenAI/OpenRouter credentials can be reused without copying them across personas; shell/service exports remain higher-precedence host overrides |
 | Pi provider key entered in the harness wizard | Persona vault, also merge-written to Pi's own `~/.pi/agent/auth.json` so the Pi CLI can enumerate models |
 | Claude/Codex host login | The harness's own OAuth/auth store; Phantombot does not copy it |
 | PhantomChat Nostr secret (`nsec`) | `<persona>/identity.json` (owner-only permissions), shared with vault key derivation |

@@ -4,7 +4,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { maybePromptRestart } from "../src/cli/harness.ts";
-import { applyVoiceConfig, runVoice } from "../src/cli/voice.ts";
+import {
+  applyVoiceConfig,
+  findStoredVoiceCredential,
+  runVoice,
+} from "../src/cli/voice.ts";
 import type { Config } from "../src/config.ts";
 import { personaDir } from "../src/config.ts";
 import { openPersonaVault } from "../src/lib/vault.ts";
@@ -76,18 +80,32 @@ describe("applyVoiceConfig — elevenlabs", () => {
   });
 });
 
-describe("applyVoiceConfig — openai", () => {
-  test("writes [voice.openai] block", async () => {
+describe("applyVoiceConfig — OpenAI-compatible", () => {
+  test("writes the endpoint block and removes the legacy OpenAI block", async () => {
+    await writeFile(
+      configPath,
+      '[voice]\nprovider = "openai"\n\n[voice.openai]\nmodel = "tts-1"\n',
+    );
     await applyVoiceConfig({
       configPath,
       config: hostConfig,
       apiKey: "sk-OAITEST",
       voice: {
-        provider: "openai",
-        openai: { model: "tts-1", voice: "nova", speed: 1.0 },
+        provider: "openai-compatible",
+        openaiCompatible: {
+          baseUrl: "https://api.openai.com/v1",
+          keyEnv: "PHANTOMBOT_OPENAI_API_KEY",
+          sttModel: "whisper-1",
+          ttsModel: "tts-1",
+          voice: "nova",
+          speed: 1,
+        },
       },
     });
     const cfg = await readFile(configPath, "utf8");
+    expect(cfg).toContain('[voice.openai_compatible]');
+    expect(cfg).not.toContain('[voice.openai]');
+    expect(cfg).toContain('base_url = "https://api.openai.com/v1"');
     expect(cfg).toContain('voice = "nova"');
     expect(await readVault("phantom", "PHANTOMBOT_OPENAI_API_KEY")).toBe(
       "sk-OAITEST",
@@ -96,8 +114,8 @@ describe("applyVoiceConfig — openai", () => {
 });
 
 describe("applyVoiceConfig — azure_edge", () => {
-  test("writes [voice.azure_edge] block; does NOT write any key (free)", async () => {
-    await applyVoiceConfig({
+  test("refuses the retired provider with migration guidance", async () => {
+    await expect(applyVoiceConfig({
       configPath,
       config: hostConfig,
       voice: {
@@ -108,15 +126,8 @@ describe("applyVoiceConfig — azure_edge", () => {
           pitch: "+0Hz",
         },
       },
-    });
-    const cfg = await readFile(configPath, "utf8");
-    expect(cfg).toContain('voice = "en-US-JennyNeural"');
-    expect(
-      await readVault("phantom", "PHANTOMBOT_ELEVENLABS_API_KEY"),
-    ).toBeUndefined();
-    expect(
-      await readVault("phantom", "PHANTOMBOT_OPENAI_API_KEY"),
-    ).toBeUndefined();
+    })).rejects.toThrow("was removed");
+    expect(existsSync(configPath)).toBe(false);
   });
 });
 
@@ -129,6 +140,38 @@ describe("applyVoiceConfig — none", () => {
     });
     const cfg = await readFile(configPath, "utf8");
     expect(cfg).toContain('provider = "none"');
+  });
+});
+
+describe("OpenAI-compatible credential reuse", () => {
+  test("finds a matching key only in the current persona's vault", async () => {
+    await mkdir(join(personasDir, "lena"), { recursive: true });
+    const vault = await openPersonaVault(join(personasDir, "phantom"));
+    try {
+      vault.set("OPENROUTER_API_KEY", "or-secret");
+    } finally {
+      vault.close();
+    }
+
+    const found = await findStoredVoiceCredential(
+      hostConfig,
+      "phantom",
+      "openai-compatible",
+      "https://openrouter.ai/api/v1/",
+    );
+    expect(found).toEqual({
+      name: "OPENROUTER_API_KEY",
+      value: "or-secret",
+      needsWrite: false,
+    });
+    expect(
+      await findStoredVoiceCredential(
+        hostConfig,
+        "lena",
+        "openai-compatible",
+        "https://openrouter.ai/api/v1",
+      ),
+    ).toBeUndefined();
   });
 });
 

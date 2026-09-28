@@ -50,6 +50,8 @@ export interface MemoryFlowDeps {
   validateOpenAI(
     settings: OpenAICompatibleConfigUpdate,
   ): Promise<EmbedResult>;
+  /** Matching credential from this persona only; value is never rendered. */
+  findOpenAICredential?(baseUrl: string): Promise<{ value: string } | undefined>;
 }
 
 export type MemoryFlowResult =
@@ -87,7 +89,7 @@ export async function configureMemory(
       },
       {
         value: "openai-compatible",
-        label: "OpenAI-compatible (local or remote /embeddings)",
+        label: "OpenAI Compatible (local or remote /embeddings)",
         hint:
           current === "openai-compatible"
             ? "current · llama-server and other standard-compatible endpoints"
@@ -117,8 +119,9 @@ export async function configureMemory(
 
   const cur = existing.openaiCompatible;
   const baseUrl = await q.value({
-    title: "OpenAI-compatible base URL (the /v1 part, without /embeddings)",
-    hint: "e.g. http://127.0.0.1:8082/v1 for a local llama-server",
+    title: "OpenAI Compatible base URL (the /v1 part, without /embeddings)",
+    hint:
+      "https://api.openai.com/v1 · https://openrouter.ai/api/v1 · http://localhost:11434/v1 (Ollama)",
     initial: cur?.baseUrl ?? "",
   });
   if (baseUrl === undefined) return undefined;
@@ -131,13 +134,30 @@ export async function configureMemory(
   if (model === undefined) return undefined;
   if (!model.trim()) return { rejected: "model is required" };
 
-  const apiKey = await q.value({
-    title: "API key (optional)",
-    hint: "leave empty for a local llama-server",
-    masked: true,
-    allowEmpty: true,
-  });
-  if (apiKey === undefined) return undefined;
+  const stored = await deps.findOpenAICredential?.(baseUrl.trim());
+  let apiKey = stored?.value;
+  if (stored) {
+    const use = await q.choose({
+      title: "Use stored key for this endpoint?",
+      options: [
+        { value: "keep", label: "Use the stored key" },
+        { value: "replace", label: "Enter another key" },
+      ],
+      initial: "keep",
+    });
+    if (!use) return undefined;
+    if (use === "replace") apiKey = undefined;
+  }
+  if (apiKey === undefined) {
+    const typed = await q.value({
+      title: "API key (optional)",
+      hint: "leave empty for a local llama-server or Ollama",
+      masked: true,
+      allowEmpty: true,
+    });
+    if (typed === undefined) return undefined;
+    apiKey = typed;
+  }
 
   const queryPrefix = await q.value({
     title: "Query prefix (optional)",

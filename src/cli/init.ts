@@ -255,7 +255,7 @@ export default defineCommand({
     p.note(
       "Give your agent a voice: it can speak replies (text-to-speech) and\n" +
       "transcribe voice notes you send it (speech-to-text). Pick from ElevenLabs\n" +
-      "or OpenAI (paid, API key), or Azure Edge (free, no key). It's optional —\n" +
+      "or OpenAI Compatible (paid, API key). It's optional —\n" +
       "you can always set it up later with `phantombot voice`.",
       "What this adds"
     );

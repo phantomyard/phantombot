@@ -348,8 +348,8 @@ describe("runNotify voice (broadcast)", () => {
   test("voice with valid TTS (openai + key) → fans out sendVoice to ALL owners + skips text", async () => {
     const cfg = baseConfig();
     cfg.voice = {
-      provider: "openai",
-      openai: { model: "tts-1", voice: "nova", speed: 1 },
+      provider: "openai-compatible",
+      openaiCompatible: { baseUrl: "https://api.openai.com/v1", keyEnv: "PHANTOMBOT_OPENAI_API_KEY", sttModel: "whisper-1", ttsModel: "tts-1", voice: "nova", speed: 1 },
     };
     process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
     // Mock global fetch for the TTS POST.

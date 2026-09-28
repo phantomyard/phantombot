@@ -608,7 +608,7 @@ describe("loadConfig persona layering", () => {
     );
     const lena = await loadConfig("lena");
     expect(lena.channels.telegram).toBeUndefined();
-    expect(lena.voice.provider).toBe("openai");
+    expect(lena.voice.provider).toBe("openai-compatible");
   });
 
   test("a non-default persona falls back to its LEGACY routing-table bot", async () => {

@@ -1319,6 +1319,9 @@ export function App(props: AppProps): React.ReactElement {
         const { openaiCompatibleEmbed } = await import(
           "../lib/openaiCompatibleEmbed.ts"
         );
+        const { findOpenAICompatibleCredential } = await import(
+          "../lib/openAICompatibleCredentials.ts"
+        );
         const { config } = await loadConfigForPersona(target.name);
         const chosen = await configureMemory(
           target.name,
@@ -1335,6 +1338,8 @@ export function App(props: AppProps): React.ReactElement {
                 "phantombot embedding validation test",
                 settings,
               ),
+            findOpenAICredential: (baseUrl) =>
+              findOpenAICompatibleCredential(config, target.name, baseUrl),
           },
         );
         if (!chosen) return setNotice("memory unchanged");
@@ -1416,10 +1421,10 @@ export function App(props: AppProps): React.ReactElement {
       try {
         const { configureVoice } = await import("./voiceFlow.ts");
         const {
-          ENV_KEY_FOR_PROVIDER,
           validateElevenLabsKey,
-          validateOpenAIKey,
+          validateOpenAICompatibleKey,
         } = await import("../lib/voice.ts");
+        const { findStoredVoiceCredential } = await import("../cli/voice.ts");
         const { maybePromptRestart } = await import("../cli/harness.ts");
         const { defaultServiceControl } = await import("../lib/platform.ts");
         const { config } = await loadConfigForPersona(target.name);
@@ -1437,20 +1442,12 @@ export function App(props: AppProps): React.ReactElement {
                   : "premium · paid (API key required)",
             },
             {
-              value: "openai",
-              label: "OpenAI",
+              value: "openai-compatible",
+              label: "OpenAI Compatible",
               hint:
-                config.voice.provider === "openai"
+                config.voice.provider === "openai-compatible"
                   ? "current · paid (API key required)"
                   : "paid (API key required)",
-            },
-            {
-              value: "azure_edge",
-              label: "Azure Edge TTS",
-              hint:
-                config.voice.provider === "azure_edge"
-                  ? "current · free · no key · speaks only"
-                  : "free · no key · speaks only",
             },
             {
               value: "none",
@@ -1468,20 +1465,16 @@ export function App(props: AppProps): React.ReactElement {
 
         const chosen = await configureVoice(
           target.name,
-          provider as "openai" | "elevenlabs" | "azure_edge" | "none",
+          provider as "openai-compatible" | "elevenlabs" | "none",
           { choose: askChoice, value: askValue, confirm: askConfirmValue },
           {
             existing: config.voice,
-            hasKey: (p) => {
-              const envVar = ENV_KEY_FOR_PROVIDER[p as "openai" | "elevenlabs"];
-              return Boolean(envVar && process.env[envVar]);
-            },
-            validateKey: (p, key) =>
-              p === "openai"
-                ? validateOpenAIKey(key)
+            findCredential: (p, baseUrl) =>
+              findStoredVoiceCredential(config, target.name, p, baseUrl),
+            validateKey: (p, key, baseUrl) =>
+              p === "openai-compatible"
+                ? validateOpenAICompatibleKey(key, baseUrl!)
                 : validateElevenLabsKey(key),
-            openaiKeyForVoices:
-              process.env[ENV_KEY_FOR_PROVIDER.openai] ?? undefined,
           },
         );
         if (!chosen) return setNotice("voice unchanged");

@@ -1,11 +1,9 @@
 /**
  * Voice — TTS/STT provider configuration.
  *
- * Three providers in v1:
+ * Providers:
  *   - elevenlabs:  premium, custom voices, paid (key required)
- *   - openai:      built-in voices (fetched live per model — 13 for
- *                  gpt-4o-mini-tts), cheap, paid (key required)
- *   - azure_edge:  Microsoft's free Edge TTS endpoint (no key)
+ *   - openai-compatible: one endpoint/key with independent STT and TTS models
  *   - none:        TTS/STT disabled
  *
  * API keys live in the PERSONA'S ENCRYPTED VAULT (#452), injected into
@@ -14,7 +12,11 @@
  * under [voice].
  */
 
-export type VoiceProvider = "elevenlabs" | "openai" | "azure_edge" | "none";
+export type VoiceProvider =
+  | "elevenlabs"
+  | "openai-compatible"
+  | "azure_edge" // read-only legacy value; never offered or written
+  | "none";
 
 export interface ElevenLabsVoice {
   voiceId: string;
@@ -27,9 +29,15 @@ export interface ElevenLabsVoice {
   style: number;
 }
 
-export interface OpenAIVoice {
-  /** "tts-1" | "tts-1-hd" | "gpt-4o-mini-tts" */
-  model: string;
+export interface OpenAICompatibleVoice {
+  /** Includes the version prefix, e.g. https://api.openai.com/v1. */
+  baseUrl: string;
+  /** Persona-vault name used for this endpoint's credential. */
+  keyEnv: string;
+  /** Model sent to POST /audio/transcriptions. */
+  sttModel: string;
+  /** Model sent to POST /audio/speech. */
+  ttsModel: string;
   /** any voice the chosen model accepts — see fetchOpenAIVoiceOptions() */
   voice: string;
   /** 0.25..4.0 */
@@ -55,7 +63,7 @@ export const DEFAULT_STT_TIMEOUT_MS = 60_000;
 export interface VoiceConfig {
   provider: VoiceProvider;
   elevenlabs?: ElevenLabsVoice;
-  openai?: OpenAIVoice;
+  openaiCompatible?: OpenAICompatibleVoice;
   azure_edge?: AzureEdgeVoice;
   /**
    * Upper bound (ms) on the combined download+transcribe step before it is
@@ -68,14 +76,11 @@ export interface VoiceConfig {
 
 /**
  * Can this provider TRANSCRIBE? Mirrors the dispatch in `lib/audio.ts`, which
- * supports exactly `elevenlabs` (scribe) and `openai` (whisper-1) and answers
- * "STT not supported" for everything else. `[voice] provider` is ONE key
- * driving TWO capabilities, so `azure_edge` — the only provider needing no
- * credential — yields a phantom that speaks but silently rejects every voice
- * note. If a new STT backend is added there, this list moves with it.
+ * supports exactly `elevenlabs` and `openai-compatible` and answers with an
+ * actionable migration error for the retired Azure Edge value.
  */
 export function providerHearsVoice(provider: VoiceProvider): boolean {
-  return provider === "openai" || provider === "elevenlabs";
+  return provider === "openai-compatible" || provider === "elevenlabs";
 }
 
 export const ENV_KEY_FOR_PROVIDER: Record<
@@ -83,8 +88,49 @@ export const ENV_KEY_FOR_PROVIDER: Record<
   string
 > = {
   elevenlabs: "PHANTOMBOT_ELEVENLABS_API_KEY",
-  openai: "PHANTOMBOT_OPENAI_API_KEY",
+  "openai-compatible": "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
 };
+
+/** Voice-owned slot used when the operator declines a reusable shared key. */
+export const OPENAI_COMPATIBLE_VOICE_KEY_ENV =
+  "PHANTOMBOT_VOICE_OPENAI_COMPATIBLE_API_KEY";
+
+export const OPENAI_BASE_URL = "https://api.openai.com/v1";
+export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+/** Normalize for matching and safe endpoint construction. */
+export function normalizeOpenAICompatibleBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
+export function openAICompatibleProviderLabel(baseUrl: string): string {
+  const host = (() => {
+    try {
+      return new URL(normalizeOpenAICompatibleBaseUrl(baseUrl)).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  })();
+  if (host === "api.openai.com") return "OpenAI";
+  if (host === "openrouter.ai") return "OpenRouter";
+  return "OpenAI-compatible endpoint";
+}
+
+/** Preferred vault name for a newly entered endpoint credential. */
+export function openAICompatibleKeyEnv(baseUrl: string): string {
+  const label = openAICompatibleProviderLabel(baseUrl);
+  if (label === "OpenAI") return "PHANTOMBOT_OPENAI_API_KEY";
+  if (label === "OpenRouter") return "OPENROUTER_API_KEY";
+  return ENV_KEY_FOR_PROVIDER["openai-compatible"];
+}
+
+/** Candidate vault names, ordered from the endpoint-native name to generic. */
+export function openAICompatibleCredentialCandidates(baseUrl: string): string[] {
+  return [...new Set([
+    openAICompatibleKeyEnv(baseUrl),
+    ENV_KEY_FOR_PROVIDER["openai-compatible"],
+  ])];
+}
 
 /** A small curated default voice list per provider for the TUI. */
 export const ELEVENLABS_DEFAULTS = {
@@ -150,8 +196,11 @@ export function openAIVoiceMenuOptions(model: string, live: string[]): string[] 
     .sort((a, b) => a.localeCompare(b));
 }
 
-export const OPENAI_DEFAULTS: OpenAIVoice = {
-  model: "gpt-4o-mini-tts",
+export const OPENAI_COMPATIBLE_DEFAULTS: OpenAICompatibleVoice = {
+  baseUrl: OPENAI_BASE_URL,
+  keyEnv: "PHANTOMBOT_OPENAI_API_KEY",
+  sttModel: "whisper-1",
+  ttsModel: "gpt-4o-mini-tts",
   voice: "nova",
   speed: 1.0,
 };
@@ -196,13 +245,14 @@ export async function validateElevenLabsKey(
 /**
  * Validate an OpenAI key by hitting GET /v1/models (cheap, no quota cost).
  */
-export async function validateOpenAIKey(
+export async function validateOpenAICompatibleKey(
   apiKey: string,
+  baseUrl: string,
   fetchImpl: typeof fetch = fetch,
   signal?: AbortSignal,
 ): Promise<{ ok: true; modelCount: number } | { ok: false; error: string }> {
   try {
-    const res = await fetchImpl("https://api.openai.com/v1/models", {
+    const res = await fetchImpl(`${normalizeOpenAICompatibleBaseUrl(baseUrl)}/models`, {
       headers: { authorization: `Bearer ${apiKey}` },
       signal,
     });
@@ -213,6 +263,15 @@ export async function validateOpenAIKey(
   } catch (e) {
     return { ok: false, error: `network: ${(e as Error).message}` };
   }
+}
+
+/** Backward-compatible helper for callers that specifically probe OpenAI. */
+export async function validateOpenAIKey(
+  apiKey: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<{ ok: true; modelCount: number } | { ok: false; error: string }> {
+  return validateOpenAICompatibleKey(apiKey, OPENAI_BASE_URL, fetchImpl, signal);
 }
 
 /**
@@ -251,9 +310,10 @@ export async function fetchOpenAIVoiceOptions(
   model: string,
   fetchImpl: typeof fetch = fetch,
   signal?: AbortSignal,
+  baseUrl: string = OPENAI_BASE_URL,
 ): Promise<string[]> {
   try {
-    const res = await fetchImpl("https://api.openai.com/v1/audio/speech", {
+    const res = await fetchImpl(`${normalizeOpenAICompatibleBaseUrl(baseUrl)}/audio/speech`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${apiKey}`,

@@ -31,7 +31,11 @@ import {
   type PiRoutingConfig,
   resolveRouting,
 } from "./lib/piRouting.ts";
-import { DEFAULT_STT_TIMEOUT_MS } from "./lib/voice.ts";
+import {
+  DEFAULT_STT_TIMEOUT_MS,
+  OPENAI_BASE_URL,
+  openAICompatibleKeyEnv,
+} from "./lib/voice.ts";
 import {
   mergeToml,
   personaConfigPath,
@@ -2186,6 +2190,7 @@ function buildVoiceConfig(
   const provider =
     (asString(tomlVoice.provider) as
       | "elevenlabs"
+      | "openai-compatible"
       | "openai"
       | "azure_edge"
       | "none"
@@ -2208,15 +2213,28 @@ function buildVoiceConfig(
       },
     };
   }
-  if (provider === "openai") {
-    const o = (tomlVoice.openai ?? {}) as Record<string, unknown>;
+  if (provider === "openai-compatible" || provider === "openai") {
+    // `openai` + [voice.openai] is the pre-#618 wire shape. Read it as the
+    // new endpoint-based provider so upgrades keep working; every subsequent
+    // wizard save writes only [voice.openai_compatible].
+    const o = (provider === "openai-compatible"
+      ? tomlVoice.openai_compatible ?? tomlVoice["openai-compatible"]
+      : tomlVoice.openai) as Record<string, unknown> | undefined;
+    const settings = o ?? {};
+    const baseUrl = asString(settings.base_url) ?? OPENAI_BASE_URL;
     return {
-      provider: "openai",
+      provider: "openai-compatible",
       sttTimeoutMs,
-      openai: {
-        model: asString(o.model) ?? "gpt-4o-mini-tts",
-        voice: asString(o.voice) ?? "nova",
-        speed: asNumber(o.speed) ?? 1.0,
+      openaiCompatible: {
+        baseUrl,
+        keyEnv: asString(settings.key_env) ?? openAICompatibleKeyEnv(baseUrl),
+        sttModel: asString(settings.stt_model) ?? "whisper-1",
+        ttsModel:
+          asString(settings.tts_model) ??
+          asString(settings.model) ??
+          "gpt-4o-mini-tts",
+        voice: asString(settings.voice) ?? "nova",
+        speed: asNumber(settings.speed) ?? 1.0,
       },
     };
   }

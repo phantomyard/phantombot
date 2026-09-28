@@ -25,6 +25,7 @@ import {
   type EmbedResult,
 } from "../lib/geminiEmbed.ts";
 import { openaiCompatibleEmbed } from "../lib/openaiCompatibleEmbed.ts";
+import { findOpenAICompatibleCredential } from "../lib/openAICompatibleCredentials.ts";
 import { getIn, setIn, updateConfigToml } from "../lib/configWriter.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
@@ -218,6 +219,8 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
             model: settings.model,
             apiKey: settings.apiKey,
           }),
+        findOpenAICredential: async (baseUrl) =>
+          findOpenAICompatibleCredential(config, persona, baseUrl),
       });
 
       if (!result) return "memory unchanged";
@@ -310,7 +313,7 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
       },
       {
         value: "openai-compatible",
-        label: "OpenAI-compatible (local or remote /embeddings)",
+        label: "OpenAI Compatible (local or remote /embeddings)",
         hint: "llama-server and other standard-compatible endpoints",
       },
       {
@@ -393,7 +396,9 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
   } else {
     const existingOpenAI = existing.openaiCompatible;
     const baseUrl = await p.text({
-      message: "OpenAI-compatible base URL (the /v1 part, without /embeddings)",
+      message: "OpenAI Compatible base URL (the /v1 part, without /embeddings)",
+      placeholder:
+        "https://api.openai.com/v1 · https://openrouter.ai/api/v1 · http://localhost:11434/v1 (Ollama)",
       initialValue: existingOpenAI?.baseUrl ?? "http://127.0.0.1:8082/v1",
       validate: (v) => (!v?.trim() ? "base URL is required" : undefined),
     });
@@ -410,12 +415,31 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
       p.cancel("cancelled");
       return 0;
     }
-    const apiKey = await p.password({
-      message: "API key (optional; leave empty for local llama-server)",
-    });
-    if (p.isCancel(apiKey)) {
-      p.cancel("cancelled");
-      return 0;
+    const stored = await findOpenAICompatibleCredential(
+      config,
+      persona,
+      String(baseUrl),
+    );
+    let apiKey: string | symbol | undefined = stored?.value;
+    if (stored) {
+      const reuse = await p.confirm({
+        message: "Use stored key for this endpoint?",
+        initialValue: true,
+      });
+      if (p.isCancel(reuse)) {
+        p.cancel("cancelled");
+        return 0;
+      }
+      if (!reuse) apiKey = undefined;
+    }
+    if (apiKey === undefined) {
+      apiKey = await p.password({
+        message: "API key (optional; leave empty for local llama-server or Ollama)",
+      });
+      if (p.isCancel(apiKey)) {
+        p.cancel("cancelled");
+        return 0;
+      }
     }
     const queryPrefix = await p.text({
       message: "Query prefix (optional)",
@@ -498,7 +522,7 @@ export default defineCommand({
   meta: {
     name: "embedding",
     description:
-      "Configure semantic-memory embeddings (Gemini, OpenAI-compatible, or none).",
+      "Configure semantic-memory embeddings (Gemini, OpenAI Compatible, or none).",
   },
   async run() {
     const code = await runEmbedding();

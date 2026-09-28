@@ -158,21 +158,13 @@ describe("describeEmbeddingChange", () => {
 });
 
 describe("describeVoiceChange", () => {
-  test("azure_edge states the STT consequence at the point of choice", () => {
-    // One key drives two capabilities; picking azure_edge yields a phantom
-    // that silently rejects every voice note.
-    const c = describeVoiceChange({ provider: "azure_edge" });
-    expect(c.summary).toContain("cannot hear");
-    expect(c.detail).toContain("whisper-1");
-  });
-
   test("a provider that can transcribe does not carry the warning", () => {
-    expect(describeVoiceChange({ provider: "openai" }).summary).not.toContain(
+    expect(describeVoiceChange({ provider: "openai-compatible" }).summary).not.toContain(
       "cannot hear",
     );
   });
 
   test("a voice change restarts the service", () => {
-    expect(describeVoiceChange({ provider: "openai" }).restarts).toBe(true);
+    expect(describeVoiceChange({ provider: "openai-compatible" }).restarts).toBe(true);
   });
 });
