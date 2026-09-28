@@ -181,12 +181,34 @@ async function openAICompatibleFlow(
 ): Promise<VoiceFlowResult | VoiceFlowRejected | undefined> {
   const existingEndpoint = deps.existing?.openaiCompatible;
   const cur = existingEndpoint ?? OPENAI_COMPATIBLE_DEFAULTS;
-  const baseAnswer = await q.value({
-    title: "OpenAI Compatible base URL (include /v1)",
-    hint: `${OPENAI_BASE_URL} · ${OPENROUTER_BASE_URL}`,
-    initial: cur.baseUrl,
-  });
-  if (baseAnswer === undefined) return undefined;
+  let baseAnswer: string;
+  if (existingEndpoint) {
+    const endpointAction = await q.choose({
+      title: "OpenAI Compatible endpoint",
+      description: "Keep the configured endpoint unless you intend to replace it.",
+      options: [
+        {
+          value: "keep",
+          label: `Keep ${existingEndpoint.baseUrl}`,
+          hint: "current",
+        },
+        { value: "change", label: "Change endpoint" },
+      ],
+      initial: "keep",
+    });
+    if (endpointAction === undefined) return undefined;
+    if (endpointAction === "keep") {
+      baseAnswer = existingEndpoint.baseUrl;
+    } else {
+      const changed = await askOpenAICompatibleBaseUrl(q, existingEndpoint.baseUrl);
+      if (changed === undefined) return undefined;
+      baseAnswer = changed;
+    }
+  } else {
+    const entered = await askOpenAICompatibleBaseUrl(q, cur.baseUrl);
+    if (entered === undefined) return undefined;
+    baseAnswer = entered;
+  }
   if (!baseAnswer.trim()) return { rejected: "base URL is required" };
   const baseUrl = normalizeOpenAICompatibleBaseUrl(baseAnswer);
   const stored = await deps.findCredential("openai-compatible", baseUrl);
@@ -310,6 +332,17 @@ async function openAICompatibleFlow(
     apiKey: needsWrite ? key : undefined,
     summary: `openai-compatible · ${voice}`,
   };
+}
+
+async function askOpenAICompatibleBaseUrl(
+  q: ChannelsQuestions,
+  initial: string,
+): Promise<string | undefined> {
+  return q.value({
+    title: "OpenAI Compatible base URL (include /v1)",
+    hint: `${OPENAI_BASE_URL} · ${OPENROUTER_BASE_URL}`,
+    initial,
+  });
 }
 
 async function askAudioModel(

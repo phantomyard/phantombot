@@ -95,6 +95,112 @@ describe("configureVoice — OpenAI Compatible", () => {
     expect(result && "apiKey" in result && result.apiKey).toBeUndefined();
   });
 
+  test("keeps the configured endpoint by default without opening the URL prompt", async () => {
+    const valueTitles: string[] = [];
+    let endpointChoice: {
+      initial?: string;
+      options: readonly { value: string; label: string }[];
+    } | undefined;
+    const q: ChannelsQuestions = {
+      choose: async (input) => {
+        if (input.title === "OpenAI Compatible endpoint") {
+          endpointChoice = { initial: input.initial, options: input.options };
+          return "keep";
+        }
+        return input.options[0]?.value;
+      },
+      value: async (input) => {
+        valueTitles.push(input.title);
+        return undefined;
+      },
+      confirm: async () => true,
+    };
+    const result = await configureVoice(
+      "phantom",
+      "openai-compatible",
+      q,
+      deps({
+        existing: {
+          provider: "openai-compatible",
+          openaiCompatible: {
+            baseUrl: "https://openrouter.ai/api/v1",
+            keyEnv: "OPENROUTER_API_KEY",
+            sttModel: "openai/whisper-1",
+            ttsModel: "x-ai/grok-voice-tts-1.0",
+            voice: "leo",
+            speed: 1,
+          },
+        },
+        findCredential: async () => ({
+          name: "OPENROUTER_API_KEY",
+          value: "stored-key",
+          needsWrite: false,
+        }),
+        probeModels: async ({ modality }) => modality === "transcription"
+          ? [{ id: "openai/whisper-1", voices: [] }]
+          : [{ id: "x-ai/grok-voice-tts-1.0", voices: ["leo"] }],
+      }),
+    );
+
+    expect(endpointChoice?.initial).toBe("keep");
+    expect(endpointChoice?.options.map((option) => option.label)).toEqual([
+      "Keep https://openrouter.ai/api/v1",
+      "Change endpoint",
+    ]);
+    expect(valueTitles).not.toContain("OpenAI Compatible base URL (include /v1)");
+    expect(result && "voice" in result && result.voice.openaiCompatible?.baseUrl)
+      .toBe("https://openrouter.ai/api/v1");
+  });
+
+  test("prefills the configured URL when changing endpoint and returns the replacement", async () => {
+    let endpointInitial: string | undefined;
+    const q: ChannelsQuestions = {
+      choose: async (input) => input.title === "OpenAI Compatible endpoint"
+        ? "change"
+        : input.options[0]?.value,
+      value: async (input) => {
+        if (input.title === "OpenAI Compatible base URL (include /v1)") {
+          endpointInitial = input.initial;
+          return "https://audio.example.test/v1/";
+        }
+        if (input.masked) return "replacement-key";
+        return undefined;
+      },
+      confirm: async () => true,
+    };
+    const result = await configureVoice(
+      "phantom",
+      "openai-compatible",
+      q,
+      deps({
+        existing: {
+          provider: "openai-compatible",
+          openaiCompatible: {
+            baseUrl: "https://openrouter.ai/api/v1",
+            keyEnv: "OPENROUTER_API_KEY",
+            sttModel: "openai/whisper-1",
+            ttsModel: "x-ai/grok-voice-tts-1.0",
+            voice: "leo",
+            speed: 1,
+          },
+        },
+        probeModels: async ({ modality }) => modality === "transcription"
+          ? [{ id: "vendor/stt", voices: [] }]
+          : [{ id: "vendor/tts", voices: ["new-voice"] }],
+      }),
+    );
+
+    expect(endpointInitial).toBe("https://openrouter.ai/api/v1");
+    expect(result && "voice" in result && result.voice.openaiCompatible).toMatchObject({
+      baseUrl: "https://audio.example.test/v1",
+      keyEnv: "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
+      sttModel: "vendor/stt",
+      ttsModel: "vendor/tts",
+      voice: "new-voice",
+    });
+    expect(result && "apiKey" in result && result.apiKey).toBe("replacement-key");
+  });
+
   test("declining a shared stored key writes the replacement to a voice-only slot", async () => {
     const { q } = questions([
       "https://openrouter.ai/api/v1",
