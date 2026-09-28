@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { DEFAULT_DURABLE_FACTS, type Config } from "../src/config.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 import {
+  createFactExtractionDrainResolver,
   drainFactExtractionRequests,
   requestFactExtractionIfEnabled,
   type ExtractComplete,
@@ -339,5 +340,102 @@ describe("drainFactExtractionRequests", () => {
     });
     expect(result).toEqual({ drained: 0, retried: 0 });
     expect((await memory.listFactExtractionRequests()).length).toBe(2);
+  });
+});
+
+describe("createFactExtractionDrainResolver (persona isolation, Kai PR #629 round 4)", () => {
+  const HOST = enabledConfig();
+  const targetFor = (_persona: string, cfg: Config) => ({
+    settings: cfg.durableFacts!,
+    complete: (async () => "[]") as ExtractComplete,
+  });
+  const makeResolver = (overrides: {
+    personaConfigs?: Map<string, Config>;
+    loadPersonaConfig?: (persona: string) => Promise<Config>;
+    personaDirExists?: (persona: string) => boolean;
+    seen?: { persona: string; cfg: Config }[];
+  }) => {
+    const seen = overrides.seen ?? [];
+    const resolver = createFactExtractionDrainResolver({
+      defaultPersona: PERSONA,
+      hostConfig: HOST,
+      personaConfigs: overrides.personaConfigs ?? new Map(),
+      loadPersonaConfig:
+        overrides.loadPersonaConfig ??
+        (async () => {
+          throw new Error("unexpected load");
+        }),
+      personaDirExists: overrides.personaDirExists ?? (() => false),
+      buildTarget: (persona, cfg) => {
+        seen.push({ persona, cfg });
+        return targetFor(persona, cfg);
+      },
+    });
+    return { resolver, seen };
+  };
+
+  test("the DEFAULT persona resolves the host config — never a config load", async () => {
+    const { resolver, seen } = makeResolver({});
+    const target = await resolver(PERSONA);
+    expect(target?.settings).toBe(SETTINGS);
+    expect(seen).toEqual([{ persona: PERSONA, cfg: HOST }]);
+  });
+
+  test("a daemon-resolved persona uses its OWN personaConfigs entry", async () => {
+    const own = enabledConfig();
+    const { resolver, seen } = makeResolver({
+      personaConfigs: new Map([["lena", own]]),
+    });
+    await resolver("lena");
+    expect(seen).toEqual([{ persona: "lena", cfg: own }]);
+  });
+
+  test("a dormant ask --persona loads its OWN config on demand — never the default's", async () => {
+    // Kai's round-4 blocker: personaConfigs only holds autostart/listener
+    // personas, so a non-autostart persona woken via ask must not fall back
+    // to the default persona's harness/settings (#439 one boundary later).
+    const own = {
+      ...enabledConfig(),
+      durableFacts: { ...SETTINGS },
+    } as Config;
+    let loads = 0;
+    const { resolver, seen } = makeResolver({
+      personaDirExists: (p) => p === "omar",
+      loadPersonaConfig: async (p) => {
+        loads++;
+        expect(p).toBe("omar");
+        return own;
+      },
+    });
+    const target = await resolver("omar");
+    expect(loads).toBe(1);
+    expect(seen).toEqual([{ persona: "omar", cfg: own }]);
+    expect(target?.settings).toBe(own.durableFacts);
+    // Resolution is cached — the second sweep does not reload.
+    await resolver("omar");
+    expect(loads).toBe(1);
+  });
+
+  test("a persona with no dir on this host resolves undefined WITHOUT a load", async () => {
+    const { resolver, seen } = makeResolver({});
+    expect(await resolver("ghost")).toBeUndefined();
+    expect(seen).toEqual([]);
+  });
+
+  test("a load failure propagates and is NOT cached — the next sweep retries", async () => {
+    let loads = 0;
+    const own = enabledConfig();
+    const { resolver } = makeResolver({
+      personaDirExists: () => true,
+      loadPersonaConfig: async () => {
+        loads++;
+        if (loads === 1) throw new Error("config read raced a write");
+        return own;
+      },
+    });
+    await expect(resolver("omar")).rejects.toThrow("config read raced a write");
+    const target = await resolver("omar");
+    expect(loads).toBe(2);
+    expect(target?.settings).toBe(SETTINGS);
   });
 });

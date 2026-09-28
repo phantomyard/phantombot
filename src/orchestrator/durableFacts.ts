@@ -418,6 +418,67 @@ export interface FactExtractionDrainTarget {
 }
 
 /**
+ * Resolve the drain target for a queued persona with STRICT persona
+ * isolation (Kai, PR #629 round 4): the host config serves the DEFAULT
+ * persona ONLY. Any other persona comes from the daemon's resolved
+ * `personaConfigs` (autostart / channel personas) or — for a dormant
+ * persona woken out-of-band via `ask --persona`, which enqueues history
+ * extraction too — is loaded ON DEMAND from its own config layer. Falling
+ * back to the host/default config for a named persona would extract its
+ * history with the default persona's harness and settings: the silent
+ * mis-run #439 exists to remove, one process boundary later.
+ *
+ * Resolution is cached (per-persona config only changes on restart), but a
+ * load FAILURE is not: the rejection propagates (the drain keeps the row
+ * and retries next sweep) and the cache entry is dropped so the next sweep
+ * re-attempts the load instead of dropping the row as unservable.
+ */
+export function createFactExtractionDrainResolver(input: {
+  defaultPersona: string;
+  hostConfig: Config;
+  personaConfigs: ReadonlyMap<string, Config>;
+  loadPersonaConfig: (persona: string) => Promise<Config>;
+  personaDirExists: (persona: string) => boolean;
+  buildTarget: (
+    persona: string,
+    personaConfig: Config,
+  ) => FactExtractionDrainTarget | undefined;
+}): (
+  persona: string,
+) => Promise<FactExtractionDrainTarget | undefined> {
+  const cache = new Map<
+    string,
+    Promise<FactExtractionDrainTarget | undefined>
+  >();
+  return (persona) => {
+    let cached = cache.get(persona);
+    if (!cached) {
+      cached = (async () => {
+        let personaConfig: Config | undefined;
+        if (persona === input.defaultPersona) {
+          personaConfig = input.hostConfig;
+        } else if (input.personaConfigs.has(persona)) {
+          personaConfig = input.personaConfigs.get(persona);
+        } else if (input.personaDirExists(persona)) {
+          personaConfig = await input.loadPersonaConfig(persona);
+        }
+        // undefined → persona unknown to this host: the drain drops its row.
+        return personaConfig
+          ? input.buildTarget(persona, personaConfig)
+          : undefined;
+      })();
+      cache.set(persona, cached);
+      cached.catch(() => {
+        // Transient load failure — never cache it, or every later sweep
+        // would re-throw (or worse, treat the persona as unservable).
+        cache.delete(persona);
+      });
+    }
+    return cached;
+  };
+}
+
+/**
  * Drain the extraction-request queue: run one eviction-cliff pass per queued
  * conversation and clear its row. A pass that hit a harness failure (or blew
  * up entirely) KEEPS its row — the next sweep retries, so a provider outage
@@ -426,7 +487,12 @@ export interface FactExtractionDrainTarget {
  */
 export async function drainFactExtractionRequests(input: {
   memory: MemoryStore;
-  resolvePersona: (persona: string) => FactExtractionDrainTarget | undefined;
+  resolvePersona: (
+    persona: string,
+  ) =>
+    | FactExtractionDrainTarget
+    | undefined
+    | Promise<FactExtractionDrainTarget | undefined>;
   signal?: AbortSignal;
 }): Promise<{ drained: number; retried: number }> {
   let drained = 0;
@@ -443,7 +509,7 @@ export async function drainFactExtractionRequests(input: {
   for (const req of requests) {
     if (input.signal?.aborted) break;
     try {
-      const target = input.resolvePersona(req.persona);
+      const target = await input.resolvePersona(req.persona);
       if (!target) {
         const cleared = await input.memory.clearFactExtractionRequest(
           req.persona,

@@ -60,9 +60,9 @@ import {
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
 import {
+  createFactExtractionDrainResolver,
   drainFactExtractionRequests,
   makeExtractionComplete,
-  type FactExtractionDrainTarget,
 } from "../orchestrator/durableFacts.ts";
 import { warnLowPiHeapAtStartup } from "../harnesses/pi.ts";
 import {
@@ -1076,15 +1076,19 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // waits. Per-persona (config, chain, complete) resolution is cached — it
   // only changes on restart. Runs SEQUENTIALLY (drainInFlight guard): a pass
   // slower than the interval must never stack another on top of itself.
-  const drainTargetCache = new Map<string, FactExtractionDrainTarget | undefined>();
-  const resolveDrainTarget = (
-    persona: string,
-  ): FactExtractionDrainTarget | undefined => {
-    if (!drainTargetCache.has(persona)) {
-      const personaConfig = withHostHarnessBins(
-        personaConfigs.get(persona) ?? config,
-        config,
-      );
+  // Per-persona resolution with STRICT isolation (#439 via Kai, PR #629
+  // round 4): the host config serves the DEFAULT persona only. A dormant
+  // persona woken out-of-band (`ask --persona` enqueues extraction too) is
+  // loaded from its OWN config layer on demand — never drained with the
+  // default persona's harness/settings.
+  const resolveDrainTarget = createFactExtractionDrainResolver({
+    defaultPersona,
+    hostConfig: config,
+    personaConfigs,
+    loadPersonaConfig,
+    personaDirExists: (persona) => existsSync(personaDir(config, persona)),
+    buildTarget: (persona, rawPersonaConfig) => {
+      const personaConfig = withHostHarnessBins(rawPersonaConfig, config);
       const settings = personaConfig.durableFacts;
       const complete = settings?.enabled
         ? makeExtractionComplete(
@@ -1093,13 +1097,11 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             personaDir(config, persona),
           )
         : undefined;
-      drainTargetCache.set(
-        persona,
-        complete && settings?.enabled ? { settings, complete } : undefined,
-      );
-    }
-    return drainTargetCache.get(persona);
-  };
+      return complete && settings?.enabled
+        ? { settings, complete }
+        : undefined;
+    },
+  });
   let drainInFlight = false;
   const runFactDrain = async (): Promise<void> => {
     if (drainInFlight || ac.signal.aborted) return;
