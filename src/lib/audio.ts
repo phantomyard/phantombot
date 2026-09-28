@@ -298,11 +298,19 @@ async function openaiCompatibleTts(
   const contentType = res.headers.get("content-type")?.trim() || "audio/mpeg";
   const mime = contentType.split(";", 1)[0]?.trim().toLowerCase() || "audio/mpeg";
   if (isRawPcmMime(mime)) {
+    if (buf.length % 2 !== 0) {
+      return {
+        ok: false,
+        error: `${mime} payload has an odd byte count (${buf.length}): not whole 16-bit samples`,
+      };
+    }
     return {
       ok: true,
       audio: {
         data: pcm16leToWav(
-          buf,
+          // audio/L16 is RFC 2586 big-endian; audio/pcm and audio/x-pcm are
+          // already little-endian. Correct into LE before the WAV header.
+          mime === "audio/l16" ? swap16InPlace(buf) : buf,
           parsePositiveContentTypeParam(contentType, "rate", 24_000, 768_000),
           parsePositiveContentTypeParam(contentType, "channels", 1, 32),
         ),
@@ -324,6 +332,15 @@ function parsePositiveContentTypeParam(
   return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= maximum
     ? parsed
     : fallback;
+}
+
+/**
+ * RFC 2586 `audio/L16` samples are network byte order, so each 16-bit sample
+ * must be swapped before the little-endian WAV wrapper. Mutates and returns
+ * `buf` (callers pass an owned buffer copied from the network response).
+ */
+function swap16InPlace(buf: Buffer): Buffer {
+  return buf.swap16();
 }
 
 /** OpenRouter's PCM speech responses are signed 16-bit little-endian samples. */

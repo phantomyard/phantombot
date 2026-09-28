@@ -284,13 +284,14 @@ describe("synthesize", () => {
     expect(r.audio.data.subarray(44)).toEqual(pcm);
   });
 
-  test("raw PCM under audio/L16 is WAV-wrapped too", async () => {
+  test("raw PCM under audio/L16 is byte-swapped into little-endian WAV (RFC 2586)", async () => {
     process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
     const config = makeConfig("openai-compatible");
     config.voice.openaiCompatible!.baseUrl = "https://openrouter.ai/api/v1";
     config.voice.openaiCompatible!.ttsModel = "test/l16-alias-model";
     config.voice.openaiCompatible!.voice = "Kore";
-    const pcm = Buffer.from([0x10, 0x20, 0x30, 0x40]);
+    // Network-byte-order samples: 0x0001 = 1, 0x0100 = 256.
+    const pcm = Buffer.from([0x00, 0x01, 0x01, 0x00]);
     const r = await synthesize(
       config,
       "hello",
@@ -305,6 +306,48 @@ describe("synthesize", () => {
     expect(r.audio.mime).toBe("audio/wav");
     expect(r.audio.data.subarray(0, 4).toString("ascii")).toBe("RIFF");
     expect(r.audio.data.readUInt32LE(24)).toBe(16_000);
+    expect(r.audio.data.readInt16LE(44)).toBe(1);
+    expect(r.audio.data.readInt16LE(46)).toBe(256);
+  });
+
+  test("audio/L16 with an odd byte count is rejected instead of wrapped", async () => {
+    process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
+    const config = makeConfig("openai-compatible");
+    config.voice.openaiCompatible!.baseUrl = "https://openrouter.ai/api/v1";
+    config.voice.openaiCompatible!.ttsModel = "test/l16-odd-model";
+    config.voice.openaiCompatible!.voice = "Kore";
+    const r = await synthesize(
+      config,
+      "hello",
+      (async (_url: string) =>
+        new Response(Buffer.from([0x00, 0x01, 0x02]), {
+          status: 200,
+          headers: { "content-type": "audio/L16;rate=16000;channels=1" },
+        })) as typeof fetch,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected a synthesis failure");
+    expect(r.error).toContain("odd byte count");
+  });
+
+  test("audio/x-pcm keeps its little-endian bytes unchanged", async () => {
+    process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
+    const config = makeConfig("openai-compatible");
+    config.voice.openaiCompatible!.baseUrl = "https://openrouter.ai/api/v1";
+    config.voice.openaiCompatible!.ttsModel = "test/x-pcm-model";
+    config.voice.openaiCompatible!.voice = "Kore";
+    const pcm = Buffer.from([0x10, 0x20, 0x30, 0x40]);
+    const r = await synthesize(
+      config,
+      "hello",
+      (async (_url: string) =>
+        new Response(pcm, {
+          status: 200,
+          headers: { "content-type": "audio/x-pcm;rate=8000;channels=1" },
+        })) as typeof fetch,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error);
     expect(r.audio.data.subarray(44)).toEqual(pcm);
   });
 
