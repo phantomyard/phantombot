@@ -107,7 +107,10 @@ describe("fetchOpenAIAudioModelOptions", () => {
     const fakeFetch = (async () => Response.json({
       data: [{
         id: "x-ai/grok-voice-tts-1.0",
-        supported_voices: ["eve", "ara", "rex", "sal", "leo"],
+        supported_voices: [
+          "eve", "ara", "rex", "sal", "leo",
+          "__other__", "__other_audio_model__",
+        ],
         architecture: { output_modalities: ["speech"] },
       }],
     })) as unknown as typeof fetch;

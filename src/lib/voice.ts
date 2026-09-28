@@ -98,6 +98,13 @@ export const OPENAI_COMPATIBLE_VOICE_KEY_ENV =
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 export const OTHER_AUDIO_MODEL = "__other_audio_model__";
+/**
+ * Menu sentinel for "none of the above — let me type one". Shared by the CLI
+ * picker and the TUI flow so a provider-specific voice name is never locked
+ * out by our own list; catalogue parsing reserves it so it cannot collide with
+ * a published provider voice.
+ */
+export const OTHER_VOICE = "__other__";
 
 export type OpenAIAudioModality = "transcription" | "speech";
 
@@ -332,7 +339,9 @@ export async function fetchOpenAIAudioModels(
         if (typeof row.id !== "string" || row.id.length === 0) return [];
         const voices = Array.isArray(row.supported_voices)
           ? [...new Set(row.supported_voices.filter(
-            (voice): voice is string => typeof voice === "string" && voice.length > 0,
+            (voice): voice is string =>
+              typeof voice === "string" && voice.length > 0 &&
+              voice !== OTHER_VOICE && voice !== OTHER_AUDIO_MODEL,
           ))]
           : [];
         return [{ id: row.id, voices }];
@@ -442,14 +451,6 @@ export async function fetchOpenAIVoiceOptions(
     return [];
   }
 }
-
-/**
- * Menu sentinel for "none of the above — let me type one". Shared by the CLI
- * picker and the TUI flow so a provider-specific voice name is never locked
- * out by our own list; it cannot collide with a real voice because every
- * published provider voice name is this reserved sentinel.
- */
-export const OTHER_VOICE = "__other__";
 
 /**
  * The outcome of proving one (model, voice) pair against a live endpoint.
