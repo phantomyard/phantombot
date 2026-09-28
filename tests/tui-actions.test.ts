@@ -8,13 +8,25 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { Config } from "../src/config.ts";
+import type { ServiceControl } from "../src/lib/platform.ts";
 import {
+  applyVoice,
   describeEmbeddingChange,
   describeVoiceChange,
   embeddingSpaceChanges,
 } from "../src/tui/actions.ts";
+
+const noopService: ServiceControl = {
+  isActive: async () => true,
+  start: async () => ({ ok: true }),
+  stop: async () => ({ ok: true }),
+  restart: async () => ({ ok: true }),
+} as unknown as ServiceControl;
 
 function configWith(embeddings: unknown): Config {
   return { embeddings } as unknown as Config;
@@ -166,5 +178,49 @@ describe("describeVoiceChange", () => {
 
   test("a voice change restarts the service", () => {
     expect(describeVoiceChange({ provider: "openai-compatible" }).restarts).toBe(true);
+  });
+});
+
+describe("applyVoice", () => {
+  test("writes the selected persona layer and leaves the host config untouched", async () => {
+    const root = await mkdtemp(join(tmpdir(), "phantombot-tui-voice-"));
+    try {
+      const hostPath = join(root, "config.toml");
+      const personasDir = join(root, "personas");
+      const kaiPath = join(personasDir, "kai", "config.toml");
+      await mkdir(join(personasDir, "kai"), { recursive: true });
+      await writeFile(hostPath, 'default_persona = "lena"\n');
+
+      const config = {
+        configPath: hostPath,
+        personasDir,
+        defaultPersona: "lena",
+      } as unknown as Config;
+      const result = await applyVoice({
+        config,
+        persona: "kai",
+        voice: {
+          provider: "openai-compatible",
+          openaiCompatible: {
+            baseUrl: "https://openrouter.ai/api/v1",
+            keyEnv: "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
+            sttModel: "x-ai/grok-stt-1.0",
+            ttsModel: "x-ai/grok-voice-tts-1.0",
+            voice: "leo",
+            speed: 1,
+          },
+        },
+        serviceControl: noopService,
+      });
+
+      expect(result).toEqual({ ok: true });
+      expect(await readFile(hostPath, "utf8")).toBe('default_persona = "lena"\n');
+      const personaToml = await readFile(kaiPath, "utf8");
+      expect(personaToml).toContain('provider = "openai-compatible"');
+      expect(personaToml).toContain('tts_model = "x-ai/grok-voice-tts-1.0"');
+      expect(personaToml).toContain('voice = "leo"');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

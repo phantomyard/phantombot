@@ -45,6 +45,7 @@ import { writeAutostartPersonas } from "../lib/personaDefault.ts";
 import { archivePersona } from "../lib/personaArchive.ts";
 import { setPersonaSecret } from "../lib/vaultSecrets.ts";
 import { openPersonaVault } from "../lib/vault.ts";
+import { personaConfigPath } from "../lib/personaConfig.ts";
 import { loadState, saveState } from "../state.ts";
 import {
   defaultServiceControl,
@@ -225,7 +226,11 @@ export async function applyVoice(
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     await applyVoiceConfig({
-      configPath: input.config.configPath,
+      // The full-screen TUI can edit any persona while its Config still
+      // carries the host config path. Voice is persona-scoped, so resolve the
+      // selected persona's layer explicitly just like `phantombot voice
+      // --persona <name>` does.
+      configPath: personaConfigPath(input.config.personasDir, input.persona),
       config: input.config,
       persona: input.persona,
       voice: input.voice,
