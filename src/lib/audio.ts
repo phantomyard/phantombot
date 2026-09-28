@@ -275,9 +275,12 @@ async function openaiCompatibleTts(
         signal,
       });
     res = await request(!skipMp3);
-    if (!res.ok && !skipMp3) {
+    if (!res.ok) {
+      // Read the diagnostic body on EVERY failure — including a cached
+      // pcm-only endpoint whose direct pcm request fails (quota, auth,
+      // provider error) — so the returned error never drops it.
       errText = await res.text().catch(() => "");
-      if (isUnsupportedSpeechFormatError(errText)) {
+      if (!skipMp3 && isUnsupportedSpeechFormatError(errText)) {
         // Remember this (baseUrl, model) as pcm-only for the whole process,
         // so the next synthesis skips the wasted mp3 probe entirely.
         pcmOnlyEndpoints.add(endpointKey);

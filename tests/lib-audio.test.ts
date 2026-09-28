@@ -407,6 +407,42 @@ describe("synthesize", () => {
     expect(bodies[0]!.response_format).toBe("mp3");
   });
 
+  test("a cached pcm-only endpoint still surfaces the provider diagnostic when the direct pcm request fails", async () => {
+    process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
+    const config = makeConfig("openai-compatible");
+    config.voice.openaiCompatible!.baseUrl = "https://openrouter.ai/api/v1";
+    config.voice.openaiCompatible!.ttsModel = "test/neg-cache-fail-model";
+    config.voice.openaiCompatible!.voice = "Kore";
+    let pcmCalls = 0;
+    const fetchImpl = (async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.response_format) {
+        return Response.json(
+          { error: { message: "mp3 is not supported by this provider" } },
+          { status: 400 },
+        );
+      }
+      pcmCalls += 1;
+      if (pcmCalls === 1) return new Response("audi", { status: 200 });
+      return Response.json(
+        { error: { message: "quota exhausted for this key" } },
+        { status: 429 },
+      );
+    }) as typeof fetch;
+
+    // First call populates the pcm-only cache (mp3 rejected, pcm succeeds).
+    const first = await synthesize(config, "hello", fetchImpl);
+    expect(first.ok).toBe(true);
+
+    // Second call goes straight to pcm; when THAT fails the provider's
+    // diagnostic body must survive into the returned error.
+    const second = await synthesize(config, "again", fetchImpl);
+    expect(second.ok).toBe(false);
+    if (second.ok) throw new Error("expected a synthesis failure");
+    expect(second.error).toContain("HTTP 429");
+    expect(second.error).toContain("quota exhausted for this key");
+  });
+
   test("azure_edge → removal error with migration guidance", async () => {
     const r = await synthesize(makeConfig("azure_edge"), "hello");
     expect(r.ok).toBe(false);
