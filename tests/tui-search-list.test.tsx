@@ -193,3 +193,24 @@ describe("the choose screen's description", () => {
     expect(answers).toEqual(["pi"]);
   });
 });
+
+describe("the search list's initial value", () => {
+  test("enter keeps the current value instead of selecting row one", async () => {
+    const answers: Array<string | undefined> = [];
+    const app = mount(
+      <SearchListScreen
+        request={{
+          title: "TTS model",
+          options: [
+            { value: "first", label: "First" },
+            { value: "current", label: "Current" },
+          ],
+          initial: "current",
+        }}
+        onAnswer={(v) => answers.push(v)}
+      />,
+    );
+    await app.press("\r");
+    expect(answers).toEqual(["current"]);
+  });
+});

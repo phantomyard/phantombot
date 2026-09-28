@@ -233,12 +233,55 @@ describe("synthesize", () => {
       (async (url, init) => {
         seenUrl = String(url);
         seenBody = JSON.parse(String(init?.body));
-        return new Response(fakeAudio, { status: 200 });
+        return new Response(fakeAudio, {
+          status: 200,
+          headers: { "content-type": "audio/mpeg" },
+        });
       }) as typeof fetch,
     );
     expect(r.ok).toBe(true);
     expect(seenUrl).toBe("https://openrouter.ai/api/v1/audio/speech");
     expect(seenBody.model).toBe("openai/gpt-4o-mini-tts");
+    expect(seenBody.response_format).toBe("mp3");
+    if (r.ok) expect(r.audio.mime).toBe("audio/mpeg");
+  });
+
+  test("retries a PCM-only model and wraps the raw samples as WAV", async () => {
+    process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
+    const config = makeConfig("openai-compatible");
+    config.voice.openaiCompatible!.baseUrl = "https://openrouter.ai/api/v1";
+    config.voice.openaiCompatible!.ttsModel = "google/gemini-3.8-flash-tts";
+    config.voice.openaiCompatible!.voice = "Kore";
+    const bodies: Array<Record<string, unknown>> = [];
+    const pcm = Buffer.from([0x01, 0x02, 0x03, 0x04]);
+    const r = await synthesize(
+      config,
+      "hello",
+      (async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        if (bodies.length === 1) {
+          return Response.json(
+            { error: { message: 'Gemini TTS only supports response_format="pcm". Got "mp3".' } },
+            { status: 400 },
+          );
+        }
+        return new Response(pcm, {
+          status: 200,
+          headers: { "content-type": "audio/pcm;rate=24000;channels=1" },
+        });
+      }) as typeof fetch,
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.response_format).toBe("mp3");
+    expect(bodies[1]!.response_format).toBeUndefined();
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.audio.mime).toBe("audio/wav");
+    expect(r.audio.data.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    expect(r.audio.data.subarray(8, 12).toString("ascii")).toBe("WAVE");
+    expect(r.audio.data.readUInt16LE(22)).toBe(1);
+    expect(r.audio.data.readUInt32LE(24)).toBe(24_000);
+    expect(r.audio.data.subarray(44)).toEqual(pcm);
   });
 
   test("azure_edge → removal error with migration guidance", async () => {

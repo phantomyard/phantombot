@@ -18,7 +18,16 @@ import { parseAllowedNpubs } from "../cli/phantomchat.ts";
 export interface ChannelsQuestions {
   choose(input: {
     title: string;
+    description?: string;
     options: readonly { value: string; label: string; hint?: string }[];
+    initial?: string;
+  }): Promise<string | undefined>;
+  search?(input: {
+    title: string;
+    banner?: string;
+    description?: string;
+    options: readonly { value: string; label: string; hint?: string }[];
+    initial?: string;
   }): Promise<string | undefined>;
   value(input: {
     title: string;

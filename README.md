@@ -2020,6 +2020,16 @@ TTS models, and voice. Phantombot calls `<base_url>/audio/transcriptions` for
 incoming voice notes and `<base_url>/audio/speech` for replies. Common base
 URLs are `https://api.openai.com/v1` and `https://openrouter.ai/api/v1`.
 
+When the endpoint publishes modality metadata, the wizard fetches STT and TTS
+catalogues separately (`output_modalities=transcription` and `speech`) and
+offers two model pickers. **Other** keeps provider-specific and generic
+OpenAI-compatible model IDs available when discovery is unsupported or
+incomplete. OpenRouter remains one provider configuration — the model choices,
+not the URL or credential, are split. OpenAI-compatible synthesis prefers MP3,
+then retries without a format when the model requires provider-selected PCM.
+Raw PCM is wrapped as WAV; Telegram sends it as a playable audio attachment
+because its voice-note API accepts MP3/M4A/OGG but not WAV.
+
 Before asking for a key, the wizard checks the current persona's vault and
 matching OpenAI-compatible embeddings configuration. It offers a matching key
 for reuse without displaying it; credentials are never searched across
@@ -2039,8 +2049,8 @@ provider = "openai-compatible"
 base_url = "https://openrouter.ai/api/v1"
 key_env = "OPENROUTER_API_KEY"
 stt_model = "openai/whisper-1"
-tts_model = "openai/gpt-4o-mini-tts"
-voice = "nova"
+tts_model = "deepgram/aura-2"
+voice = "aura-2-beatrix-nl"
 speed = 1
 ```
 

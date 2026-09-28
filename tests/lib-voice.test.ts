@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  fetchOpenAIAudioModelOptions,
   fetchOpenAIVoiceOptions,
   validateOpenAIVoice,
   fallbackVoiceOptions,
@@ -84,9 +85,64 @@ describe("parseOpenAIVoiceOptions", () => {
     ]);
   });
 
+  test("parses OpenRouter's unquoted supported-voices shape", () => {
+    const msg =
+      'Unknown voice "x". Supported voices: aura-2-thalia-en, aura-2-beatrix-nl, aura-2-zeus-en.';
+    expect(parseOpenAIVoiceOptions(msg)).toEqual([
+      "aura-2-thalia-en",
+      "aura-2-beatrix-nl",
+      "aura-2-zeus-en",
+    ]);
+  });
+
   test("returns [] on unrelated errors", () => {
     expect(parseOpenAIVoiceOptions("401 Unauthorized")).toEqual([]);
     expect(parseOpenAIVoiceOptions("")).toEqual([]);
+  });
+});
+
+describe("fetchOpenAIAudioModelOptions", () => {
+  test("queries and returns only the requested annotated audio models", async () => {
+    let seen = "";
+    const fakeFetch = (async (url: URL) => {
+      seen = String(url);
+      return Response.json({
+        data: [
+          {
+            id: "deepgram/aura-2",
+            architecture: { output_modalities: ["speech"] },
+          },
+          {
+            id: "openai/whisper-1",
+            architecture: { output_modalities: ["transcription"] },
+          },
+        ],
+      });
+    }) as unknown as typeof fetch;
+    expect(
+      await fetchOpenAIAudioModelOptions(
+        "k",
+        "https://openrouter.ai/api/v1/",
+        "speech",
+        fakeFetch,
+      ),
+    ).toEqual(["deepgram/aura-2"]);
+    expect(seen).toBe(
+      "https://openrouter.ai/api/v1/models?output_modalities=speech",
+    );
+  });
+
+  test("returns no menu when an endpoint ignores the modality filter", async () => {
+    const fakeFetch = (async () =>
+      Response.json({ data: [{ id: "gpt-4.1" }] })) as unknown as typeof fetch;
+    expect(
+      await fetchOpenAIAudioModelOptions(
+        "k",
+        "https://api.openai.com/v1",
+        "speech",
+        fakeFetch,
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -118,6 +174,27 @@ describe("fetchOpenAIVoiceOptions", () => {
     >;
     expect(captured?.url).toContain("/v1/audio/speech");
     expect(body.voice).toBe("__phantombot_probe__");
+  });
+
+  test("retries without a format when PCM-only models reject MP3", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fakeFetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return bodies.length === 1
+        ? Response.json(
+          { error: { message: 'Only response_format="pcm" is supported, not mp3.' } },
+          { status: 400 },
+        )
+        : Response.json(
+          { error: { message: "Unknown voice. Supported voices: Kore, Puck." } },
+          { status: 400 },
+        );
+    }) as unknown as typeof fetch;
+    expect(
+      await fetchOpenAIVoiceOptions("k", "gemini-tts", fakeFetch),
+    ).toEqual(["Kore", "Puck"]);
+    expect(bodies[0]!.response_format).toBe("mp3");
+    expect(bodies[1]!.response_format).toBeUndefined();
   });
 
   test("returns [] on 401", async () => {
@@ -238,7 +315,30 @@ describe("validateOpenAIVoice", () => {
     // would say nothing about it. Input stays one character so proving a
     // voice is the cheapest billable call there is.
     expect(seenUrl).toBe("https://openrouter.ai/api/v1/audio/speech");
-    expect(seenBody).toEqual({ model: "tts-1", voice: "shimmer", input: "." });
+    expect(seenBody).toEqual({
+      model: "tts-1",
+      voice: "shimmer",
+      input: ".",
+      response_format: "mp3",
+    });
+  });
+
+  test("proves a valid voice after a PCM-only model rejects MP3", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fakeFetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return bodies.length === 1
+        ? Response.json(
+          { error: { message: 'Gemini only supports response_format="pcm". Got "mp3".' } },
+          { status: 400 },
+        )
+        : new Response("pcm", { status: 200 });
+    }) as unknown as typeof fetch;
+    expect(
+      await validateOpenAIVoice("k", "gemini-tts", "Kore", fakeFetch),
+    ).toEqual({ ok: true });
+    expect(bodies[0]!.response_format).toBe("mp3");
+    expect(bodies[1]!.response_format).toBeUndefined();
   });
 
   test("reports a rejection and the voices the model does accept", async () => {
@@ -261,11 +361,14 @@ describe("validateOpenAIVoice", () => {
     expect(r.supported).toEqual(["alloy", "echo", "nova"]);
   });
 
-  test("reports a rejection with no list when the error does not enumerate", async () => {
-    const fakeFetch = (async () =>
-      new Response("nope", { status: 401 })) as unknown as typeof fetch;
-    const r = await validateOpenAIVoice("bad", "tts-1", "nova", fakeFetch);
-    expect(r).toEqual({ ok: false, error: "HTTP 401", supported: [] });
+  test("auth, permission, and quota responses do not masquerade as bad voices", async () => {
+    for (const status of [401, 403, 429]) {
+      const statusFetch = (async () =>
+        new Response("nope", { status })) as unknown as typeof fetch;
+      expect(
+        await validateOpenAIVoice("bad", "tts-1", "nova", statusFetch),
+      ).toEqual({ ok: true });
+    }
   });
 
   test("a network failure is not treated as a bad voice", async () => {

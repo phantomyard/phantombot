@@ -32,11 +32,13 @@ import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import {
   ELEVENLABS_DEFAULTS,
   ENV_KEY_FOR_PROVIDER,
+  fetchOpenAIAudioModelOptions,
   fetchOpenAIVoiceOptions,
   openAIVoiceMenuOptions,
   OTHER_VOICE,
   OPENAI_COMPATIBLE_DEFAULTS,
   OPENAI_COMPATIBLE_VOICE_KEY_ENV,
+  OTHER_AUDIO_MODEL,
   OPENAI_BASE_URL,
   OPENROUTER_BASE_URL,
   normalizeOpenAICompatibleBaseUrl,
@@ -225,6 +227,7 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
 
       const questions = {
         choose: (opts: any) => q.choose(opts),
+        search: (opts: any) => q.search(opts),
         value: (opts: any) => q.value(opts),
         confirm: (opts: any) => q.confirm(opts),
       };
@@ -244,6 +247,8 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
             }
             return { ok: true };
           },
+          probeModels: ({ key, baseUrl, modality }) =>
+            fetchOpenAIAudioModelOptions(key, baseUrl, modality),
           probeVoices: ({ key, baseUrl, model }) =>
             fetchOpenAIVoiceOptions(key, model, fetch, undefined, baseUrl),
           checkVoice: ({ key, baseUrl, model, voice }) =>
@@ -253,7 +258,7 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
 
       if (!result) return "voice unchanged";
       if ("rejected" in result)
-        return `voice unchanged — rejected: ${result.rejected}`;
+        return `voice unchanged — ${result.rejected}`;
 
       await applyVoiceConfig({
         configPath: voiceConfigPath,
@@ -435,7 +440,8 @@ async function runOpenAICompatibleFlow(
   existing: VoiceConfig,
   embedded: boolean,
 ): Promise<number> {
-  const cur = existing.openaiCompatible ?? OPENAI_COMPATIBLE_DEFAULTS;
+  const existingEndpoint = existing.openaiCompatible;
+  const cur = existingEndpoint ?? OPENAI_COMPATIBLE_DEFAULTS;
   const baseUrlAnswer = await p.text({
     message: "OpenAI Compatible base URL (include /v1)",
     placeholder:
@@ -495,26 +501,41 @@ async function runOpenAICompatibleFlow(
   }
   spinner.stop(`key validated (${r.modelCount} models visible)`);
 
-  const sttModel = await p.text({
-    message: "Speech-to-text model",
-    defaultValue: cur.sttModel,
-    validate: (v) => (!v?.trim() ? "STT model is required" : undefined),
-  });
-  if (p.isCancel(sttModel)) {
+  const discovery = p.spinner();
+  discovery.start("discovering speech-to-text and text-to-speech models…");
+  const [sttModels, ttsModels] = await Promise.all([
+    fetchOpenAIAudioModelOptions(key, baseUrl, "transcription"),
+    fetchOpenAIAudioModelOptions(key, baseUrl, "speech"),
+  ]);
+  discovery.stop(
+    sttModels.length || ttsModels.length
+      ? `found ${sttModels.length} STT and ${ttsModels.length} TTS models`
+      : "endpoint did not publish audio model catalogues — enter model IDs",
+  );
+  const sameEndpoint = existingEndpoint !== undefined &&
+    normalizeOpenAICompatibleBaseUrl(existingEndpoint.baseUrl) === baseUrl;
+  const sttModel = await askOpenAIAudioModel(
+    "Speech-to-text model",
+    "STT model",
+    sttModels,
+    sameEndpoint ? cur.sttModel : undefined,
+  );
+  if (sttModel === undefined) {
     p.cancel("cancelled");
     return 0;
   }
-  const ttsModel = await p.text({
-    message: "Text-to-speech model",
-    defaultValue: cur.ttsModel,
-    validate: (v) => (!v?.trim() ? "TTS model is required" : undefined),
-  });
-  if (p.isCancel(ttsModel)) {
+  const ttsModel = await askOpenAIAudioModel(
+    "Text-to-speech model",
+    "TTS model",
+    ttsModels,
+    sameEndpoint ? cur.ttsModel : undefined,
+  );
+  if (ttsModel === undefined) {
     p.cancel("cancelled");
     return 0;
   }
 
-  const ttsModelName = String(ttsModel).trim();
+  const ttsModelName = ttsModel;
   const probeSpinner = p.spinner();
   probeSpinner.start(`asking ${ttsModelName} which voices it accepts…`);
   const liveVoices = await fetchOpenAIVoiceOptions(
@@ -600,8 +621,8 @@ async function runOpenAICompatibleFlow(
       openaiCompatible: {
         baseUrl,
         keyEnv,
-        sttModel: String(sttModel).trim(),
-        ttsModel: String(ttsModel).trim(),
+        sttModel,
+        ttsModel,
         voice,
         speed: cur.speed,
       },
@@ -621,6 +642,40 @@ async function runOpenAICompatibleFlow(
     p.outro("done");
   }
   return 0;
+}
+
+async function askOpenAIAudioModel(
+  message: string,
+  requiredLabel: string,
+  live: string[],
+  current?: string,
+): Promise<string | undefined> {
+  if (live.length) {
+    const picked = await p.select({
+      message,
+      options: [
+        ...live.map((model) => ({
+          value: model,
+          label: model,
+          hint: model === current ? "current" : undefined,
+        })),
+        {
+          value: OTHER_AUDIO_MODEL,
+          label: "Other — type a model ID",
+          hint: undefined,
+        },
+      ] as never,
+      initialValue: (current && live.includes(current) ? current : live[0]) as never,
+    });
+    if (p.isCancel(picked)) return undefined;
+    if (picked !== OTHER_AUDIO_MODEL) return String(picked);
+  }
+  const typed = await p.text({
+    message,
+    ...(current ? { defaultValue: current } : {}),
+    validate: (v) => (!v?.trim() ? `${requiredLabel} is required` : undefined),
+  });
+  return p.isCancel(typed) ? undefined : String(typed).trim();
 }
 
 function formatExistingDetails(v: VoiceConfig): string {

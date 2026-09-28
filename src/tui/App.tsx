@@ -1424,6 +1424,7 @@ export function App(props: AppProps): React.ReactElement {
           validateElevenLabsKey,
           validateOpenAICompatibleKey,
           validateOpenAIVoice,
+          fetchOpenAIAudioModelOptions,
           fetchOpenAIVoiceOptions,
         } = await import("../lib/voice.ts");
         const { findStoredVoiceCredential } = await import("../cli/voice.ts");
@@ -1468,7 +1469,12 @@ export function App(props: AppProps): React.ReactElement {
         const chosen = await configureVoice(
           target.name,
           provider as "openai-compatible" | "elevenlabs" | "none",
-          { choose: askChoice, value: askValue, confirm: askConfirmValue },
+          {
+            choose: askChoice,
+            search: askSearch,
+            value: askValue,
+            confirm: askConfirmValue,
+          },
           {
             existing: config.voice,
             findCredential: (p, baseUrl) =>
@@ -1477,6 +1483,8 @@ export function App(props: AppProps): React.ReactElement {
               p === "openai-compatible"
                 ? validateOpenAICompatibleKey(key, baseUrl!)
                 : validateElevenLabsKey(key),
+            probeModels: ({ key, baseUrl, modality }) =>
+              fetchOpenAIAudioModelOptions(key, baseUrl, modality),
             probeVoices: ({ key, baseUrl, model }) =>
               fetchOpenAIVoiceOptions(key, model, fetch, undefined, baseUrl),
             checkVoice: ({ key, baseUrl, model, voice }) =>
@@ -1485,7 +1493,7 @@ export function App(props: AppProps): React.ReactElement {
         );
         if (!chosen) return setNotice("voice unchanged");
         if ("rejected" in chosen)
-          return setNotice(`voice unchanged — key rejected: ${chosen.rejected}`);
+          return setNotice(`voice unchanged — ${chosen.rejected}`);
 
         // The restart offer below belongs to a SAVE, not to a visit — a
         // cancelled confirm must not fire it.
@@ -1535,7 +1543,7 @@ export function App(props: AppProps): React.ReactElement {
         await refresh();
       }
     },
-    [refresh, askChoice, askValue, askConfirmValue],
+    [refresh, askChoice, askSearch, askValue, askConfirmValue],
   );
 
   /**
