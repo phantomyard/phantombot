@@ -179,6 +179,19 @@ export interface ExtractDurableFactsResult {
   factsWritten: number;
   /** How many facts were retired by the age-based prune this pass. */
   factsPruned: number;
+  /**
+   * Harness completions that failed mid-batch. The failed turn and the tail
+   * are released for re-claim, so a caller that triggered this pass off a
+   * queue row (#626) uses this to decide the row must STAY queued for retry
+   * rather than be cleared as done.
+   */
+  harnessFailures: number;
+  /**
+   * Set when the pass itself blew up (the outer catch — e.g. the DB went
+   * away): nothing was committed and the batch was never even claimed. A
+   * queue drain must treat this like a failure, not like "nothing to do".
+   */
+  error?: string;
 }
 
 /**
@@ -209,6 +222,7 @@ export async function extractDurableFactsOnEviction(
     turnsProcessed: 0,
     factsWritten: 0,
     factsPruned: 0,
+    harnessFailures: 0,
   };
   if (!input.settings.enabled) return result;
 
@@ -265,6 +279,7 @@ export async function extractDurableFactsOnEviction(
         // Harness reject / timeout / abort. Stop here: this turn and every turn
         // after it in the batch stay in `outstanding` and are released below, so
         // they're re-claimed next pass. Already-committed turns are untouched.
+        result.harnessFailures++;
         log.warn("durable-facts: extraction call failed; will retry batch", {
           persona: input.persona,
           conversation: input.conversation,
@@ -354,6 +369,10 @@ export async function extractDurableFactsOnEviction(
     }
     return result;
   } catch (e) {
+    // The pass itself blew up (e.g. the DB handle is gone). Mark the result so
+    // a queue drain (#626) keeps the request row for retry instead of
+    // clearing it as if the pass had run clean.
+    result.error = (e as Error).message;
     log.warn("durable-facts: extraction failed; continuing", {
       persona: input.persona,
       conversation: input.conversation,
@@ -361,6 +380,112 @@ export async function extractDurableFactsOnEviction(
     });
     return result;
   }
+}
+
+// ── EXTRACTION QUEUE (#626) — short-lived writers enqueue, the daemon drains ──
+
+/**
+ * Enqueue an eviction-cliff extraction request for (persona, conversation),
+ * for SHORT-LIVED processes (tick, ask) that cannot run the extraction's
+ * model call themselves: their teardown closes the shared SQLite handle under
+ * a fire-and-forget pass and the facts are lost with only a swallowed warn
+ * (issue #626 — Matt: 1072 losses vs 22 wins). The daemon's drain loop picks
+ * the row up. AWAITED by design — durability before teardown is the whole
+ * point. No-op when durable facts are disabled; never throws.
+ */
+export async function requestFactExtractionIfEnabled(
+  config: Config,
+  persona: string,
+  conversation: string,
+  memory: MemoryStore,
+): Promise<void> {
+  if (!config.durableFacts?.enabled) return;
+  try {
+    await memory.requestFactExtraction(persona, conversation);
+  } catch (e) {
+    log.warn("durable-facts: extraction request enqueue failed", {
+      persona,
+      conversation,
+      error: (e as Error).message,
+    });
+  }
+}
+
+/**
+ * What the drain needs to serve one persona's queued requests: the feature
+ * settings plus the tool-less completion transport. The resolver returns
+ * undefined when this host cannot extract for that persona (unknown persona,
+ * feature disabled, no usable harness) — the drain then DROPS the row, since
+ * nothing here will ever serve it.
+ */
+export interface FactExtractionDrainTarget {
+  settings: DurableFactsSettings;
+  complete: ExtractComplete;
+}
+
+/**
+ * Drain the extraction-request queue: run one eviction-cliff pass per queued
+ * conversation and clear its row. A pass that hit a harness failure (or blew
+ * up entirely) KEEPS its row — the next sweep retries, so a provider outage
+ * degrades to a backlog instead of silent fact loss. Never throws: per-row
+ * failures leave the row queued and move on.
+ */
+export async function drainFactExtractionRequests(input: {
+  memory: MemoryStore;
+  resolvePersona: (persona: string) => FactExtractionDrainTarget | undefined;
+  signal?: AbortSignal;
+}): Promise<{ drained: number; retried: number }> {
+  let drained = 0;
+  let retried = 0;
+  let requests;
+  try {
+    requests = await input.memory.listFactExtractionRequests();
+  } catch (e) {
+    log.warn("durable-facts: drain could not list requests", {
+      error: (e as Error).message,
+    });
+    return { drained, retried };
+  }
+  for (const req of requests) {
+    if (input.signal?.aborted) break;
+    try {
+      const target = input.resolvePersona(req.persona);
+      if (!target) {
+        await input.memory.clearFactExtractionRequest(
+          req.persona,
+          req.conversation,
+        );
+        drained++;
+        continue;
+      }
+      const result = await extractDurableFactsOnEviction({
+        persona: req.persona,
+        conversation: req.conversation,
+        memory: input.memory,
+        settings: target.settings,
+        complete: target.complete,
+        signal: input.signal,
+      });
+      if (result.error !== undefined || result.harnessFailures > 0) {
+        // Leave the row queued — the next sweep retries this conversation.
+        retried++;
+        continue;
+      }
+      await input.memory.clearFactExtractionRequest(
+        req.persona,
+        req.conversation,
+      );
+      drained++;
+    } catch (e) {
+      retried++;
+      log.warn("durable-facts: drain pass failed; request stays queued", {
+        persona: req.persona,
+        conversation: req.conversation,
+        error: (e as Error).message,
+      });
+    }
+  }
+  return { drained, retried };
 }
 
 /** Render one evicted turn as the extractor's user message. */

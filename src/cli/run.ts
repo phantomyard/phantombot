@@ -59,6 +59,11 @@ import {
 } from "../p2p/index.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
+import {
+  drainFactExtractionRequests,
+  makeExtractionComplete,
+  type FactExtractionDrainTarget,
+} from "../orchestrator/durableFacts.ts";
 import { warnLowPiHeapAtStartup } from "../harnesses/pi.ts";
 import {
   resolveHarnessBinsForConfig,
@@ -1057,6 +1062,70 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   process.on("SIGINT", onSig);
   process.on("SIGTERM", onSig);
 
+  // Durable-fact extraction DRAIN (#626). Short-lived processes (tick, ask)
+  // no longer run the extraction's model call themselves — their teardown
+  // closes the shared SQLite handle under the fire-and-forget pass and the
+  // facts were lost with only a swallowed warn (Matt: 1072 losses vs 22
+  // wins). They enqueue an extraction REQUEST (a cheap awaited INSERT)
+  // instead; THIS loop — inside the long-lived daemon that holds its handle
+  // for its whole life — runs the passes and clears the rows. A pass that
+  // hits a harness failure keeps its row and is retried next sweep, so a
+  // provider outage becomes a backlog, not silent loss; a crashed daemon
+  // leaves the table intact and drains it on restart. 60s cadence plus one
+  // immediate sweep so a backlog accumulated while the daemon was down never
+  // waits. Per-persona (config, chain, complete) resolution is cached — it
+  // only changes on restart. Runs SEQUENTIALLY (drainInFlight guard): a pass
+  // slower than the interval must never stack another on top of itself.
+  const drainTargetCache = new Map<string, FactExtractionDrainTarget | undefined>();
+  const resolveDrainTarget = (
+    persona: string,
+  ): FactExtractionDrainTarget | undefined => {
+    if (!drainTargetCache.has(persona)) {
+      const personaConfig = withHostHarnessBins(
+        personaConfigs.get(persona) ?? config,
+        config,
+      );
+      const settings = personaConfig.durableFacts;
+      const complete = settings?.enabled
+        ? makeExtractionComplete(
+            buildHarnessChain(personaConfig, { write: () => true }, persona),
+            personaConfig,
+            personaDir(config, persona),
+          )
+        : undefined;
+      drainTargetCache.set(
+        persona,
+        complete && settings?.enabled ? { settings, complete } : undefined,
+      );
+    }
+    return drainTargetCache.get(persona);
+  };
+  let drainInFlight = false;
+  const runFactDrain = async (): Promise<void> => {
+    if (drainInFlight || ac.signal.aborted) return;
+    drainInFlight = true;
+    try {
+      const { drained, retried } = await drainFactExtractionRequests({
+        memory,
+        resolvePersona: resolveDrainTarget,
+        signal: ac.signal,
+      });
+      if (drained + retried > 0) {
+        log.info("run: durable-fact extraction drain", { drained, retried });
+      }
+    } catch (e) {
+      log.warn("run: durable-fact extraction drain threw", {
+        error: (e as Error).message,
+      });
+    } finally {
+      drainInFlight = false;
+    }
+  };
+  const factDrainTimer = setInterval(() => {
+    void runFactDrain();
+  }, 60_000);
+  void runFactDrain();
+
   // Harness viability for the PhantomChat roster, decided ONCE with the SAME
   // check the startup loop below applies (empty chain → skip). It must be a
   // pre-pass, not loop-internal: runningPersonas and lifecycleAccounts are
@@ -1522,6 +1591,11 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   } finally {
     process.off("SIGINT", onSig);
     process.off("SIGTERM", onSig);
+    // Stop the extraction drain (#626) BEFORE closing the store — a sweep in
+    // flight past this point would write into a closed handle, the exact
+    // failure mode the queue exists to remove. An in-flight pass itself is
+    // aborted via ac.signal; its request row survives and drains on restart.
+    clearInterval(factDrainTimer);
     await memory.close();
     lock.release();
   }

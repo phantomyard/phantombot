@@ -66,7 +66,7 @@ import { makeRetriever } from "../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 import {
   makeDurableFactPuller,
-  makeFactExtractor,
+  requestFactExtractionIfEnabled,
 } from "../orchestrator/durableFacts.ts";
 
 const WAKE_STREAM_PREVIEW_CHARS = 2000;
@@ -371,14 +371,12 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
               conversation,
               memory,
             ),
-            extractFacts: makeFactExtractor(
-              taskConfig,
-              task.persona,
-              conversation,
-              memory,
-              taskHarnesses,
-              agentDir,
-            ),
+            // #626 — NEVER extract in-process here: tick is a short-lived
+            // oneshot whose teardown closes the shared SQLite handle under
+            // the fire-and-forget extraction, silently dropping the facts
+            // (Matt: 1072 losses vs 22 wins). The awaited enqueue after the
+            // turn hands the pass to the daemon's drain loop instead.
+            extractFacts: false,
             // Provenance: an autonomous task wake can ingest UNTRUSTED content
             // mid-turn (email body, web page, Plane issue) via tools — content
             // the threat judge never screened because it arrives as tool output,
@@ -403,6 +401,16 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             if (chunk.type === "text") finalText += chunk.text;
             if (chunk.type === "done") finalText = chunk.finalText;
           }
+          // #626 — hand eviction-cliff extraction to the daemon drain. This
+          // is AWAITED (a plain INSERT) so the request is durable BEFORE the
+          // finally below closes the DB — the exact guarantee the old
+          // fire-and-forget extraction could not give.
+          await requestFactExtractionIfEnabled(
+            taskConfig,
+            task.persona,
+            conversation,
+            memory,
+          );
         }
       } catch (e) {
         runError = (e as Error).message;

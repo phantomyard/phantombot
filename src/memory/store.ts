@@ -237,6 +237,13 @@ export interface ClaimedExtraction {
   turns: Turn[];
 }
 
+/** One queued extraction request (issue #626): "run an eviction-cliff pass for this conversation". */
+export interface FactExtractionRequest {
+  persona: string;
+  conversation: string;
+  requestedAt: Date;
+}
+
 export interface TopDurableFactsOptions {
   /** Max facts to return. */
   limit: number;
@@ -431,6 +438,28 @@ export interface MemoryStore {
     conversation: string,
     turnIds: number[],
     token: string,
+  ): Promise<void>;
+  /**
+   * ENQUEUE an extraction request for (persona, conversation) — the #626
+   * hand-off from short-lived processes to the daemon's drain loop. A plain
+   * upsert: a second request for the same conversation just refreshes
+   * requested_at. MUST be awaited by the caller before its DB handle closes;
+   * that durability-before-teardown is the entire point of the queue.
+   */
+  requestFactExtraction(
+    persona: string,
+    conversation: string,
+  ): Promise<void>;
+  /** All queued extraction requests, oldest first. Read by the daemon drain. */
+  listFactExtractionRequests(): Promise<FactExtractionRequest[]>;
+  /**
+   * Delete a queued extraction request after a drain pass has handled it.
+   * Callers leave the row in place after a FAILED pass so the next sweep
+   * retries — the queue is at-least-once, like the lease ledger it feeds.
+   */
+  clearFactExtractionRequest(
+    persona: string,
+    conversation: string,
   ): Promise<void>;
   /**
    * Insert a durable fact, or — when the same normalized text already exists
@@ -631,6 +660,21 @@ CREATE TABLE IF NOT EXISTS durable_fact_pending (
 CREATE INDEX IF NOT EXISTS idx_durable_fact_pending_conv
   ON durable_fact_pending (persona, conversation, turn_id);
 
+-- Extraction REQUEST queue (issue #626). A row means "a turn in this
+-- conversation persisted and wants an eviction-cliff extraction pass". It is
+-- written by SHORT-LIVED processes (tick, ask) with a plain awaited INSERT —
+-- they must never run the extraction's model call themselves, because their
+-- teardown closes this DB under the fire-and-forget pass and the facts are
+-- lost silently. The long-lived daemon drains this table: run the pass, then
+-- delete the row (a failed pass keeps its row and is retried). Deduped by
+-- PRIMARY KEY — N turns in one conversation collapse to one request.
+CREATE TABLE IF NOT EXISTS durable_fact_extract_requests (
+  persona      TEXT NOT NULL,
+  conversation TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  PRIMARY KEY (persona, conversation)
+);
+
 -- Live-context watermark for /reset. A row means "replay only turns with
 -- id > reset_turn_id in this conversation's live history window". The turns
 -- themselves are NEVER deleted — /reset draws a line, it does not destroy the
@@ -681,6 +725,9 @@ class SqliteMemoryStore implements MemoryStore {
   private countDurableFactsStmt;
   private durableFactCursorStmt;
   private setDurableFactCursorStmt;
+  private requestFactExtractionStmt;
+  private listFactExtractionRequestsStmt;
+  private clearFactExtractionRequestStmt;
   private touchDurableFactsBase: string;
   private pruneDurableFactsStmt;
   private claimEvictedSelectStmt;
@@ -986,6 +1033,23 @@ class SqliteMemoryStore implements MemoryStore {
          last_extracted_turn_id =
            MAX(last_extracted_turn_id, excluded.last_extracted_turn_id),
          updated_at             = excluded.updated_at`,
+    );
+    // Extraction-request queue (#626): upsert / read-all / clear.
+    this.requestFactExtractionStmt = db.prepare(
+      `INSERT INTO durable_fact_extract_requests
+         (persona, conversation, requested_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT (persona, conversation) DO UPDATE SET
+         requested_at = excluded.requested_at`,
+    );
+    this.listFactExtractionRequestsStmt = db.prepare(
+      `SELECT persona, conversation, requested_at
+       FROM durable_fact_extract_requests
+       ORDER BY requested_at ASC`,
+    );
+    this.clearFactExtractionRequestStmt = db.prepare(
+      `DELETE FROM durable_fact_extract_requests
+       WHERE persona = ? AND conversation = ?`,
     );
     // Claim SELECT for the lease-based extractor. Returns evicted turns that are
     // eligible to claim: those ABOVE the high-water cursor (newly evicted), OR
@@ -1513,6 +1577,37 @@ class SqliteMemoryStore implements MemoryStore {
       cutoffs.unverified,
     );
     return res.changes;
+  }
+
+  async requestFactExtraction(
+    persona: string,
+    conversation: string,
+  ): Promise<void> {
+    this.requestFactExtractionStmt.run(
+      persona,
+      conversation,
+      new Date().toISOString(),
+    );
+  }
+
+  async listFactExtractionRequests(): Promise<FactExtractionRequest[]> {
+    const rows = this.listFactExtractionRequestsStmt.all() as Array<{
+      persona: string;
+      conversation: string;
+      requested_at: string;
+    }>;
+    return rows.map((r) => ({
+      persona: r.persona,
+      conversation: r.conversation,
+      requestedAt: new Date(r.requested_at),
+    }));
+  }
+
+  async clearFactExtractionRequest(
+    persona: string,
+    conversation: string,
+  ): Promise<void> {
+    this.clearFactExtractionRequestStmt.run(persona, conversation);
   }
 
   async durableFactCursor(

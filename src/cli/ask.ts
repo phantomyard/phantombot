@@ -46,7 +46,7 @@ import { makeRetriever } from "../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 import {
   makeDurableFactPuller,
-  makeFactExtractor,
+  requestFactExtractionIfEnabled,
 } from "../orchestrator/durableFacts.ts";
 import { makeScreener, type ScreenVerdict } from "../orchestrator/screen.ts";
 
@@ -188,21 +188,15 @@ export async function runAsk(input: RunAskInput): Promise<number> {
         : undefined,
       // Durable facts — same conversational-only gating as retrieval: a
       // scripted one-shot ask has no window to age out of and no prompt to
-      // enrich. READ half (pure SQL pull) + WRITE half (extract-at-cliff,
-      // out of band on the primary harness).
+      // enrich. READ half (pure SQL pull) + WRITE half (extract-at-cliff).
       pullFacts: input.history
         ? makeDurableFactPuller(config, persona, conversation, memory)
         : undefined,
-      extractFacts: input.history
-        ? makeFactExtractor(
-            config,
-            persona,
-            conversation,
-            memory,
-            harnesses,
-            agentDir,
-          )
-        : undefined,
+      // #626 — NEVER extract in-process here: ask is a oneshot whose exit
+      // closes the shared SQLite handle under the fire-and-forget
+      // extraction, silently dropping the facts. The awaited enqueue after
+      // the turn hands the pass to the daemon's drain loop instead.
+      extractFacts: false,
       // Threat screen. `ask` is always untrusted, so every turn is judged
       // by the tool-less classifier (running on the chain's claude harness)
       // before the harness runs. runTurn only consults this when
@@ -242,6 +236,13 @@ export async function runAsk(input: RunAskInput): Promise<number> {
     err.write(`phantombot ask: ${(e as Error).message}\n`);
     if (ownsMemory) await memory.close();
     return 1;
+  }
+
+  // #626 — hand eviction-cliff extraction to the daemon drain. AWAITED (a
+  // plain INSERT) so the request is durable BEFORE the handle closes — the
+  // guarantee the old fire-and-forget extraction could not give.
+  if (input.history) {
+    await requestFactExtractionIfEnabled(config, persona, conversation, memory);
   }
 
   if (ownsMemory) await memory.close();
