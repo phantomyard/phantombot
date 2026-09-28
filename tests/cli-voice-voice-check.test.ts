@@ -17,6 +17,8 @@ mock.module("@clack/prompts", () => ({
   note: () => {},
   cancel: () => {},
   select: async (opts: { message: string; options: { value: string }[] }) => {
+    if (opts.message === "Speech-to-text model") return opts.options[0]?.value;
+    if (opts.message === "Text-to-speech model") return opts.options[0]?.value;
     if (!opts.message.startsWith("Voice")) return "openai-compatible";
     const offered = opts.options.map((o) => o.value);
     voiceMenus.push(offered);
@@ -46,6 +48,7 @@ let voiceMenus: string[][] = [];
 let speechCalls: string[] = [];
 /** Voices this fake endpoint accepts; anything else is a 400. */
 let accepted: string[] = [];
+let inconclusiveStatus: number | undefined;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-cli-voice-check-"));
@@ -66,12 +69,33 @@ beforeEach(async () => {
   voiceMenus = [];
   speechCalls = [];
   chosenVoice = "nova";
+  accepted = [];
+  inconclusiveStatus = undefined;
   realFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
-    if (String(url).endsWith("/models"))
+    const parsed = new URL(String(url));
+    if (parsed.pathname.endsWith("/models")) {
+      const modality = parsed.searchParams.get("output_modalities");
+      if (modality === "transcription")
+        return Response.json({
+          data: [{
+            id: "whisper-1",
+            architecture: { output_modalities: ["transcription"] },
+          }],
+        });
+      if (modality === "speech")
+        return Response.json({
+          data: [{
+            id: "tts-1",
+            architecture: { output_modalities: ["speech"] },
+          }],
+        });
       return Response.json({ data: [{ id: "tts-1" }] });
+    }
     const voice = String(JSON.parse(String(init?.body)).voice);
     speechCalls.push(voice);
+    if (inconclusiveStatus !== undefined)
+      return new Response("account error", { status: inconclusiveStatus });
     if (accepted.includes(voice)) return new Response("audio", { status: 200 });
     return Response.json(
       {
@@ -127,6 +151,16 @@ test("a non-enumerating endpoint still proves the chosen fallback voice", async 
   // returned nothing.
   expect(voiceMenus.at(-1)).toContain("alloy");
   expect(voiceMenus.at(-1)).not.toContain("ballad"); // tts-1 rejects it
+  expect(speechCalls).toEqual(["__phantombot_probe__", "alloy"]);
+  expect(await readFile(personaConfig, "utf8")).toContain('voice = "alloy"');
+});
+
+test("a quota response during voice proof does not reject a valid configuration", async () => {
+  inconclusiveStatus = 429;
+  chosenVoice = "alloy";
+
+  expect(await runVoice({ config, embedded: true })).toBe(0);
+
   expect(speechCalls).toEqual(["__phantombot_probe__", "alloy"]);
   expect(await readFile(personaConfig, "utf8")).toContain('voice = "alloy"');
 });

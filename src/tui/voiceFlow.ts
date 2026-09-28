@@ -15,6 +15,7 @@ import {
   ELEVENLABS_DEFAULTS,
   OPENAI_COMPATIBLE_DEFAULTS,
   OPENAI_COMPATIBLE_VOICE_KEY_ENV,
+  OTHER_AUDIO_MODEL,
   OPENAI_BASE_URL,
   OPENROUTER_BASE_URL,
   normalizeOpenAICompatibleBaseUrl,
@@ -42,6 +43,12 @@ export interface VoiceFlowDeps {
     key: string,
     baseUrl?: string,
   ): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Live model IDs for one audio direction; [] keeps typed fallback. */
+  probeModels(input: {
+    key: string;
+    baseUrl: string;
+    modality: "transcription" | "speech";
+  }): Promise<string[]>;
   /**
    * The voices this TTS model actually accepts, asked live. `[]` means the
    * endpoint would not say, and the caller falls back to the known list.
@@ -72,14 +79,14 @@ export interface VoiceFlowResult {
   summary: string;
 }
 
-/** A key the provider itself refused — stated, never written. */
+/** A configuration choice the provider refused — stated, never written. */
 export interface VoiceFlowRejected {
   rejected: string;
 }
 
 /**
  * Ask everything the provider needs. `undefined` means the user backed out;
- * `{ rejected }` means a key failed its live check and nothing was written.
+ * `{ rejected }` means a live check failed and nothing was written.
  */
 export async function configureVoice(
   persona: string,
@@ -171,7 +178,8 @@ async function openAICompatibleFlow(
   q: ChannelsQuestions,
   deps: VoiceFlowDeps,
 ): Promise<VoiceFlowResult | VoiceFlowRejected | undefined> {
-  const cur = deps.existing?.openaiCompatible ?? OPENAI_COMPATIBLE_DEFAULTS;
+  const existingEndpoint = deps.existing?.openaiCompatible;
+  const cur = existingEndpoint ?? OPENAI_COMPATIBLE_DEFAULTS;
   const baseAnswer = await q.value({
     title: "OpenAI Compatible base URL (include /v1)",
     hint: `${OPENAI_BASE_URL} · ${OPENROUTER_BASE_URL}`,
@@ -217,19 +225,29 @@ async function openAICompatibleFlow(
   const validated = await deps.validateKey("openai-compatible", key, baseUrl);
   if (!validated.ok) return { rejected: validated.error };
 
-  const sttModel = await q.value({
-    title: "Speech-to-text model",
-    initial: cur.sttModel,
-  });
+  const [sttModels, ttsModels] = await Promise.all([
+    deps.probeModels({ key, baseUrl, modality: "transcription" }),
+    deps.probeModels({ key, baseUrl, modality: "speech" }),
+  ]);
+  const sameEndpoint = existingEndpoint !== undefined &&
+    normalizeOpenAICompatibleBaseUrl(existingEndpoint.baseUrl) === baseUrl;
+  const sttModel = await askAudioModel(
+    q,
+    "Speech-to-text model",
+    sttModels,
+    sameEndpoint ? cur.sttModel : undefined,
+  );
   if (sttModel === undefined) return undefined;
-  if (!sttModel.trim()) return { rejected: "STT model is required" };
-  const ttsModel = await q.value({
-    title: "Text-to-speech model",
-    initial: cur.ttsModel,
-  });
+  if (!sttModel) return { rejected: "STT model is required" };
+  const ttsModel = await askAudioModel(
+    q,
+    "Text-to-speech model",
+    ttsModels,
+    sameEndpoint ? cur.ttsModel : undefined,
+  );
   if (ttsModel === undefined) return undefined;
-  if (!ttsModel.trim()) return { rejected: "TTS model is required" };
-  const model = ttsModel.trim();
+  if (!ttsModel) return { rejected: "TTS model is required" };
+  const model = ttsModel;
   const live = await deps.probeVoices({ key, baseUrl, model });
   const menu = openAIVoiceMenuOptions(model, live);
   const picked = await q.choose({
@@ -246,6 +264,7 @@ async function openAICompatibleFlow(
         hint: "tested against the endpoint before it is saved",
       },
     ],
+    initial: menu.includes(cur.voice) ? cur.voice : menu[0],
   });
   if (picked === undefined) return undefined;
   let voice = picked;
@@ -276,7 +295,7 @@ async function openAICompatibleFlow(
       openaiCompatible: {
         baseUrl,
         keyEnv,
-        sttModel: sttModel.trim(),
+        sttModel,
         ttsModel: model,
         voice,
         speed: cur.speed,
@@ -285,4 +304,36 @@ async function openAICompatibleFlow(
     apiKey: needsWrite ? key : undefined,
     summary: `openai-compatible · ${voice}`,
   };
+}
+
+async function askAudioModel(
+  q: ChannelsQuestions,
+  title: string,
+  live: string[],
+  current?: string,
+): Promise<string | undefined> {
+  if (live.length) {
+    const pick = q.search ?? q.choose;
+    const picked = await pick({
+      title,
+      description: "Select the model for this audio direction, or search by model ID.",
+      options: [
+        ...live.map((model) => ({
+          value: model,
+          label: model,
+          ...(model === current ? { hint: "current" } : {}),
+        })),
+        {
+          value: OTHER_AUDIO_MODEL,
+          label: "Other — type a model ID",
+          hint: "validated when the audio endpoint is used",
+        },
+      ],
+      initial: current && live.includes(current) ? current : live[0],
+    });
+    if (picked === undefined) return undefined;
+    if (picked !== OTHER_AUDIO_MODEL) return picked;
+  }
+  const typed = await q.value({ title, ...(current ? { initial: current } : {}) });
+  return typed === undefined ? undefined : typed.trim();
 }

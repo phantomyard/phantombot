@@ -97,6 +97,9 @@ export const OPENAI_COMPATIBLE_VOICE_KEY_ENV =
 
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+export const OTHER_AUDIO_MODEL = "__other_audio_model__";
+
+export type OpenAIAudioModality = "transcription" | "speech";
 
 /** Normalize for matching and safe endpoint construction. */
 export function normalizeOpenAICompatibleBaseUrl(value: string): string {
@@ -275,6 +278,52 @@ export async function validateOpenAIKey(
 }
 
 /**
+ * Ask an OpenAI-compatible Models API for one audio capability. OpenRouter
+ * documents this filter and annotates every returned row with the requested
+ * output modality. Requiring that annotation matters: an endpoint that
+ * ignores the unknown query parameter must not turn its entire text-model
+ * catalogue into a bogus STT/TTS menu.
+ *
+ * An empty result is deliberately non-fatal. Generic compatible endpoints
+ * are still configurable through the picker's "Other" / typed fallback.
+ */
+export async function fetchOpenAIAudioModelOptions(
+  apiKey: string,
+  baseUrl: string,
+  modality: OpenAIAudioModality,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  try {
+    const url = new URL(`${normalizeOpenAICompatibleBaseUrl(baseUrl)}/models`);
+    url.searchParams.set("output_modalities", modality);
+    const res = await fetchImpl(url, {
+      headers: { authorization: `Bearer ${apiKey}` },
+      signal,
+    });
+    if (!res.ok) return [];
+    const body = (await res.json().catch(() => null)) as
+      | {
+          data?: Array<{
+            id?: unknown;
+            architecture?: { output_modalities?: unknown };
+          }>;
+        }
+      | null;
+    const ids = (body?.data ?? [])
+      .filter((row) =>
+        Array.isArray(row.architecture?.output_modalities) &&
+        row.architecture.output_modalities.includes(modality)
+      )
+      .map((row) => row.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Parse the voice list out of a speech-endpoint validation error. Two error
  * shapes exist in the wild:
  *   gpt-4o-mini-tts: "Invalid value: 'x'. Supported values are: 'alloy', … and 'cedar'."
@@ -285,13 +334,20 @@ export async function validateOpenAIKey(
 export function parseOpenAIVoiceOptions(message: string): string[] {
   const scope =
     /Supported values are: (.+)$/i.exec(message)?.[1] ??
+    /Supported voices:\s*(.+)$/i.exec(message)?.[1] ??
     /"?expected"?\s*:\s*"(.+?)"/.exec(message)?.[1] ??
     /Input should be (.+?)"/.exec(message)?.[1] ??
     "";
   const voices: string[] = [];
-  for (const m of scope.matchAll(/'([a-z][a-z0-9_-]*)'/g)) {
+  for (const m of scope.matchAll(/['"]([a-z][a-z0-9_-]*)['"]/gi)) {
     const v = m[1];
     if (v && !voices.includes(v)) voices.push(v);
+  }
+  if (voices.length === 0 && /Supported voices:/i.test(message)) {
+    for (const token of scope.replace(/[.\s]+$/, "").split(/,|\s+(?:and|or)\s+/i)) {
+      const v = token.trim();
+      if (/^[a-z][a-z0-9_-]*$/i.test(v) && !voices.includes(v)) voices.push(v);
+    }
   }
   return voices;
 }
@@ -323,6 +379,7 @@ export async function fetchOpenAIVoiceOptions(
         model,
         voice: "__phantombot_probe__",
         input: ".",
+        response_format: "mp3",
       }),
       signal,
     });
@@ -361,9 +418,10 @@ export type OpenAIVoiceCheck =
  * billable request there is — because the only thing that proves a voice is
  * accepted is the endpoint accepting it.
  *
- * A network failure is NOT reported as a bad voice: an unreachable endpoint
- * says nothing about the voice, and failing the wizard on it would block a
- * valid config behind a blip. Only an actual rejection is `ok: false`.
+ * A network failure or account-scoped response is NOT reported as a bad
+ * voice: reachability, authentication, permission and quota say nothing about
+ * whether this model accepts the voice. Only an actual model/voice rejection
+ * is `ok: false`.
  */
 export async function validateOpenAIVoice(
   apiKey: string,
@@ -381,13 +439,16 @@ export async function validateOpenAIVoice(
         authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ model, voice, input: "." }),
+      body: JSON.stringify({ model, voice, input: ".", response_format: "mp3" }),
       signal,
     });
   } catch {
     return { ok: true };
   }
   if (res.ok) return { ok: true };
+  if (res.status === 401 || res.status === 403 || res.status === 429) {
+    return { ok: true };
+  }
   const body = (await res.json().catch(() => null)) as
     | { error?: { message?: string } }
     | null;

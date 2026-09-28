@@ -29,6 +29,7 @@ function deps(overrides: Partial<VoiceFlowDeps> = {}): VoiceFlowDeps {
   return {
     findCredential: async () => undefined,
     validateKey: async () => ({ ok: true }),
+    probeModels: async () => [],
     probeVoices: async () => [],
     checkVoice: async () => ({ ok: true }),
     ...overrides,
@@ -165,6 +166,41 @@ function menuQuestions(
 const BASE = ["https://api.openai.com/v1", "sk-test", "whisper-1", "tts-1"];
 
 describe("configureVoice — voice availability", () => {
+  test("offers separate live STT and TTS catalogues from one endpoint", async () => {
+    const seen: string[] = [];
+    const { q, offered } = menuQuestions(
+      ["https://openrouter.ai/api/v1", "or-key"],
+      (options) => {
+        if (options.includes("openai/whisper-1")) return "openai/whisper-1";
+        if (options.includes("deepgram/aura-2")) return "deepgram/aura-2";
+        return "aura-2-beatrix-nl";
+      },
+    );
+    const result = await configureVoice(
+      "phantom",
+      "openai-compatible",
+      q,
+      deps({
+        probeModels: async ({ modality }) => {
+          seen.push(modality);
+          return modality === "transcription"
+            ? ["openai/whisper-1"]
+            : ["deepgram/aura-2"];
+        },
+        probeVoices: async () => ["aura-2-beatrix-nl"],
+      }),
+    );
+    expect(seen.sort()).toEqual(["speech", "transcription"]);
+    expect(offered[0]).toEqual(["openai/whisper-1", "__other_audio_model__"]);
+    expect(offered[1]).toEqual(["deepgram/aura-2", "__other_audio_model__"]);
+    expect(result && "voice" in result && result.voice.openaiCompatible).toMatchObject({
+      baseUrl: "https://openrouter.ai/api/v1",
+      sttModel: "openai/whisper-1",
+      ttsModel: "deepgram/aura-2",
+      voice: "aura-2-beatrix-nl",
+    });
+  });
+
   test("offers the model's live voices and spends no synthesis on them", async () => {
     let probedWith: { baseUrl: string; model: string } | undefined;
     let checks = 0;

@@ -2,8 +2,9 @@
  * Shared TTS / STT types + the dispatcher that picks the right
  * provider based on Config.voice.provider.
  *
- * Telegram needs OGG-Opus for sendVoice, so every provider returns
- * audio in that container (or a buffer Telegram can accept as-is).
+ * Voice transports accept provider audio with its declared MIME type. The
+ * OpenAI-compatible path requests MP3 because OpenAI and OpenRouter share it;
+ * ElevenLabs continues to return OGG-Opus.
  */
 
 import type { Config } from "../config.ts";
@@ -28,7 +29,7 @@ const AUDIO_FETCH_TIMEOUT_MS = 60_000;
 
 export interface SynthesizedAudio {
   data: Buffer;
-  /** Telegram-compatible MIME for sendVoice. We aim for audio/ogg. */
+  /** MIME returned by the provider (or implied by the requested format). */
   mime: string;
 }
 
@@ -251,7 +252,7 @@ async function openaiCompatibleTts(
         voice: cfg.voice,
         input: text,
         speed: cfg.speed,
-        response_format: "opus",
+        response_format: "mp3",
       }),
       signal: timeoutSignal(AUDIO_FETCH_TIMEOUT_MS),
     });
@@ -266,7 +267,9 @@ async function openaiCompatibleTts(
     };
   }
   const buf = Buffer.from(await res.arrayBuffer());
-  return { ok: true, audio: { data: buf, mime: "audio/ogg" } };
+  const mime = res.headers.get("content-type")?.split(";", 1)[0]?.trim() ||
+    "audio/mpeg";
+  return { ok: true, audio: { data: buf, mime } };
 }
 
 async function elevenlabsScribe(

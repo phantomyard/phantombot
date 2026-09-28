@@ -233,12 +233,17 @@ describe("synthesize", () => {
       (async (url, init) => {
         seenUrl = String(url);
         seenBody = JSON.parse(String(init?.body));
-        return new Response(fakeAudio, { status: 200 });
+        return new Response(fakeAudio, {
+          status: 200,
+          headers: { "content-type": "audio/mpeg" },
+        });
       }) as typeof fetch,
     );
     expect(r.ok).toBe(true);
     expect(seenUrl).toBe("https://openrouter.ai/api/v1/audio/speech");
     expect(seenBody.model).toBe("openai/gpt-4o-mini-tts");
+    expect(seenBody.response_format).toBe("mp3");
+    if (r.ok) expect(r.audio.mime).toBe("audio/mpeg");
   });
 
   test("azure_edge → removal error with migration guidance", async () => {

@@ -352,10 +352,15 @@ export class HttpTelegramTransport implements TelegramTransport {
     const chatId = Number(conversationId);
     const form = new FormData();
     form.set("chat_id", String(chatId));
+    const filename = mime === "audio/mpeg"
+      ? "voice.mp3"
+      : mime === "audio/mp4" || mime === "audio/x-m4a"
+      ? "voice.m4a"
+      : "voice.ogg";
     form.set(
       "voice",
       new Blob([audio], { type: mime || "audio/ogg" }),
-      "voice.ogg",
+      filename,
     );
     const res = await fetch(
       `https://api.telegram.org/bot${this.token}/sendVoice`,

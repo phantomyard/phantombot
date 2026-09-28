@@ -50,7 +50,10 @@ export function SearchListScreen(props: {
 }): React.ReactElement {
   const { title, banner, description, options, initial } = props.request;
   const [query, setQuery] = useState("");
-  const [index, setIndex] = useState(0);
+  const [index, setIndex] = useState(() => {
+    const at = options.findIndex((option) => option.value === initial);
+    return at >= 0 ? at : 0;
+  });
 
   // All-matching-words substring filter, case-insensitive, over label + value
   // + hint. Words rather than the whole query, so "openrouter claude" finds
