@@ -48,6 +48,8 @@ let voiceMenus: string[][] = [];
 let speechCalls: string[] = [];
 /** Voices this fake endpoint accepts; anything else is a 400. */
 let accepted: string[] = [];
+/** Model-scoped voices returned directly by the Models API. */
+let catalogVoices: string[] = [];
 let inconclusiveStatus: number | undefined;
 
 beforeEach(async () => {
@@ -70,6 +72,7 @@ beforeEach(async () => {
   speechCalls = [];
   chosenVoice = "nova";
   accepted = [];
+  catalogVoices = [];
   inconclusiveStatus = undefined;
   realFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
@@ -87,6 +90,7 @@ beforeEach(async () => {
         return Response.json({
           data: [{
             id: "tts-1",
+            supported_voices: catalogVoices,
             architecture: { output_modalities: ["speech"] },
           }],
         });
@@ -127,6 +131,19 @@ test("offers the voices the TTS model enumerates, and saves without a second cal
   expect(await readFile(personaConfig, "utf8")).toContain('voice = "nova"');
 });
 
+test("uses model-scoped catalogue voices without a synthesis probe", async () => {
+  catalogVoices = ["eve", "ara", "rex", "sal", "leo"];
+  chosenVoice = "leo";
+
+  expect(await runVoice({ config, embedded: true })).toBe(0);
+
+  expect(voiceMenus.at(-1)).toEqual([
+    "ara", "eve", "leo", "rex", "sal", "__other__",
+  ]);
+  expect(speechCalls).toEqual([]);
+  expect(await readFile(personaConfig, "utf8")).toContain('voice = "leo"');
+});
+
 test("a voice the endpoint rejects aborts the wizard instead of saving a mute config", async () => {
   accepted = ["echo", "nova"];
   // The endpoint enumerates, but the operator types something else.
@@ -163,4 +180,14 @@ test("a quota response during voice proof does not reject a valid configuration"
 
   expect(speechCalls).toEqual(["__phantombot_probe__", "alloy"]);
   expect(await readFile(personaConfig, "utf8")).toContain('voice = "alloy"');
+});
+
+test("a transient server error during voice proof does not reject a valid configuration", async () => {
+  inconclusiveStatus = 502;
+  chosenVoice = "leo";
+
+  expect(await runVoice({ config, embedded: true })).toBe(0);
+
+  expect(speechCalls).toEqual(["__phantombot_probe__", "leo"]);
+  expect(await readFile(personaConfig, "utf8")).toContain('voice = "leo"');
 });

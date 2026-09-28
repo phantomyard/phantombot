@@ -2024,7 +2024,10 @@ When the endpoint publishes modality metadata, the wizard fetches STT and TTS
 catalogues separately (`output_modalities=transcription` and `speech`) and
 offers two model pickers. **Other** keeps provider-specific and generic
 OpenAI-compatible model IDs available when discovery is unsupported or
-incomplete. OpenRouter remains one provider configuration — the model choices,
+incomplete. When a catalogue row publishes `supported_voices`, the selected
+model's real voices drive the voice picker; the wizard only falls back to a
+speech-endpoint probe or known OpenAI voices when that metadata is absent.
+OpenRouter remains one provider configuration — the model choices,
 not the URL or credential, are split. OpenAI-compatible synthesis prefers MP3,
 then retries without a format when the model requires provider-selected PCM.
 Raw PCM is wrapped as WAV; Telegram sends it as a playable audio attachment

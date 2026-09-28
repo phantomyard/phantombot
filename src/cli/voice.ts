@@ -32,7 +32,7 @@ import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import {
   ELEVENLABS_DEFAULTS,
   ENV_KEY_FOR_PROVIDER,
-  fetchOpenAIAudioModelOptions,
+  fetchOpenAIAudioModels,
   fetchOpenAIVoiceOptions,
   openAIVoiceMenuOptions,
   OTHER_VOICE,
@@ -248,7 +248,7 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
             return { ok: true };
           },
           probeModels: ({ key, baseUrl, modality }) =>
-            fetchOpenAIAudioModelOptions(key, baseUrl, modality),
+            fetchOpenAIAudioModels(key, baseUrl, modality),
           probeVoices: ({ key, baseUrl, model }) =>
             fetchOpenAIVoiceOptions(key, model, fetch, undefined, baseUrl),
           checkVoice: ({ key, baseUrl, model, voice }) =>
@@ -503,10 +503,12 @@ async function runOpenAICompatibleFlow(
 
   const discovery = p.spinner();
   discovery.start("discovering speech-to-text and text-to-speech models…");
-  const [sttModels, ttsModels] = await Promise.all([
-    fetchOpenAIAudioModelOptions(key, baseUrl, "transcription"),
-    fetchOpenAIAudioModelOptions(key, baseUrl, "speech"),
+  const [sttCatalog, ttsCatalog] = await Promise.all([
+    fetchOpenAIAudioModels(key, baseUrl, "transcription"),
+    fetchOpenAIAudioModels(key, baseUrl, "speech"),
   ]);
+  const sttModels = sttCatalog.map((model) => model.id);
+  const ttsModels = ttsCatalog.map((model) => model.id);
   discovery.stop(
     sttModels.length || ttsModels.length
       ? `found ${sttModels.length} STT and ${ttsModels.length} TTS models`
@@ -538,13 +540,16 @@ async function runOpenAICompatibleFlow(
   const ttsModelName = ttsModel;
   const probeSpinner = p.spinner();
   probeSpinner.start(`asking ${ttsModelName} which voices it accepts…`);
-  const liveVoices = await fetchOpenAIVoiceOptions(
-    key,
-    ttsModelName,
-    fetch,
-    undefined,
-    baseUrl,
-  );
+  const catalogVoices = ttsCatalog.find((model) => model.id === ttsModelName)?.voices ?? [];
+  const liveVoices = catalogVoices.length
+    ? catalogVoices
+    : await fetchOpenAIVoiceOptions(
+      key,
+      ttsModelName,
+      fetch,
+      undefined,
+      baseUrl,
+    );
   probeSpinner.stop(
     liveVoices.length
       ? `${liveVoices.length} voices offered by ${ttsModelName}`

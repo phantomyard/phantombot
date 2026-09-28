@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  fetchOpenAIAudioModels,
   fetchOpenAIAudioModelOptions,
   fetchOpenAIVoiceOptions,
   validateOpenAIVoice,
@@ -102,6 +103,28 @@ describe("parseOpenAIVoiceOptions", () => {
 });
 
 describe("fetchOpenAIAudioModelOptions", () => {
+  test("preserves model-scoped voices published by OpenRouter", async () => {
+    const fakeFetch = (async () => Response.json({
+      data: [{
+        id: "x-ai/grok-voice-tts-1.0",
+        supported_voices: ["eve", "ara", "rex", "sal", "leo"],
+        architecture: { output_modalities: ["speech"] },
+      }],
+    })) as unknown as typeof fetch;
+
+    expect(
+      await fetchOpenAIAudioModels(
+        "k",
+        "https://openrouter.ai/api/v1",
+        "speech",
+        fakeFetch,
+      ),
+    ).toEqual([{
+      id: "x-ai/grok-voice-tts-1.0",
+      voices: ["eve", "ara", "rex", "sal", "leo"],
+    }]);
+  });
+
   test("queries and returns only the requested annotated audio models", async () => {
     let seen = "";
     const fakeFetch = (async (url: URL) => {
@@ -361,8 +384,8 @@ describe("validateOpenAIVoice", () => {
     expect(r.supported).toEqual(["alloy", "echo", "nova"]);
   });
 
-  test("auth, permission, and quota responses do not masquerade as bad voices", async () => {
-    for (const status of [401, 403, 429]) {
+  test("auth, permission, quota, and server errors do not masquerade as bad voices", async () => {
+    for (const status of [401, 403, 429, 500, 502, 503]) {
       const statusFetch = (async () =>
         new Response("nope", { status })) as unknown as typeof fetch;
       expect(
