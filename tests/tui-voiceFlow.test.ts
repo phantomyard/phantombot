@@ -91,6 +91,32 @@ describe("configureVoice — OpenAI Compatible", () => {
     expect(result && "apiKey" in result && result.apiKey).toBeUndefined();
   });
 
+  test("declining a shared stored key writes the replacement to a voice-only slot", async () => {
+    const { q } = questions([
+      "https://openrouter.ai/api/v1",
+      "voice-only-key",
+      "whisper",
+      "tts",
+      "coral",
+    ], [false]);
+    const result = await configureVoice(
+      "phantom",
+      "openai-compatible",
+      q,
+      deps({
+        findCredential: async () => ({
+          name: "OPENROUTER_API_KEY",
+          value: "routing-key-must-survive",
+          needsWrite: false,
+        }),
+      }),
+    );
+
+    expect(result && "voice" in result && result.voice.openaiCompatible?.keyEnv)
+      .toBe("PHANTOMBOT_VOICE_OPENAI_COMPATIBLE_API_KEY");
+    expect(result && "apiKey" in result && result.apiKey).toBe("voice-only-key");
+  });
+
   test("rejects the retired Azure provider with migration guidance", async () => {
     const result = await configureVoice(
       "phantom",

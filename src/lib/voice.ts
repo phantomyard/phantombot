@@ -91,6 +91,10 @@ export const ENV_KEY_FOR_PROVIDER: Record<
   "openai-compatible": "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
 };
 
+/** Voice-owned slot used when the operator declines a reusable shared key. */
+export const OPENAI_COMPATIBLE_VOICE_KEY_ENV =
+  "PHANTOMBOT_VOICE_OPENAI_COMPATIBLE_API_KEY";
+
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 

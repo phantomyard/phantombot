@@ -33,6 +33,7 @@ import {
   ELEVENLABS_DEFAULTS,
   ENV_KEY_FOR_PROVIDER,
   OPENAI_COMPATIBLE_DEFAULTS,
+  OPENAI_COMPATIBLE_VOICE_KEY_ENV,
   OPENAI_BASE_URL,
   OPENROUTER_BASE_URL,
   normalizeOpenAICompatibleBaseUrl,
@@ -456,7 +457,12 @@ async function runOpenAICompatibleFlow(
       p.cancel("cancelled");
       return 0;
     }
-    if (!reuse) key = undefined;
+    if (!reuse) {
+      key = undefined;
+      // Declining a reusable routing/embeddings key means the typed key is
+      // voice-only; keep it out of the shared credential's vault slot.
+      keyEnv = OPENAI_COMPATIBLE_VOICE_KEY_ENV;
+    }
   }
   if (!key) {
     const typed = await p.password({
@@ -468,7 +474,7 @@ async function runOpenAICompatibleFlow(
       return 0;
     }
     key = String(typed);
-    keyEnv = openAICompatibleKeyEnv(baseUrl);
+    if (!stored) keyEnv = openAICompatibleKeyEnv(baseUrl);
   }
 
   const spinner = p.spinner();

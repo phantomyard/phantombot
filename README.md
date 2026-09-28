@@ -2023,7 +2023,10 @@ URLs are `https://api.openai.com/v1` and `https://openrouter.ai/api/v1`.
 Before asking for a key, the wizard checks the current persona's vault and
 matching OpenAI-compatible embeddings configuration. It offers a matching key
 for reuse without displaying it; credentials are never searched across
-personas. Azure Edge TTS is no longer selectable because it cannot provide the
+personas. If that shared credential is declined, the replacement is saved to
+the voice-only `PHANTOMBOT_VOICE_OPENAI_COMPATIBLE_API_KEY` slot rather than
+overwriting model-routing or embeddings credentials. Azure Edge TTS is no
+longer selectable because it cannot provide the
 full STT/TTS loop. A legacy `provider = "azure_edge"` configuration stays
 readable only to emit an actionable error: run `phantombot voice` and select
 ElevenLabs or OpenAI Compatible.

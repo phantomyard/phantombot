@@ -14,6 +14,7 @@
 import {
   ELEVENLABS_DEFAULTS,
   OPENAI_COMPATIBLE_DEFAULTS,
+  OPENAI_COMPATIBLE_VOICE_KEY_ENV,
   OPENAI_BASE_URL,
   OPENROUTER_BASE_URL,
   normalizeOpenAICompatibleBaseUrl,
@@ -171,7 +172,12 @@ async function openAICompatibleFlow(
       },
     });
     if (use === undefined) return undefined;
-    if (!use) key = undefined;
+    if (!use) {
+      key = undefined;
+      // The offered name may also own model routing or embeddings. A
+      // different voice key must not overwrite that shared credential.
+      keyEnv = OPENAI_COMPATIBLE_VOICE_KEY_ENV;
+    }
   }
   if (!key) {
     const typed = await q.value({
@@ -182,7 +188,7 @@ async function openAICompatibleFlow(
     if (typed === undefined) return undefined;
     if (!typed.trim()) return { rejected: "key is required" };
     key = typed.trim();
-    keyEnv = openAICompatibleKeyEnv(baseUrl);
+    if (!stored) keyEnv = openAICompatibleKeyEnv(baseUrl);
     needsWrite = true;
   }
   const validated = await deps.validateKey("openai-compatible", key, baseUrl);
