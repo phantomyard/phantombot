@@ -337,6 +337,69 @@ export async function fetchOpenAIVoiceOptions(
 }
 
 /**
+ * Menu sentinel for "none of the above — let me type one". Shared by the CLI
+ * picker and the TUI flow so a provider-specific voice name is never locked
+ * out by our own list; it cannot collide with a real voice because every
+ * voice name the endpoints use is a bare lowercase word.
+ */
+export const OTHER_VOICE = "__other__";
+
+/**
+ * The outcome of proving one (model, voice) pair against a live endpoint.
+ * `supported` carries whatever the rejection enumerated, so the caller can
+ * show the real choices instead of just the failure.
+ */
+export type OpenAIVoiceCheck =
+  | { ok: true }
+  | { ok: false; error: string; supported: string[] };
+
+/**
+ * Prove ONE voice works before it is persisted, for the case the free probe
+ * cannot cover: an endpoint whose rejection does not enumerate its voices
+ * (so `fetchOpenAIVoiceOptions` returned []) or a voice typed by hand. This
+ * one synthesises for real — `input` is a single character, the smallest
+ * billable request there is — because the only thing that proves a voice is
+ * accepted is the endpoint accepting it.
+ *
+ * A network failure is NOT reported as a bad voice: an unreachable endpoint
+ * says nothing about the voice, and failing the wizard on it would block a
+ * valid config behind a blip. Only an actual rejection is `ok: false`.
+ */
+export async function validateOpenAIVoice(
+  apiKey: string,
+  model: string,
+  voice: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+  baseUrl: string = OPENAI_BASE_URL,
+): Promise<OpenAIVoiceCheck> {
+  let res: Response;
+  try {
+    res = await fetchImpl(`${normalizeOpenAICompatibleBaseUrl(baseUrl)}/audio/speech`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model, voice, input: "." }),
+      signal,
+    });
+  } catch {
+    return { ok: true };
+  }
+  if (res.ok) return { ok: true };
+  const body = (await res.json().catch(() => null)) as
+    | { error?: { message?: string } }
+    | null;
+  const message = body?.error?.message?.trim();
+  return {
+    ok: false,
+    error: message ? `HTTP ${res.status}: ${message}` : `HTTP ${res.status}`,
+    supported: parseOpenAIVoiceOptions(message ?? ""),
+  };
+}
+
+/**
  * Extract voice config from an OpenClaw config object. Returns undefined
  * when no voice block is present. Looks at both `tts` (modern openclaw)
  * and `talk` (older variant some OpenClaw deployments had).

@@ -8,14 +8,14 @@ mock.module("@clack/prompts", () => ({
   outro: () => {},
   note: () => {},
   cancel: () => {},
-  select: async () => "openai-compatible",
+  select: async (opts: { message: string }) =>
+    opts.message.startsWith("Voice") ? "alloy" : "openai-compatible",
   confirm: async () => false,
   password: async () => "voice-only-key",
   text: async (opts: { message: string }) => {
     if (opts.message.includes("base URL")) return "https://openrouter.ai/api/v1";
     if (opts.message.includes("Speech-to-text")) return "openai/whisper-large-v3";
     if (opts.message.includes("Text-to-speech")) return "openai/gpt-audio-mini";
-    if (opts.message === "Voice") return "alloy";
     throw new Error(`unexpected prompt: ${opts.message}`);
   },
   isCancel: () => false,
