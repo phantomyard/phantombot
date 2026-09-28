@@ -32,6 +32,9 @@ import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import {
   ELEVENLABS_DEFAULTS,
   ENV_KEY_FOR_PROVIDER,
+  fetchOpenAIVoiceOptions,
+  openAIVoiceMenuOptions,
+  OTHER_VOICE,
   OPENAI_COMPATIBLE_DEFAULTS,
   OPENAI_COMPATIBLE_VOICE_KEY_ENV,
   OPENAI_BASE_URL,
@@ -43,6 +46,7 @@ import {
   type VoiceProvider,
   validateElevenLabsKey,
   validateOpenAICompatibleKey,
+  validateOpenAIVoice,
 } from "../lib/voice.ts";
 import { maybePromptRestart } from "./harness.ts";
 
@@ -240,6 +244,10 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
             }
             return { ok: true };
           },
+          probeVoices: ({ key, baseUrl, model }) =>
+            fetchOpenAIVoiceOptions(key, model, fetch, undefined, baseUrl),
+          checkVoice: ({ key, baseUrl, model, voice }) =>
+            validateOpenAIVoice(key, model, voice, fetch, undefined, baseUrl),
         },
       );
 
@@ -506,14 +514,77 @@ async function runOpenAICompatibleFlow(
     return 0;
   }
 
-  const voice = await p.text({
-    message: "Voice",
-    defaultValue: cur.voice,
-    validate: (v) => (!v?.trim() ? "voice is required" : undefined),
+  const ttsModelName = String(ttsModel).trim();
+  const probeSpinner = p.spinner();
+  probeSpinner.start(`asking ${ttsModelName} which voices it accepts…`);
+  const liveVoices = await fetchOpenAIVoiceOptions(
+    key,
+    ttsModelName,
+    fetch,
+    undefined,
+    baseUrl,
+  );
+  probeSpinner.stop(
+    liveVoices.length
+      ? `${liveVoices.length} voices offered by ${ttsModelName}`
+      : `${ttsModelName} did not enumerate its voices — offering known defaults`,
+  );
+
+  const menu = openAIVoiceMenuOptions(ttsModelName, liveVoices);
+  const picked = await p.select({
+    message: liveVoices.length ? "Voice" : "Voice (not verified yet)",
+    options: [
+      ...menu.map((v) => ({
+        value: v,
+        label: v,
+        hint: v === cur.voice ? "current" : undefined,
+      })),
+      { value: OTHER_VOICE, label: "Other — type a voice name", hint: undefined },
+    ] as never,
+    initialValue: (menu.includes(cur.voice) ? cur.voice : menu[0]) as never,
   });
-  if (p.isCancel(voice)) {
+  if (p.isCancel(picked)) {
     p.cancel("cancelled");
     return 0;
+  }
+  let voice = String(picked);
+  if (voice === OTHER_VOICE) {
+    const typed = await p.text({
+      message: "Voice name",
+      defaultValue: cur.voice,
+      validate: (v) => (!v?.trim() ? "voice is required" : undefined),
+    });
+    if (p.isCancel(typed)) {
+      p.cancel("cancelled");
+      return 0;
+    }
+    voice = String(typed).trim();
+  }
+
+  // A voice taken from the LIVE list is already proven — the endpoint just
+  // enumerated it. Everything else (a hand-typed name, or a pick from the
+  // offline fallback because this endpoint does not enumerate) is unproven,
+  // so prove it now rather than persisting a config that is mute on the
+  // first turn.
+  if (!liveVoices.includes(voice)) {
+    const checkSpinner = p.spinner();
+    checkSpinner.start(`testing ${voice} on ${ttsModelName}…`);
+    const check = await validateOpenAIVoice(
+      key,
+      ttsModelName,
+      voice,
+      fetch,
+      undefined,
+      baseUrl,
+    );
+    if (!check.ok) {
+      checkSpinner.stop(`voice rejected: ${check.error}`);
+      if (check.supported.length)
+        p.note(check.supported.join(", "), `voices ${ttsModelName} accepts`);
+      p.cancel("aborting — endpoint rejected that voice");
+      return 1;
+    }
+    checkSpinner.stop(`${voice} accepted by ${ttsModelName}`);
   }
 
   await applyVoiceConfig({
@@ -531,7 +602,7 @@ async function runOpenAICompatibleFlow(
         keyEnv,
         sttModel: String(sttModel).trim(),
         ttsModel: String(ttsModel).trim(),
-        voice: String(voice).trim(),
+        voice,
         speed: cur.speed,
       },
     },

@@ -1423,6 +1423,8 @@ export function App(props: AppProps): React.ReactElement {
         const {
           validateElevenLabsKey,
           validateOpenAICompatibleKey,
+          validateOpenAIVoice,
+          fetchOpenAIVoiceOptions,
         } = await import("../lib/voice.ts");
         const { findStoredVoiceCredential } = await import("../cli/voice.ts");
         const { maybePromptRestart } = await import("../cli/harness.ts");
@@ -1475,6 +1477,10 @@ export function App(props: AppProps): React.ReactElement {
               p === "openai-compatible"
                 ? validateOpenAICompatibleKey(key, baseUrl!)
                 : validateElevenLabsKey(key),
+            probeVoices: ({ key, baseUrl, model }) =>
+              fetchOpenAIVoiceOptions(key, model, fetch, undefined, baseUrl),
+            checkVoice: ({ key, baseUrl, model, voice }) =>
+              validateOpenAIVoice(key, model, voice, fetch, undefined, baseUrl),
           },
         );
         if (!chosen) return setNotice("voice unchanged");

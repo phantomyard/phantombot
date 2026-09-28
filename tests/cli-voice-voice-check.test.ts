@@ -1,0 +1,132 @@
+/**
+ * The CLI twin of the voice-availability flow. The TUI flow is pinned in
+ * tests/tui-voiceFlow.test.ts, but `phantombot voice` on a TTY runs THIS
+ * code path with its own copy of the probe/check logic — a fix applied to one
+ * and not the other ships half a fix, so each flow carries its own pin.
+ */
+import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+let chosenVoice = "nova";
+
+mock.module("@clack/prompts", () => ({
+  intro: () => {},
+  outro: () => {},
+  note: () => {},
+  cancel: () => {},
+  select: async (opts: { message: string; options: { value: string }[] }) => {
+    if (!opts.message.startsWith("Voice")) return "openai-compatible";
+    const offered = opts.options.map((o) => o.value);
+    voiceMenus.push(offered);
+    return chosenVoice;
+  },
+  confirm: async () => true,
+  password: async () => "sk-test",
+  text: async (opts: { message: string }) => {
+    if (opts.message.includes("base URL")) return "https://api.openai.com/v1";
+    if (opts.message.includes("Speech-to-text")) return "whisper-1";
+    if (opts.message.includes("Text-to-speech")) return "tts-1";
+    throw new Error(`unexpected prompt: ${opts.message}`);
+  },
+  isCancel: () => false,
+  spinner: () => ({ start: () => {}, stop: () => {} }),
+}));
+
+const { runVoice } = await import("../src/cli/voice.ts");
+import type { Config } from "../src/config.ts";
+
+let workdir: string;
+let personaConfig: string;
+let config: Config;
+let realFetch: typeof fetch;
+let voiceMenus: string[][] = [];
+/** Every voice POSTed to /audio/speech, in order. */
+let speechCalls: string[] = [];
+/** Voices this fake endpoint accepts; anything else is a 400. */
+let accepted: string[] = [];
+
+beforeEach(async () => {
+  workdir = await mkdtemp(join(tmpdir(), "phantombot-cli-voice-check-"));
+  const personasDir = join(workdir, "personas");
+  await mkdir(join(personasDir, "phantom"), { recursive: true });
+  // The wizard writes the PERSONA's config, not the host config.
+  personaConfig = join(personasDir, "phantom", "config.toml");
+  config = {
+    defaultPersona: "phantom",
+    personaLayer: "phantom",
+    personasDir,
+    configPath: join(workdir, "config.toml"),
+    channels: {},
+    embeddings: { provider: "none" },
+    voice: { provider: "none" },
+  } as unknown as Config;
+
+  voiceMenus = [];
+  speechCalls = [];
+  chosenVoice = "nova";
+  realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).endsWith("/models"))
+      return Response.json({ data: [{ id: "tts-1" }] });
+    const voice = String(JSON.parse(String(init?.body)).voice);
+    speechCalls.push(voice);
+    if (accepted.includes(voice)) return new Response("audio", { status: 200 });
+    return Response.json(
+      {
+        error: {
+          message: `Invalid value: '${voice}'. Supported values are: ${accepted
+            .map((v) => `'${v}'`)
+            .join(", ")}.`,
+        },
+      },
+      { status: 400 },
+    );
+  }) as unknown as typeof fetch;
+});
+
+afterEach(async () => {
+  globalThis.fetch = realFetch;
+  await rm(workdir, { recursive: true, force: true });
+});
+
+test("offers the voices the TTS model enumerates, and saves without a second call", async () => {
+  accepted = ["echo", "nova"];
+
+  expect(await runVoice({ config, embedded: true })).toBe(0);
+
+  expect(voiceMenus.at(-1)).toEqual(["echo", "nova", "__other__"]);
+  // One call only: the free enumeration probe. A voice the endpoint just
+  // listed must not be re-proven with a billable synthesis.
+  expect(speechCalls).toEqual(["__phantombot_probe__"]);
+  expect(await readFile(personaConfig, "utf8")).toContain('voice = "nova"');
+});
+
+test("a voice the endpoint rejects aborts the wizard instead of saving a mute config", async () => {
+  accepted = ["echo", "nova"];
+  // The endpoint enumerates, but the operator types something else.
+  chosenVoice = "aura-asteria";
+
+  expect(await runVoice({ config, embedded: true })).toBe(1);
+
+  expect(speechCalls).toEqual(["__phantombot_probe__", "aura-asteria"]);
+  // Nothing persisted: a config naming a voice this model refuses would be
+  // silently mute on the persona's first spoken turn.
+  await expect(readFile(personaConfig, "utf8")).rejects.toThrow();
+});
+
+test("a non-enumerating endpoint still proves the chosen fallback voice", async () => {
+  // Accepts the probe voice too — i.e. never reports its voice list.
+  accepted = ["__phantombot_probe__", "alloy"];
+  chosenVoice = "alloy";
+
+  expect(await runVoice({ config, embedded: true })).toBe(0);
+
+  // Fallback menu offered, and the pick proven for real because the probe
+  // returned nothing.
+  expect(voiceMenus.at(-1)).toContain("alloy");
+  expect(voiceMenus.at(-1)).not.toContain("ballad"); // tts-1 rejects it
+  expect(speechCalls).toEqual(["__phantombot_probe__", "alloy"]);
+  expect(await readFile(personaConfig, "utf8")).toContain('voice = "alloy"');
+});

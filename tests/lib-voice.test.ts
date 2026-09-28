@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   fetchOpenAIVoiceOptions,
+  validateOpenAIVoice,
   fallbackVoiceOptions,
   openAIVoiceMenuOptions,
   parseOpenAIVoiceOptions,
@@ -210,5 +211,71 @@ describe("fallbackVoiceOptions / openAIVoiceMenuOptions", () => {
     const options = openAIVoiceMenuOptions("tts-1", []);
     expect(options).toHaveLength(9);
     expect(options).not.toContain("ballad");
+  });
+});
+
+describe("validateOpenAIVoice", () => {
+  test("accepts a voice the endpoint synthesises, sending one character", async () => {
+    let seenUrl = "";
+    let seenBody: Record<string, unknown> = {};
+    const fakeFetch = (async (url: string, init: RequestInit) => {
+      seenUrl = url;
+      seenBody = JSON.parse(String(init.body));
+      return new Response("audio", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    expect(
+      await validateOpenAIVoice(
+        "k",
+        "tts-1",
+        "shimmer",
+        fakeFetch,
+        undefined,
+        "https://openrouter.ai/api/v1/",
+      ),
+    ).toEqual({ ok: true });
+    // The chosen voice itself is what gets proven — probing with a sentinel
+    // would say nothing about it. Input stays one character so proving a
+    // voice is the cheapest billable call there is.
+    expect(seenUrl).toBe("https://openrouter.ai/api/v1/audio/speech");
+    expect(seenBody).toEqual({ model: "tts-1", voice: "shimmer", input: "." });
+  });
+
+  test("reports a rejection and the voices the model does accept", async () => {
+    const fakeFetch = (async () =>
+      Response.json(
+        {
+          error: {
+            message:
+              "Invalid value: 'ballad'. Supported values are: 'alloy', 'echo' and 'nova'.",
+          },
+        },
+        { status: 400 },
+      )) as unknown as typeof fetch;
+
+    const r = await validateOpenAIVoice("k", "tts-1", "ballad", fakeFetch);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected rejection");
+    expect(r.error).toContain("HTTP 400");
+    expect(r.error).toContain("Invalid value: 'ballad'");
+    expect(r.supported).toEqual(["alloy", "echo", "nova"]);
+  });
+
+  test("reports a rejection with no list when the error does not enumerate", async () => {
+    const fakeFetch = (async () =>
+      new Response("nope", { status: 401 })) as unknown as typeof fetch;
+    const r = await validateOpenAIVoice("bad", "tts-1", "nova", fakeFetch);
+    expect(r).toEqual({ ok: false, error: "HTTP 401", supported: [] });
+  });
+
+  test("a network failure is not treated as a bad voice", async () => {
+    // An unreachable endpoint says nothing about the voice. Failing here
+    // would block a valid config behind a blip, so the wizard proceeds.
+    const failing = (async () => {
+      throw new Error("ECONNRESET");
+    }) as unknown as typeof fetch;
+    expect(await validateOpenAIVoice("k", "tts-1", "nova", failing)).toEqual({
+      ok: true,
+    });
   });
 });

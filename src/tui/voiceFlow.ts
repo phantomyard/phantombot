@@ -20,6 +20,9 @@ import {
   normalizeOpenAICompatibleBaseUrl,
   openAICompatibleKeyEnv,
   openAICompatibleProviderLabel,
+  openAIVoiceMenuOptions,
+  OTHER_VOICE,
+  type OpenAIVoiceCheck,
   type VoiceConfig,
   type VoiceProvider,
 } from "../lib/voice.ts";
@@ -39,6 +42,26 @@ export interface VoiceFlowDeps {
     key: string,
     baseUrl?: string,
   ): Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * The voices this TTS model actually accepts, asked live. `[]` means the
+   * endpoint would not say, and the caller falls back to the known list.
+   * Costs no TTS quota — the request is rejected before synthesis.
+   */
+  probeVoices(input: {
+    key: string;
+    baseUrl: string;
+    model: string;
+  }): Promise<string[]>;
+  /**
+   * Prove ONE unproven (model, voice) pair. Only reached for a voice the live
+   * probe did not enumerate, so the common path never spends a synthesis.
+   */
+  checkVoice(input: {
+    key: string;
+    baseUrl: string;
+    model: string;
+    voice: string;
+  }): Promise<OpenAIVoiceCheck>;
 }
 
 export interface VoiceFlowResult {
@@ -206,12 +229,46 @@ async function openAICompatibleFlow(
   });
   if (ttsModel === undefined) return undefined;
   if (!ttsModel.trim()) return { rejected: "TTS model is required" };
-  const voice = await q.value({
-    title: "Voice",
-    initial: cur.voice,
+  const model = ttsModel.trim();
+  const live = await deps.probeVoices({ key, baseUrl, model });
+  const menu = openAIVoiceMenuOptions(model, live);
+  const picked = await q.choose({
+    title: live.length ? `Voice — ${model}` : `Voice — ${model} (unverified)`,
+    options: [
+      ...menu.map((v) => ({
+        value: v,
+        label: v,
+        ...(v === cur.voice ? { hint: "current" } : {}),
+      })),
+      {
+        value: OTHER_VOICE,
+        label: "Other — type a voice name",
+        hint: "tested against the endpoint before it is saved",
+      },
+    ],
   });
-  if (voice === undefined) return undefined;
-  if (!voice.trim()) return { rejected: "voice is required" };
+  if (picked === undefined) return undefined;
+  let voice = picked;
+  if (voice === OTHER_VOICE) {
+    const typed = await q.value({ title: "Voice name", initial: cur.voice });
+    if (typed === undefined) return undefined;
+    voice = typed.trim();
+  }
+  if (!voice) return { rejected: "voice is required" };
+
+  // A voice the endpoint just enumerated needs no further proof. Anything
+  // else — hand-typed, or picked from the offline fallback because this
+  // endpoint would not enumerate — is unproven, and saving it unproven is
+  // how a persona ends up looking configured and being mute.
+  if (!live.includes(voice)) {
+    const check = await deps.checkVoice({ key, baseUrl, model, voice });
+    if (!check.ok) {
+      const choices = check.supported.length
+        ? ` — ${model} accepts: ${check.supported.join(", ")}`
+        : "";
+      return { rejected: `voice ${voice} rejected: ${check.error}${choices}` };
+    }
+  }
 
   return {
     voice: {
@@ -220,12 +277,12 @@ async function openAICompatibleFlow(
         baseUrl,
         keyEnv,
         sttModel: sttModel.trim(),
-        ttsModel: ttsModel.trim(),
-        voice: voice.trim(),
+        ttsModel: model,
+        voice,
         speed: cur.speed,
       },
     },
     apiKey: needsWrite ? key : undefined,
-    summary: `openai-compatible · ${voice.trim()}`,
+    summary: `openai-compatible · ${voice}`,
   };
 }
