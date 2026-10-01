@@ -3003,9 +3003,17 @@ content hash) and processes every date that is new, that grew since it was
 processed, or whose last pass didn't finish:
 
 ```text
-sweep (code) -> per date: distill ‖ kb -> index refresh (code) -> ledger (code)
-                                                            \-> compact (once)
+sweep: journal render (code) -> per date: distill ‖ kb -> index refresh (code) -> ledger (code)
+                                                                 \-> compact (once)
+                                                             \-> dormancy + snapshot (code)
 ```
+
+The sweep opens with a **journal render** (issue #633): closed journal days
+become their daily `.md` files *before* the date queue is built, so the day
+that closes at midnight is swept by that same midnight run instead of waiting
+~24 h for the next sweep (and doctor showing `1 date pending` every morning).
+Dormancy and the memory snapshot run at the end, so the restore point
+captures the night's settled state.
 
 * `distill` files the day's captures into the drawers (people / decisions /
   lessons / commitments / norms) and maintains MEMORY.md's `## Recent`.

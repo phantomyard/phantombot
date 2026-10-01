@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -119,6 +120,51 @@ describe("runNightly — early exits", () => {
 });
 
 describe("runNightly — the sweep", () => {
+  test("the just-closed day is rendered AND processed in the same run (#633)", async () => {
+    // The rollover bug: the sweep queue was built from the daily files on
+    // disk BEFORE the maintenance stage rendered the day that had just
+    // closed, so every night processed the day before yesterday and doctor
+    // showed `1 date pending` every morning. Seed yesterday's journal rows
+    // with NO daily file and run the nightly: the render at the head of the
+    // sweep must publish the file, and the same run must distill it.
+    const yesterday = "2026-05-09"; // `now` below is 2026-05-10T02:00Z
+    const { writeJournalEntry } = await import("../src/memory/journalIngest.ts");
+    const wrote = await writeJournalEntry(
+      config.memoryDbPath,
+      personaDir,
+      {
+        persona: "phantom",
+        date: yesterday,
+        content: "captured the rollover bug lesson",
+        tags: ["lesson"],
+        createdAt: new Date("2026-05-09T18:30:00Z"),
+      },
+      { skipIndex: true },
+    );
+    expect(wrote).toBe(true);
+    expect(existsSync(join(personaDir, "memory", `${yesterday}.md`))).toBe(false);
+
+    const h = harness();
+    const out = new CaptureStream();
+    const code = await runNightly({
+      config,
+      now,
+      out,
+      runStage: h.runStage as never,
+      refreshIndex: async () => {},
+    });
+    expect(code).toBe(0);
+
+    // Rendered.
+    expect(existsSync(join(personaDir, "memory", `${yesterday}.md`))).toBe(true);
+    // Processed in the SAME run — the stage prompt names the day.
+    expect(h.calls.filter((c) => c.date === yesterday && c.stage === "distill")).toHaveLength(1);
+    expect(h.calls.filter((c) => c.date === yesterday && c.stage === "kb")).toHaveLength(1);
+    // Ledgered as processed.
+    const state = await loadNightlyState(personaDir);
+    expect(state.processed?.[yesterday]).toBeDefined();
+    expect(out.text).toContain(`${yesterday}:`);
+  });
   test("processes every pending date, oldest first, two stages each", async () => {
     await daily("2026-05-01");
     await daily("2026-05-02");
