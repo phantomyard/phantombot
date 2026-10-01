@@ -2000,17 +2000,15 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     renderTimer("tick", timersReport.tick);
   }
 
-  // Scheduled-task dispatch health (#631) — warn-only.
+  // Scheduled-task dispatch health (#631) — warn-only, and SILENT when
+  // healthy: #632's doctor contract is that a healthy queue produces no
+  // tasks line at all (the pre-existing suite asserts this).
   if (taskClaims) {
     const nClaims =
       taskClaims.running.length +
       taskClaims.stale.length +
       taskClaims.overdue.length;
-    if (nClaims === 0) {
-      out.write(
-        `  scheduled tasks: ${tick(true)} — no claims outstanding, none overdue\n`,
-      );
-    } else {
+    if (nClaims > 0) {
       for (const r of taskClaims.running) {
         out.write(
           `  scheduled tasks: ${tick(r.minutes <= WAKE_BUDGET_WARN_MINUTES)} — ` +
