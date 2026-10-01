@@ -2135,6 +2135,18 @@ Task behavior:
   `--for` when the poller has a natural end.
 - A due task is **held** while the principal is mid-conversation — see
   [Turn registry](#turn-registry-concurrent-turns) below.
+- `task add` and `task selftest` **refuse to file a task against a persona
+  whose directory does not exist** — including the resolved default when no
+  `--persona` is given (exit 2, no row). A failed add is loud; a task filed
+  into a queue nobody will ever run is silent forever. Read commands
+  (`list`, `show`, `cancel`, `log`) intentionally skip that check so an
+  orphaned queue stays inspectable.
+- When **tick** meets an already-orphaned due task (persona dir gone — e.g.
+  deleted after the fact, or leaked in by an older build), it deactivates
+  the row once, records the reason in `task log`, and moves on — instead of
+  logging an error every minute forever. **Doctor** additionally scans every
+  active task for a missing persona dir: it WARNs with the ids and deactivates
+  them under `--fix`.
 
 Manage tasks:
 

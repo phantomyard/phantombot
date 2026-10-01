@@ -32,7 +32,6 @@ test("the preload strips $CI, so ink uses its interactive renderer", () => {
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
-
 test("the preload redirects the data dir away from the real host", async () => {
   const root = process.env.PHANTOMBOT_TEST_ISOLATION_ROOT;
   expect(root).toBeString();
@@ -44,12 +43,11 @@ test("the preload redirects the data dir away from the real host", async () => {
   const { statePath } = await import("../src/state.ts");
   const saved = process.env.PHANTOMBOT_STATE;
   const savedXdg = process.env.XDG_DATA_HOME;
-  delete process.env.PHANTOMBOT_STATE;
-  // A sibling suite may be mid-flight with its own XDG override (the suite
+  delete process.env.PHANTOMBOT_STATE;  // A sibling suite may be mid-flight with its own XDG override (the suite
   // runs in ONE process), so pin the preload's value back before asking where
   // the default resolves. What is under test is the preload's contract, not
   // whoever ran last.
-  process.env.XDG_DATA_HOME = join(root!, "xdg-data");
+  process.env.XDG_DATA_HOME = join(root!, "xdg_data_home");
   try {
     expect(resolve(statePath()).startsWith(resolve(root!) + sep)).toBe(true);
   } finally {
@@ -66,8 +64,26 @@ test("the preload does NOT pin PHANTOMBOT_STATE", async () => {
   // preload's source rather than the live env, which any sibling suite in the
   // shared process may legitimately be overriding right now.
   const src = await readFile(new URL("./testEnvIsolation.ts", import.meta.url), "utf8");
-  expect(src).not.toMatch(/^process\.env\.PHANTOMBOT_STATE\s*\?\?=/m);
-  expect(src).toMatch(/^process\.env\.XDG_DATA_HOME\s*\?\?=/m);
+  expect(src).not.toMatch(/^process\.env\.PHANTOMBOT_STATE\s*\??=/m);
+  // All three XDG roots are isolated UNCONDITIONALLY (#632): `??=` trusted an
+  // ambient root, and engine-scoped harness shells set all three — which is
+  // how a suite run from inside a harness turn pointed the whole run at a
+  // live root. The preload assigns through the loop variable, so pin the
+  // assignment form itself: a `??=` fallback on any of the three is the bug.
+  expect(src).toContain('process.env[ambientName] = join(isolationRoot');
+  expect(src).not.toMatch(/XDG_(?:DATA|CONFIG|STATE)_HOME"\]\s*\?\?=/);
+});
+
+test("the preload clears PHANTOMBOT_STATE, the audit path and the engine-scope marker (#632)", async () => {
+  // An ambient PHANTOMBOT_STATE outranks the isolation root for state.json,
+  // an ambient PHANTOMBOT_STATE_AUDIT does the same for the audit log, and
+  // PHANTOMBOT_ENGINE_SCOPE makes every CLI child behave as an engine tool
+  // against the engine root. All three are cleared at preload.
+  expect(process.env.PHANTOMBOT_STATE).toBeUndefined();
+  expect(process.env.PHANTOMBOT_STATE_AUDIT).toBeUndefined();
+  expect(process.env.PHANTOMBOT_ENGINE_SCOPE).toBeUndefined();
+  const src = await readFile(new URL("./testEnvIsolation.ts", import.meta.url), "utf8");
+  expect(src).toContain('delete process.env.PHANTOMBOT_STATE;');
 });
 
 test("saveState REFUSES to write outside the isolation root", async () => {

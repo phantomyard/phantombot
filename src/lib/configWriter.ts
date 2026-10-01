@@ -12,6 +12,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { parse, stringify } from "smol-toml";
+import { assertTestWritable } from "./testGuard.ts";
 
 export type TomlObject = Record<string, unknown>;
 
@@ -29,6 +30,7 @@ export async function writeConfigToml(
   path: string,
   data: TomlObject,
 ): Promise<void> {
+  assertTestWritable(path, "config.toml");
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, stringify(data) + "\n", "utf8");
 }

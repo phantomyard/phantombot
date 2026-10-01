@@ -42,6 +42,9 @@ beforeEach(async () => {
   // at some other persona's queue (phantombot#473) — pin the env off.
   savedPersonaEnv = process.env.PHANTOMBOT_PERSONA;
   delete process.env.PHANTOMBOT_PERSONA;
+  // #632: task add now refuses a default persona whose dir is missing, so the
+  // suite's default persona needs the dir it would have on a real install.
+  await mkdir(join(workdir, "personas", "phantom"), { recursive: true });
   store = await openTaskStore(join(workdir, "tasks.sqlite"));
   config = {
     defaultPersona: "phantom",
@@ -404,6 +407,52 @@ describe("task --persona", () => {
     expect(code).toBe(2);
     expect(err.text).toContain("ghost");
     expect(store.list("ghost", {})).toHaveLength(0);
+  });
+
+  test("a broken default persona is refused — no row is filed into the void (#632)", async () => {
+    // The robbie incident: the resolved (default) persona was never checked,
+    // so a temporarily-broken default stamped 23 one-off wakes with a name
+    // whose dir did not exist. They never fired, never expired, and logged
+    // an error line per minute for 34 days. A failed `task add` is loud; a
+    // task filed into the void is not.
+    await rm(join(workdir, "personas", "phantom"), { recursive: true, force: true });
+    const err = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      relIn: "10m",
+      prompt: "x",
+      description: "orphaned by design",
+      out: new CaptureStream(),
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("default persona 'phantom' does not exist");
+    expect(store.list("phantom", { includeInactive: true })).toHaveLength(0);
+
+    // An explicit --persona still wins and is unaffected — the refusal is
+    // about the RESOLVED default, not about omitting the flag.
+    await mkdir(join(workdir, "personas", "lena"), { recursive: true });
+    const ok = await runTaskAdd({
+      config,
+      store,
+      persona: "lena",
+      relIn: "10m",
+      prompt: "x",
+      description: "explicit persona",
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(ok).toBe(0);
+  });
+
+  test("task list still resolves a missing default persona dir (read path, no refusal)", async () => {
+    // Cleanup/inspection must survive the same broken state that add refuses:
+    // an orphaned queue you cannot list is an orphaned queue you cannot clean.
+    await rm(join(workdir, "personas", "phantom"), { recursive: true, force: true });
+    const out = new CaptureStream();
+    const code = await runTaskList({ config, store, out });
+    expect(code).toBe(0);
   });
 
   test("list shows the named persona's tasks", async () => {

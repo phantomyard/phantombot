@@ -56,6 +56,25 @@ delete process.env.CONTINUOUS_INTEGRATION;
  * The paired guard in src/state.ts turns the remaining hole — a suite that
  * points state at the real host outright — from a silent host mutation into a
  * loud failure.
+ *
+ * UNCONDITIONAL since #632: `??=` trusted an ambient XDG root, but engine-
+ * scoped harness shells (scopedChildEnv in src/lib/engineScope.ts) inject
+ * XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME into every child — so an
+ * agent running `bun test` from inside an engine-scoped turn pointed the
+ * whole suite at the embedding application's LIVE root. `??=` is exactly how
+ * the 2026-08-28 robbie incident wrote a live state.json. Like HOME below,
+ * respecting the ambient value IS the bug. The real values stay readable as
+ * PHANTOMBOT_TEST_REAL_XDG_*_HOME for guard tests.
+ *
+ * All three roots, not just the data dir: only XDG_DATA_HOME was isolated
+ * before, so a set XDG_CONFIG_HOME / XDG_STATE_HOME resolved config.toml,
+ * the tick lock, digests, turn registry and timer markers to the REAL
+ * directories. And PHANTOMBOT_STATE / PHANTOMBOT_STATE_AUDIT / the engine-
+ * scope marker are cleared outright: an ambient PHANTOMBOT_STATE would
+ * outrank the isolation root for state.json exactly as #573's comment above
+ * describes, and the marker would make a test's CLI children behave as
+ * engine tools against the engine root. Suites that need their own values
+ * set them in their own hooks — per-suite isolation still wins.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -63,7 +82,17 @@ import { join } from "node:path";
 
 const isolationRoot = mkdtempSync(join(tmpdir(), "phantombot-test-isolation-"));
 process.env.PHANTOMBOT_TEST_ISOLATION_ROOT = isolationRoot;
-process.env.XDG_DATA_HOME ??= join(isolationRoot, "xdg-data");
+for (const [realName, ambientName] of [
+  ["PHANTOMBOT_TEST_REAL_XDG_DATA_HOME", "XDG_DATA_HOME"],
+  ["PHANTOMBOT_TEST_REAL_XDG_CONFIG_HOME", "XDG_CONFIG_HOME"],
+  ["PHANTOMBOT_TEST_REAL_XDG_STATE_HOME", "XDG_STATE_HOME"],
+] as const) {
+  process.env[realName] ??= process.env[ambientName] ?? "";
+  process.env[ambientName] = join(isolationRoot, ambientName.toLowerCase());
+}
+delete process.env.PHANTOMBOT_STATE;
+delete process.env.PHANTOMBOT_STATE_AUDIT;
+delete process.env.PHANTOMBOT_ENGINE_SCOPE;
 
 /**
  * HOME isolation (2026-09-11 and again 2026-09-17). tests/install-sh.test.ts

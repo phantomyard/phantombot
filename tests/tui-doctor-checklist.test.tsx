@@ -30,6 +30,11 @@ import type { DoctorReport } from "../src/cli/doctor.ts";
 function healthyReport(): DoctorReport {
   return {
     persona: "alice",
+    orphaned_tasks: {
+      healthy: true,
+      orphans: [],
+      detail: "no active tasks point at a missing persona dir",
+    },
     telegram: {
       healthy: true,
       listeners: 2,

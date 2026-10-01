@@ -2262,3 +2262,58 @@ describe("runDoctor — decision model (issue #597)", () => {
     expect(out.text).toContain("outside the current window");
   });
 });
+
+describe("runDoctor — orphaned scheduled tasks (#632)", () => {
+  const DISABLED = {
+    checkSystemd: false,
+    checkTimers: false,
+    checkHarnesses: false,
+    checkPiExtension: false,
+    checkEditorConnectors: false,
+  } as const;
+
+  test("an active task whose persona dir is missing is WARNed with its id, and --fix deactivates it", async () => {
+    const { openTaskStore } = await import("../src/lib/tasks.ts");
+    const taskStore = await openTaskStore(join(workdir, "memory.sqlite"));
+    try {
+      // 'ghost' gets a persona dir, then loses it — the orphan condition.
+      await mkdir(join(workdir, "personas", "ghost"), { recursive: true });
+      const created = taskStore.add({
+        persona: "ghost",
+        description: "poller for a deleted persona",
+        schedule: "0 * * * *",
+        prompt: "x",
+        now: new Date("2026-05-02T09:00:00Z"),
+      });
+      if (!created.ok) throw new Error("setup");
+      await rm(join(workdir, "personas", "ghost"), { recursive: true, force: true });
+
+      // Unrepaired: WARN with the id, exit 1.
+      const out = new CaptureStream();
+      const code = await runDoctor({ config, out, ...DISABLED, repair: false });
+      expect(code).toBe(1);
+      expect(out.text).toContain("tasks: WARN");
+      expect(out.text).toContain(`task ${created.id} (ghost)`);
+      expect(taskStore.get(created.id)!.active).toBe(true);
+
+      // Repaired: deactivated in the store, clean exit.
+      const out2 = new CaptureStream();
+      const code2 = await runDoctor({ config, out: out2, ...DISABLED });
+      expect(code2).toBe(0);
+      expect(out2.text).toContain("deactivated this run");
+      expect(taskStore.get(created.id)!.active).toBe(false);
+      const runs = taskStore.taskRuns(created.id);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]!.outputExcerpt).toContain("deactivated by doctor");
+    } finally {
+      taskStore.close();
+    }
+  });
+
+  test("healthy queue is silent — no tasks line at all", async () => {
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out, ...DISABLED });
+    expect(code).toBe(0);
+    expect(out.text).not.toContain("tasks:");
+  });
+});

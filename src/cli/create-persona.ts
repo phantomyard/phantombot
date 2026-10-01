@@ -16,6 +16,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { assertTestWritable } from "../lib/testGuard.ts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as p from "@clack/prompts";
@@ -99,6 +100,7 @@ export async function applyPersona(
   if (existsSync(dir)) {
     archived = await archivePersona(config.personasDir, inputs.name);
   }
+  assertTestWritable(dir, "a persona dir");
   await mkdir(dir, { recursive: true });
   // Split identity: SOUL.md is the shared, character-free behaviour anchor;
   // IDENTITY.md is the per-phantom "who you are" from the wizard answers.
