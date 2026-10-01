@@ -2034,6 +2034,42 @@ describe("runTurn — soft deadline + wrap-up nudge (#639)", () => {
     ]);
   });
 
+  test("nudge pass learns which tools the interrupted pass had started", async () => {
+    // The wrap-up pass is a FRESH harness process: without a digest of what
+    // pass 1 had already started, it can blindly redo side-effecting work.
+    const harness = new MultiScriptHarness("fake", [
+      [
+        {
+          type: "progress",
+          note: "tool",
+          tool: { title: "Bash: git push origin main", kind: "execute", locations: [] },
+        },
+        { type: "text", text: "working on it..." },
+        SOFT_ERROR,
+      ],
+      [{ type: "done", finalText: "wrapped up" }],
+    ]);
+
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "build the thing",
+        harnesses: [harness],
+        hardTimeoutMs: 3_600_000,
+        softTimeoutMs: 3_000_000,
+      }),
+    );
+    expect(chunks.at(-1)).toMatchObject({ finalText: "working on it...wrapped up" });
+    const nudgeReq = harness.requests[1]!;
+    // Digest line in the nudge: tools listed, outcome explicitly UNKNOWN,
+    // plus the verify-before-redo warning (same tone as the resume preamble).
+    expect(nudgeReq.userMessage).toContain(
+      "already started these tool calls",
+    );
+    expect(nudgeReq.userMessage).toContain("Bash: git push origin main");
+    expect(nudgeReq.userMessage).toContain("may or may not have applied");
+  });
+
   test("final nudge warns that the next soft kill terminates the turn", async () => {
     const harness = new MultiScriptHarness("fake", [
       [SOFT_ERROR],

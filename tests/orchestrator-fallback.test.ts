@@ -1265,3 +1265,53 @@ describe("issue #638 — persona attribution + failure evidence", () => {
     expect(chunks.at(-1)).toEqual({ type: "done", finalText: "ok", meta: {} });
   });
 });
+
+describe("soft-kill observability (#638/#639 review)", () => {
+  test("soft kill records evidence with cause 'soft', never falls through, and carries the tool digest", async () => {
+    const records: unknown[] = [];
+    const claude = new FakeHarness("claude", [
+      {
+        type: "progress",
+        note: "tool",
+        tool: { title: "Bash: git push origin main", kind: "execute", locations: [] },
+      },
+      {
+        type: "error",
+        error: "fake soft deadline after 3000ms (soft deadline)",
+        recoverable: false,
+        killCause: "soft",
+      },
+    ]);
+    const native = new FakeHarness("native", [
+      { type: "done", finalText: "wrong path" },
+    ]);
+    const chunks = await collect(
+      runWithFallback([claude, native], newRequest({ hardTimeoutMs: 3_600_000 }), {
+        cooldown: new CooldownStore(),
+        onHarnessFailure: (r) => records.push(r),
+      }),
+    );
+    // The soft kill ends the chain run — no cooldown bump, no fall-through —
+    // but still lands in the failure JSONL (cause "soft") so nudge frequency
+    // stays observable, and hands the interrupted pass's tool calls to the
+    // orchestrator for the nudge digest.
+    expect(native.invocations).toBe(0);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toMatchObject({ type: "progress", tool: { title: "Bash: git push origin main" } });
+    expect(chunks[1]).toEqual({
+      type: "error",
+      error: "fake soft deadline after 3000ms (soft deadline)",
+      recoverable: false,
+      killCause: "soft",
+      toolCallsSoFar: ["Bash: git push origin main"],
+    });
+    expect(records).toEqual([
+      {
+        ts: expect.any(String),
+        harnessId: "claude",
+        error: "fake soft deadline after 3000ms (soft deadline)",
+        killCause: "soft",
+      },
+    ]);
+  });
+});

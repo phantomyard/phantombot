@@ -898,6 +898,8 @@ async function* runTurnBody(
   // order is: history → epoch turns → [interrupted pair(s)] → nudge. The
   // prefix stays append-only, so a prepared prompt-cache epoch survives.
   const nudgePairs: PromptEpochTurn[] = [];
+  /** Tool calls the just-interrupted pass had started (outcome unknown). */
+  let softToolCalls: string[] | undefined;
 
   try {
     // #580 (second half): withhold pre-tool narration that is confidently in
@@ -975,6 +977,11 @@ async function* runTurnBody(
           // the turn as errored and apologise over a reply that is still
           // coming); record it and let the pass loop decide.
           terminalError = chunk;
+          // Bounded digest of tool calls the interrupted pass had started —
+          // outcome UNKNOWN for every one of them (the fresh nudge process
+          // cannot see their results). Surfaced in the nudge below so a
+          // 502-tool-call turn is not replayed during wrap-up.
+          softToolCalls = chunk.toolCallsSoFar;
           continue;
         }
         if (chunk.type === "text") finalText += chunk.text;
@@ -1017,6 +1024,18 @@ async function* runTurnBody(
             ? " This is the final wrap-up window: after it the turn is terminated and undelivered."
             : ""
         }`;
+        if (softToolCalls && softToolCalls.length > 0) {
+          const listed = softToolCalls.slice(0, 20).map((c) =>
+            c.length > 80 ? `${c.slice(0, 80)}…` : c,
+          );
+          passUserMessage +=
+            `\n\n[phantombot] Before the interrupt, your previous attempt had` +
+            ` already started these tool calls, most recent last:` +
+            ` ${listed.join("; ")}${softToolCalls.length > 20 ? " (list capped at 20)" : ""}.` +
+            ` Each may or may not have applied — its result was lost with the` +
+            ` interrupted process. VERIFY current state before redoing any of` +
+            ` them; do not blindly re-run writes, sends, commits or deletions.`;
+        }
         log.warn("turn: soft deadline — issuing wrap-up nudge", {
           persona: input.persona,
           conversation: input.conversation,

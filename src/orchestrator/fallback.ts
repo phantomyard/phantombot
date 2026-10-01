@@ -371,7 +371,19 @@ export async function* runWithFallback(
                 error: chunk.error,
               },
             );
-            yield chunk;
+            // A soft kill is deliberately NOT a harness failure — no cooldown
+            // bump, no alerter, no fall-through — but it IS evidence (#639's
+            // point is observability): record it in the failure JSONL with
+            // cause "soft" so nudge frequency stays visible when tuning
+            // harness_soft_timeout_s. Deliberately NOT firstFailure: a soft
+            // kill is not an outage and must not colour the exhausted alert.
+            recordFailure(harness.id, chunk.error, {
+              killCause: "soft",
+              stderrTail: chunk.stderrTail,
+            });
+            // The nudge pass is a FRESH process: hand it what this attempt
+            // had already started so it doesn't replay side-effecting calls.
+            yield { ...chunk, toolCallsSoFar: partial.toolCalls };
             return;
           }
           // Killed mid-flight with work already done: respawn this same

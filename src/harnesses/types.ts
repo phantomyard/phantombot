@@ -265,6 +265,16 @@ export type HarnessChunk =
       /** True when an idle callback raced with an already-started tool. */
       toolInFlightAtKill?: true;
       /**
+       * Tool calls started earlier in this attempt (most recent last, bounded
+       * by the attempt chunk log), attached ONLY by the orchestrator's
+       * soft-deadline path: the wrap-up nudge pass is a fresh harness process
+       * with no memory of the interrupted one, so without this digest it could
+       * blindly redo side-effecting work. Each call's outcome is UNKNOWN —
+       * consumers must phrase it that way, like the resume preamble does.
+       * Harnesses themselves never populate this field.
+       */
+      toolCallsSoFar?: string[];
+      /**
        * Last ~20 lines of harness stderr, captured by a ring buffer in
        * `runHarnessProcess` (src/lib/harnessRunner.ts). Present on non-zero-exit
        * and kill-cause error chunks so the orchestrator can surface the cause in
