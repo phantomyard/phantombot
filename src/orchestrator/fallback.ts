@@ -73,6 +73,19 @@ export interface RunWithFallbackOptions {
    * paths alert nobody unless they inject their own.
    */
   alerter?: HarnessAlerter;
+  /**
+   * Absolute wall-clock deadline (epoch ms) for the WHOLE chain (issue #631).
+   * When set, every attempt's `hardTimeoutMs` is clamped to the time REMAINING
+   * before the deadline, so a harness that burns its cap hands the next one
+   * only what is left instead of a fresh window — previously one 30-min hard
+   * cap applied PER harness, and a recoverable timeout walked the whole chain,
+   * so a single background wake could hold a tick for cap × chain length.
+   *
+   * Foreground callers omit it deliberately: per-attempt caps are correct when
+   * a human is watching the turn, and clamping a live conversation's fallback
+   * to an already-elapsed budget would kill a working harness mid-reply.
+   */
+  chainDeadlineMs?: number;
 }
 
 export async function* runWithFallback(
@@ -106,6 +119,20 @@ export async function* runWithFallback(
   const priorKillHarness = new Map<string, string>();
   const repeatedKillCausesLogged = new Set<string>();
   const estimatedBytes = estimatePayloadBytes(req);
+  // #631 — per-attempt hard cap clamp under a chain-wide deadline. Each
+  // attempt gets min(configured hard cap, time left before the deadline);
+  // an already-EXPIRED deadline (the caller's budget was consumed by an
+  // earlier harness) yields a non-positive cap, which is normalised to a
+  // tiny grace window so the attempt still gets a real timeout signal
+  // instead of an immediate kill that no kill coordinator can express.
+  const chainDeadline = options.chainDeadlineMs;
+  const attemptHardCapMs = (): number | undefined => {
+    if (chainDeadline === undefined) return req.hardTimeoutMs;
+    const remaining = chainDeadline - Date.now();
+    if (remaining <= 0) return undefined;
+    if (req.hardTimeoutMs === undefined) return remaining;
+    return Math.min(req.hardTimeoutMs, remaining);
+  };
 
   // Snapshot cooldown state at turn start. We don't re-poll within the
   // turn — failures we register as we go are scoped to FUTURE turns,
@@ -245,6 +272,21 @@ export async function* runWithFallback(
     let carriedText = "";
     while (resumeRequested) {
       resumeRequested = false;
+      // #631: recompute the clamp per attempt so a resumed slot (and the
+      // next harness after a fall-through) inherits the REMAINING budget,
+      // never a fresh window. An expired budget refuses the attempt
+      // entirely — granting even a token window would be the fresh-clock
+      // bug this option exists to kill.
+      if (chainDeadline !== undefined && chainDeadline - Date.now() <= 0) {
+        const error = `wake budget exhausted before ${harness.id} could start`;
+        log.warn("orchestrator: chain wall-clock budget exhausted", {
+          harnessId: harness.id,
+          budgetEndsAtMs: chainDeadline,
+        });
+        yield { type: "error", error, recoverable: false };
+        return;
+      }
+      attemptReq = { ...attemptReq, hardTimeoutMs: attemptHardCapMs() };
       // Chunk log for THIS attempt only — a resume must describe the attempt
       // that actually wedged, not an earlier one it already recovered from.
       const partial = new PartialAttempt();

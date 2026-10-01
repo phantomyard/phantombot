@@ -2135,6 +2135,19 @@ Task behavior:
   `--for` when the poller has a natural end.
 - A due task is **held** while the principal is mid-conversation — see
   [Turn registry](#turn-registry-concurrent-turns) below.
+- **Dispatch is claim-then-dispatch (issue #631).** The tick timer holds its
+  lock only long enough to SELECT and CLAIM due tasks; command-backed tasks
+  then run in-process (first — a cheap poller never waits behind an LLM turn),
+  and each agent wake is dispatched as its own detached child
+  (`phantombot tick --run-task <id>`, via `systemd-run --user --scope` on
+  Linux so it survives the tick unit's exit). The tick process is back in
+  seconds; a 60-minute wake no longer blocks any other schedule. A task with
+  a live claim (runner alive) is never double-fired; a claim whose runner
+  died is reclaimed by the next tick. At most one agent wake per persona runs
+  at once (same-persona wakes collide on shared checkouts — `[tick]
+  max_concurrent_wakes` in config.toml raises it); each wake has a TOTAL
+  30-minute wall-clock budget shared across its harness fallback chain, and
+  `task list` shows `running since …` for claimed tasks.
 
 Manage tasks:
 

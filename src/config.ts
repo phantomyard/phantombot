@@ -853,6 +853,21 @@ export interface Config {
   promptCache?: PromptCacheSettings;
 
   /**
+   * `[tick]` block (issue #631) — dispatch concurrency for scheduled wakes.
+   * Optional on the type so partial test fixtures need no update; read sites
+   * default via TICK_DEFAULTS.
+   */
+  tick?: {
+    /**
+     * Max agent wakes dispatched but still running at once, PER PERSONA
+     * (default 1). Same-persona wakes collide on shared checkouts and PRs
+     * (#391), so they queue in their own lane; other personas and command
+     * tasks are never blocked by them.
+     */
+    maxConcurrentWakes?: number;
+  };
+
+  /**
    * Standing default for interim "progress narration" bubbles in the chat
    * channels (Telegram + PhantomChat). `true` = stream the running commentary
    * ("checking your calendar…"); `false` = quiet, final reply only. A
@@ -1376,6 +1391,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
   >;
   const tomlVoice = (toml.voice ?? {}) as Record<string, unknown>;
   const tomlPromptCache = (toml.prompt_cache ?? {}) as Record<string, unknown>;
+  const tomlTick = (toml.tick ?? {}) as Record<string, unknown>;
   const tomlDecisionModel = (toml.jev ?? {}) as Record<string, unknown>;
 
   // Jev API keys resolve VAULT-FIRST under the configured key_env name (and
@@ -1676,6 +1692,16 @@ export async function loadConfig(persona?: string): Promise<Config> {
     telegramStreaming: buildTelegramStreamingConfig(tomlTelegram),
 
     promptCache: buildPromptCacheConfig(tomlPromptCache),
+
+    // [tick] — dispatch concurrency for scheduled wakes (issue #631). Clamp
+    // to >= 1: a zero or negative value from a hand-edited toml must never
+    // silently disable all agent wakes.
+    tick: {
+      maxConcurrentWakes: Math.max(
+        1,
+        asInt(tomlTick?.max_concurrent_wakes) ?? 1,
+      ),
+    },
 
     // Standing default for interim progress-narration bubbles. An explicit
     // value always wins (env for scripted/test setups, then `chattiness` in
