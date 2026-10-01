@@ -34,6 +34,7 @@ import {
   embeddingRowMatchesSpace,
   type EmbeddingSpace,
 } from "./embeddingSpace.ts";
+import { QUARANTINE_SHA } from "../orchestrator/turnIndexer.ts";
 
 export type Scope = "memory" | "kb" | "turns";
 
@@ -1070,6 +1071,34 @@ export class MemoryIndex {
   }
 
   /**
+   * #634: tombstone a turn whose content the embedding provider PERMANENTLY
+   * rejects (oversized input, malformed request). Writes an embedding row
+   * with an EMPTY vector and the QUARANTINE_SHA sentinel so the repair
+   * pass's anti-join scan stops finding it — otherwise one permanently-
+   * rejected turn retries every sweep forever and the queue behind it
+   * starves.
+   *
+   * The row is inert by construction: an empty Float32Array has zero norm,
+   * so cosineSimilarity scores 0 against everything and it wins no
+   * vector-search slot. FTS search is untouched — the turn stays fully
+   * searchable lexically.
+   *
+   * QUARANTINE_SHA as text_sha also means a later upsertTurn/upsertTurnEmbedding
+   * with a real vector naturally overwrites the tombstone (INSERT OR REPLACE,
+   * primary key = path) — quarantine is the terminal state only while the
+   * content itself is unembeddable.
+   */
+  quarantineTurnEmbedding(path: string, space?: EmbeddingSpace): void {
+    const buf = Buffer.alloc(0);
+    this.db
+      .prepare(
+        "INSERT OR REPLACE INTO turn_embeddings " +
+          "(path, vec, text_sha, space_fingerprint, embedded_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(path, buf, QUARANTINE_SHA, space?.fingerprint ?? null, new Date().toISOString());
+  }
+
+  /**
    * Write ONLY the embedding row for an already-indexed turn. Unlike
    * upsertTurn this never touches turn_docs, so the repair pass can add a
    * missing vector without rewriting (or accidentally duplicating) the FTS
@@ -1732,6 +1761,10 @@ export class MemoryIndex {
     const vecScores = new Map<string, number>(); // path → max chunk score
     let incompatible = 0;
     for (const emb of all) {
+      // #634: an empty vector is a quarantine tombstone (content the provider
+      // permanently rejected), not an incompatible dimension — skip silently,
+      // it must never trigger the "run memory index --reembed" warning.
+      if (emb.vec.length === 0) continue;
       if (emb.vec.length !== queryVec.length) {
         incompatible++;
         continue;
