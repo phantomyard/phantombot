@@ -750,6 +750,8 @@ export class Persona {
         memory,
         idleTimeoutMs: config.harnessIdleTimeoutMs,
         hardTimeoutMs: config.harnessHardTimeoutMs,
+        softTimeoutMs: config.harnessSoftTimeoutMs,
+        nudgeCap: config.harnessNudgeCap,
         toolTimeoutMs: config.harnessToolTimeoutMs,
         thinkingTimeoutMs: config.harnessThinkingTimeoutMs,
         promptCache: config.promptCache,

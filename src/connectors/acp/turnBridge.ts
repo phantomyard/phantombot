@@ -55,6 +55,10 @@ export interface BridgeTurnInput {
   memory: MemoryStore;
   idleTimeoutMs: number;
   hardTimeoutMs?: number;
+  /** Soft deadline override — arms the wrap-up nudge pass (issue #639). */
+  softTimeoutMs?: number;
+  /** Max wrap-up nudge passes before the soft deadline turns final. */
+  nudgeCap?: number;
   toolTimeoutMs?: number;
   thinkingTimeoutMs?: number;
   promptCache?: PromptCacheSettings;
@@ -121,6 +125,8 @@ export async function runBridgeTurn(
     memory: input.memory,
     idleTimeoutMs: input.idleTimeoutMs,
     hardTimeoutMs: input.hardTimeoutMs,
+    softTimeoutMs: input.softTimeoutMs,
+    nudgeCap: input.nudgeCap,
     toolTimeoutMs: input.toolTimeoutMs,
     thinkingTimeoutMs: input.thinkingTimeoutMs,
     promptCache: input.promptCache,
