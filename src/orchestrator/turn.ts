@@ -27,6 +27,7 @@ import { join } from "node:path";
 
 import { runWithFallback } from "./fallback.ts";
 import { createAuditSink } from "../lib/auditLog.ts";
+import { createHarnessFailureSink } from "../lib/harnessFailureLog.ts";
 import { log } from "../lib/logger.ts";
 import {
   registerTurn,
@@ -793,6 +794,13 @@ async function* runTurnBody(
   // it for free; the sink self-disables when PHANTOMBOT_AUDIT_TOOL_CALLS is off.
   const auditSink = createAuditSink(input.agentDir);
 
+  // Harness-failure evidence (issue #638): every recoverable/terminal/throw
+  // failure the orchestrator records is appended (bounded) to
+  // `<agentDir>/harness-failures/<date>.jsonl`, so a mid-chain failure that a
+  // fallback absorbed leaves a diagnosable record instead of vanishing with
+  // the process. Best-effort by contract.
+  const failureSink = createHarnessFailureSink(input.agentDir);
+
   // Digest collection (#405) rides the same hook but is INDEPENDENT of the
   // audit sink: auditing has its own kill switch, and an operator who turns off
   // the on-disk audit log has not asked to go blind to what background turns
@@ -874,6 +882,7 @@ async function* runTurnBody(
       },
       {
         onToolCall: toolSink,
+        onHarnessFailure: failureSink,
         // #631: background wakes pass a chain-wide wall-clock deadline so a
         // timed-out primary hands the fallback only the REMAINING budget
         // instead of a fresh window. Foreground callers omit it — per-attempt

@@ -185,8 +185,18 @@ export function classifyFailure(
 }
 
 /** Sends one alert line to the owner. Injected so this module never
- *  imports a channel. Contracted to never throw. */
-export type AlertSender = (message: string) => Promise<void> | void;
+ *  imports a channel. Contracted to never throw.
+ *
+ *  `persona` is the persona whose turn produced the alert (issue #638) —
+ *  the sender routes the notification through THAT persona's channels so
+ *  the user sees which persona is broken and replies land on it. Undefined
+ *  means the turn had no persona context (greetings, recovery replies);
+ *  the sender falls back to its own default.
+ */
+export type AlertSender = (
+  message: string,
+  persona?: string,
+) => Promise<void> | void;
 
 export interface HarnessAlertOptions {
   send: AlertSender;
@@ -294,6 +304,8 @@ export class HarnessAlerter {
   async noteDegraded(input: {
     harnessId: string;
     servedBy?: string;
+    /** Persona whose turn hit this failure (issue #638 attribution). */
+    persona?: string;
   }): Promise<void> {
     const state = this.incidents.get(input.harnessId);
     if (!state) return;
@@ -309,7 +321,7 @@ export class HarnessAlerter {
       state.cause === "auth"
         ? `\u{1f511} ${input.harnessId} auth failure \u00d7${state.consecutiveFailures}${this.hostTag()} \u00b7 ${served}, run \`${input.harnessId} /login\``
         : `\u{1f507} ${input.harnessId} empty reply \u00d7${state.consecutiveFailures}${this.hostTag()} \u00b7 ${served}, harness returns no text`;
-    await this.emit(input.harnessId, "degraded", line);
+    await this.emit(input.harnessId, "degraded", line, input.persona);
   }
 
   /**
@@ -324,6 +336,16 @@ export class HarnessAlerter {
     httpStatus?: number;
     chain: string[];
     stderrTail?: string[];
+    /** Persona whose turn died here (issue #638 attribution). */
+    persona?: string;
+    /**
+     * The chain's FIRST failure when it differs from `harnessId` (issue
+     * #638): the classic shape is codex dying on a quota error early, the
+     * last fallback timing out much later — the alert used to name only
+     * the timeout, leaving the quota discoverable only by manual repro.
+     * One bounded line restores the start of the story.
+     */
+    earlier?: { harnessId: string; excerpt: string };
   }): Promise<void> {
     const cause = classifyFailure(input.error, input.httpStatus, input.stderrTail);
     const label =
@@ -361,10 +383,17 @@ export class HarnessAlerter {
       input.stderrTail && input.stderrTail.length > 0
         ? ` \u00b7 ${input.stderrTail.slice(-2).map((l) => l.slice(0, 200)).join(" | ")}`
         : "";
+    // The chain's opening failure, when it isn't the one being reported.
+    // Bounded to one short line so the Telegram column survives.
+    const earlierPreview =
+      input.earlier && input.earlier.harnessId !== input.harnessId
+        ? ` \u00b7 ${input.earlier.harnessId}: ${input.earlier.excerpt.slice(0, 160)}`
+        : "";
     await this.emit(
       input.harnessId,
       "exhausted",
-      `\u{1f6a8} ${input.harnessId} ${label}${detail}${this.hostTag()} \u00b7 ${exhaustion}${chain}, turn undelivered${stderrPreview}`,
+      `\u{1f6a8} ${input.harnessId} ${label}${detail}${this.hostTag()} \u00b7 ${exhaustion}${chain}, turn undelivered${stderrPreview}${earlierPreview}`,
+      input.persona,
     );
   }
 
@@ -413,6 +442,7 @@ export class HarnessAlerter {
     harnessId: string,
     kind: string,
     message: string,
+    persona?: string,
   ): Promise<void> {
     const send = this.send;
     if (!send) return;
@@ -430,8 +460,8 @@ export class HarnessAlerter {
     if (last !== undefined && now - last < REALERT_MS) return;
     state.alertedAt.set(kind, now);
     try {
-      await this.withDeadline(send(message));
-      log.warn("harnessAlert: notified owner", { harnessId, kind });
+      await this.withDeadline(send(message, persona));
+      log.warn("harnessAlert: notified owner", { harnessId, kind, persona });
     } catch (e) {
       // Never let a failed notification break the turn — the alert is a
       // courtesy on top of a turn that already has its own outcome.
