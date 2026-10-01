@@ -521,6 +521,43 @@ export class TaskStore {
     return r.changes > 0;
   }
 
+  /** All ACTIVE tasks across every persona — doctor's orphan scan (#632). */
+  allActive(): Task[] {
+    const rows = this.db
+      .prepare("SELECT * FROM tasks WHERE active = 1 ORDER BY id ASC")
+      .all() as RawTaskRow[];
+    return rows.map(rowToTask);
+  }
+
+  /**
+   * Deactivate an orphaned task — one whose persona dir is gone (#632).
+   *
+   * Tick used to `continue` past these forever: 23 rows on the robbie host
+   * logged `persona dir missing` once a minute for 34 days — never firing,
+   * never expiring, invisible to `task list` and to the owner. Deactivation
+   * is the terminal state the row already has (`active = 0`); the reason
+   * lands in task_runs, NOT in run_count: the task never ran, and a bumped
+   * count would make `recordRun`'s maxRuns/one-off arithmetic lie.
+   */
+  deactivateOrphaned(id: number, reason: string, now: Date = new Date()): boolean {
+    let changed = false;
+    this.db.transaction(() => {
+      const r = this.db
+        .prepare("UPDATE tasks SET active = 0 WHERE id = ? AND active = 1")
+        .run(id);
+      changed = r.changes > 0;
+      if (changed) {
+        this.db
+          .prepare(
+            `INSERT INTO task_runs (task_id, fired_at, status, exit_code, output_excerpt, delivered)
+             VALUES (?, ?, ?, ?, ?, 0)`,
+          )
+          .run(id, now.toISOString(), "error", 1, redactForLog(reason).slice(0, 500));
+      }
+    }).immediate();
+    return changed;
+  }
+
   /**
    * Mark a task as having run. Updates last_run_at to `now`, increments
    * run_count, and recomputes next_run_at strictly AFTER `now` per the
@@ -724,6 +761,8 @@ export class TaskStore {
   }
 }
 
+import { assertTestWritable } from "./testGuard.ts";
+
 /**
  * Open a TaskStore by path. Creates parent dirs if needed and runs the
  * schema. Sharing the file with memory.sqlite is safe (WAL mode), so
@@ -732,6 +771,7 @@ export class TaskStore {
  * Caller must call `.close()` on the returned TaskStore when done.
  */
 export async function openTaskStore(path: string): Promise<TaskStore> {
+  assertTestWritable(path, "the task store");
   if (path !== ":memory:") {
     await mkdir(dirname(path), { recursive: true });
   }

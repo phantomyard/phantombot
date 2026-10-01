@@ -1210,6 +1210,84 @@ describe("runTick — failure resilience", () => {
   });
 });
 
+describe("runTick — orphaned tasks (issue #632)", () => {
+  test("a due task whose persona dir is missing is deactivated once, with a task_runs row", async () => {
+    // The robbie incident: this used to be log-and-continue — the row was
+    // re-picked every minute for 34 days, never firing and never expiring.
+    // Add the task against a persona, then delete its dir to orphan it.
+    await mkdir(join(workdir, "personas", "ghost"), { recursive: true });
+    const created = store.add({
+      persona: "ghost",
+      description: "orphaned poller",
+      schedule: "* * * * *",
+      prompt: "x",
+      now: new Date("2026-05-02T09:00:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const { rmSync } = await import("node:fs");
+    rmSync(join(workdir, "personas", "ghost"), { recursive: true, force: true });
+
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "must never run" },
+    ]);
+    const code = await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    expect(code).toBe(0);
+    expect(harness.invocations).toBe(0);
+
+    // Deactivated, and the reason is auditable in task_runs.
+    const t = store.get(created.id)!;
+    expect(t.active).toBe(false);
+    const runs = store.taskRuns(created.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.status).toBe("error");
+    expect(runs[0]!.outputExcerpt).toContain("orphaned: persona dir missing");
+
+    // Deactivation is terminal: a SECOND tick over the same row neither
+    // re-deactivates nor appends another run — it is simply no longer due.
+    const code2 = await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T09:31:00Z"),
+    });
+    expect(code2).toBe(0);
+    expect(store.taskRuns(created.id)).toHaveLength(1);
+  });
+
+  test("a due task for an existing persona dir is untouched", async () => {
+    const created = store.add({
+      persona: "phantom",
+      description: "healthy",
+      schedule: "* * * * *",
+      prompt: "x",
+      now: new Date("2026-05-02T09:00:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "ran" },
+    ]);
+    await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    expect(store.get(created.id)!.active).toBe(true);
+    expect(harness.invocations).toBe(1);
+  });
+});
+
 describe("runTick — wake deferral while the principal is talking (issue #391)", () => {
   // The registry is inert under NODE_ENV=test by default (so unrelated suites
   // can't write live-looking entries into the real state dir); these tests opt

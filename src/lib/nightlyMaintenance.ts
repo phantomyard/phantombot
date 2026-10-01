@@ -70,6 +70,22 @@ export async function runMemoryMaintenance(input: {
   /** Snapshot coalescing window (#495). Defaults to `SNAPSHOT_COALESCE_MS`. */
   coalesceMs?: number;
   out?: WriteSink;
+  /**
+   * Skip the journal RENDER stage (#633). The nightly runs this function
+   * twice: at the head of the sweep, where the render must precede the date
+   * queue build so the just-closed day is swept the same night, and at the
+   * tail, where only the dormancy sweep + restore point belong (the snapshot
+   * must capture the settled end state, and a mid-sweep re-render could race
+   * the compaction stage). Never set by other callers.
+   */
+  skipRender?: boolean;
+  /**
+   * Skip the SNAPSHOT (restore point) stage (#633). Set by the nightly's
+   * HEAD call, whose job is the render only — the night's restore point is
+   * taken once, at the tail, after every other stage has settled. Like
+   * skipRender, never set by callers other than the nightly driver.
+   */
+  skipSnapshot?: boolean;
 }): Promise<MaintenanceResult> {
   const now = input.now ?? new Date();
   const write = (t: string) => input.out?.write(t);
@@ -104,7 +120,7 @@ export async function runMemoryMaintenance(input: {
   // backlog here is memory quietly not being written down. Recall reads only
   // TODAY, so nothing about a stalled render is visible in the prompt — which
   // is exactly why it gets an error line rather than a debug log.
-  if (input.personaDir) {
+  if (input.personaDir && !input.skipRender) {
     try {
       const { store, close } = await openJournalStore(input.dbPath);
       try {
@@ -147,60 +163,62 @@ export async function runMemoryMaintenance(input: {
     }
   }
 
-  try {
-    const backup = await backupMemoryDb({
-      dbPath: input.dbPath,
-      keep: input.keep,
-      now,
-      // The database is shared by every persona on the host, and since the
-      // per-persona nightly instances (#490) the siblings roll over together.
-      // One restore point per rollover is the whole point of a restore point,
-      // so a sweep that finds a fresh one — or finds a sibling mid-snapshot —
-      // stands down instead of racing it (#495).
-      coalesceMs: input.coalesceMs ?? SNAPSHOT_COALESCE_MS,
-    });
-    result.backup = backup;
-    if (backup.status === "taken") {
-      write(
-        `nightly: memory snapshot ${backup.path} ` +
-          `(${Math.round((backup.bytes ?? 0) / 1024)} KB)` +
-          (backup.pruned.length > 0
-            ? `, ${backup.pruned.length} older point(s) rotated out`
-            : "") +
-          `\n`,
-      );
-    } else if (backup.status === "fresh") {
-      // Not an error and deliberately not in `errors`: a sibling sweep took
-      // the snapshot seconds ago, so this host IS backed up. Writing it to the
-      // ledger would leave `doctor` permanently red on a healthy box, which is
-      // how operators learn to stop reading doctor at all.
-      // Two different shapes share `fresh`: a sibling's restore point already
-      // covers this rollover (we have a path), or the lock stayed held and
-      // nothing was taken at all. Say which — an operator reading the ledger
-      // should not have to guess whether a snapshot exists.
-      write(
-        backup.path
-          ? `nightly: memory snapshot skipped — a restore point from this ` +
-              `rollover already exists (${backup.path})\n`
-          : `nightly: memory snapshot skipped — another snapshot is in ` +
-              `flight, nothing taken this run\n`,
-      );
-    } else if (backup.status === "refused") {
-      // Loud on purpose: an unhealthy memory database is the one condition
-      // where doing nothing is right AND the operator has to know tonight.
-      const msg = `memory database failed its integrity check: ${backup.integrity.detail}`;
+  if (!input.skipSnapshot) {
+    try {
+      const backup = await backupMemoryDb({
+        dbPath: input.dbPath,
+        keep: input.keep,
+        now,
+        // The database is shared by every persona on the host, and since the
+        // per-persona nightly instances (#490) the siblings roll over together.
+        // One restore point per rollover is the whole point of a restore point,
+        // so a sweep that finds a fresh one — or finds a sibling mid-snapshot —
+        // stands down instead of racing it (#495).
+        coalesceMs: input.coalesceMs ?? SNAPSHOT_COALESCE_MS,
+      });
+      result.backup = backup;
+      if (backup.status === "taken") {
+        write(
+          `nightly: memory snapshot ${backup.path} ` +
+            `(${Math.round((backup.bytes ?? 0) / 1024)} KB)` +
+            (backup.pruned.length > 0
+              ? `, ${backup.pruned.length} older point(s) rotated out`
+              : "") +
+            `\n`,
+        );
+      } else if (backup.status === "fresh") {
+        // Not an error and deliberately not in `errors`: a sibling sweep took
+        // the snapshot seconds ago, so this host IS backed up. Writing it to the
+        // ledger would leave `doctor` permanently red on a healthy box, which is
+        // how operators learn to stop reading doctor at all.
+        // Two different shapes share `fresh`: a sibling's restore point already
+        // covers this rollover (we have a path), or the lock stayed held and
+        // nothing was taken at all. Say which — an operator reading the ledger
+        // should not have to guess whether a snapshot exists.
+        write(
+          backup.path
+            ? `nightly: memory snapshot skipped — a restore point from this ` +
+                `rollover already exists (${backup.path})\n`
+            : `nightly: memory snapshot skipped — another snapshot is in ` +
+                `flight, nothing taken this run\n`,
+        );
+      } else if (backup.status === "refused") {
+        // Loud on purpose: an unhealthy memory database is the one condition
+        // where doing nothing is right AND the operator has to know tonight.
+        const msg = `memory database failed its integrity check: ${backup.integrity.detail}`;
+        result.errors.push(msg);
+        write(
+          `nightly: ${msg}\n` +
+            `nightly: no snapshot taken — existing restore points are intact.\n` +
+            `nightly: recover with 'phantombot memory restore --list' then ` +
+            `'phantombot memory restore --from <point>'\n`,
+        );
+      }
+    } catch (e) {
+      const msg = `snapshot: ${(e as Error).message}`;
       result.errors.push(msg);
-      write(
-        `nightly: ${msg}\n` +
-          `nightly: no snapshot taken — existing restore points are intact.\n` +
-          `nightly: recover with 'phantombot memory restore --list' then ` +
-          `'phantombot memory restore --from <point>'\n`,
-      );
+      log.warn("nightly: snapshot failed", { error: (e as Error).message });
     }
-  } catch (e) {
-    const msg = `snapshot: ${(e as Error).message}`;
-    result.errors.push(msg);
-    log.warn("nightly: snapshot failed", { error: (e as Error).message });
   }
 
   return result;

@@ -329,6 +329,7 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   }
 
   const state = await loadNightlyState(dir);
+  const todayStamp = now.toISOString().slice(0, 10);
 
   // Single-sweep lock. A long backlog can outlive the gap to the next trigger;
   // two sweeps on the same dates would double-file drawers. Only a marker whose
@@ -353,66 +354,26 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     );
   }
 
-  // Which dates to process. `--date` is an explicit override for one day
-  // (backfill / debugging); otherwise sweep everything unprocessed or changed.
-  let queue: PendingDate[];
-  if (input.today) {
-    const one = await pendingForDate(dir, input.today);
-    if (!one) {
-      err.write(`no daily file for ${input.today} — nothing to process\n`);
-      return 2;
-    }
-    queue = [one];
-  } else {
-    const sweep = await sweepDailyFiles(
-      dir,
-      state,
-      now.toISOString().slice(0, 10),
-    );
-    // Files that were touched but not changed: refresh the ledger's mtime so
-    // the next sweep takes the cheap stat-only path again. No turns spent.
-    if (sweep.touched.length > 0) {
-      const patch: Record<string, ReturnType<typeof dateRecord>> = {};
-      for (const t of sweep.touched) {
-        const prev = state.processed?.[t.date];
-        if (prev)
-          patch[t.date] = { ...prev, mtime_ms: t.mtime_ms, size: t.size };
-      }
-      await saveNightlyState(dir, { processed: patch });
-    }
-    queue = sweep.pending;
-  }
-
-  // No cap by default — the sweep drains the whole backlog. `--max-dates`
-  // bounds a manual run; anything it leaves behind stays pending in the ledger.
-  const cap = input.maxDates;
-  const deferred =
-    cap !== undefined && cap > 0 ? Math.max(0, queue.length - cap) : 0;
-  if (deferred > 0) queue = queue.slice(0, cap);
-
-  // An empty queue is NOT an early return. Compaction's inputs are whole-file
-  // sizes, not a day's events, so the night it most needs to run is exactly
-  // the steady-state night where nothing new is pending — which is every night
-  // once the backlog is drained. Returning here made the stage permanently
-  // inert outside a backfill. The date loop below simply does nothing instead.
-  if (queue.length === 0) {
-    out.write(`nightly: persona='${persona}' — nothing pending\n`);
-  } else {
-    out.write(
-      `nightly: persona='${persona}' — ${queue.length} date(s) to process ` +
-        `[${queue.map((q) => `${q.date}:${q.reason}`).join(", ")}]` +
-        (deferred > 0 ? ` (+${deferred} deferred to the next run)` : "") +
-        `\n`,
-    );
-  }
-
-  const monolithic = existsSync(join(dir, "nightly-prompt.md"));
-  const memory = input.runStage
-    ? null
-    : await openMemoryStore(config.memoryDbPath);
+  // -----------------------------------------------------------------------
+  // Stage four FIRST, not last (issue #633): the date queue below is built
+  // from the daily .md files on disk, and the just-closed day only becomes a
+  // file when renderClosedDays runs. Maintenance at the tail of the sweep
+  // meant the queue never saw the day that closed at midnight — it sat
+  // pending until the NEXT night's sweep, ~24 h late, and doctor greeted
+  // every morning with `1 date pending`. Rendering before the queue build is
+  // the whole fix: the sweep that runs at rollover processes the day that
+  // just closed, in the same run.
+  //
+  // Placement is deliberate: AFTER the persona-dir check and the in-flight
+  // gate above (a skipped sweep still skips everything), and BEFORE the
+  // queue build so its render feeds that build. A failure here is reported
+  // with the sweep's errors exactly as before — a failed render retries next
+  // sweep and must not block the distillation of days that already have
+  // files. Like every stage, it also runs when the queue ends up empty:
+  // dormancy + the snapshot are housekeeping, not a per-date outcome.
+  // -----------------------------------------------------------------------
   const startedAt = new Date().toISOString();
   const errors: string[] = [];
-  const todayStamp = now.toISOString().slice(0, 10);
 
   // The in-flight marker covers the WHOLE sweep, not just the date loop.
   // Compaction runs even when the queue is empty — which, once the backlog is
@@ -421,12 +382,12 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   // the same pre-image and point concurrent LLM writers at the same files.
   // Acquired before any work, refreshed as each date starts and again before
   // compaction so a long stage never reads as stalled, cleared in the finally.
-  const holdSweep = async (date: string, index: number): Promise<void> => {
+  const holdSweep = async (date: string, index: number, total: number): Promise<void> => {
     await saveNightlyState(dir, {
       current: {
         date,
         index,
-        total: queue.length,
+        total,
         started_at: startedAt,
         updated_at: new Date().toISOString(),
         pid: process.pid,
@@ -435,12 +396,101 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     });
   };
 
+  const monolithic = existsSync(join(dir, "nightly-prompt.md"));
+  const memory = input.runStage
+    ? null
+    : await openMemoryStore(config.memoryDbPath);
+  let queue: PendingDate[] = [];
+  let deferred = 0;
+
   try {
-    await holdSweep(queue[0]?.date ?? todayStamp, 0);
+    // ---------------------------------------------------------------------
+    // Stage four HEAD: journal render (issue #633).
+    //
+    // The date queue below is built from the daily .md files on disk, and
+    // the just-closed day only becomes a file when renderClosedDays runs.
+    // Maintenance at the tail of the sweep meant the queue never saw the day
+    // that closed at midnight — it sat pending until the NEXT night's sweep,
+    // ~24 h late, and doctor greeted every morning with `1 date pending`.
+    // Rendering before the queue build is the whole fix: the sweep that runs
+    // at rollover processes the day that just closed, in the same run.
+    //
+    // Placement is deliberate: AFTER the persona-dir check and the in-flight
+    // gate above (a skipped sweep still skips everything), and BEFORE the
+    // queue build so its render feeds that build. A failure here is reported
+    // with the sweep's errors exactly as before — a failed render retries
+    // next sweep and must not block the distillation of days that already
+    // have files. Like every housekeeping stage it runs on EVERY sweep,
+    // including `--date` backfills and empty-queue nights.
+    // ---------------------------------------------------------------------
+    await holdSweep(todayStamp, 0, 0);
+    const render = await runMemoryMaintenance({
+      dbPath: config.memoryDbPath,
+      persona,
+      personaDir: dir,
+      now,
+      out,
+      skipSnapshot: true,
+    });
+    for (const e of render.errors) errors.push(`maintenance: ${e}`);
+
+    // Which dates to process. `--date` is an explicit override for one day
+    // (backfill / debugging); otherwise sweep everything unprocessed or changed.
+    // Built AFTER the render above, so the day it just rendered is in the
+    // queue (#633) instead of waiting ~24 h for the next sweep.
+    if (input.today) {
+      const one = await pendingForDate(dir, input.today);
+      if (!one) {
+        err.write(`no daily file for ${input.today} — nothing to process\n`);
+        return 2;
+      }
+      queue = [one];
+    } else {
+      const sweep = await sweepDailyFiles(
+        dir,
+        state,
+        now.toISOString().slice(0, 10),
+      );
+      // Files that were touched but not changed: refresh the ledger's mtime so
+      // the next sweep takes the cheap stat-only path again. No turns spent.
+      if (sweep.touched.length > 0) {
+        const patch: Record<string, ReturnType<typeof dateRecord>> = {};
+        for (const t of sweep.touched) {
+          const prev = state.processed?.[t.date];
+          if (prev)
+            patch[t.date] = { ...prev, mtime_ms: t.mtime_ms, size: t.size };
+        }
+        await saveNightlyState(dir, { processed: patch });
+      }
+      queue = sweep.pending;
+    }
+
+    // No cap by default — the sweep drains the whole backlog. `--max-dates`
+    // bounds a manual run; anything it leaves behind stays pending in the ledger.
+    const cap = input.maxDates;
+    deferred =
+      cap !== undefined && cap > 0 ? Math.max(0, queue.length - cap) : 0;
+    if (deferred > 0) queue = queue.slice(0, cap);
+
+    // An empty queue is NOT an early return. Compaction's inputs are whole-file
+    // sizes, not a day's events, so the night it most needs to run is exactly
+    // the steady-state night where nothing new is pending — which is every night
+    // once the backlog is drained. Returning here made the stage permanently
+    // inert outside a backfill. The date loop below simply does nothing instead.
+    if (queue.length === 0) {
+      out.write(`nightly: persona='${persona}' — nothing pending\n`);
+    } else {
+      out.write(
+        `nightly: persona='${persona}' — ${queue.length} date(s) to process ` +
+          `[${queue.map((q) => `${q.date}:${q.reason}`).join(", ")}]` +
+          (deferred > 0 ? ` (+${deferred} deferred to the next run)` : "") +
+          `\n`,
+      );
+    }
 
     for (const [i, pending] of queue.entries()) {
       const conversation = nightlyConversationKey(pending.date);
-      await holdSweep(pending.date, i + 1);
+      await holdSweep(pending.date, i + 1, queue.length);
 
       const runOne = async (
         stage: NightlyStage | "override" | "compact",
@@ -561,7 +611,7 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
       });
     } else if (compactionEligible) {
       // Keep the beat fresh across a stage that can outlive the stall timer.
-      await holdSweep(todayStamp, queue.length);
+      await holdSweep(todayStamp, queue.length, queue.length);
       const compaction = await runCompaction({
         personaDir: dir,
         persona,
@@ -611,24 +661,28 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     }
 
     // ---------------------------------------------------------------------
-    // Stage four: database housekeeping (issue #417).
+    // Stage four TAIL: dormancy sweep + restore point (issue #417).
     //
-    // Retire decayed beliefs and take a verified restore point. Runs on EVERY
-    // sweep, including `--date` backfills and monolithic-prompt personas and
-    // including sweeps that had stage errors: unlike compaction it never
-    // rewrites content, and a night that went wrong is precisely the night a
-    // snapshot is worth having. Its own integrity gate is what decides whether
-    // the snapshot may be taken.
+    // The RENDER half of this stage now runs at the head of the sweep (see
+    // the #633 comment above). What stays at the tail is the dormancy sweep
+    // and the snapshot: a restore point must represent the settled END of
+    // the night, and re-rendering after compaction could re-write files the
+    // compaction stage just reconciled. Runs on EVERY sweep, including
+    // `--date` backfills and sweeps that had stage errors: unlike compaction
+    // it never rewrites content, and a night that went wrong is precisely
+    // the night a snapshot is worth having. Its own integrity gate decides
+    // whether the snapshot may be taken.
     // ---------------------------------------------------------------------
-    await holdSweep(todayStamp, queue.length);
-    const maintenance = await runMemoryMaintenance({
+    await holdSweep(todayStamp, queue.length, queue.length);
+    const tailMaintenance = await runMemoryMaintenance({
       dbPath: config.memoryDbPath,
       persona,
       personaDir: dir,
       now,
       out,
+      skipRender: true,
     });
-    for (const e of maintenance.errors) errors.push(`maintenance: ${e}`);
+    for (const e of tailMaintenance.errors) errors.push(`maintenance: ${e}`);
   } finally {
     await memory?.close();
   }

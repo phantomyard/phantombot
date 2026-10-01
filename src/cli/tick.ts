@@ -314,11 +314,22 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
 
       const agentDir = personaDir(config, task.persona);
       if (!existsSync(agentDir)) {
-        log.error("tick: persona dir missing — skipping task", {
-          id: task.id,
-          persona: task.persona,
-          agentDir,
-        });
+        // #632 — the persona dir is GONE, and this used to be a skip-and-
+        // continue: the row was re-picked every tick, logged an error line
+        // per minute, never fired and never expired (robbie: 23 tasks, 34
+        // days). Deactivate it. A persona dir that is briefly missing is
+        // covered by this firing only when the task is actually DUE — a
+        // mid-rename or mid-restore persona with nothing due loses nothing.
+        const reason =
+          `orphaned: persona dir missing at ${agentDir} — task deactivated by tick`;
+        const deactivated = taskStore.deactivateOrphaned(task.id, reason, now);
+        if (deactivated) {
+          log.warn("tick: persona dir missing — task deactivated", {
+            id: task.id,
+            persona: task.persona,
+            agentDir,
+          });
+        }
         continue;
       }
 
