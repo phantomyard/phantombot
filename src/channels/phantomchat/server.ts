@@ -981,6 +981,8 @@ export async function runPhantomchatServer(
         memory: input.memory,
         idleTimeoutMs: input.config.harnessIdleTimeoutMs,
         hardTimeoutMs: input.config.harnessHardTimeoutMs,
+        softTimeoutMs: input.config.harnessSoftTimeoutMs,
+        nudgeCap: input.config.harnessNudgeCap,
         toolTimeoutMs: input.config.harnessToolTimeoutMs,
         thinkingTimeoutMs: input.config.harnessThinkingTimeoutMs,
         startupTimeoutMs: input.config.harnessStartupTimeoutMs,

@@ -83,6 +83,8 @@ const ENV_KEYS = [
   "PHANTOMBOT_DURABLE_FACTS_MAX_EXTRACT_PER_TURN",
   "PHANTOMBOT_DURABLE_FACTS_LEASE_MS",
   "PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS",
+  "PHANTOMBOT_HARNESS_SOFT_TIMEOUT_MS",
+  "PHANTOMBOT_HARNESS_NUDGE_CAP",
   "PHANTOMBOT_HARNESS_TOOL_TIMEOUT_MS",
   "PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS",
   "PHANTOMBOT_STATE",
@@ -243,6 +245,31 @@ describe("loadConfig — OpenAI-compatible voice migration", () => {
       sttModel: "whisper-1",
       ttsModel: "tts-1",
     });
+  });
+});
+
+describe("loadConfig — soft deadline + nudge cap (#639)", () => {
+  test("defaults: soft 3000s, nudge cap 2", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.harnessSoftTimeoutMs).toBe(3_000_000);
+    expect(cfg.harnessNudgeCap).toBe(2);
+  });
+
+  test("reads TOML seconds for the soft deadline", async () => {
+    const path = join(workdir, "config", "phantombot", "config.toml");
+    await mkdir(join(workdir, "config", "phantombot"), { recursive: true });
+    await writeFile(path, "harness_soft_timeout_s = 1800\nharness_nudge_cap = 3\n");
+    const cfg = await loadConfig();
+    expect(cfg.harnessSoftTimeoutMs).toBe(1_800_000);
+    expect(cfg.harnessNudgeCap).toBe(3);
+  });
+
+  test("environment overrides TOML; 0 disables the soft deadline", async () => {
+    process.env.PHANTOMBOT_HARNESS_SOFT_TIMEOUT_MS = "0";
+    process.env.PHANTOMBOT_HARNESS_NUDGE_CAP = "0";
+    const cfg = await loadConfig();
+    expect(cfg.harnessSoftTimeoutMs).toBe(0);
+    expect(cfg.harnessNudgeCap).toBe(0);
   });
 });
 

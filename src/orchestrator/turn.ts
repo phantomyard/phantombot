@@ -60,6 +60,8 @@ import { loadPersona } from "../persona/loader.ts";
 import { buildDailyRecall } from "../lib/dailyRecall.ts";
 import { isNightlyConversation } from "../lib/nightly.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
+import type { PromptEpochTurn } from "../harnesses/payload.ts";
+import { INTERRUPTED_MARKER } from "../channels/core/interrupted.ts";
 import { gateNarrationStream } from "../lib/narrationStreamGate.ts";
 import type { ToolCallDetail } from "../harnesses/toolNote.ts";
 import type { MemoryStore, TurnOrigin } from "../memory/store.ts";
@@ -73,6 +75,21 @@ import {
 } from "./promptCache.ts";
 
 export const DEFAULT_HISTORY_LIMIT = 30;
+
+/**
+ * Soft wall-clock deadline, default (issue #639): 3000s — 600s under the
+ * classic 3600s hard cap. At the soft deadline a healthy, mid-work turn is
+ * interrupted and given a wrap-up nudge on a fresh budget instead of being
+ * killed with everything it did.
+ */
+export const DEFAULT_SOFT_TIMEOUT_MS = 3_000_000;
+
+/**
+ * Max soft interrupts (nudge passes) per turn, default (issue #639). Bounds
+ * a model that never wraps: after this many nudges the soft deadline is
+ * disarmed and the hard cap is the only remaining backstop.
+ */
+export const DEFAULT_NUDGE_CAP = 2;
 /** Maximum UTF-8 bytes of canonical conversation history sent to a harness. */
 export const DEFAULT_HISTORY_MAX_BYTES = 128_000;
 const FAILURE_REASON_MAX_CHARS = 500;
@@ -146,6 +163,23 @@ export interface TurnInput {
   idleTimeoutMs: number;
   /** Hard wall-clock ceiling regardless of activity. */
   hardTimeoutMs?: number;
+  /**
+   * Soft wall-clock deadline (issue #639): interrupt the running harness
+   * BEFORE the hard cap and re-run the turn with a synthetic "wrap up and
+   * deliver" nudge on a fresh budget, instead of discarding healthy
+   * mid-work turns at the cap. Only armed when a hard cap is set and the
+   * soft deadline is strictly below it; the hard cap stays as the backstop
+   * once the nudge budget is exhausted. Default: DEFAULT_SOFT_TIMEOUT_MS
+   * (3000s) whenever hardTimeoutMs is set.
+   */
+  softTimeoutMs?: number;
+  /**
+   * Max soft interrupts (nudge passes) per turn (issue #639). A model that
+   * never wraps cannot loop 3000s forever: once exhausted, later passes run
+   * with the soft deadline disarmed and the hard cap kills for real.
+   * Default: DEFAULT_NUDGE_CAP (2).
+   */
+  nudgeCap?: number;
   /**
    * Absolute wall-clock deadline (epoch ms) for the WHOLE harness chain
    * (issue #631). When set, runWithFallback clamps each attempt's
@@ -845,6 +879,26 @@ async function* runTurnBody(
     }
   };
 
+  // #639: soft deadline + nudge resolution. Default ON whenever a hard cap
+  // is configured: the soft deadline defaults to DEFAULT_SOFT_TIMEOUT_MS and
+  // only arms when it is strictly below the hard cap (a soft deadline at or
+  // above the backstop is pointless, and a turn with NO hard cap must not
+  // gain one — after the nudge budget the hard cap is the only stopper).
+  const effectiveSoftTimeoutMs =
+    input.hardTimeoutMs !== undefined
+      ? (() => {
+          const soft = input.softTimeoutMs ?? DEFAULT_SOFT_TIMEOUT_MS;
+          return soft > 0 && soft < input.hardTimeoutMs ? soft : undefined;
+        })()
+      : undefined;
+  const nudgeCap = Math.max(0, input.nudgeCap ?? DEFAULT_NUDGE_CAP);
+
+  // Synthetic epoch turns carrying the interrupted pairs a nudge pass needs
+  // (issue #639). Appended AFTER any prompt-cache epoch turns so the render
+  // order is: history → epoch turns → [interrupted pair(s)] → nudge. The
+  // prefix stays append-only, so a prepared prompt-cache epoch survives.
+  const nudgePairs: PromptEpochTurn[] = [];
+
   try {
     // #580 (second half): withhold pre-tool narration that is confidently in
     // a language the user did not write in. Applied HERE, above every
@@ -852,60 +906,133 @@ async function* runTurnBody(
     // channels — they stream text straight through and had no gate at all.
     // Only for turns that asked for narration: `toolNarration` is opt-in, and
     // a turn without it emits none, so there is nothing to gate.
-    const upstream = runWithFallback(
-      input.harnesses,
-      {
-        systemPrompt,
-        ...(turnContext ? { turnContext } : {}),
-        userMessage: input.userMessage,
-        history: [...(epochPlan?.baseHistory ?? history)],
-        ...(epochPlan?.epochTurns.length
-          ? { epochTurns: [...epochPlan.epochTurns] }
-          : {}),
-        persona: input.persona,
-        conversation: input.conversation,
-        // #405: lets `phantombot workspace lock/unlock` attribute a claim to the
-        // turn that made it, so a release from a different turn is refused.
-        turnId,
-        workingDir: input.workingDir,
-        // Harness temp files land under the persona's own dir, not the shared
-        // system /tmp (issue #365) — per-persona isolation + survives a full /tmp.
-        tmpBaseDir: join(input.agentDir, "tmp"),
-        idleTimeoutMs: input.idleTimeoutMs,
-        hardTimeoutMs: input.hardTimeoutMs,
-        toolTimeoutMs: input.toolTimeoutMs,
-        thinkingTimeoutMs: input.thinkingTimeoutMs,
-        startupTimeoutMs: input.startupTimeoutMs,
-        mcpMode: input.mcpMode,
-        toolsMode: input.toolsMode,
-        signal: input.signal,
-      },
-      {
-        onToolCall: toolSink,
-        onHarnessFailure: failureSink,
-        // #631: background wakes pass a chain-wide wall-clock deadline so a
-        // timed-out primary hands the fallback only the REMAINING budget
-        // instead of a fresh window. Foreground callers omit it — per-attempt
-        // caps are correct when a human is watching the turn.
-        ...(input.chainDeadlineMs !== undefined
-          ? { chainDeadlineMs: input.chainDeadlineMs }
-          : {}),
-      },
-    );
-    const stream =
-      input.toolNarration === true
-        ? gateNarrationStream(upstream, input.userMessage)
-        : upstream;
-    for await (const chunk of stream) {
-      if (chunk.type === "text") finalText += chunk.text;
-      if (chunk.type === "done") {
-        // The done chunk carries the authoritative finalText — prefer it
-        // over our running accumulation in case the harness reformatted.
-        finalText = chunk.finalText;
-        succeeded = true;
+    //
+    // The loop is the soft-deadline nudge (#639): a pass killed by the soft
+    // deadline starts a NEW pass — same chain, fresh hard budget, the nudge
+    // as the user message, and the interrupted pair(s) in epoch turns so the
+    // fresh process knows what was asked and how far the reply got. Passes
+    // are bounded by nudgeCap; once exhausted the soft deadline is disarmed
+    // and the hard cap is the backstop, exactly as before.
+    let passUserMessage = input.userMessage;
+    while (true) {
+      const softArmed =
+        effectiveSoftTimeoutMs !== undefined && nudgePairs.length < nudgeCap;
+      // Text streamed by EARLIER passes. A later pass's `done.finalText`
+      // describes only its own stream (the fallback resume path makes the
+      // same stitch), so the turn's authoritative reply is prefix + tail.
+      const passPrefix = finalText;
+      terminalError = undefined;
+      const upstream = runWithFallback(
+        input.harnesses,
+        {
+          systemPrompt,
+          ...(turnContext ? { turnContext } : {}),
+          userMessage: passUserMessage,
+          history: [...(epochPlan?.baseHistory ?? history)],
+          ...((epochPlan?.epochTurns.length ?? 0) > 0 || nudgePairs.length > 0
+            ? { epochTurns: [...(epochPlan?.epochTurns ?? []), ...nudgePairs] }
+            : {}),
+          persona: input.persona,
+          conversation: input.conversation,
+          // #405: lets `phantombot workspace lock/unlock` attribute a claim to the
+          // turn that made it, so a release from a different turn is refused.
+          turnId,
+          workingDir: input.workingDir,
+          // Harness temp files land under the persona's own dir, not the shared
+          // system /tmp (issue #365) — per-persona isolation + survives a full /tmp.
+          tmpBaseDir: join(input.agentDir, "tmp"),
+          idleTimeoutMs: input.idleTimeoutMs,
+          hardTimeoutMs: input.hardTimeoutMs,
+          ...(softArmed ? { softTimeoutMs: effectiveSoftTimeoutMs } : {}),
+          toolTimeoutMs: input.toolTimeoutMs,
+          thinkingTimeoutMs: input.thinkingTimeoutMs,
+          startupTimeoutMs: input.startupTimeoutMs,
+          mcpMode: input.mcpMode,
+          toolsMode: input.toolsMode,
+          signal: input.signal,
+        },
+        {
+          onToolCall: toolSink,
+          onHarnessFailure: failureSink,
+          // #631: background wakes pass a chain-wide wall-clock deadline so a
+          // timed-out primary hands the fallback only the REMAINING budget
+          // instead of a fresh window. Foreground callers omit it — per-attempt
+          // caps are correct when a human is watching the turn.
+          ...(input.chainDeadlineMs !== undefined
+            ? { chainDeadlineMs: input.chainDeadlineMs }
+            : {}),
+        },
+      );
+      const stream =
+        input.toolNarration === true
+          ? gateNarrationStream(upstream, input.userMessage)
+          : upstream;
+      for await (const chunk of stream) {
+        if (chunk.type === "error" && chunk.killCause === "soft") {
+          // Internal machinery (issue #639): a soft-deadline interrupt is
+          // orchestrator bookkeeping, not a turn failure. The consumer must
+          // NOT see an error bubble mid-stream (a chat channel would treat
+          // the turn as errored and apologise over a reply that is still
+          // coming); record it and let the pass loop decide.
+          terminalError = chunk;
+          continue;
+        }
+        if (chunk.type === "text") finalText += chunk.text;
+        if (chunk.type === "done") {
+          // The done chunk carries the authoritative finalText — prefer it
+          // over our running accumulation in case the harness reformatted.
+          // Stitched onto earlier passes' text on nudge passes — AND on the
+          // yielded chunk itself: consumers (channels, TUI, ask) take the
+          // reply text from done.finalText, and the transports diff it
+          // against what was streamed, so an unstitched done would truncate
+          // pass 1's already-delivered text out of history and voice.
+          const stitched = passPrefix + chunk.finalText;
+          finalText = stitched;
+          succeeded = true;
+          yield passPrefix.length > 0 ? { ...chunk, finalText: stitched } : chunk;
+          continue;
+        }
+        if (chunk.type === "error") terminalError = chunk;
+        yield chunk;
       }
-      if (chunk.type === "error") terminalError = chunk;
-      yield chunk;
+
+      const softFired = terminalError?.killCause === "soft";
+      if (!softFired) break;
+      if (softArmed && !input.signal?.aborted) {
+        // ── soft deadline fired, nudge budget remains (#639) ─────────────
+        nudgePairs.push({
+          turnContext: "",
+          userMessage: passUserMessage,
+          assistantMessage:
+            finalText.slice(passPrefix.length).trim().length > 0
+              ? `${finalText.slice(passPrefix.length).trim()}\n\n${INTERRUPTED_MARKER}`
+              : INTERRUPTED_MARKER,
+        });
+        const nudgeNumber = nudgePairs.length;
+        const finalWarning = nudgeNumber >= nudgeCap;
+        passUserMessage = `Your turn has lasted ${Math.round(
+          effectiveSoftTimeoutMs! / 1000,
+        )}s — that's too long for one turn. Wrap up and deliver your reply now.${
+          finalWarning
+            ? " This is the final wrap-up window: after it the turn is terminated and undelivered."
+            : ""
+        }`;
+        log.warn("turn: soft deadline — issuing wrap-up nudge", {
+          persona: input.persona,
+          conversation: input.conversation,
+          nudge: nudgeNumber,
+          of: nudgeCap,
+          softTimeoutMs: effectiveSoftTimeoutMs,
+          partialChars: finalText.length - passPrefix.length,
+        });
+        continue;
+      }
+      // Defensive: a soft kill with no nudge budget left must not be
+      // swallowed — surface it like any terminal error. Unreachable with
+      // real coordinators (the timer is only armed when the budget lasts),
+      // but a scripted/test harness can yield one at any time.
+      yield terminalError!;
+      break;
     }
   } finally {
     flushDigest();

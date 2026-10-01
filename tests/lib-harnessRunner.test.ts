@@ -15,6 +15,7 @@ import {
   harnessDefaults,
   isShutdownExit,
   killCauseToErrorChunk,
+  SOFT_CAP_ERROR_SUFFIX,
   runHarnessProcess,
 } from "../src/lib/harnessRunner.ts";
 import { spawnInNewSession } from "../src/lib/processGroup.ts";
@@ -1354,5 +1355,59 @@ describe("runHarnessProcess — post-tool-text guard", () => {
     const chunks = await run(spec);
     expect(chunks.some((c) => c.type === "error")).toBe(false);
     expect(chunks.filter((c) => c.type === "done")).toHaveLength(1);
+  });
+});
+
+describe("createKillCoordinator — soft deadline (#639)", () => {
+  test("soft timer fires before the hard cap with cause='soft'", async () => {
+    const proc = spawnInNewSession(
+      ["sh", "-c", "while true; do echo tick; sleep 0.05; done"],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 5_000,
+      hardTimeoutMs: 5_000,
+      softTimeoutMs: 250,
+      harnessId: "test",
+    });
+
+    for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+      killer.touch(); // idle never fires; the SOFT timer must
+      void chunk;
+    }
+    await killer.dispose();
+
+    expect(killer.killCause()).toBe("soft");
+  });
+
+  test("soft timer is cleared on dispose — no kill after teardown", async () => {
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore", stdout: "pipe", stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 30_000,
+      softTimeoutMs: 100,
+      harnessId: "test",
+    });
+    await killer.dispose();
+    await Bun.sleep(250);
+    // The cleared soft timer never fired — no kill cause after teardown.
+    expect(killer.killCause()).toBeUndefined();
+  });
+
+  test("killCauseToErrorChunk renders the soft-deadline shape", () => {
+    const chunk = killCauseToErrorChunk("soft", "pi", 3_600_000, 300_000, 60_000, false, 3_000_000);
+    expect(chunk).toMatchObject({
+      type: "error",
+      recoverable: false,
+      killCause: "soft",
+    });
+    expect(chunk!.error).toBe("pi soft deadline after 3000000ms (soft deadline)");
+    expect(SOFT_CAP_ERROR_SUFFIX).toBe("(soft deadline)");
   });
 });

@@ -692,6 +692,12 @@ export async function runTaskWake(
           wakeBudgetMs,
         ),
         thinkingTimeoutMs: taskConfig.harnessThinkingTimeoutMs,
+        // #639: soft deadline + nudge budget come from the task persona's
+        // own config layer. The chain deadline still bounds every pass —
+        // runWithFallback clamps each attempt to the time REMAINING, so a
+        // nudge pass inherits the leftover wake budget, never a fresh hour.
+        softTimeoutMs: taskConfig.harnessSoftTimeoutMs,
+        nudgeCap: taskConfig.harnessNudgeCap,
         promptCache: taskConfig.promptCache,
         // #324: an agent-woken task should wake with the same memory
         // instincts a conversation turn gets — semantic recall + durable

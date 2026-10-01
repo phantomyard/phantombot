@@ -358,6 +358,22 @@ export async function* runWithFallback(
               priorKillHarness.set(chunk.killCause, harness.id);
             }
           }
+          // Issue #639: a soft-deadline kill is NOT a harness failure —
+          // no cooldown bump, no alerter incident, no fall-through. The
+          // chain run ends here and runTurnBody decides what happens next:
+          // a wrap-up nudge pass while the nudge budget lasts, or (budget
+          // exhausted) the hard cap as the backstop.
+          if (chunk.killCause === "soft") {
+            log.warn(
+              "orchestrator: soft deadline reached — ending chain run for nudge",
+              {
+                harnessId: harness.id,
+                error: chunk.error,
+              },
+            );
+            yield chunk;
+            return;
+          }
           // Killed mid-flight with work already done: respawn this same
           // harness once, carrying what it had said and started. Checked BEFORE
           // the fall-through branch so a chain that HAS a next harness still

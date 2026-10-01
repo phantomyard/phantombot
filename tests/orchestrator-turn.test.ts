@@ -1950,3 +1950,196 @@ describe("runTurn — daily journal reflex (#410)", () => {
     expect(get()?.systemPrompt ?? "").not.toContain("# Daily journal");
   });
 });
+
+describe("runTurn — soft deadline + wrap-up nudge (#639)", () => {
+  const SOFT_ERROR: HarnessChunk = {
+    type: "error",
+    error: "fake soft deadline after 3000ms (soft deadline)",
+    recoverable: false,
+    killCause: "soft",
+  };
+  const HARD_ERROR: HarnessChunk = {
+    type: "error",
+    error: "fake timed out after 3600000ms (hard wall-clock cap)",
+    recoverable: true,
+    killCause: "timeout",
+  };
+
+  /** A harness whose script differs per invocation — nudge passes need one. */
+  class MultiScriptHarness implements Harness {
+    invocations = 0;
+    requests: HarnessRequest[] = [];
+    constructor(
+      public readonly id: string,
+      private readonly scripts: HarnessChunk[][],
+    ) {}
+    async available(): Promise<boolean> {
+      return true;
+    }
+    async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+      const script = this.scripts[Math.min(this.invocations, this.scripts.length - 1)]!;
+      this.requests.push(req);
+      this.invocations++;
+      for (const c of script) yield c;
+    }
+  }
+
+  test("alive model: soft kill is swallowed, nudge pass delivers the wrap-up", async () => {
+    const harness = new MultiScriptHarness("fake", [
+      [{ type: "text", text: "working on it..." }, SOFT_ERROR],
+      [{ type: "done", finalText: "done, here is the summary", meta: {} }],
+    ]);
+
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "build the thing",
+        harnesses: [harness],
+        hardTimeoutMs: 3_600_000,
+        softTimeoutMs: 3_000_000,
+      }),
+    );
+
+    // The soft-deadline error chunk never reaches the consumer — a chat
+    // channel must not treat the turn as errored while the nudge is coming.
+    expect(chunks.map((c) => c.type)).toEqual(["text", "done"]);
+    // Stitched: pass 1's streamed text + pass 2's done.finalText.
+    expect(chunks.at(-1)).toMatchObject({
+      finalText: "working on it...done, here is the summary",
+    });
+
+    expect(harness.invocations).toBe(2);
+    const nudgeReq = harness.requests[1]!;
+    // The nudge is the new user message; the interrupted pair sits in the
+    // epoch turns so the fresh process knows what was asked and how far the
+    // reply got.
+    expect(nudgeReq.userMessage).toContain("Wrap up and deliver");
+    expect(nudgeReq.userMessage).toContain("3000s");
+    const pair = nudgeReq.epochTurns?.at(-1)!;
+    expect(pair.userMessage).toBe("build the thing");
+    expect(pair.assistantMessage).toContain("working on it...");
+    expect(pair.assistantMessage).toContain("[interrupted before reply]");
+    // First pass carried no epoch turns (none configured, no nudges yet).
+    expect(harness.requests[0]!.epochTurns).toBeUndefined();
+    // Fresh hard budget: the nudge pass re-arms the soft deadline too.
+    expect(nudgeReq.softTimeoutMs).toBe(3_000_000);
+    expect(nudgeReq.hardTimeoutMs).toBe(3_600_000);
+
+    // Persistence unchanged: ONE pair (original user → full stitched reply);
+    // the nudge is runtime bookkeeping, not conversation history.
+    const stored = await memory.recentTurns("phantom", "cli:default", 10);
+    expect(stored).toEqual([
+      { role: "user", text: "build the thing" },
+      { role: "assistant", text: "working on it...done, here is the summary" },
+    ]);
+  });
+
+  test("final nudge warns that the next soft kill terminates the turn", async () => {
+    const harness = new MultiScriptHarness("fake", [
+      [SOFT_ERROR],
+      [SOFT_ERROR],
+      [{ type: "done", finalText: "wrapped up", meta: {} }],
+    ]);
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "go",
+        harnesses: [harness],
+        hardTimeoutMs: 3_600_000,
+        softTimeoutMs: 3_000,
+        nudgeCap: 2,
+      }),
+    );
+    expect(harness.invocations).toBe(3);
+    // First nudge: plain wrap-up ask. Second (final) nudge: explicit warning.
+    expect(harness.requests[1]!.userMessage).not.toContain("final wrap-up window");
+    expect(harness.requests[2]!.userMessage).toContain("final wrap-up window");
+  });
+
+  test("nudge-cap exhaustion: the hard cap is the backstop, soft disarmed", async () => {
+    const harness = new MultiScriptHarness("fake", [
+      [SOFT_ERROR],
+      // Pass 2 runs with the soft deadline DISARMED — a real coordinator
+      // could only produce the hard-cap kill here.
+      [HARD_ERROR],
+    ]);
+
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "go",
+        harnesses: [harness],
+        hardTimeoutMs: 3_600_000,
+        softTimeoutMs: 3_000,
+        nudgeCap: 1,
+      }),
+    );
+
+    expect(harness.invocations).toBe(2);
+    expect(harness.requests[1]!.softTimeoutMs).toBeUndefined();
+    const last = chunks.at(-1)!;
+    expect(last).toMatchObject({ type: "error", killCause: "timeout" });
+    // The nudge pass's pair is still recorded for the fresh process.
+    expect(harness.requests[1]!.epochTurns?.at(-1)!.assistantMessage).toContain(
+      "[interrupted before reply]",
+    );
+  });
+
+  test("hung model: a hard-cap kill still terminates with the error surfaced", async () => {
+    const harness = new MultiScriptHarness("fake", [[HARD_ERROR]]);
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "go",
+        harnesses: [harness],
+        hardTimeoutMs: 3_600_000,
+        softTimeoutMs: 3_000_000,
+      }),
+    );
+    expect(harness.invocations).toBe(1);
+    expect(chunks.at(-1)).toMatchObject({ type: "error", killCause: "timeout" });
+  });
+
+  test("defaults: soft armed at 3000s under a 3600s cap, disarmed when hard < soft", async () => {
+    const big = new MultiScriptHarness("fake", [
+      [{ type: "done", finalText: "ok", meta: {} }],
+    ]);
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "go",
+        harnesses: [big],
+        hardTimeoutMs: 3_600_000,
+      }),
+    );
+    expect(big.requests[0]!.softTimeoutMs).toBe(3_000_000);
+
+    const small = new MultiScriptHarness("fake", [
+      [{ type: "done", finalText: "ok", meta: {} }],
+    ]);
+    await collect(
+      runTurn({
+        ...baseInput(), // hardTimeoutMs: 5000 < the 3000s default soft
+        userMessage: "go",
+        harnesses: [small],
+      }),
+    );
+    expect(small.requests[0]!.softTimeoutMs).toBeUndefined();
+  });
+
+  test("soft disable: softTimeoutMs 0 disarms the nudge machinery entirely", async () => {
+    const harness = new MultiScriptHarness("fake", [
+      [{ type: "done", finalText: "ok", meta: {} }],
+    ]);
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "go",
+        harnesses: [harness],
+        hardTimeoutMs: 3_600_000,
+        softTimeoutMs: 0,
+      }),
+    );
+    expect(harness.requests[0]!.softTimeoutMs).toBeUndefined();
+  });
+});
