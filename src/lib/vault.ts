@@ -490,6 +490,7 @@ function warnConfigOwnedEnvMirrors(
 export {
   isVaultInjectedEnvKey,
   isVaultLoadedPersonaDir,
+  vaultTrackedKeys,
   _resetVaultTrackingForTesting,
 } from "./vaultEnvTracking.ts";
 

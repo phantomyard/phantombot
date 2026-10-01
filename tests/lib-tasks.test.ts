@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openTaskStore, type TaskStore } from "../src/lib/tasks.ts";
+import { hostname } from "node:os";
 
 let workdir: string;
 let store: TaskStore;
@@ -508,5 +509,238 @@ describe("TaskStore.selftest", () => {
     store.recordReview(r.id, "stop");
     expect(store.get(r.id)!.active).toBe(false);
     expect(store.get(r.id)!.reviewCount).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Dispatch claims (issue #631): claim-then-dispatch replaced the tick lock
+// as the no-double-fire guarantee. A claim is atomic, blocks a live one,
+// is stolen when its pid died, and is dropped by the runner.
+// ─────────────────────────────────────────────────────────────────────────
+describe("TaskStore.claimForRun (issue #631)", () => {
+  function addDue(now = NOW) {
+    const r = store.add({
+      persona: "phantom",
+      description: "wake",
+      schedule: "",
+      prompt: "p",
+      oneOff: true,
+      nextRunAt: now,
+      now,
+    });
+    if (!r.ok) throw new Error("setup");
+    return r.id;
+  }
+
+  test("claiming a due task records host, pid and instant, and the row carries it", () => {
+    const id = addDue();
+    const claimed = store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: "host-a",
+      pid: 4242,
+      nowMs: NOW.getTime(),
+    });
+    expect(claimed).toBeDefined();
+    expect(claimed!.claim).toEqual({
+      claimedAt: NOW.getTime(),
+      host: "host-a",
+      pid: 4242,
+    });
+  });
+
+  test("claiming is exclusive: the second claimant for a live claim gets undefined", () => {
+    const id = addDue();
+    const first = store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: "host-a",
+      pid: process.pid, // alive — this test process
+      nowMs: NOW.getTime(),
+    });
+    expect(first).toBeDefined();
+    const second = store.claimForRun(id, {
+      claimedAt: NOW.getTime() + 1,
+      host: "host-a",
+      pid: 9999,
+      nowMs: NOW.getTime() + 1,
+    });
+    expect(second).toBeUndefined();
+  });
+
+  test("a live claim blocks re-claim even though the row is still due", () => {
+    const id = addDue();
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: "host-a",
+      pid: process.pid,
+      nowMs: NOW.getTime(),
+    });
+    // A tick 10 minutes later still must not steal a claim whose runner is
+    // alive — that is the double-fire the claim exists to prevent.
+    const later = store.claimForRun(id, {
+      claimedAt: NOW.getTime() + 10 * 60_000,
+      host: "host-a",
+      pid: 9999,
+      nowMs: NOW.getTime() + 10 * 60_000,
+    });
+    expect(later).toBeUndefined();
+  });
+
+  test("a dead-pid claim is transparently stolen by the next claimant", () => {
+    const id = addDue();
+    // Simulate a runner that crashed: claim held by a pid that is dead.
+    // Claims always carry the local hostname in production (the memory DB
+    // lives on one host's filesystem); a foreign-host claim is only
+    // reclaimable past the TTL, since its pids cannot be probed.
+    const child = Bun.spawnSync(["true"]);
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: child.pid,
+      nowMs: NOW.getTime(),
+    });
+    const reclaimed = store.claimForRun(id, {
+      claimedAt: NOW.getTime() + 1,
+      host: hostname(),
+      pid: process.pid,
+      nowMs: NOW.getTime() + 1,
+    });
+    expect(reclaimed).toBeDefined();
+    expect(reclaimed!.claim!.pid).toBe(process.pid);
+  });
+
+  test("a foreign-host claim is only reclaimable past the TTL", () => {
+    const id = addDue();
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: "some-other-box",
+      pid: 1,
+      nowMs: NOW.getTime(),
+    });
+    const withinTtl = store.claimForRun(id, {
+      claimedAt: NOW.getTime() + 60_000,
+      host: hostname(),
+      pid: process.pid,
+      nowMs: NOW.getTime() + 60_000,
+    });
+    expect(withinTtl).toBeUndefined();
+    const pastTtl = store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: process.pid,
+      nowMs: NOW.getTime() + 3 * 60 * 60 * 1000,
+    });
+    expect(pastTtl).toBeDefined();
+  });
+
+  test("a claim past the TTL is stale even while its pid probes alive", () => {
+    const id = addDue();
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime() - 3 * 60 * 60 * 1000, // hung runner, 3h old
+      host: "host-a",
+      pid: process.pid,
+      nowMs: NOW.getTime(),
+    });
+    const reclaimed = store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: "host-a",
+      pid: process.pid,
+      nowMs: NOW.getTime(),
+    });
+    expect(reclaimed).toBeDefined();
+  });
+
+  test("adoptClaimPid re-points a live claim at the runner, preserving instant and host", () => {
+    const id = addDue();
+    // The tick parent claims with its own (soon-dead) pid during selection.
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: 424242, // the "parent", about to exit
+      nowMs: NOW.getTime(),
+    });
+    // Dispatch adopts the runner's pid — a LIVE process, like the detached
+    // wake child in production (this process stands in for it: liveness is
+    // what matters to the sweep).
+    store.adoptClaimPid(id, process.pid);
+    const t = store.get(id)!;
+    expect(t.claim).toEqual({
+      claimedAt: NOW.getTime(), // handoff, not a new claim
+      host: hostname(),
+      pid: process.pid,
+    });
+    // And the adopted (live) claim blocks a re-claim — the production
+    // double-fire this exists to prevent.
+    expect(
+      store.claimForRun(id, {
+        claimedAt: NOW.getTime() + 60_000,
+        host: hostname(),
+        pid: 424243,
+        nowMs: NOW.getTime() + 60_000,
+      }),
+    ).toBeUndefined();
+  });
+
+  test("adoptClaimPid never resurrects a released claim", () => {
+    const id = addDue();
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: process.pid,
+      nowMs: NOW.getTime(),
+    });
+    store.releaseClaim(id);
+    store.adoptClaimPid(id, 424242);
+    expect(store.get(id)!.claim).toBeUndefined();
+  });
+
+  test("claiming refuses a task that is no longer due", () => {
+    const id = addDue();
+    const refused = store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: "host-a",
+      pid: process.pid,
+      nowMs: NOW.getTime() - 1, // before next_run_at
+    });
+    expect(refused).toBeUndefined();
+  });
+
+  test("claiming refuses a cancelled task and releaseClaim clears it", () => {
+    const id = addDue();
+    store.cancel(id);
+    expect(
+      store.claimForRun(id, {
+        claimedAt: NOW.getTime(),
+        host: "host-a",
+        pid: process.pid,
+        nowMs: NOW.getTime(),
+      }),
+    ).toBeUndefined();
+
+    const id2 = addDue();
+    store.claimForRun(id2, {
+      claimedAt: NOW.getTime(),
+      host: "host-a",
+      pid: process.pid,
+      nowMs: NOW.getTime(),
+    });
+    store.releaseClaim(id2);
+    expect(store.get(id2)!.claim).toBeUndefined();
+  });
+
+  test("claimed() lists every row with a claim, active or not", () => {
+    const a = addDue();
+    const b = addDue();
+    store.claimForRun(a, {
+      claimedAt: NOW.getTime(),
+      host: "host-a",
+      pid: process.pid,
+      nowMs: NOW.getTime(),
+    });
+    const claimed = store.claimed().map((t) => t.id);
+    expect(claimed).toContain(a);
+    // b was never claimed — the seed task rows in this fixture only exist
+    // for a and b, and claimed() must not list unclaimed rows.
+    expect(claimed).not.toContain(b);
+    expect(claimed).toHaveLength(1);
   });
 });

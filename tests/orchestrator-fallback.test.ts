@@ -25,6 +25,7 @@ import type {
 
 class FakeHarness implements Harness {
   invocations = 0;
+  lastRequest?: HarnessRequest;
   constructor(
     public readonly id: string,
     public script: HarnessChunk[],
@@ -33,8 +34,9 @@ class FakeHarness implements Harness {
   async available(): Promise<boolean> {
     return true;
   }
-  async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+  async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
     this.invocations++;
+    this.lastRequest = req;
     for (const c of this.script) yield c;
   }
 }
@@ -1036,5 +1038,96 @@ describe("recoverable fall-through diagnostics", () => {
     } finally {
       restore();
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Chain-wide wake budget (issue #631): with chainDeadlineMs set, each
+// attempt's hard cap is the time REMAINING, not a fresh window. The issue's
+// live case: a 30-min hard cap on the primary, then the fallback got a
+// SECOND full 30 min — one wake held a tick for cap × chain length.
+// ─────────────────────────────────────────────────────────────────────────
+describe("runWithFallback — chain-wide wake budget (#631)", () => {
+  /**
+   * A harness that honours the hard cap it is HANDED (real adapters do this
+   * via harnessRunner's kill coordinator; a test stub must model it): sleeps
+   * for the full cap, then yields the hard-cap recoverable error the real
+   * kill path produces.
+   */
+  class BudgetHonoringHarness implements Harness {
+    invocations = 0;
+    capsSeen: number[] = [];
+    constructor(public readonly id: string) {}
+    async available(): Promise<boolean> {
+      return true;
+    }
+    async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+      this.invocations++;
+      const cap = req.hardTimeoutMs ?? Number.POSITIVE_INFINITY;
+      this.capsSeen.push(cap);
+      await new Promise((r) => setTimeout(r, Math.min(cap, 150)));
+      yield {
+        type: "error",
+        error: `${this.id} timed out after ${cap}ms [hard cap]`,
+        recoverable: true,
+        killCause: "timeout",
+      };
+    }
+  }
+
+  test("a timed-out primary hands the fallback only the remaining budget", async () => {
+    const first = new BudgetHonoringHarness("claude");
+    const second = new BudgetHonoringHarness("native");
+    const start = Date.now();
+    const deadline = start + 200;
+    await collect(runWithFallback([first, second], newRequest(), {
+      cooldown: new CooldownStore(),
+      chainDeadlineMs: deadline,
+    }));
+    expect(first.invocations).toBe(1);
+    expect(second.invocations).toBe(1);
+    // The fallback's cap is what was LEFT after the primary burned most of
+    // the budget — strictly less than the configured 30-min-style full cap,
+    // and close to (deadline - now) rather than a fresh window.
+    expect(first.capsSeen[0]).toBe(200);
+    const remaining = second.capsSeen[0]!;
+    expect(remaining).toBeGreaterThan(0);
+    expect(remaining).toBeLessThanOrEqual(200);
+    expect(remaining).toBeLessThan(160); // first attempt consumed ~150ms
+    // And the whole chain never exceeds the deadline by much: the fallback
+    // was clamped to the remainder, not restarted the clock.
+    expect(Date.now() - start).toBeLessThan(450);
+  });
+
+  test("an expired budget refuses further attempts instead of granting fresh windows", async () => {
+    const first = new BudgetHonoringHarness("claude");
+    const second = new FakeHarness("native", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const chunks = await collect(runWithFallback([first, second], newRequest(), {
+      cooldown: new CooldownStore(),
+      chainDeadlineMs: Date.now() - 1, // already expired
+    }));
+    expect(second.invocations).toBe(0);
+    const last = chunks.at(-1)!;
+    expect(last).toMatchObject({ type: "error" });
+    if (last.type === "error") expect(last.recoverable).toBe(false);
+  });
+
+  test("foreground callers (no chainDeadlineMs) keep per-attempt caps", async () => {
+    const first = new FakeHarness("claude", [
+      { type: "error", error: "recoverable", recoverable: true },
+    ]);
+    const second = new FakeHarness("native", [
+      { type: "done", finalText: "ok" },
+    ]);
+    const req = newRequest({ hardTimeoutMs: 5_000 });
+    await collect(runWithFallback([first, second], req, {
+      cooldown: new CooldownStore(),
+    }));
+    // Both attempts saw the request's own full cap — unchanged behaviour.
+    expect(first.invocations).toBe(1);
+    expect(second.invocations).toBe(1);
+    expect(second.lastRequest?.hardTimeoutMs).toBe(5_000);
   });
 });

@@ -145,6 +145,15 @@ export interface TurnInput {
   idleTimeoutMs: number;
   /** Hard wall-clock ceiling regardless of activity. */
   hardTimeoutMs?: number;
+  /**
+   * Absolute wall-clock deadline (epoch ms) for the WHOLE harness chain
+   * (issue #631). When set, runWithFallback clamps each attempt's
+   * hardTimeoutMs to the time REMAINING before this deadline, so a harness
+   * that burns its cap hands the next one only what is left instead of a
+   * fresh window. Foreground callers omit it — per-attempt caps are correct
+   * when a human is watching; background task wakes pass their total budget.
+   */
+  chainDeadlineMs?: number;
   /** Per-tool wall-clock ceiling while idle watching is suspended. */
   toolTimeoutMs?: number;
   /** Max time model-only activity (heartbeats) may keep the turn alive without productive output. */
@@ -863,7 +872,16 @@ async function* runTurnBody(
         toolsMode: input.toolsMode,
         signal: input.signal,
       },
-      { onToolCall: toolSink },
+      {
+        onToolCall: toolSink,
+        // #631: background wakes pass a chain-wide wall-clock deadline so a
+        // timed-out primary hands the fallback only the REMAINING budget
+        // instead of a fresh window. Foreground callers omit it — per-attempt
+        // caps are correct when a human is watching the turn.
+        ...(input.chainDeadlineMs !== undefined
+          ? { chainDeadlineMs: input.chainDeadlineMs }
+          : {}),
+      },
     );
     const stream =
       input.toolNarration === true

@@ -134,12 +134,84 @@ import {
 } from "../lib/timerHealth.ts";
 import { openTaskStore } from "../lib/tasks.ts";
 import { openMemoryStore } from "../memory/store.ts";
+import {
+  classifyCadence,
+  defaultReviewIntervalMs,
+} from "../lib/cronSchedule.ts";
 import { checkIntegrity, listRestorePoints } from "../memory/dbBackup.ts";
 import { DRAWER_KINDS } from "../memory/drawers.ts";
 import { drawerPath } from "../memory/drawerIngest.ts";
 
 /** Window for the capture-health check: a "dry day" is judged over 24h. */
+
 const CAPTURE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Wake budget for the doctor's claim-age warning (#631): a background wake
+ * is capped at 30 min of wall clock (BACKGROUND_WAKE_HARD_TIMEOUT_MS in
+ * cli/tick.ts); a claim older than this is either a hung runner or a stale
+ * one the sweeper has not reached yet. Matched as minutes for rendering.
+ */
+const WAKE_BUDGET_WARN_MINUTES = 30;
+
+/**
+ * Scheduled-task dispatch health (#631). Best-effort: an unreadable task
+ * store reports "nothing outstanding" rather than failing the doctor run —
+ * the memory-db integrity check above is the place that reports a broken DB.
+ */
+async function defaultTaskClaimHealth(
+  host: { memoryDbPath: string },
+): Promise<NonNullable<DoctorReport["task_claims"]>> {
+  const running: NonNullable<DoctorReport["task_claims"]>["running"] = [];
+  const stale: NonNullable<DoctorReport["task_claims"]>["stale"] = [];
+  const overdue: NonNullable<DoctorReport["task_claims"]>["overdue"] = [];
+  try {
+    const store = await openTaskStore(host.memoryDbPath);
+    try {
+      const now = Date.now();
+      for (const t of store.claimed()) {
+        if (!t.claim) continue;
+        if (store.claimIsStale(t.claim)) {
+          stale.push({
+            id: t.id,
+            description: t.description,
+            persona: t.persona,
+          });
+        } else {
+          running.push({
+            id: t.id,
+            description: t.description,
+            persona: t.persona,
+            minutes: Math.round((now - t.claim.claimedAt) / 60_000),
+          });
+        }
+      }
+      // due(now) IS the overdue population (next_run_at <= now, active);
+      // filter to recurring rows whose lateness exceeds 3× their cadence
+      // interval — the dispatcher-starvation signature, not a task that is
+      // merely seconds from its slot or currently claimed mid-run.
+      for (const t of store.due(new Date(now))) {
+        if (t.oneOff) continue;
+        const overdueMs = now - t.nextRunAt.getTime();
+        const cadence = classifyCadence(t.schedule, new Date(now));
+        const intervalMs = defaultReviewIntervalMs(cadence);
+        if (overdueMs > 3 * intervalMs) {
+          overdue.push({
+            id: t.id,
+            description: t.description,
+            persona: t.persona,
+            overdue_minutes: Math.round(overdueMs / 60_000),
+          });
+        }
+      }
+    } finally {
+      store.close();
+    }
+  } catch {
+    // Unreadable store — report nothing; the memory-db check covers it.
+  }
+  return { running, stale, overdue };
+}
 /**
  * Below this many real user turns in the window we don't flag a dry
  * day — a genuinely quiet day legitimately has nothing to capture.
@@ -410,6 +482,31 @@ export interface DoctorReport {
       stale: boolean;
       threshold_minutes: number;
     };
+  };
+  /**
+   * Scheduled-task dispatch health (issue #631) — warn-only. A claimed task
+   * is a wake still running in its detached child; a STALE claim is one whose
+   * runner died (the next tick sweeps it). A recurring task overdue by more
+   * than 3× its cadence interval means the dispatcher is starving it.
+   */
+  task_claims?: {
+    running: Array<{
+      id: number;
+      description: string;
+      persona: string;
+      minutes: number;
+    }>;
+    stale: Array<{
+      id: number;
+      description: string;
+      persona: string;
+    }>;
+    overdue: Array<{
+      id: number;
+      description: string;
+      persona: string;
+      overdue_minutes: number;
+    }>;
   };
   /**
    * Per-persona maintenance coverage (#486): for every persona this host
@@ -1127,6 +1224,15 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
   const dryDay = userTurns >= DRY_DAY_TURN_THRESHOLD && captures === 0;
+
+  // Scheduled-task dispatch health (#631) — best-effort and warn-only. The
+  // tasks table lives in the same memory DB as the turns, so it is checked
+  // under the same dbHealth gate as the capture counts above.
+  let taskClaims: DoctorReport["task_claims"] | undefined;
+  if (dbHealth.ok) {
+    taskClaims = await defaultTaskClaimHealth(host);
+  }
+
   const telegramReport = telegramHealthReport(host, personaConfigs);
   const phantomchatReport =
     input.checkPhantomchat === false
@@ -1892,6 +1998,36 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     };
     renderTimer("heartbeat", timersReport.heartbeat);
     renderTimer("tick", timersReport.tick);
+  }
+
+  // Scheduled-task dispatch health (#631) — warn-only, and SILENT when
+  // healthy: #632's doctor contract is that a healthy queue produces no
+  // tasks line at all (the pre-existing suite asserts this).
+  if (taskClaims) {
+    const nClaims =
+      taskClaims.running.length +
+      taskClaims.stale.length +
+      taskClaims.overdue.length;
+    if (nClaims > 0) {
+      for (const r of taskClaims.running) {
+        out.write(
+          `  scheduled tasks: ${tick(r.minutes <= WAKE_BUDGET_WARN_MINUTES)} — ` +
+            `task ${r.id} "${r.description}" (${r.persona}) claimed ${r.minutes}m ago\n`,
+        );
+      }
+      for (const r of taskClaims.stale) {
+        out.write(
+          `  scheduled tasks: ${tick(false)} — task ${r.id} "${r.description}" ` +
+            `(${r.persona}) has a STALE claim (runner died); the next tick reclaims it\n`,
+        );
+      }
+      for (const r of taskClaims.overdue) {
+        out.write(
+          `  scheduled tasks: ${tick(false)} — task ${r.id} "${r.description}" ` +
+            `(${r.persona}) overdue ${r.overdue_minutes}m past its schedule\n`,
+        );
+      }
+    }
   }
 
   // Per-persona maintenance coverage (#486) — warn-only, never exit-code.

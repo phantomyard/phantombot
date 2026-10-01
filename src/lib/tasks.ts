@@ -15,6 +15,7 @@
 
 import { Database } from "bun:sqlite";
 import { mkdir } from "node:fs/promises";
+import { hostname } from "node:os";
 import { dirname } from "node:path";
 
 import { redactForLog } from "./redact.ts";
@@ -25,6 +26,15 @@ import {
   nextFire,
   validateCron,
 } from "./cronSchedule.ts";
+
+export interface TaskClaim {
+  /** Absolute time the claim was taken (ms epoch). */
+  claimedAt: number;
+  /** Hostname the claiming tick process ran on (multi-host shared DBs). */
+  host: string;
+  /** OS pid of the claiming process. */
+  pid: number;
+}
 
 export interface Task {
   id: number;
@@ -60,6 +70,8 @@ export interface Task {
   command?: string;
   /** Env var names to expose to a command-backed task. */
   commandSecrets: string[];
+  /** Live dispatch claim, if any (see claimForRun / releaseClaim). */
+  claim?: TaskClaim;
 }
 
 export interface TaskRunRow {
@@ -112,6 +124,13 @@ export interface TaskAddInput {
   commandSecrets?: string[];
 }
 
+/**
+ * A claim older than this is stale even if its pid still probes alive —
+ * the runner hung rather than died. Deliberately far beyond any legitimate
+ * wake's hard budget (2× the 30-min background cap); see TaskStore.claimIsStale.
+ */
+export const CLAIM_STALE_TTL_MS = 2 * 30 * 60 * 1000;
+
 export type TaskAddResult =
   | { ok: true; id: number; task: Task }
   | { ok: false; error: string };
@@ -136,7 +155,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   silent          INTEGER NOT NULL DEFAULT 0,
   created_by      TEXT NOT NULL DEFAULT '',
   command         TEXT,
-  command_secrets TEXT NOT NULL DEFAULT '[]'
+  command_secrets TEXT NOT NULL DEFAULT '[]',
+  claim           TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_runs (
@@ -169,6 +189,13 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE tasks ADD COLUMN command TEXT`,
   // v3 -> v4: least-privilege env for command-backed tasks
   `ALTER TABLE tasks ADD COLUMN command_secrets TEXT NOT NULL DEFAULT '[]'`,
+  // v4 -> v5 (issue #631): dispatch claim for claim-then-dispatch tick —
+  // JSON {claimed_at, host, pid}. Set under the tick lock during selection,
+  // cleared by the runner that owns the run. A stale row (pid dead) is
+  // reclaimed by the next tick; it is the only thing stopping a second
+  // tick from double-firing a one-off once the tick lock stops covering
+  // the run itself.
+  `ALTER TABLE tasks ADD COLUMN claim TEXT`,
 ];
 
 /**
@@ -202,6 +229,32 @@ interface RawTaskRow {
   created_by: string;
   command?: string | null;
   command_secrets?: string | null;
+  claim?: string | null;
+}
+
+/**
+ * Parse a claim cell. Never throws: a corrupt cell (hand-edited DB, torn
+ * write across a downgrade) reads as "no live claim" and the next tick
+ * re-claims cleanly — the wrong direction to fail closed in, since a
+ * wedged-looking claim would starve the task forever.
+ */
+export function parseTaskClaim(raw: string | null | undefined): TaskClaim | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed === null || typeof parsed !== "object" ||
+      typeof (parsed as { claimed_at?: unknown }).claimed_at !== "number" ||
+      typeof (parsed as { pid?: unknown }).pid !== "number" ||
+      typeof (parsed as { host?: unknown }).host !== "string"
+    ) {
+      return undefined;
+    }
+    const p = parsed as { claimed_at: number; host: string; pid: number };
+    return { claimedAt: p.claimed_at, host: p.host, pid: p.pid };
+  } catch {
+    return undefined;
+  }
 }
 
 function parseCommandSecrets(raw: string | null | undefined): string[] {
@@ -236,6 +289,7 @@ function rowToTask(r: RawTaskRow): Task {
     createdBy: r.created_by,
     command: r.command ?? undefined,
     commandSecrets: parseCommandSecrets(r.command_secrets),
+    claim: r.claim ? parseTaskClaim(r.claim) : undefined,
   };
 }
 
@@ -361,6 +415,135 @@ export class TaskStore {
       )
       .all(asOf.toISOString()) as RawTaskRow[];
     return rows.map(rowToTask);
+  }
+
+  /** All tasks with a non-null claim, active or not. */
+  claimed(): Task[] {
+    const rows = this.db
+      .prepare("SELECT * FROM tasks WHERE claim IS NOT NULL")
+      .all() as RawTaskRow[];
+    return rows.map(rowToTask);
+  }
+
+  /**
+   * Atomically claim a due task for dispatch (issue #631).
+   *
+   * Runs read-check-write inside an `.immediate()` transaction — SQLite's
+   * write lock is held for the whole thing, so two ticks selecting the same
+   * row cannot both claim it: the loser sees the winner's claim and gets
+   * undefined back. A LIVE claim (pid still probeable-alive on this host)
+   * blocks the claim even when the row is still due — that is the exact
+   * mechanism that stops a second tick from double-firing a one-off whose
+   * runner is still in flight (previously the job of the process-wide tick
+   * lock, which no longer covers the run itself). A STALE claim (pid dead —
+   * the runner crashed before releasing) is transparently stolen here, so a
+   * crashed child costs one tick of delay, not the task forever.
+   *
+   * A task claimed but no longer due (clock moved, row cancelled mid-run)
+   * also refuses: claiming re-checks due-ness so a claim is never a
+   * commitment to run something the schedule no longer wants.
+   *
+   * `nowMs` is injected so tests can pin the clock.
+   */
+  claimForRun(
+    id: number,
+    opts: { claimedAt: number; host: string; pid: number; nowMs: number },
+  ): Task | undefined {
+    let claimed: Task | undefined;
+    this.db.transaction(() => {
+      const t = this.get(id);
+      if (!t || !t.active) return;
+      if (t.nextRunAt.getTime() > opts.nowMs) return;
+      if (t.claim && !this.claimIsStale(t.claim, { nowMs: opts.nowMs })) {
+        return;
+      }
+      this.db
+        .prepare("UPDATE tasks SET claim = ? WHERE id = ?")
+        .run(
+          JSON.stringify({
+            claimed_at: opts.claimedAt,
+            host: opts.host,
+            pid: opts.pid,
+          }),
+          id,
+        );
+      claimed = this.get(id);
+    }).immediate();
+    return claimed;
+  }
+
+  /** Drop the claim (runner finished, or the next tick stole a stale one). */
+  releaseClaim(id: number): void {
+    this.db
+      .prepare("UPDATE tasks SET claim = NULL WHERE id = ?")
+      .run(id);
+  }
+
+  /**
+   * Re-point a live claim at the process that actually OWNS the run now
+   * (issue #631). The tick parent claims with its own pid during selection,
+   * but that process exits seconds after dispatch — if the claim kept
+   * naming it, the next tick's stale-claim sweep would probe a DEAD pid,
+   * release the claim, and re-dispatch a wake whose real runner is still
+   * alive: a double fire, the invariant claim-then-dispatch exists to keep.
+   * The dispatcher adopts the spawned child's pid at dispatch, and the wake
+   * child re-adopts its own pid on boot, so the sweep always probes the
+   * live runner. Claimed instant and host are preserved — adoption is a
+   * handoff, not a new claim.
+   *
+   * No-op when the claim is gone (a fast-finishing runner already released
+   * it) — adoption must never resurrect a released claim.
+   */
+  adoptClaimPid(id: number, pid: number): void {
+    this.db.transaction(() => {
+      const t = this.get(id);
+      if (!t?.claim) return;
+      this.db
+        .prepare("UPDATE tasks SET claim = ? WHERE id = ?")
+        .run(
+          JSON.stringify({
+            claimed_at: t.claim.claimedAt,
+            host: t.claim.host,
+            pid,
+          }),
+          id,
+        );
+    }).immediate();
+  }
+
+  /**
+   * True when the claim is stale: either its pid is dead on this host (the
+   * runner crashed before releasing — the next tick may reclaim the task),
+   * or the claim is past {@link CLAIM_STALE_TTL_MS} (the runner hung; a
+   * foreign-host claim can't be probed, so the TTL is its only clock).
+   * A LIVE local pid within the TTL is never stale — stealing it would
+   * double-fire a task whose process may still be running, violating #631's
+   * acceptance invariant. Doctor surfaces those instead.
+   */
+  claimIsStale(
+    claim: TaskClaim,
+    opts: { nowMs?: number } = {},
+  ): boolean {
+    const expired =
+      opts.nowMs !== undefined &&
+      opts.nowMs - claim.claimedAt > CLAIM_STALE_TTL_MS;
+    if (claim.host !== hostname()) return expired;
+    // Backstop: a claim older than CLAIM_STALE_TTL_MS is stale even if its
+    // pid still probes alive — the runner hung rather than died. The TTL is
+    // deliberately far beyond any legitimate wake (a wake's hard budget is
+    // BACKGROUND_WAKE_HARD_TIMEOUT_MS); reclaiming a HUNG runner would risk
+    // double-firing a task whose process may still be running, so the
+    // automatic reclaim is late on purpose. Doctor surfaces live claims
+    // past the wake budget long before this.
+    if (opts.nowMs !== undefined && opts.nowMs - claim.claimedAt > CLAIM_STALE_TTL_MS) {
+      return true;
+    }
+    try {
+      process.kill(claim.pid, 0);
+      return false; // probe succeeded — alive
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === "ESRCH";
+    }
   }
 
   cancel(id: number): boolean {

@@ -3,7 +3,13 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { previewForLog, runTick } from "../src/cli/tick.ts";
+import {
+  previewForLog,
+  runTaskWake,
+  runTick,
+  type RunTaskWakeInput,
+  type RunTickInput,
+} from "../src/cli/tick.ts";
 import type { Config } from "../src/config.ts";
 import type {
   Harness,
@@ -11,6 +17,7 @@ import type {
   HarnessRequest,
 } from "../src/harnesses/types.ts";
 import { acquireRunLock, isLockHandle } from "../src/lib/runLock.ts";
+import { hostname } from "node:os";
 import { openTaskStore, type TaskStore } from "../src/lib/tasks.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 
@@ -134,6 +141,41 @@ beforeEach(async () => {
   };
 });
 
+/**
+ * Test seam helper: run the tick with agent wakes executing IN-PROCESS via
+ * `runTaskWake` (the detached-child path is seam-replaced by a call to the
+ * very function the child would run, carrying the injected harnesses).
+ * Everything else about the parent's behavior — deferral, claiming, ordering
+ * — is production code.
+ */
+type InlineWakeInput = Omit<RunTickInput, "spawnWake" | "harnesses" | "buildHarnesses"> & {
+  harnesses?: RunTaskWakeInput["harnesses"];
+  buildHarnesses?: RunTaskWakeInput["buildHarnesses"];
+  loadPersonaConfig?: RunTaskWakeInput["loadPersonaConfig"];
+};
+
+function tickInline(input: InlineWakeInput): Promise<number> {
+  const { harnesses, buildHarnesses, loadPersonaConfig, ...rest } = input;
+  return runTick({
+    ...rest,
+    loadPersonaConfig,
+    spawnWake: async (task) => {
+      const code = await runTaskWake(task.id, {
+        config: input.config,
+        taskStore: input.taskStore ?? store,
+        memory: input.memory ?? memory,
+        now: input.now,
+        harnesses,
+        buildHarnesses,
+        loadPersonaConfig,
+        out: input.out ?? { write() {} },
+        err: input.err,
+      });
+      if (code !== 0) throw new Error(`inline wake exited ${code}`);
+    },
+  });
+}
+
 afterEach(async () => {
   store.close();
   await memory.close();
@@ -145,7 +187,7 @@ describe("runTick — no-op cases", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "should not run" },
     ]);
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -161,7 +203,7 @@ describe("runTick — no-op cases", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "unused" },
     ]);
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -194,7 +236,7 @@ describe("runTick — normal task fire", () => {
     ]);
     const resolvedPersonas: Array<string | undefined> = [];
 
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -241,7 +283,7 @@ describe("runTick — normal task fire", () => {
     ]);
     const seenConfigs: number[] = [];
 
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -284,7 +326,7 @@ describe("runTick — normal task fire", () => {
     const capture = captureStream("stderr");
     const trap = installFetchTrap();
     try {
-      await runTick({
+      await tickInline({
         config,
         taskStore: store,
         memory,
@@ -365,7 +407,7 @@ describe("runTick — normal task fire", () => {
       },
     });
 
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory: spied,
@@ -411,7 +453,7 @@ describe("runTick — normal task fire", () => {
         now: new Date("2026-05-02T09:30:00Z"),
       });
       if (!created.ok) throw new Error("setup");
-      const code = await runTick({
+      const code = await tickInline({
         config,
         taskStore: store,
         memory,
@@ -454,7 +496,7 @@ describe("runTick — normal task fire", () => {
         now: new Date("2026-05-02T09:30:00Z"),
       });
       if (!created.ok) throw new Error("setup");
-      const code = await runTick({
+      const code = await tickInline({
         config,
         taskStore: store,
         memory,
@@ -504,7 +546,7 @@ describe("runTick — normal task fire", () => {
     });
     if (!created.ok) throw new Error("setup");
 
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -555,7 +597,7 @@ describe("runTick — normal task fire", () => {
     if (!created.ok) throw new Error("setup");
 
     try {
-      const code = await runTick({
+      const code = await tickInline({
         config,
         taskStore: store,
         memory,
@@ -607,7 +649,7 @@ describe("runTick — normal task fire", () => {
     if (!created.ok) throw new Error("setup");
 
     try {
-      const code = await runTick({
+      const code = await tickInline({
         config,
         taskStore: store,
         memory,
@@ -640,7 +682,7 @@ describe("runTick — normal task fire", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "should not run" },
     ]);
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -673,7 +715,7 @@ describe("runTick — normal task fire", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "should not run" },
     ]);
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -706,7 +748,7 @@ describe("runTick — normal task fire", () => {
       now: new Date("2026-05-02T09:30:00Z"),
     });
     if (!created.ok) throw new Error("setup");
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -735,7 +777,7 @@ describe("runTick — normal task fire", () => {
     });
     if (!created.ok) throw new Error("setup");
 
-    const code = await runTick({
+    const code = await tickInline({
       config: shortTimeoutConfig,
       taskStore: store,
       memory,
@@ -786,7 +828,7 @@ describe("runTick — normal task fire", () => {
       });
       if (!created.ok) throw new Error("setup");
 
-      const code = await runTick({
+      const code = await tickInline({
         config: shortTimeoutConfig,
         taskStore: store,
         memory,
@@ -835,7 +877,7 @@ describe("runTick — normal task fire", () => {
       { type: "done", finalText: "result" },
     ]);
     // Simulate the 10:00 tick.
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -846,7 +888,13 @@ describe("runTick — normal task fire", () => {
     expect(code).toBe(0);
     expect(harness.invocations).toBe(1);
     expect(harness.lastRequest?.idleTimeoutMs).toBe(config.harnessIdleTimeoutMs);
-    expect(harness.lastRequest?.hardTimeoutMs).toBe(30 * 60 * 1000);
+    // #631: the 30-min wake budget is now a chain-wide deadline, so the
+    // first attempt's hard cap is min(30 min, time-remaining) — a hair under
+    // the budget once the clock has ticked, still the full budget in spirit.
+    expect(harness.lastRequest?.hardTimeoutMs).toBeGreaterThan(
+      30 * 60 * 1000 - 1_000,
+    );
+    expect(harness.lastRequest?.hardTimeoutMs!).toBeLessThanOrEqual(30 * 60 * 1000);
     // The original prompt is still there...
     expect(harness.lastUserMessage).toContain("do the thing");
     // ...followed by the hygiene footer because there's no expiry.
@@ -873,7 +921,7 @@ describe("runTick — normal task fire", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "result" },
     ]);
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -899,7 +947,7 @@ describe("runTick — normal task fire", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "result" },
     ]);
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -926,7 +974,7 @@ describe("runTick — review path", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "STOP — no longer needed" },
     ]);
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -959,7 +1007,7 @@ describe("runTick — review path", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "KEEP — still useful" },
     ]);
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -989,7 +1037,7 @@ describe("runTick — review path", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "uh, I'm not sure" },
     ]);
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1020,7 +1068,7 @@ describe("runTick — lockfile", () => {
       const harness = new ScriptedHarness("h", [
         { type: "done", finalText: "x" },
       ]);
-      const code = await runTick({
+      const code = await tickInline({
         config,
         taskStore: store,
         memory,
@@ -1067,7 +1115,7 @@ describe("runTick — quiet-by-default (no auto-Telegram delivery)", () => {
     ]);
     const trap = installFetchTrap();
     try {
-      await runTick({
+      await tickInline({
         config: configWithTelegram,
         taskStore: store,
         memory,
@@ -1112,7 +1160,7 @@ describe("runTick — quiet-by-default (no auto-Telegram delivery)", () => {
     ]);
     const trap = installFetchTrap();
     try {
-      await runTick({
+      await tickInline({
         config: configWithTelegram,
         taskStore: store,
         memory,
@@ -1146,7 +1194,7 @@ describe("runTick — failure resilience", () => {
         throw new Error("boom");
       }
     }
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1182,7 +1230,7 @@ describe("runTick — orphaned tasks (issue #632)", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "must never run" },
     ]);
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1203,7 +1251,7 @@ describe("runTick — orphaned tasks (issue #632)", () => {
 
     // Deactivation is terminal: a SECOND tick over the same row neither
     // re-deactivates nor appends another run — it is simply no longer due.
-    const code2 = await runTick({
+    const code2 = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1227,7 +1275,7 @@ describe("runTick — orphaned tasks (issue #632)", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "ran" },
     ]);
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1295,7 +1343,7 @@ describe("runTick — wake deferral while the principal is talking (issue #391)"
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "should not run" },
     ]);
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1329,7 +1377,7 @@ describe("runTick — wake deferral while the principal is talking (issue #391)"
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "ran" },
     ]);
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1357,7 +1405,7 @@ describe("runTick — wake deferral while the principal is talking (issue #391)"
     ]);
     // 20 minutes past due, well beyond MAX_DEFERRAL_MS. Starving a scheduled
     // task indefinitely is a worse failure than the collision — it is silent.
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1396,7 +1444,7 @@ describe("runTick — wake deferral while the principal is talking (issue #391)"
     const created = addPoller(askMarker);
     await seedLiveConversation(new Date("2026-05-02T10:00:00Z"));
 
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1420,7 +1468,7 @@ describe("runTick — wake deferral while the principal is talking (issue #391)"
     const created = addPoller(askMarker);
     // No registry entries at all — nobody is talking.
 
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1440,7 +1488,7 @@ describe("runTick — wake deferral while the principal is talking (issue #391)"
 
     // 20 minutes past due, beyond MAX_DEFERRAL_MS: a poller that never polls is
     // a worse failure than the collision, because it is silent.
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1451,5 +1499,288 @@ describe("runTick — wake deferral while the principal is talking (issue #391)"
 
     expect(existsSync(askMarker)).toBe(true);
     expect(store.get(created.id)!.runCount).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Claim-then-dispatch (issue #631): the tick lock covers selection only;
+// agent wakes are claimed then dispatched as detached children; a live
+// claim is the no-double-fire guarantee; a dead-pid claim is reclaimed.
+// ─────────────────────────────────────────────────────────────────────────
+describe("runTick — claim-then-dispatch (issue #631)", () => {
+  function addOneOffWake(now: Date) {
+    const created = store.add({
+      persona: "phantom",
+      description: "one-off long wake",
+      schedule: "",
+      prompt: "do the long thing",
+      oneOff: true,
+      nextRunAt: now,
+      now,
+    });
+    if (!created.ok) throw new Error("setup");
+    return created;
+  }
+
+  test("claims the task, dispatches the child seam, and releases the lock while the wake is in flight", async () => {
+    const now = new Date("2026-05-02T10:00:00Z");
+    const created = addOneOffWake(now);
+    const dispatched: number[] = [];
+    // A seam that returns without running the wake — the detached child is
+    // "out there" running for a long time.
+    const code = await runTick({
+      config,
+      taskStore: store,
+      memory,
+      lockPath,
+      now,
+      out: { write() {} },
+      spawnWake: async (task) => {
+        dispatched.push(task.id);
+      },
+    });
+    expect(code).toBe(0);
+    expect(dispatched).toEqual([created.id]);
+
+    // The claim is live and names the task.
+    const t = store.get(created.id)!;
+    expect(t.claim).toBeDefined();
+    expect(t.claim!.pid).toBe(process.pid);
+    expect(t.claim!.host).toBe(hostname());
+
+    // The tick LOCK is released — the next minute's tick can start even
+    // though the wake is still in flight (the old design held the lock for
+    // the whole run, which is what wedged robbie's host for ~95 minutes).
+    const secondLock = acquireRunLock(lockPath);
+    expect(isLockHandle(secondLock)).toBe(true);
+    if (isLockHandle(secondLock)) secondLock.release();
+  });
+
+  test("a second tick does not double-fire a claimed one-off", async () => {
+    const now = new Date("2026-05-02T10:00:00Z");
+    const created = addOneOffWake(now);
+    const seam = { calls: 0 };
+    const spawn = async (): Promise<void> => {
+      seam.calls++; // returns immediately; the "child" runs for a long time
+    };
+    await runTick({
+      config, taskStore: store, memory, lockPath, now,
+      out: { write() {} }, spawnWake: spawn,
+    });
+    expect(seam.calls).toBe(1);
+
+    // One tick later, the one-off is still "due" (its row only advances when
+    // the child finishes) — but the live claim must refuse a second dispatch.
+    const later = new Date("2026-05-02T10:01:00Z");
+    await runTick({
+      config, taskStore: store, memory, lockPath, now: later,
+      out: { write() {} }, spawnWake: spawn,
+    });
+    expect(seam.calls).toBe(1);
+    const t = store.get(created.id)!;
+    expect(t.runCount).toBe(0);
+    expect(t.active).toBe(true);
+  });
+
+  test("a claim whose pid is dead is reclaimed by the next tick", async () => {
+    const now = new Date("2026-05-02T10:00:00Z");
+    const created = addOneOffWake(now);
+    // Simulate a child that was dispatched and then crashed hard (SIGKILL):
+    // the claim stays, its pid is dead.
+    const deadChild = Bun.spawnSync(["true"]);
+    store.releaseClaim(created.id);
+    store.claimForRun(created.id, {
+      claimedAt: now.getTime(),
+      host: hostname(),
+      pid: deadChild.pid,
+      nowMs: now.getTime(),
+    });
+    expect(store.get(created.id)!.claim!.pid).toBe(deadChild.pid);
+
+    const dispatched: number[] = [];
+    const later = new Date("2026-05-02T10:01:00Z");
+    await runTick({
+      config, taskStore: store, memory, lockPath, now: later,
+      out: { write() {} },
+      spawnWake: async (task) => {
+        dispatched.push(task.id);
+      },
+    });
+    // The stale claim was swept and the task re-dispatched.
+    expect(dispatched).toEqual([created.id]);
+    expect(store.get(created.id)!.claim!.pid).toBe(process.pid);
+  });
+
+  test("claim adoption: a live runner pid survives the dispatcher's exit (production double-fire shape)", async () => {
+    // THE #631 production scenario the claim design must survive: the tick
+    // parent claims under its own pid, spawns a detached child, and EXITS —
+    // so the claim's original pid dies seconds later while the real runner
+    // lives on for up to 30 minutes. Without adoption the next tick's
+    // stale-claim sweep probes the dead dispatcher pid, releases the claim
+    // and re-dispatches — a double fire every tick interval for the whole
+    // run. spawnWakeChild adopts the child's pid at dispatch; simulate that
+    // here with a real sleeper standing in for the wake child.
+    const now = new Date("2026-05-02T10:00:00Z");
+    const created = addOneOffWake(now);
+    const runner = Bun.spawn(["sleep", "60"], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    const seam = { calls: 0 };
+    try {
+      await runTick({
+        config, taskStore: store, memory, lockPath, now,
+        out: { write() {} },
+        spawnWake: async (task, { taskStore: s }) => {
+          seam.calls++;
+          // What the production dispatcher does right after spawn.
+          s.adoptClaimPid(task.id, runner.pid);
+        },
+      });
+      expect(seam.calls).toBe(1);
+      // The claim names the RUNNER, not this (about-to-"exit") process.
+      expect(store.get(created.id)!.claim!.pid).toBe(runner.pid);
+
+      // One tick later the one-off is still due (its row only advances when
+      // the runner finishes) — but the adopted claim is LIVE, so the tick
+      // must not re-dispatch, exactly as if the dispatcher had exited.
+      await runTick({
+        config, taskStore: store, memory, lockPath,
+        now: new Date("2026-05-02T10:01:00Z"),
+        out: { write() {} },
+        spawnWake: async () => {
+          seam.calls++;
+        },
+      });
+      expect(seam.calls).toBe(1);
+      expect(store.get(created.id)!.runCount).toBe(0);
+    } finally {
+      runner.kill("SIGKILL");
+      await runner.exited;
+    }
+
+    // Once the runner DIES (crash), the very next tick sweeps the adopted
+    // claim and re-dispatches — one tick of delay, never a lost task.
+    await runTick({
+      config, taskStore: store, memory, lockPath,
+      now: new Date("2026-05-02T10:02:00Z"),
+      out: { write() {} },
+      spawnWake: async () => {
+        seam.calls++;
+      },
+    });
+    expect(seam.calls).toBe(2);
+  });
+
+  test("command tasks run to completion even while an agent wake is in flight", async () => {
+    const now = new Date("2026-05-02T10:00:00Z");
+    const wake = addOneOffWake(now);
+    const marker = join(workdir, "command-ran.txt");
+    const cmd = store.add({
+      persona: "phantom",
+      description: "cheap poller",
+      schedule: "0 * * * *",
+      prompt: "audit context",
+      command: `printf ok > ${marker}`,
+      // Next fire of the hourly cron from 09:30 is exactly 10:00.
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!cmd.ok) throw new Error("setup");
+    const code = await runTick({
+      config, taskStore: store, memory, lockPath, now,
+      out: { write() {} },
+      // The wake child never finishes within this tick — the seam returns
+      // and the "child" stays in flight.
+      spawnWake: async () => {},
+    });
+    expect(code).toBe(0);
+    // The command task ran in-process and completed.
+    expect(await readFile(marker, "utf8")).toBe("ok");
+    expect(store.get(cmd.id)!.runCount).toBe(1);
+    expect(store.get(cmd.id)!.claim).toBeUndefined();
+    // The wake was dispatched and is still claimed by this tick's pid.
+    expect(store.get(wake.id)!.claim).toBeDefined();
+  });
+
+  test("per-persona concurrency cap defers the second wake to the next tick", async () => {
+    const now = new Date("2026-05-02T10:00:00Z");
+    const cappedConfig: Config = {
+      ...config,
+      tick: { maxConcurrentWakes: 1 },
+    };
+    const a = addOneOffWake(now);
+    const b = addOneOffWake(now);
+    const dispatched: number[] = [];
+    await runTick({
+      config: cappedConfig, taskStore: store, memory, lockPath, now,
+      out: { write() {} },
+      spawnWake: async (task) => {
+        dispatched.push(task.id);
+      },
+    });
+    // One wake dispatched; the other stays unclaimed and due.
+    expect(dispatched).toHaveLength(1);
+    const dispatchedId = dispatched[0]!;
+    const otherId = dispatchedId === a.id ? b.id : a.id;
+    expect(store.get(otherId)!.claim).toBeUndefined();
+
+    // Once the first wake finishes (claim released), the next tick runs the
+    // queued one — in its own lane, never having blocked anything else.
+    const finished = store.get(dispatchedId)!;
+    store.recordRun(finished.id, now);
+    store.releaseClaim(finished.id);
+    const later = new Date("2026-05-02T10:01:00Z");
+    const second: number[] = [];
+    await runTick({
+      config: cappedConfig, taskStore: store, memory, lockPath, now: later,
+      out: { write() {} },
+      spawnWake: async (task) => {
+        second.push(task.id);
+      },
+    });
+    expect(second).toEqual([otherId]);
+  });
+
+  test("runTaskWake (the child runner) owns run bookkeeping end to end", async () => {
+    const now = new Date("2026-05-02T10:00:00Z");
+    const created = addOneOffWake(now);
+    // Claim it the way the tick parent would.
+    store.claimForRun(created.id, {
+      claimedAt: now.getTime(),
+      host: hostname(),
+      pid: process.pid,
+      nowMs: now.getTime(),
+    });
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "wake output" },
+    ]);
+    const code = await runTaskWake(created.id, {
+      config,
+      taskStore: store,
+      memory,
+      now,
+      harnesses: [harness],
+      out: { write() {} },
+    });
+    expect(code).toBe(0);
+    expect(harness.lastUserMessage).toBe("do the long thing"); // one-off: no footer
+    const t = store.get(created.id)!;
+    expect(t.runCount).toBe(1);
+    expect(t.active).toBe(false); // one-off deactivates
+    expect(t.claim).toBeUndefined(); // claim released
+    const runs = store.taskRuns(created.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.status).toBe("ok");
+    expect(runs[0]!.outputExcerpt).toContain("wake output");
+  });
+
+  test("runTaskWake with a task id that does not exist exits non-zero without crashing", async () => {
+    const code = await runTaskWake(424242, {
+      config,
+      taskStore: store,
+      memory,
+      now: new Date("2026-05-02T10:00:00Z"),
+      out: { write() {} },
+    });
+    expect(code).toBe(1);
   });
 });

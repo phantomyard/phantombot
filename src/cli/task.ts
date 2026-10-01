@@ -394,7 +394,14 @@ export async function runTaskList(input: RunTaskListInput = {}): Promise<number>
       return 0;
     }
     for (const t of tasks) {
-      out.write(formatTaskOneLine(t) + "\n");
+      // #631: a claimed task is a wake/command still running in its child —
+      // show it, and distinguish a live claim from one whose runner died
+      // (the next tick sweeps the stale kind automatically).
+      let claimState: "running" | "stale" | undefined;
+      if (t.claim) {
+        claimState = store.claimIsStale(t.claim) ? "stale" : "running";
+      }
+      out.write(formatTaskOneLine(t, claimState) + "\n");
     }
     return 0;
   } finally {
@@ -528,14 +535,24 @@ export async function runTaskSelftest(
   }
 }
 
-function formatTaskOneLine(t: Task): string {
+function formatTaskOneLine(t: Task, claimState?: "running" | "stale"): string {
   const flag = t.active ? "" : " [inactive]";
   const type = t.oneOff ? "once" : "recur";
   const mode = t.command ? " command" : "";
+  // #631: "running since" replaces "next=" while a claimed run is in flight —
+  // the old line kept showing a past next_run_at with no hint anything was
+  // actually running, which is how a 95-minute wedge looked like idleness.
+  const running =
+    claimState === "running" && t.claim
+      ? `  running=${formatLocal(new Date(t.claim.claimedAt))}`
+      : claimState === "stale"
+        ? "  claim=STALE (runner died; next tick reclaims)"
+        : "";
   return (
     `[${t.id}] ${t.description}${flag}` +
     `  type=${type}${mode}  next=${formatLocal(t.nextRunAt)}  runs=${t.runCount}` +
-    (t.schedule ? `  schedule=${t.schedule}` : "")
+    (t.schedule ? `  schedule=${t.schedule}` : "") +
+    running
   );
 }
 
@@ -548,6 +565,10 @@ function formatTaskFull(t: Task): string {
     `schedule:     ${t.schedule || "(none — one-off)"}\n` +
     `active:       ${t.active}\n` +
     `created:      ${t.createdAt.toISOString()}\n` +
+    (t.claim
+      ? `claim:        since ${new Date(t.claim.claimedAt).toISOString()} ` +
+        `(host ${t.claim.host}, pid ${t.claim.pid})\n`
+      : "") +
     `last run:     ${t.lastRunAt ? formatLocal(t.lastRunAt) : "(never)"}\n` +
     `next run:     ${formatLocal(t.nextRunAt)}\n` +
     `runs:         ${t.runCount}` +
