@@ -649,6 +649,50 @@ describe("TaskStore.claimForRun (issue #631)", () => {
     expect(reclaimed).toBeDefined();
   });
 
+  test("adoptClaimPid re-points a live claim at the runner, preserving instant and host", () => {
+    const id = addDue();
+    // The tick parent claims with its own (soon-dead) pid during selection.
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: 424242, // the "parent", about to exit
+      nowMs: NOW.getTime(),
+    });
+    // Dispatch adopts the runner's pid — a LIVE process, like the detached
+    // wake child in production (this process stands in for it: liveness is
+    // what matters to the sweep).
+    store.adoptClaimPid(id, process.pid);
+    const t = store.get(id)!;
+    expect(t.claim).toEqual({
+      claimedAt: NOW.getTime(), // handoff, not a new claim
+      host: hostname(),
+      pid: process.pid,
+    });
+    // And the adopted (live) claim blocks a re-claim — the production
+    // double-fire this exists to prevent.
+    expect(
+      store.claimForRun(id, {
+        claimedAt: NOW.getTime() + 60_000,
+        host: hostname(),
+        pid: 424243,
+        nowMs: NOW.getTime() + 60_000,
+      }),
+    ).toBeUndefined();
+  });
+
+  test("adoptClaimPid never resurrects a released claim", () => {
+    const id = addDue();
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: process.pid,
+      nowMs: NOW.getTime(),
+    });
+    store.releaseClaim(id);
+    store.adoptClaimPid(id, 424242);
+    expect(store.get(id)!.claim).toBeUndefined();
+  });
+
   test("claiming refuses a task that is no longer due", () => {
     const id = addDue();
     const refused = store.claimForRun(id, {

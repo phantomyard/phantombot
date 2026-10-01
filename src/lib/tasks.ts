@@ -480,6 +480,38 @@ export class TaskStore {
   }
 
   /**
+   * Re-point a live claim at the process that actually OWNS the run now
+   * (issue #631). The tick parent claims with its own pid during selection,
+   * but that process exits seconds after dispatch — if the claim kept
+   * naming it, the next tick's stale-claim sweep would probe a DEAD pid,
+   * release the claim, and re-dispatch a wake whose real runner is still
+   * alive: a double fire, the invariant claim-then-dispatch exists to keep.
+   * The dispatcher adopts the spawned child's pid at dispatch, and the wake
+   * child re-adopts its own pid on boot, so the sweep always probes the
+   * live runner. Claimed instant and host are preserved — adoption is a
+   * handoff, not a new claim.
+   *
+   * No-op when the claim is gone (a fast-finishing runner already released
+   * it) — adoption must never resurrect a released claim.
+   */
+  adoptClaimPid(id: number, pid: number): void {
+    this.db.transaction(() => {
+      const t = this.get(id);
+      if (!t?.claim) return;
+      this.db
+        .prepare("UPDATE tasks SET claim = ? WHERE id = ?")
+        .run(
+          JSON.stringify({
+            claimed_at: t.claim.claimedAt,
+            host: t.claim.host,
+            pid,
+          }),
+          id,
+        );
+    }).immediate();
+  }
+
+  /**
    * True when the claim is stale: either its pid is dead on this host (the
    * runner crashed before releasing — the next tick may reclaim the task),
    * or the claim is past {@link CLAIM_STALE_TTL_MS} (the runner hung; a

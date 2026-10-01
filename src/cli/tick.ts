@@ -26,6 +26,12 @@
  * refuses a task with a LIVE claim (pid still probeable-alive), transparently
  * STEALS a STALE one (pid dead — the runner crashed before releasing), and
  * one-off deactivation plus next_run_at advancement happen in the runner.
+ * Because the dispatcher exits seconds after dispatch, the claim's pid must
+ * track the RUNNER, not the dispatcher: the dispatcher ADOPTS the spawned
+ * child's pid into the claim (`adoptClaimPid`) and the wake child re-adopts
+ * its own pid on boot — otherwise the next sweep would probe the exited
+ * dispatcher's corpse and re-dispatch a live wake (a double fire every
+ * tick interval).
  *
  * Quiet-by-default contract: neither tick nor the wake child posts the
  * harness reply to Telegram. The harnessed agent is the sole arbiter of
@@ -116,8 +122,14 @@ export interface RunTickInput {
    * Test seam replacing the detached wake-child spawn (issue #631). Tests
    * either record the dispatch, or run the wake IN-PROCESS via `runTaskWake`
    * with injected harnesses. Production passes undefined → `spawnWakeChild`.
+   * The store is handed through so the dispatcher can ADOPT the spawned
+   * child's pid into the claim — the no-double-fire guarantee depends on
+   * the claim naming the live runner, not this exiting process.
    */
-  spawnWake?: (task: Task, opts: { err: WriteSink }) => Promise<void>;
+  spawnWake?: (
+    task: Task,
+    opts: { err: WriteSink; taskStore: TaskStore },
+  ) => Promise<void>;
   /**
    * Resolve one persona's EFFECTIVE config (test seam, phantombot#439).
    * Used by the command-task path; agent wakes resolve in the child.
@@ -476,7 +488,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
     // advance and the claim release.
     for (const task of claimedWakes) {
       try {
-        await (input.spawnWake ?? spawnWakeChild)(task, { err });
+        await (input.spawnWake ?? spawnWakeChild)(task, { err, taskStore });
       } catch (e) {
         log.error("tick: failed to dispatch wake child", {
           taskId: task.id,
@@ -555,6 +567,16 @@ export async function runTaskWake(
       });
       return 1;
     }
+
+    // Adopt the claim for the run's lifetime (issue #631): the dispatcher
+    // re-pointed it at the SPAWN pid — the systemd-run supervisor when
+    // scoped — which is a valid liveness probe but not the real runner.
+    // Re-point at THIS process so the stale-claim sweep probes the process
+    // actually doing the work. No-op if the claim is somehow gone already
+    // (adoptClaimPid never resurrects a released claim), and it preserves
+    // the claimed-at instant, so the review-vs-run derivation below still
+    // sees the PARENT's claim time.
+    taskStore.adoptClaimPid(task.id, process.pid);
 
     const claim = task.claim;
     const claimedAtMs = claim?.claimedAt ?? now.getTime();
@@ -876,7 +898,7 @@ function systemdScopeAvailable(): boolean {
  */
 async function spawnWakeChild(
   task: Task,
-  _opts: { err: WriteSink },
+  opts: { err: WriteSink; taskStore: TaskStore },
 ): Promise<void> {
   const self = tickSelfCommand();
   const args = [...self.args, "--run-task", String(task.id)];
@@ -893,60 +915,97 @@ async function spawnWakeChild(
     windowsHide: true,
   };
 
-  let scoped = systemdScopeAvailable();
+  // CLAIM ADOPTION — the no-double-fire half of claim-then-dispatch. The
+  // claim was taken under THIS process's pid during selection, but this
+  // process exits right after dispatching. Left that way, the next tick's
+  // stale-claim sweep would probe a dead pid, release the claim and
+  // re-dispatch a wake whose real runner is still alive — a double fire
+  // every tick interval for the whole run. Re-point the claim at the
+  // spawned child's pid (the systemd-run supervisor when scoped: it lives
+  // exactly as long as the scope it guards), so claim liveness tracks the
+  // RUNNER, not the dispatcher. The wake child re-adopts its own pid once
+  // booted (runTaskWake), closing the exec-handoff window.
+  const adopt = (pid: number | undefined): void => {
+    if (typeof pid === "number" && pid > 0) {
+      opts.taskStore.adoptClaimPid(task.id, pid);
+    }
+  };
+
+  let retriedPlain = false;
+  const spawnPlain = (): void => {
+    retriedPlain = true;
+    const plain = spawn(self.cmd, args, spawnOpts);
+    plain.on("error", (e2) => {
+      // The claim stays held by THIS (now exiting) process's pid — the
+      // next tick's stale-claim sweep releases it and re-dispatches.
+      log.error("tick: wake child spawn failed — will retry next tick", {
+        taskId: task.id,
+        persona: task.persona,
+        error: e2.message,
+      });
+    });
+    adopt(plain.pid);
+    plain.unref();
+    log.info("tick: wake child dispatched", {
+      taskId: task.id,
+      persona: task.persona,
+      scoped: false,
+    });
+  };
+
+  if (!systemdScopeAvailable()) {
+    // launchd, Windows, non-systemd Linux: a plain detached spawn survives
+    // its parent, so that is the launch there.
+    spawnPlain();
+    return;
+  }
+
   const child = spawn(
-    scoped ? "systemd-run" : self.cmd,
-    scoped
-      ? [
-          "--user",
-          "--scope",
-          "--collect",
-          `--unit=phantombot-wake-${task.id}-${Date.now()}`,
-          self.cmd,
-          ...args,
-        ]
-      : args,
+    "systemd-run",
+    [
+      "--user",
+      "--scope",
+      "--collect",
+      `--unit=phantombot-wake-${task.id}-${Date.now()}`,
+      self.cmd,
+      ...args,
+    ],
     spawnOpts,
   );
   child.on("error", (e) => {
-    if (scoped) {
-      // systemd-run itself failed (missing binary, no user bus). Retry once
-      // as a plain detached child: on launchd/Windows/non-systemd Linux that
-      // is the correct launch anyway, and on a systemd host it at least runs
-      // until the tick unit deactivates instead of never running at all.
-      scoped = false;
-      log.warn("tick: scoped wake spawn failed — retrying as plain child", {
-        taskId: task.id,
-        persona: task.persona,
-        error: e.message,
-      });
-      const plain = spawn(self.cmd, args, spawnOpts);
-      plain.on("error", (e2) => {
-        // The claim stays held by THIS (now exiting) process's pid — the
-        // next tick's stale-claim sweep releases it and re-dispatches.
-        log.error("tick: wake child spawn failed — will retry next tick", {
-          taskId: task.id,
-          persona: task.persona,
-          error: e2.message,
-        });
-      });
-      plain.unref();
-      return;
-    }
-    // The claim stays held by THIS (now exiting) process's pid — the next
-    // tick's stale-claim sweep releases it and re-dispatches. Loud here so
-    // a persistently failing dispatch is visible in the journal.
-    log.error("tick: wake child spawn failed — will retry next tick", {
+    // systemd-run itself failed to start (missing binary). Retry once as a
+    // plain detached child: on a systemd host it at least runs until the
+    // tick unit deactivates instead of never running at all.
+    if (retriedPlain) return;
+    log.warn("tick: scoped wake spawn failed — retrying as plain child", {
       taskId: task.id,
       persona: task.persona,
       error: e.message,
     });
+    spawnPlain();
   });
+  child.on("exit", (code) => {
+    // systemd-run SPAWNED but the scope never materialised (no user bus,
+    // transient unit refused): it exits non-zero within about a second,
+    // which is not an "error" event. Catch it here and fall back while this
+    // parent is still alive to do so; a later exit either means the wake
+    // finished (claim released by the runner) or the runner died (claim's
+    // pid is dead → the next tick sweeps and re-dispatches). Only the
+    // quick non-zero exit needs the fallback.
+    if (retriedPlain || code === 0 || code === null) return;
+    log.warn("tick: systemd-run scope exited early — retrying as plain child", {
+      taskId: task.id,
+      persona: task.persona,
+      exitCode: code,
+    });
+    spawnPlain();
+  });
+  adopt(child.pid);
   child.unref();
   log.info("tick: wake child dispatched", {
     taskId: task.id,
     persona: task.persona,
-    scoped,
+    scoped: true,
   });
 }
 function unrefTimer(t: ReturnType<typeof setTimeout>): void {

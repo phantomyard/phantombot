@@ -1611,6 +1611,66 @@ describe("runTick — claim-then-dispatch (issue #631)", () => {
     expect(store.get(created.id)!.claim!.pid).toBe(process.pid);
   });
 
+  test("claim adoption: a live runner pid survives the dispatcher's exit (production double-fire shape)", async () => {
+    // THE #631 production scenario the claim design must survive: the tick
+    // parent claims under its own pid, spawns a detached child, and EXITS —
+    // so the claim's original pid dies seconds later while the real runner
+    // lives on for up to 30 minutes. Without adoption the next tick's
+    // stale-claim sweep probes the dead dispatcher pid, releases the claim
+    // and re-dispatches — a double fire every tick interval for the whole
+    // run. spawnWakeChild adopts the child's pid at dispatch; simulate that
+    // here with a real sleeper standing in for the wake child.
+    const now = new Date("2026-05-02T10:00:00Z");
+    const created = addOneOffWake(now);
+    const runner = Bun.spawn(["sleep", "60"], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    const seam = { calls: 0 };
+    try {
+      await runTick({
+        config, taskStore: store, memory, lockPath, now,
+        out: { write() {} },
+        spawnWake: async (task, { taskStore: s }) => {
+          seam.calls++;
+          // What the production dispatcher does right after spawn.
+          s.adoptClaimPid(task.id, runner.pid);
+        },
+      });
+      expect(seam.calls).toBe(1);
+      // The claim names the RUNNER, not this (about-to-"exit") process.
+      expect(store.get(created.id)!.claim!.pid).toBe(runner.pid);
+
+      // One tick later the one-off is still due (its row only advances when
+      // the runner finishes) — but the adopted claim is LIVE, so the tick
+      // must not re-dispatch, exactly as if the dispatcher had exited.
+      await runTick({
+        config, taskStore: store, memory, lockPath,
+        now: new Date("2026-05-02T10:01:00Z"),
+        out: { write() {} },
+        spawnWake: async () => {
+          seam.calls++;
+        },
+      });
+      expect(seam.calls).toBe(1);
+      expect(store.get(created.id)!.runCount).toBe(0);
+    } finally {
+      runner.kill("SIGKILL");
+      await runner.exited;
+    }
+
+    // Once the runner DIES (crash), the very next tick sweeps the adopted
+    // claim and re-dispatches — one tick of delay, never a lost task.
+    await runTick({
+      config, taskStore: store, memory, lockPath,
+      now: new Date("2026-05-02T10:02:00Z"),
+      out: { write() {} },
+      spawnWake: async () => {
+        seam.calls++;
+      },
+    });
+    expect(seam.calls).toBe(2);
+  });
+
   test("command tasks run to completion even while an agent wake is in flight", async () => {
     const now = new Date("2026-05-02T10:00:00Z");
     const wake = addOneOffWake(now);
