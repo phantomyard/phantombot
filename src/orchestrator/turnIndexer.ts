@@ -15,7 +15,12 @@ import {
   memoryIndexPath,
   type TurnIndexingSettings,
 } from "../config.ts";
-import { defaultEmbedder, type Embedder, sha256 } from "../lib/embedJob.ts";
+import {
+  defaultEmbedder,
+  type Embedder,
+  sha256,
+} from "../lib/embedJob.ts";
+import { documentChunkChars } from "../config.ts";
 import { embeddingSpaceForConfig } from "../lib/embeddingSpace.ts";
 import { log } from "../lib/logger.ts";
 import {
@@ -154,9 +159,15 @@ export async function indexConversationTurnsIfDue(
         // turn_embeddings kept) cost zero embed API calls.
         const path = turnPath(turn);
         const haveSha = ix.turnEmbeddingSha(path, space);
+        // #634: cap the embed request to the same character budget the
+        // repair pass uses, so a turn over the provider's input limit can't
+        // 400 at index time either. The sha is still over the FULL text —
+        // the stored vector just describes the capped prefix.
+        const maxChars = turnEmbedMaxChars(input.config);
+        const embedText = text.length > maxChars ? text.slice(0, maxChars) : text;
         const vec =
           embedder && haveSha !== textSha
-            ? await embedTurn(embedder, turn, text)
+            ? await embedTurn(embedder, turn, embedText)
             : undefined;
         if (vec) embedded++;
         else if (embedder && haveSha !== textSha) embeddingFailures++;
@@ -254,10 +265,63 @@ export interface FlushDueConversationsResult {
   repaired: number;
   /** Turns the repair pass tried and failed to embed again. */
   repairFailures: number;
+  /** #634: turns quarantined this sweep — content the provider permanently rejects. */
+  quarantined: number;
 }
 
 /** How many consecutive repair failures before we assume the provider is down. */
 const REPAIR_GIVE_UP_AFTER_CONSECUTIVE_FAILURES = 3;
+
+/**
+ * #634: character cap on the text sent to the turn embedder.
+ *
+ * Rendered turns are unbounded (one tool-heavy turn reached 183K chars),
+ * while embedding providers have a hard INPUT token limit — OpenRouter's
+ * `text-embedding-3-small` 400s on anything over 8,192 tokens. A single
+ * oversized turn used to fail on every repair sweep forever, and because the
+ * breaker resets on successes BETWEEN the oversized rows, the queue made zero
+ * progress for weeks. The notes/KB path guards against exactly this with
+ * `documentChunkChars` (character-based, deliberately not a token claim);
+ * this reuses that same resolved budget so both paths share one knob.
+ *
+ * If no budget resolves (provider "none", stub embedders in tests), fall
+ * back to a generous static cap that still sits far below any provider's
+ * real token limit.
+ */
+const TURN_EMBED_FALLBACK_MAX_CHARS = 12_000;
+
+export function turnEmbedMaxChars(config?: Pick<Config, "embeddings">): number {
+  if (config) {
+    const resolved = documentChunkChars(config);
+    if (resolved !== undefined && Number.isFinite(resolved) && resolved > 0) {
+      return resolved;
+    }
+  }
+  return TURN_EMBED_FALLBACK_MAX_CHARS;
+}
+
+/**
+ * #634: does this embedder error mean the CONTENT was rejected (as opposed
+ * to a transient transport/provider problem)? Such a rejection is permanent —
+ * the same bytes 400 identically on every retry — so the caller quarantines
+ * the turn instead of re-arming the retry loop. Matched on the provider's
+ * own status code and rejection phrasing; deliberately narrow, because a
+ * false positive permanently demotes an otherwise-repairable turn.
+ */
+export function isContentRejection(error: string | undefined): boolean {
+  if (!error) return false;
+  const e = error.toLowerCase();
+  const status = /\bhttp (400|413|422)\b/.test(e);
+  const phrasing =
+    e.includes("maximum context length") ||
+    e.includes("too large") ||
+    e.includes("too long") ||
+    e.includes("exceeds") ||
+    e.includes("invalid 'input'") ||
+    e.includes("invalid input") ||
+    e.includes("input is invalid");
+  return status && phrasing;
+}
 
 export interface RepairMissingTurnEmbeddingsInput {
   config: Config;
@@ -269,6 +333,8 @@ export interface RepairMissingTurnEmbeddingsInput {
 export interface RepairMissingTurnEmbeddingsResult {
   repaired: number;
   failures: number;
+  /** #634: permanently-rejected turns tombstoned this pass (no more retries). */
+  quarantined: number;
 }
 
 /**
@@ -300,6 +366,7 @@ export async function repairMissingTurnEmbeddings(
   const result: RepairMissingTurnEmbeddingsResult = {
     repaired: 0,
     failures: 0,
+    quarantined: 0,
   };
   if (!input.settings.enabled) return result;
   if (input.settings.repairBatchSize <= 0) return result;
@@ -322,12 +389,19 @@ export async function repairMissingTurnEmbeddings(
 
     let consecutiveFailures = 0;
     for (const row of stale) {
-      const r = await embedder(row.content);
+      // #634: the rendered text can exceed the provider's input token limit
+      // (a single machine-heavy turn can be tens of thousands of chars). Send
+      // a bounded prefix so one giant turn can never wedge the whole repair
+      // queue behind a permanent HTTP 400.
+      const maxChars = turnEmbedMaxChars(input.config);
+      const embedText =
+        row.content.length > maxChars ? row.content.slice(0, maxChars) : row.content;
+      const r = await embedder(embedText);
       if (r.ok) {
         ix.upsertTurnEmbedding(
           row.path,
           r.values,
-          sha256(row.content),
+          sha256(embedText),
           input.embedder?.space ?? embeddingSpaceForConfig(input.config.embeddings),
         );
         result.repaired++;
@@ -336,6 +410,26 @@ export async function repairMissingTurnEmbeddings(
       }
       result.failures++;
       consecutiveFailures++;
+      // #634: a provider REJECTION of the content itself (too large, bad
+      // request, payload over limits) will fail identically on every retry —
+      // retrying it every sweep just wedges the queue behind a permanent
+      // 400/413. Quarantine the turn with an empty vector so it drops out of
+      // the missing-embedding scan; only genuine transient errors (429, 5xx,
+      // network) keep the retry cycle alive.
+      if (isContentRejection(r.error)) {
+        ix.quarantineTurnEmbedding(
+          row.path,
+          input.embedder?.space ?? embeddingSpaceForConfig(input.config.embeddings),
+        );
+        log.warn("turn-index repair: provider rejected turn content; quarantined", {
+          persona: input.persona,
+          path: row.path,
+          chars: row.content.length,
+          error: r.error,
+        });
+        result.quarantined++;
+        continue;
+      }
       if (
         consecutiveFailures >= REPAIR_GIVE_UP_AFTER_CONSECUTIVE_FAILURES
       ) {
@@ -349,11 +443,12 @@ export async function repairMissingTurnEmbeddings(
       }
     }
 
-    if (result.repaired > 0 || result.failures > 0) {
+    if (result.repaired > 0 || result.failures > 0 || result.quarantined > 0) {
       log.info("turn-index repair: re-embedded previously failed turns", {
         persona: input.persona,
         repaired: result.repaired,
         failures: result.failures,
+        quarantined: result.quarantined,
         // Turns this pass looked at, capped at repairBatchSize. Deliberately
         // NOT a "remaining" count: the scan is bounded, so we don't know the
         // true backlog without a second query, and reporting a batch-relative
@@ -399,6 +494,7 @@ export async function flushDueConversationTurns(
     embeddingFailures: 0,
     repaired: 0,
     repairFailures: 0,
+    quarantined: 0,
   };
   if (!input.settings.enabled) return summary;
 
@@ -445,8 +541,9 @@ export async function flushDueConversationTurns(
   });
   summary.repaired = repair.repaired;
   summary.repairFailures = repair.failures;
+  summary.quarantined = repair.quarantined;
 
-  if (summary.triggered > 0 || summary.repaired > 0) {
+  if (summary.triggered > 0 || summary.repaired > 0 || summary.quarantined > 0) {
     log.info("turn-index sweep: flushed conversation tails", { ...summary });
   }
   return summary;
@@ -467,3 +564,19 @@ async function embedTurn(
   });
   return undefined;
 }
+
+/**
+ * #634: a turn whose content the provider PERMANENTLY rejects must not retry
+ * forever. `ix.quarantineTurnEmbedding` writes a tombstone embedding row —
+ * empty vector, space-tagged — so `turnsMissingEmbeddings` (an anti-join on
+ * the turn_embeddings table) stops finding it and the repair queue can never
+ * be wedged behind one bad row again.
+ *
+ * The tombstone is inert by construction: an empty Float32Array has zero
+ * norm, so `cosineSimilarity` scores it 0 against everything and it wins no
+ * vector-search slot; FTS search is untouched (the turn stays fully
+ * searchable lexically — strictly better than the pre-fix state, where the
+ * jam ALSO starved thousands of healthy turns behind it).
+ */
+/** Sentinel text_sha marking a quarantined (unembeddable-content) turn. */
+export const QUARANTINE_SHA = "quarantined:content-rejected";

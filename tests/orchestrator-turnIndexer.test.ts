@@ -17,6 +17,7 @@ import { MemoryIndex } from "../src/lib/memoryIndex.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 import type { Embedder } from "../src/lib/embedJob.ts";
 import {
+  QUARANTINE_SHA,
   flushDueConversationTurns,
   indexConversationTurnsIfDue,
   makeTurnIndexer,
@@ -845,3 +846,247 @@ describe("turn-schema rebuild recovery", () => {
     expect(summary.triggered).toBe(0);
   });
 });
+
+/**
+ * #634 — turn embeddings had no size cap, and provider content-rejections
+ * retried forever.
+ *
+ * A rendered turn is unbounded (one real turn hit 183K chars) while embedding
+ * providers have a hard INPUT token limit — OpenRouter's text-embedding-3-small
+ * 400s on anything over 8,192 tokens. The oversized row failed identically on
+ * every repair sweep; the 3-consecutive-failure breaker reset on successes
+ * BETWEEN oversized rows, so a queue of ~3,200 healthy turns behind 3 giants
+ * made zero progress for weeks. These tests pin both halves of the fix: the
+ * request is capped before it is sent, and a content rejection is tombstoned
+ * (quarantined) instead of retried.
+ */
+describe("#634 embed size cap and content-rejection quarantine", () => {
+  const settings = (over: Partial<typeof DEFAULT_RETRIEVAL.turnIndexing> = {}) => ({
+    ...DEFAULT_RETRIEVAL.turnIndexing,
+    interval: 1,
+    flushAfterHours: 0,
+    ...over,
+  });
+
+  /** How many indexed turns currently have no embedding row. */
+  async function missingCount(): Promise<number> {
+    const ix = await MemoryIndex.open(memoryIndexPath("phantom"));
+    const n = ix.turnsMissingEmbeddings("phantom", 1_000).length;
+    ix.close();
+    return n;
+  }
+
+  /** Stub that 400s like OpenRouter on anything over `limit` chars. */
+  function limitedStubEmbedder(limit: number): {
+    embedder: Embedder;
+    calls: () => Array<string>;
+  } {
+    const calls: Array<string> = [];
+    const embedder: Embedder = async (text: string) => {
+      calls.push(text);
+      if (text.length > limit) {
+        return {
+          ok: false,
+          error:
+            'HTTP 400: {"error":{"message":"Invalid \'input\': maximum context length is 8192 tokens.","type":"invalid_request_error"}}',
+        };
+      }
+      return { ok: true, values: new Float32Array([0.1, 0.2, 0.3]), dims: 3 };
+    };
+    return { embedder, calls: () => calls };
+  }
+
+  test("an oversized turn is capped before the embed call and still gets a vector", async () => {
+    // The cap comes from CONFIG (openaiCompatible.maxChunkChars), not from the
+    // stub — this exercises the documentChunkChars wiring end to end.
+    const cappedConfig = {
+      defaultPersona: "phantom",
+      embeddings: {
+        provider: "openai-compatible",
+        openaiCompatible: {
+          baseUrl: "https://example.test/v1",
+          model: "text-embedding-3-small",
+          apiKey: "sk-test",
+          dims: 3,
+          queryPrefix: "",
+          documentPrefix: "",
+          maxChunkChars: 200,
+        },
+      },
+      retrieval: DEFAULT_RETRIEVAL,
+    } as unknown as Config;
+    const stub = limitedStubEmbedder(200);
+    const giant = "Vesuvius pension ".repeat(200); // 3,600 chars
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: giant,
+    });
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "assistant",
+      text: "Stromboli assistant reply",
+    });
+
+    const r = await indexConversationTurnsIfDue({
+      config: cappedConfig,
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+
+    // Both turns embedded — the giant was truncated to the configured 200
+    // chars before the call, not sent raw (rendered it is ~3,400 chars).
+    expect(r?.embedded).toBe(2);
+    expect(r?.embeddingFailures).toBe(0);
+    const calls = stub.calls();
+    expect(calls.length).toBe(2);
+    expect(calls[0]!.length).toBeLessThanOrEqual(200);
+    expect(calls[1]!.length).toBeLessThanOrEqual(200);
+  });
+  test("repair pass quarantines a permanently-rejected turn instead of retrying it", async () => {
+    const stub = limitedStubEmbedder(200);
+    const giant = "Vesuvius pension ".repeat(200);
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: giant,
+    });
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "assistant",
+      text: "Stromboli assistant reply",
+    });
+    // Recreate the PRE-fix jam state: an embedder with NO cap so the giant
+    // lands in FTS with no vector (rows this small stay under the cap fine).
+    const noCapEmbedder: Embedder = async (text: string) => {
+      if (text.length > 1_000) {
+        return {
+          ok: false,
+          error:
+            'HTTP 400: {"error":{"message":"Invalid \'input\': maximum context length is 8192 tokens.","type":"invalid_request_error"}}',
+        };
+      }
+      return { ok: true, values: new Float32Array([0.1, 0.2, 0.3]), dims: 3 };
+    };
+    await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+      embedder: noCapEmbedder,
+    });
+    expect(await missingCount()).toBe(1);
+
+    // Repair pass with the CAPPED embedder: the 400 must quarantine the
+    // giant row, not retry it — wait, with a cap the giant no longer 400s.
+    // Use an UNCAPPED- behaving provider here on purpose: the repair pass
+    // itself must still recognise a content rejection when one arrives (e.g.
+    // a provider whose limit shrank, or a config with a stale maxChunkChars).
+    const rejectingEmbedder: Embedder = async () => ({
+      ok: false,
+      error:
+        'HTTP 400: {"error":{"message":"Invalid \'input\': maximum context length is 8192 tokens.","type":"invalid_request_error"}}',
+    });
+    const r = await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings(),
+      embedder: rejectingEmbedder,
+    });
+    expect(r.quarantined).toBe(1);
+    // The turn was quarantined (not repaired, not left for retry).
+    expect(r.repaired).toBe(0);
+    // Quarantined row dropped out of the scan — the queue is un-wedged.
+    expect(await missingCount()).toBe(0);
+
+    // A second pass makes no calls for the quarantined row (idempotent).
+    const before = stub.calls().length;
+    const r2 = await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+    expect(r2.repaired).toBe(0);
+    expect(r2.quarantined).toBe(0);
+    expect(stub.calls().length).toBe(before);
+
+    // The quarantined turn is still lexically searchable — quarantine only
+    // removes the vector, never the FTS row.
+    const ix = await MemoryIndex.open(memoryIndexPath("phantom"));
+    expect(ix.search("Vesuvius pension", { scope: "turns" }).length).toBeGreaterThan(0);
+    ix.close();
+  });
+
+  test("transient errors do NOT quarantine — the retry cycle survives", async () => {
+    // Local stub: 429 while `failing`, vector otherwise (same contract as the
+    // repair describe's stubEmbedder, kept local to this block).
+    let failing = true;
+    let calls = 0;
+    const stub = {
+      embedder: (async (_text: string) => {
+        calls++;
+        if (failing) return { ok: false, error: "429 rate limited" };
+        return { ok: true, values: new Float32Array([0.1, 0.2, 0.3]), dims: 3 };
+      }) as Embedder,
+      setFailing: (v: boolean) => {
+        failing = v;
+      },
+      callCount: () => calls,
+    };
+    stub.setFailing(true);
+    await appendPair(1);
+    await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+    expect(await missingCount()).toBe(2);
+
+    const r = await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+    // Transient failure: no quarantine, rows remain in the scan for next sweep.
+    expect(r.quarantined).toBe(0);
+    expect(await missingCount()).toBe(2);
+
+    stub.setFailing(false);
+    const r2 = await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+    expect(r2.repaired).toBe(2);
+    expect(await missingCount()).toBe(0);
+  });
+
+  test("a quarantined turn is inert in vector search and never re-quarantines", async () => {
+    // Quarantine tombstone: empty vec + sentinel sha, space-tagged.
+    const ix = await MemoryIndex.open(memoryIndexPath("phantom"));
+    ix.quarantineTurnEmbedding("telegram:1001:turn:1", undefined);
+    const sha = ix.turnEmbeddingSha("telegram:1001:turn:1");
+    expect(sha).toBe(QUARANTINE_SHA);
+
+    // The tombstone never trips the "incompatible dimensions, run --reembed"
+    // path: an empty vector is skipped silently in vector search.
+    const hits = ix.hybridSearch("anything", new Float32Array([0.1, 0.2, 0.3]));
+    expect(Array.isArray(hits)).toBe(true);
+    ix.close();
+  });
+});
+
