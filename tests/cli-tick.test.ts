@@ -1230,7 +1230,7 @@ describe("runTick — orphaned tasks (issue #632)", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "must never run" },
     ]);
-    const code = await runTick({
+    const code = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1251,7 +1251,7 @@ describe("runTick — orphaned tasks (issue #632)", () => {
 
     // Deactivation is terminal: a SECOND tick over the same row neither
     // re-deactivates nor appends another run — it is simply no longer due.
-    const code2 = await runTick({
+    const code2 = await tickInline({
       config,
       taskStore: store,
       memory,
@@ -1275,7 +1275,7 @@ describe("runTick — orphaned tasks (issue #632)", () => {
     const harness = new ScriptedHarness("h", [
       { type: "done", finalText: "ran" },
     ]);
-    await runTick({
+    await tickInline({
       config,
       taskStore: store,
       memory,

@@ -134,7 +134,6 @@ import {
 } from "../lib/timerHealth.ts";
 import { openTaskStore } from "../lib/tasks.ts";
 import { openMemoryStore } from "../memory/store.ts";
-import { openTaskStore } from "../lib/tasks.ts";
 import {
   classifyCadence,
   defaultReviewIntervalMs,
