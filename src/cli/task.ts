@@ -100,26 +100,50 @@ export interface RunTaskAddInput {
  * would otherwise succeed silently and produce a task that can never fire —
  * no persona runs that queue — which is the worst possible outcome for a
  * scheduler: the user believes a reminder is set.
+ *
+ * Since #632 the RESOLVED persona is validated too, not just an explicit
+ * one: a broken default (or env) persona used to fall through unchecked and
+ * stamp every no-flag `task add` with a name whose dir does not exist — the
+ * robbie host accumulated 23 never-firing tasks that way, one error line
+ * per minute for 34 days. Used by the row-CREATING commands (add, selftest);
+ * list/show/cancel/log deliberately skip the check so an orphaned queue
+ * stays inspectable and cleanable.
  */
 function resolveTaskPersona(
   config: Config,
   requested: string | undefined,
   err: WriteSink,
+  /** Row-creating commands refuse a persona with no dir; readers do not. */
+  opts: { requireDir?: boolean } = {},
 ): string | undefined {
-  if (!requested) return resolvePersona(requested, config);
-  const dir = personaDir(config, requested);
-  if (!existsSync(dir)) {
-    err.write(`no persona '${requested}' at ${dir}\n`);
-    return undefined;
+  const persona = requested
+    ? (() => {
+        const dir = personaDir(config, requested);
+        if (!existsSync(dir)) {
+          err.write(`no persona '${requested}' at ${dir}\n`);
+          return undefined;
+        }
+        return requested;
+      })()
+    : resolvePersona(requested, config);
+  if (persona === undefined) return undefined;
+  if (opts.requireDir) {
+    const dir = personaDir(config, persona);
+    if (!existsSync(dir)) {
+      err.write(
+        `default persona '${persona}' does not exist at ${dir} — pass --persona or run 'phantombot persona switch'\n`,
+      );
+      return undefined;
+    }
   }
-  return requested;
+  return persona;
 }
 
 export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
   const config = input.config ?? (await loadConfig());
-  const persona = resolveTaskPersona(config, input.persona, err);
+  const persona = resolveTaskPersona(config, input.persona, err, { requireDir: true });
   if (!persona) return 2;
   const store = input.store ?? (await openTaskStore(config.memoryDbPath));
   try {
@@ -482,7 +506,9 @@ export async function runTaskSelftest(
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
   const config = input.config ?? (await loadConfig());
-  const selftestPersona = resolveTaskPersona(config, input.persona, err);
+  const selftestPersona = resolveTaskPersona(config, input.persona, err, {
+    requireDir: true,
+  });
   if (!selftestPersona) return 2;
   const store = input.store ?? (await openTaskStore(config.memoryDbPath));
   try {

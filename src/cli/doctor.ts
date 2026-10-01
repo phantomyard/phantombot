@@ -132,6 +132,7 @@ import {
   TICK_STALE_MINUTES,
   type TimerLastFired,
 } from "../lib/timerHealth.ts";
+import { openTaskStore } from "../lib/tasks.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { checkIntegrity, listRestorePoints } from "../memory/dbBackup.ts";
 import { DRAWER_KINDS } from "../memory/drawers.ts";
@@ -231,6 +232,20 @@ export interface DoctorReport {
       healthy: boolean;
       detail: string;
     }>;
+  };
+  /**
+   * Orphaned scheduled tasks (#632): active rows whose persona dir does not
+   * exist. They never fire, never expire and used to log an error line per
+   * tick forever (robbie: 23 tasks × 34 days). Doctor makes them VISIBLE;
+   * `--fix` deactivates them (the same terminal state tick itself now uses).
+   */
+  orphaned_tasks: {
+    healthy: boolean;
+    /** ids + personas of the active tasks with a missing persona dir. */
+    orphans: Array<{ id: number; persona: string; description: string }>;
+    /** Set when this run deactivated them (repair on). */
+    repaired?: boolean;
+    detail: string;
   };
   nightly: {
     last_run?: string;
@@ -1412,6 +1427,54 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     existsSync(join(dir, rel)),
   );
 
+  // Orphaned scheduled tasks (#632) — active rows whose persona dir does not
+  // exist. Scan EVERY active task across every persona (allActive, not the
+  // persona-scoped list): an orphan by definition belongs to a persona whose
+  // queue nothing else reads. Best-effort on the store itself — a host with
+  // no/unreadable task DB reports the section skipped, not a failed doctor.
+  let orphanedTasksReport: DoctorReport["orphaned_tasks"];
+  try {
+    const taskStore = await openTaskStore(host.memoryDbPath);
+    try {
+      const orphans: DoctorReport["orphaned_tasks"]["orphans"] = [];
+      for (const t of taskStore.allActive()) {
+        if (existsSync(personaDir(host, t.persona))) continue;
+        orphans.push({ id: t.id, persona: t.persona, description: t.description });
+      }
+      if (orphans.length > 0 && repair) {
+        for (const o of orphans) {
+          taskStore.deactivateOrphaned(
+            o.id,
+            `orphaned: persona dir missing — deactivated by doctor --fix (#632)`,
+          );
+        }
+      }
+      orphanedTasksReport = {
+        healthy: orphans.length === 0,
+        orphans,
+        ...(orphans.length > 0 && repair ? { repaired: true } : {}),
+        detail:
+          orphans.length === 0
+            ? "no active tasks point at a missing persona dir"
+            : `${orphans.length} active task(s) whose persona dir is missing` +
+              (repair ? " — deactivated this run" : " (run with repair to deactivate)"),
+      };
+    } finally {
+      taskStore.close();
+    }
+  } catch (e) {
+    // No task DB (fresh install) or unreadable: report healthy-and-empty
+    // rather than failing the whole doctor over a section that cannot run.
+    log.debug("doctor: orphaned-task scan skipped", {
+      error: (e as Error).message,
+    });
+    orphanedTasksReport = {
+      healthy: true,
+      orphans: [],
+      detail: "scan skipped — task store unavailable",
+    };
+  }
+
   const emptyPhantomchat: DoctorReport["phantomchat"] = {
     healthy: true,
     listeners: 0,
@@ -1423,6 +1486,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     telegram: telegramReport,
     phantomchat: phantomchatReport ?? emptyPhantomchat,
     vault: vaultReport ?? emptyVault,
+    orphaned_tasks: orphanedTasksReport,
     nightly: {
       last_run: state.last_run,
       last_status: state.last_status,
@@ -1550,6 +1614,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // memory database: not a process to restart, but data the box cannot get
   // back. Every credential-shaped feature degrades silently behind it.
   const vaultBroken = !!vaultReport && !vaultReport.healthy;
+  // Active tasks pointing at a missing persona dir (#632). Unrepaired
+  // orphans (i.e. --no-repair) fail the run so the drift is visible in CI
+  // and scripts; a repaired run cleared them, so it exits clean.
+  const orphanedTasksBroken =
+    !orphanedTasksReport.healthy && !orphanedTasksReport.repaired;
   const exitCode =
     memoryDbBroken
       ? 1
@@ -1573,9 +1642,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
                   ? 1
                   : vaultBroken
                     ? 1
-                    : phantomchatBroken
+                    : orphanedTasksBroken
                       ? 1
-                      : 0;
+                      : phantomchatBroken
+                        ? 1
+                        : 0;
 
   if (input.json) {
     out.write(JSON.stringify(report, null, 2) + "\n");
@@ -1635,6 +1706,17 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     );
     for (const entry of vaultReport.personas) {
       out.write(`    persona '${entry.persona}': ${entry.detail}\n`);
+    }
+  }
+  // Orphaned tasks (#632). Healthy-and-empty is silent — a healthy box pays
+  // no attention cost; anything else names the rows so the operator can see
+  // what stopped firing and why.
+  if (orphanedTasksReport.orphans.length > 0) {
+    out.write(
+      `  tasks: ${tick(orphanedTasksReport.healthy)} — ${orphanedTasksReport.detail}\n`,
+    );
+    for (const o of orphanedTasksReport.orphans) {
+      out.write(`    task ${o.id} (${o.persona}): ${o.description}\n`);
     }
   }
   // Health comes off the ledger, not the clock: a box that slept through

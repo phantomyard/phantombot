@@ -24,6 +24,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { assertTestWritable } from "../lib/testGuard.ts";
 import type { FactSource } from "../config.ts";
 
 export type Role = "user" | "assistant";
@@ -1883,6 +1884,7 @@ export async function enableWalMode(db: Database, deadlineMs = 5000): Promise<vo
 }
 
 export async function openMemoryStore(path: string): Promise<MemoryStore> {
+  assertTestWritable(path, "the memory store");
   if (path !== ":memory:") {
     await mkdir(dirname(path), { recursive: true });
   }

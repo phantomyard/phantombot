@@ -129,6 +129,11 @@ const FAKE_REPORT: DoctorReport = {
   telegram: { healthy: true, listeners: 2, personas: [] },
   phantomchat: { healthy: true, listeners: 0, personas: [] },
   vault: { healthy: true, personas: [] },
+  orphaned_tasks: {
+    healthy: true,
+    orphans: [],
+    detail: "no active tasks point at a missing persona dir",
+  },
   memory_db: {
     path: "/x/db",
     healthy: true,

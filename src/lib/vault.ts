@@ -23,6 +23,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { assertTestWritable } from "./testGuard.ts";
 import { createCipheriv, createDecipheriv } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -227,6 +228,7 @@ export function openVaultWithSecret(
  * + migration use.
  */
 export async function openPersonaVault(personaDir: string): Promise<Vault> {
+  assertTestWritable(vaultPath(personaDir), "a persona vault");
   const identity = await getOrCreatePersonaIdentity(personaDir);
   return openVaultWithSecret(personaDir, identity.secretKey);
 }
