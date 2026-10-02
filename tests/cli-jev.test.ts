@@ -12,8 +12,10 @@ import {
   applyDecisionModelConfig,
   findReusableDecisionModelKeys,
   decisionModelUpdateEquals,
+  validateDecisionModelKey,
   type DecisionModelConfigUpdate,
 } from "../src/cli/jev.ts";
+import { decisionModelDecide } from "../src/lib/decisionModel.ts";
 import { type Config, loadConfig } from "../src/config.ts";
 import { openPersonaVault } from "../src/lib/vault.ts";
 import { _resetVaultTrackingForTesting } from "../src/lib/vaultEnvTracking.ts";
@@ -352,5 +354,60 @@ describe("an unknown vendor name (statedProvider) round-trips through the write 
     expect(await readFile(personaTomlPath(), "utf8")).toContain(
       'base_url = "https://openrouter.ai/api/v1"',
     );
+  });
+});
+
+describe("validateDecisionModelKey — the wizard's test ping", () => {
+  // The ping must satisfy the vendor floor itself: a choice needs >= 2
+  // options, or every OpenRouter decide model 422s the probe identically
+  // ("A Choice needs at least 2 options", questions.pong.criteria) and the
+  // wizard blocks models that would judge fine live.
+  test("the pong choice carries two options and validates against the wire shape", async () => {
+    const seenBodies: unknown[] = [];
+    const v = await validateDecisionModelKey({
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "test-key",
+      model: "typesafe/jev-1.13",
+      fetchImpl: async (_url, init) => {
+        seenBodies.push(JSON.parse(String(init?.body)));
+        return new Response(
+          JSON.stringify({
+            answers: {
+              pong: {
+                type: "choice",
+                choice: "ok",
+                probabilities: { ok: 0.99, unreachable: 0.01 },
+                confidence: 0.99,
+              },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    expect(v.ok).toBe(true);
+    expect(seenBodies).toHaveLength(1);
+    const pong = (seenBodies[0] as { questions: { pong: { criteria: Record<string, string> } } })
+      .questions.pong;
+    expect(Object.keys(pong.criteria).length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("a single-option pong would now be rejected by the client floor before the wire", async () => {
+    const r = await decisionModelDecide({
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "test-key",
+      model: "typesafe/jev-1.13",
+      instructions: "Answer the validation ping.",
+      state: "Validation ping.",
+      questions: {
+        pong: { type: "choice", instructions: "Reply to the ping.", criteria: { ok: "x" } },
+      },
+      timeoutMs: 200,
+      fetchImpl: async () => {
+        throw new Error("fetch must not be reached");
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("at least 2 options");
   });
 });

@@ -47,7 +47,7 @@ the coding brain onto a conversational turn.
 | context | 32,000 tokens (max completion 28,800) |
 | price | $0.042 / Mtok input, output free |
 | latency | vendor claims 70–500 ms; measured p50 ~300 ms (2026-09-20) |
-| choices | criteria cardinality capped at 255 |
+| choices | criteria cardinality floored at 2 (the gateway 422s a single-option choice), capped at 255 |
 | score levels | ordinal scale capped at 10 levels per score question |
 | endpoint | `/api/alpha/decisions` — **not** chat/completions |
 
@@ -97,7 +97,12 @@ model alone.
 The wizard closes with a **test & apply step**: one live decision probe
 confirms the credentials and the chosen model's routing before anything is
 applied (a revoked key or a wrong model id fails here, not at the first
-held message). The probe runs in the Brain test screen with retry and
+held message). The probe itself is a two-option choice — the decisions
+gateway rejects a single-option choice with HTTP 422 ("A Choice needs at
+least 2 options", verified live 2026-10-02), so the probe must satisfy the
+same vendor floor it exists to check; `decisionModelDecide` enforces that
+floor client-side so no call site can ship a one-option choice again.
+The probe runs in the Brain test screen with retry and
 apply/discard options; the standalone CLI flow validates directly.
 Credentials live in the **vault**, never `config.toml`.
 Reusable-key discovery is **persona-scoped** — on a multi-persona daemon the

@@ -319,6 +319,30 @@ describe("decisionModelDecide", () => {
     if (!r.ok) expect(r.error).toContain("levels");
   });
 
+  it("rejects a single-option choice without hitting the wire (vendor floor)", async () => {
+    // The decisions gateway 422s a 1-option choice ("A Choice needs at least 2
+    // options") — the wizard's validation ping shipped exactly that and every
+    // OpenRouter decide model rejected it identically (verified live
+    // 2026-10-02). The local check must catch it before the wire, so no call
+    // site can regress this again.
+    for (const criteria of [
+      { ok: "only one option" }, // 1 option — the 422 shape
+      {}, // 0 options
+    ] as Record<string, string>[]) {
+      const r = await decisionModelDecide({
+        ...BASE,
+        questions: {
+          pong: { type: "choice", instructions: "x", criteria },
+        },
+        fetchImpl: async () => {
+          throw new Error("fetch must not be reached");
+        },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("at least 2 options");
+    }
+  });
+
   it("rejects an empty question set without hitting the wire", async () => {
     const r = await decisionModelDecide({
       ...BASE,

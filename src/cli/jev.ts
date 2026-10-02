@@ -286,7 +286,10 @@ export async function findReusableDecisionModelKeys(
  * Live key probe: one trivial choice decision against the configured
  * endpoint. A key that does not work is caught at configure time, not at
  * the first held message — the same gate the embedding and voice wizards
- * apply. Also used by the /status probe.
+ * apply. Also used by the /status probe. The pong choice carries TWO
+ * options — the decisions gateway rejects a single-option choice with
+ * HTTP 422 ("A Choice needs at least 2 options"), so the probe itself must
+ * satisfy the vendor floor it exists to detect.
  */
 export async function validateDecisionModelKey(settings: {
   baseUrl: string;
@@ -304,7 +307,10 @@ export async function validateDecisionModelKey(settings: {
       pong: {
         type: "choice",
         instructions: "Reply to the ping.",
-        criteria: { ok: "The ping was received" },
+        criteria: {
+          ok: "The ping was received",
+          unreachable: "The ping was not received",
+        },
       },
     },
     timeoutMs: 5000,
