@@ -32,7 +32,8 @@
  *     `type` discriminator, a per-question `instructions` line, and
  *     `criteria`:
  *       - { type: "choice", instructions, criteria: { <choice>: <description> } }
- *         — the criteria KEYS are the choice set (max DECISION_MODEL_MAX_CHOICES);
+ *         — the criteria KEYS are the choice set (min DECISION_MODEL_MIN_CHOICES,
+ *         max DECISION_MODEL_MAX_CHOICES);
  *       - { type: "score", instructions, criteria: [ <level label>, ... ] }
  *         — an ordinal scale; criteria index IS the level, max
  *         DECISION_MODEL_MAX_SCORE_LEVELS (10) levels.
@@ -76,6 +77,12 @@ export const DECISION_MODEL_TYPESAFE_BASE_URL = "https://api.typesafe.ai/v1";
 
 /** The vault/env name a Jev API key lives under by default. */
 export const DECISION_MODEL_DEFAULT_KEY_ENV = "PHANTOMBOT_JEV_API_KEY";
+
+/** Vendor floor: a choice question needs at least 2 options — the decisions
+ * gateway 422s a single-option choice ("A Choice needs at least 2 options",
+ * verified live on OpenRouter 2026-10-02, the `inception/mercury-decide:free`
+ * wizard test failing with HTTP 422 on `questions.pong.criteria`). */
+export const DECISION_MODEL_MIN_CHOICES = 2;
 
 /** Vendor cap: a choice question's criteria may not exceed 255 entries. */
 export const DECISION_MODEL_MAX_CHOICES = 255;
@@ -183,7 +190,8 @@ function questionsError(
     const q = questions[id]!;
     if (q.type === "choice") {
       const n = Object.keys(q.criteria).length;
-      if (n === 0) return `jev: choice question '${id}' has no choices`;
+      if (n < DECISION_MODEL_MIN_CHOICES)
+        return `jev: choice question '${id}' needs at least ${DECISION_MODEL_MIN_CHOICES} options (has ${n})`;
       if (n > DECISION_MODEL_MAX_CHOICES)
         return `jev: choice question '${id}' has ${n} choices (max ${DECISION_MODEL_MAX_CHOICES})`;
     } else if (q.type === "score") {
