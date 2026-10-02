@@ -737,6 +737,24 @@ export interface Config {
    * Caps runaway agents that legitimately keep emitting but never finish.
    */
   harnessHardTimeoutMs: number;
+  /**
+   * Soft wall-clock deadline (issue #639), ms. Fires BEFORE
+   * harnessHardTimeoutMs: the running harness is interrupted and the turn
+   * re-runs with a synthetic "wrap up and deliver" nudge on a fresh budget,
+   * instead of a healthy mid-work turn being killed at the cap with
+   * everything it did discarded. The hard cap remains the backstop once
+   * the nudge budget is exhausted. 0 disables (legacy behaviour).
+   * toml `harness_soft_timeout_s` (default 3000), env
+   * PHANTOMBOT_HARNESS_SOFT_TIMEOUT_MS.
+   */
+  harnessSoftTimeoutMs?: number;
+  /**
+   * Max soft interrupts (nudge passes) per turn (issue #639). Bounds a
+   * model that never wraps: after this many nudges the soft deadline is
+   * disarmed and the hard cap kills for real. toml `harness_nudge_cap`
+   * (default 2), env PHANTOMBOT_HARNESS_NUDGE_CAP.
+   */
+  harnessNudgeCap?: number;
   /** Wall-clock ceiling for one in-flight tool; never exceeds the hard cap. */
   harnessToolTimeoutMs?: number;
   /**
@@ -1434,6 +1452,23 @@ export async function loadConfig(persona?: string): Promise<Config> {
       : undefined) ??
     legacyTurnTimeoutMs(toml) ??
       3_600_000;
+  // #639: soft deadline + nudge cap. The soft deadline interrupts a healthy
+  // mid-work turn BEFORE the hard cap and hands it a wrap-up nudge on a
+  // fresh budget; the hard cap stays as the backstop once the nudge budget
+  // is exhausted. 0 disables the soft deadline entirely (legacy behaviour:
+  // the hard cap is the only deadline).
+  const harnessSoftTimeoutMs =
+    asInt(process.env.PHANTOMBOT_HARNESS_SOFT_TIMEOUT_MS) ??
+    (asInt(toml.harness_soft_timeout_s) !== undefined
+      ? asInt(toml.harness_soft_timeout_s)! * 1000
+      : undefined) ??
+    3_000_000;
+  const harnessNudgeCap =
+    asInt(process.env.PHANTOMBOT_HARNESS_NUDGE_CAP) ??
+    (asInt(toml.harness_nudge_cap) !== undefined
+      ? asInt(toml.harness_nudge_cap)!
+      : undefined) ??
+    2;
   const configuredHarnessToolTimeoutMs =
     asInt(process.env.PHANTOMBOT_HARNESS_TOOL_TIMEOUT_MS) ??
     (asInt(toml.harness_tool_timeout_s) !== undefined
@@ -1600,6 +1635,11 @@ export async function loadConfig(persona?: string): Promise<Config> {
       60_000,
 
     harnessHardTimeoutMs,
+    // #639: soft deadline (default 3000s) + nudge cap (default 2). See the
+    // field docs at the interface. Clamped at the turn layer: a soft
+    // deadline at or above the hard cap never arms.
+    harnessSoftTimeoutMs,
+    harnessNudgeCap,
     // Thinking budget (2026-09-16 hang): heartbeats alone may defer the idle
     // kill for at most this long after the last productive output. 10 min so
     // genuine deep reasoning survives; a liveness-only stream does not.

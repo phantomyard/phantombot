@@ -241,6 +241,11 @@ export interface RunReactionTurnInput {
   memory: MemoryStore;
   idleTimeoutMs: number;
   hardTimeoutMs?: number;
+  /** Soft-deadline pass-loop knobs (see runTurn) — threaded from the caller's
+   *  config so the persona's harness_soft_timeout_s / harness_nudge_cap apply
+   *  to reaction turns too, not just the interactive surfaces. */
+  softTimeoutMs?: number;
+  nudgeCap?: number;
   toolTimeoutMs?: number;
   thinkingTimeoutMs?: number;
   startupTimeoutMs?: number;
@@ -296,6 +301,8 @@ export async function runReactionTurn(
       memory: input.memory,
       idleTimeoutMs: input.idleTimeoutMs,
       hardTimeoutMs: input.hardTimeoutMs,
+      softTimeoutMs: input.softTimeoutMs,
+      nudgeCap: input.nudgeCap,
       toolTimeoutMs: input.toolTimeoutMs,
       thinkingTimeoutMs: input.thinkingTimeoutMs,
       startupTimeoutMs: input.startupTimeoutMs,

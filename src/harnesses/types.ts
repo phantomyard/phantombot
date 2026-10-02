@@ -83,6 +83,15 @@ export interface HarnessRequest {
    * fed but never converge on a final reply.
    */
   hardTimeoutMs?: number;
+  /**
+   * Soft wall-clock deadline (issue #639). Fires BEFORE hardTimeoutMs: the
+   * subprocess is interrupted (same SIGTERM path as a channel interrupt)
+   * and the orchestrator re-runs the turn with a synthetic "wrap up and
+   * deliver" nudge instead of losing the work to the hard cap. Omit to
+   * disable for this attempt (used once the nudge budget is exhausted, so
+   * the hard cap is the backstop).
+   */
+  softTimeoutMs?: number;
   /** Per-tool wall-clock ceiling while the idle watchdog is suspended. */
   toolTimeoutMs?: number;
   /**
@@ -252,9 +261,19 @@ export type HarnessChunk =
        * silently disabling the recovery. Omitted when the failure was not a
        * coordinator kill (spawn failure, non-zero exit, provider 4XX).
        */
-      killCause?: "timeout" | "idle" | "tool" | "startup" | "aborted" | "policy" | "abandoned";
+      killCause?: "timeout" | "idle" | "tool" | "startup" | "aborted" | "policy" | "abandoned" | "soft";
       /** True when an idle callback raced with an already-started tool. */
       toolInFlightAtKill?: true;
+      /**
+       * Tool calls started earlier in this attempt (most recent last, bounded
+       * by the attempt chunk log), attached ONLY by the orchestrator's
+       * soft-deadline path: the wrap-up nudge pass is a fresh harness process
+       * with no memory of the interrupted one, so without this digest it could
+       * blindly redo side-effecting work. Each call's outcome is UNKNOWN —
+       * consumers must phrase it that way, like the resume preamble does.
+       * Harnesses themselves never populate this field.
+       */
+      toolCallsSoFar?: string[];
       /**
        * Last ~20 lines of harness stderr, captured by a ring buffer in
        * `runHarnessProcess` (src/lib/harnessRunner.ts). Present on non-zero-exit

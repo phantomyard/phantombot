@@ -60,6 +60,7 @@ export type KillCause =
   | "aborted"
   | "policy"
   | "abandoned"
+  | "soft"
   | undefined;
 export type HarnessActivity = "model" | "tool" | "productive";
 export type ToolBoundary = { phase: "start" | "end"; id: string };
@@ -70,6 +71,14 @@ export interface KillCoordinatorOpts {
   idleTimeoutMs: number;
   /** Hard wall-clock cap. Never resets. Omit to disable the wall-clock SIGTERM. */
   hardTimeoutMs?: number;
+  /**
+   * Soft wall-clock deadline (issue #639). Fires BEFORE hardTimeoutMs and
+   * kills with cause "soft" — the same SIGTERM-to-process-group interrupt a
+   * channel interrupt uses, but orchestrator-initiated: the turn gets a
+   * wrap-up nudge instead of dying at the cap. Omit to disable (the
+   * backstop is then hardTimeoutMs alone).
+   */
+  softTimeoutMs?: number;
   /**
    * Cap on time-to-FIRST-stdout-byte. Distinct from idleTimeoutMs, which only
    * starts biting once output has begun and then resets on every chunk — a
@@ -214,6 +223,12 @@ export function createKillCoordinator(
     opts.hardTimeoutMs === undefined
       ? undefined
       : setTimeout(() => triggerKill("timeout"), opts.hardTimeoutMs);
+  // Soft deadline (#639): fires BEFORE the hard cap. Same interrupt path,
+  // distinct cause, so the orchestrator can nudge instead of failing over.
+  const softTimer: ReturnType<typeof setTimeout> | undefined =
+    opts.softTimeoutMs === undefined
+      ? undefined
+      : setTimeout(() => triggerKill("soft"), opts.softTimeoutMs);
   // Startup timer: fires only if the subprocess emits NO stdout at all before
   // it elapses. Cancelled by firstOutput() on the first stdout byte. See
   // KillCoordinatorOpts.startupTimeoutMs.
@@ -305,6 +320,7 @@ export function createKillCoordinator(
       }
       inFlightTools.clear();
       if (hardTimer) clearTimeout(hardTimer);
+      if (softTimer) clearTimeout(softTimer);
       if (startupTimer) clearTimeout(startupTimer);
       if (opts.signal && !opts.signal.aborted) {
         opts.signal.removeEventListener("abort", onAbort);
@@ -323,6 +339,11 @@ export function createKillCoordinator(
  * re-hardcoding the string in two places.
  */
 export const HARD_CAP_ERROR_SUFFIX = "(hard wall-clock cap)";
+
+/** Suffix marking the soft-deadline kill message (issue #639). Exported so
+ *  the orchestrator can recognise a nudge-requesting interrupt without
+ *  re-hardcoding the string; mirrors HARD_CAP_ERROR_SUFFIX. */
+export const SOFT_CAP_ERROR_SUFFIX = "(soft deadline)";
 
 export function isHardCapError(error: string): boolean {
   return error.endsWith(HARD_CAP_ERROR_SUFFIX);
@@ -353,6 +374,7 @@ export function killCauseToErrorChunk(
   idleTimeoutMs: number,
   startupTimeoutMs?: number,
   toolInFlightAtKill = false,
+  softTimeoutMs?: number,
 ):
   | {
       type: "error";
@@ -408,6 +430,14 @@ export function killCauseToErrorChunk(
       type: "error",
       error: `${harnessId} killed by policy tripwire`,
       recoverable: true,
+      killCause: cause,
+    };
+  }
+  if (cause === "soft") {
+    return {
+      type: "error",
+      error: `${harnessId} soft deadline after ${softTimeoutMs ?? "unknown"}ms ${SOFT_CAP_ERROR_SUFFIX}`,
+      recoverable: false,
       killCause: cause,
     };
   }
@@ -644,6 +674,7 @@ export async function* runHarnessProcess(
     proc,
     idleTimeoutMs: req.idleTimeoutMs,
     hardTimeoutMs: req.hardTimeoutMs,
+    softTimeoutMs: req.softTimeoutMs,
     startupTimeoutMs: req.startupTimeoutMs,
     toolTimeoutMs,
     thinkingTimeoutMs: req.thinkingTimeoutMs ?? DEFAULT_THINKING_TIMEOUT_MS,
@@ -940,6 +971,7 @@ export async function* runHarnessProcess(
     req.idleTimeoutMs,
     req.startupTimeoutMs,
     killer.toolWasInFlightAtKill(),
+    req.softTimeoutMs,
   );
   if (errChunk) {
     await awaitStderrDrained();

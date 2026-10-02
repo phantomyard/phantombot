@@ -774,8 +774,13 @@ export async function runRun(input: RunInput = {}): Promise<number> {
 
   harnessAlerter.configure({
     host: hostname(),
-    send: async (message: string) => {
-      await runNotify({ config, message, persona: alertPersona });
+    // `persona` is the persona whose turn produced the alert (issue #638):
+    // an undelivered-turn notification must come from THAT persona's
+    // channels, so the user sees which persona is broken and replies land
+    // on it. Undefined (greetings, recovery replies) falls back to the
+    // daemon-level default below.
+    send: async (message: string, persona?: string) => {
+      await runNotify({ config, message, persona: persona ?? alertPersona });
     },
   });
 

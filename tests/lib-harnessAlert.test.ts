@@ -591,3 +591,80 @@ describe("parseRetryDeadlineMs — wall-clock deadlines", () => {
     expect(parseRetryDeadlineMs("try again at 99:99", now)).toBeUndefined();
   });
 });
+
+describe("issue #638 — persona attribution + chain excerpt", () => {
+  function recordingAlerter() {
+    const sent: { message: string; persona?: string }[] = [];
+    const alerter = new HarnessAlerter({
+      send: (m, persona) => {
+        sent.push({ message: m, persona });
+      },
+    });
+    return { alerter, sent };
+  }
+
+  test("exhausted alert threads the originating persona to the sender", async () => {
+    const { alerter, sent } = recordingAlerter();
+    await alerter.noteExhausted({
+      harnessId: "native",
+      error: "native timed out after 3600000ms (hard wall-clock cap)",
+      chain: ["codex", "native"],
+      persona: "kai",
+    });
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.persona).toBe("kai");
+  });
+
+  test("degraded alert threads the persona; undefined stays undefined", async () => {
+    const { alerter, sent } = recordingAlerter();
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES; i++) {
+      alerter.noteFailure("claude", "claude api error: authentication_failed");
+      await alerter.noteDegraded({ harnessId: "claude", servedBy: "pi", persona: "kai" });
+    }
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.persona).toBe("kai");
+
+    const fresh = recordingAlerter();
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES; i++) {
+      fresh.alerter.noteFailure("claude", "claude api error: authentication_failed");
+      await fresh.alerter.noteDegraded({ harnessId: "claude", servedBy: "pi" });
+    }
+    expect(fresh.sent[0]!.persona).toBeUndefined();
+  });
+
+  test("earlier chain failure renders as one bounded line, omitted when same harness", async () => {
+    const { alerter, sent } = recordingAlerter();
+    await alerter.noteExhausted({
+      harnessId: "native",
+      error: "native timed out after 3600000ms (hard wall-clock cap)",
+      chain: ["codex", "native"],
+      earlier: {
+        harnessId: "codex",
+        excerpt: "ERROR: You've hit your usage limit. Upgrade to Pro ... try again at Oct 4th, 2026 11:32 AM.",
+      },
+    });
+    expect(sent[0]!.message).toContain("codex: ERROR: You've hit your usage limit");
+    // Still one line — the excerpt rides inline, never multi-line.
+    expect(sent[0]!.message).not.toContain("\n");
+
+    // An over-long excerpt is truncated to the 160-char cap.
+    const long = recordingAlerter();
+    await long.alerter.noteExhausted({
+      harnessId: "native",
+      error: "native timed out after 3600000ms (hard wall-clock cap)",
+      chain: ["codex", "native"],
+      earlier: { harnessId: "codex", excerpt: "x".repeat(400) },
+    });
+    expect(long.sent[0]!.message).toContain("x".repeat(160));
+    expect(long.sent[0]!.message).not.toContain("x".repeat(161));
+
+    const again = recordingAlerter();
+    await again.alerter.noteExhausted({
+      harnessId: "native",
+      error: "native timed out after 3600000ms (hard wall-clock cap)",
+      chain: ["native"],
+      earlier: { harnessId: "native", excerpt: "same harness — no excerpt" },
+    });
+    expect(again.sent[0]!.message).not.toContain("no excerpt");
+  });
+});

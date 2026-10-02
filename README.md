@@ -852,6 +852,8 @@ update_channel = "stable"
 harness_idle_timeout_s = 300
 harness_thinking_timeout_s = 600
 harness_tool_timeout_s = 1200
+harness_soft_timeout_s = 3000
+harness_nudge_cap = 2
 harness_hard_timeout_s = 3600
 
 [harnesses]
@@ -889,6 +891,32 @@ When the orchestrator fails over (a recoverable error mid-stream, such as
 claude's `server_error`), the abandoned harness's whole process group is killed
 immediately (SIGKILL) and the fallback only starts once it has exited, so it
 cannot keep running tools in parallel with the fallback.
+
+The hard cap is a backstop, not the deadline (issue #639). At
+`harness_soft_timeout_s` (default 3000s, env
+`PHANTOMBOT_HARNESS_SOFT_TIMEOUT_MS`, 0 disables) a still-running turn is
+interrupted — the same process-group SIGTERM a channel interrupt uses — and
+the turn re-runs with a synthetic wrap-up nudge ("Your turn has lasted 3000s —
+that's too long for one turn. Wrap up and deliver your reply now.") on a fresh
+budget. The nudge pass sees the original request plus a synthetic
+interrupted-pair (what was asked, what had streamed, an interrupted marker),
+so a healthy model wraps up and delivers instead of dying at the cap with
+everything it did discarded. A model that never wraps is bounded by
+`harness_nudge_cap` (default 2, env `PHANTOMBOT_HARNESS_NUDGE_CAP`): after
+that many nudges the soft deadline is disarmed and `harness_hard_timeout_s`
+kills for real, producing the usual undelivered-turn alert. Soft kills are
+not harness failures — no cooldown, no failover, no health alert. Background
+task wakes respect their chain-wide budget: a nudge pass inherits the time
+remaining, never a fresh window.
+
+Every harness failure is also recorded (bounded) to
+`<persona dir>/harness-failures/<date>.jsonl` — error, exit code, kill cause
+and the last 20 stderr lines — so a mid-chain failure that a fallback absorbed
+(e.g. codex exiting 1 on a quota error while pi served the turn) stays
+diagnosable after the fact. The "no fallback left" alert names the failing
+persona it came from and includes a one-line excerpt of the chain's first
+failure.
+
 A turn sends at most 128 KiB of canonical conversation history to a harness,
 keeping the newest complete messages and logging both the loaded and included
 byte counts. The 30-row limit remains a second ceiling; retrieval and durable

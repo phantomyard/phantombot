@@ -1131,3 +1131,187 @@ describe("runWithFallback — chain-wide wake budget (#631)", () => {
     expect(second.lastRequest?.hardTimeoutMs).toBe(5_000);
   });
 });
+
+describe("issue #638 — persona attribution + failure evidence", () => {
+  function recordingAlerter() {
+    const sent: { message: string; persona?: string }[] = [];
+    return {
+      sent,
+      alerter: new HarnessAlerter({
+        send: (m, persona) => {
+          sent.push({ message: m, persona });
+        },
+      }),
+    };
+  }
+
+  test("exhausted alert carries the originating persona", async () => {
+    const { alerter, sent } = recordingAlerter();
+    const only = new FakeHarness("codex", [
+      { type: "error", error: "codex exited with code 1", recoverable: true },
+    ]);
+    await collect(
+      runWithFallback([only], newRequest({ persona: "kai" }), {
+        cooldown: new CooldownStore(),
+        alerter,
+      }),
+    );
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.persona).toBe("kai");
+  });
+
+  test("degraded alert carries the originating persona", async () => {
+    const { alerter, sent } = recordingAlerter();
+    const authError: HarnessChunk = {
+      type: "error",
+      error: "claude api error: authentication_failed",
+      recoverable: true,
+    };
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES; i++) {
+      const primary = new FakeHarness("claude", [authError]);
+      const backup = new FakeHarness("pi", [
+        { type: "done", finalText: "answered", meta: {} },
+      ]);
+      await collect(
+        runWithFallback([primary, backup], newRequest({ persona: "kai" }), {
+          cooldown: new CooldownStore(),
+          alerter,
+        }),
+      );
+    }
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.persona).toBe("kai");
+  });
+
+  test("exhausted alert names the chain's first failure with its stderr excerpt", async () => {
+    const { alerter, sent } = recordingAlerter();
+    const codex = new FakeHarness("codex", [
+      {
+        type: "error",
+        error: "codex exited with code 1",
+        recoverable: true,
+        stderrTail: [
+          "ERROR: You've hit your usage limit. Upgrade to Pro ... try again at Oct 4th, 2026 11:32 AM.",
+        ],
+      },
+    ]);
+    const native = new FakeHarness("native", [
+      {
+        type: "error",
+        error: "native timed out after 3600000ms (hard wall-clock cap)",
+        recoverable: true,
+      },
+    ]);
+    await collect(
+      runWithFallback([codex, native], newRequest({ persona: "kai" }), {
+        cooldown: new CooldownStore(),
+        alerter,
+      }),
+    );
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.message).toContain("codex: ERROR: You've hit your usage limit");
+    expect(sent[0]!.persona).toBe("kai");
+  });
+
+  test("onHarnessFailure records every failure with bounded stderr", async () => {
+    const records: unknown[] = [];
+    const codex = new FakeHarness("codex", [
+      {
+        type: "error",
+        error: "codex exited with code 1",
+        recoverable: true,
+        exitCode: 1,
+        stderrTail: ["ERROR: You've hit your usage limit."],
+      },
+    ]);
+    const native = new FakeHarness("native", [
+      { type: "error", error: "native died", recoverable: true },
+    ]);
+    await collect(
+      runWithFallback([codex, native], newRequest({ persona: "kai" }), {
+        cooldown: new CooldownStore(),
+        onHarnessFailure: (r) => records.push(r),
+      }),
+    );
+    expect(records.length).toBe(2);
+    expect(records[0]).toMatchObject({
+      harnessId: "codex",
+      persona: "kai",
+      exitCode: 1,
+      stderrTail: ["ERROR: You've hit your usage limit."],
+    });
+    expect((records[0] as { ts: string }).ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(records[1]).toMatchObject({
+      harnessId: "native",
+      persona: "kai",
+    });
+  });
+
+  test("a sinking that throws cannot break the turn", async () => {
+    const codex = new FakeHarness("codex", [
+      { type: "error", error: "codex exited with code 1", recoverable: true },
+    ]);
+    const native = new FakeHarness("native", [
+      { type: "done", finalText: "ok", meta: {} },
+    ]);
+    const chunks = await collect(
+      runWithFallback([codex, native], newRequest(), {
+        cooldown: new CooldownStore(),
+        onHarnessFailure: () => {
+          throw new Error("sink exploded");
+        },
+      }),
+    );
+    expect(chunks.at(-1)).toEqual({ type: "done", finalText: "ok", meta: {} });
+  });
+});
+
+describe("soft-kill observability (#638/#639 review)", () => {
+  test("soft kill records evidence with cause 'soft', never falls through, and carries the tool digest", async () => {
+    const records: unknown[] = [];
+    const claude = new FakeHarness("claude", [
+      {
+        type: "progress",
+        note: "tool",
+        tool: { title: "Bash: git push origin main", kind: "execute", locations: [] },
+      },
+      {
+        type: "error",
+        error: "fake soft deadline after 3000ms (soft deadline)",
+        recoverable: false,
+        killCause: "soft",
+      },
+    ]);
+    const native = new FakeHarness("native", [
+      { type: "done", finalText: "wrong path" },
+    ]);
+    const chunks = await collect(
+      runWithFallback([claude, native], newRequest({ hardTimeoutMs: 3_600_000 }), {
+        cooldown: new CooldownStore(),
+        onHarnessFailure: (r) => records.push(r),
+      }),
+    );
+    // The soft kill ends the chain run — no cooldown bump, no fall-through —
+    // but still lands in the failure JSONL (cause "soft") so nudge frequency
+    // stays observable, and hands the interrupted pass's tool calls to the
+    // orchestrator for the nudge digest.
+    expect(native.invocations).toBe(0);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toMatchObject({ type: "progress", tool: { title: "Bash: git push origin main" } });
+    expect(chunks[1]).toEqual({
+      type: "error",
+      error: "fake soft deadline after 3000ms (soft deadline)",
+      recoverable: false,
+      killCause: "soft",
+      toolCallsSoFar: ["Bash: git push origin main"],
+    });
+    expect(records).toEqual([
+      {
+        ts: expect.any(String),
+        harnessId: "claude",
+        error: "fake soft deadline after 3000ms (soft deadline)",
+        killCause: "soft",
+      },
+    ]);
+  });
+});

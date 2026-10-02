@@ -45,6 +45,7 @@ import {
 } from "../lib/harnessAlert.ts";
 import { log } from "../lib/logger.ts";
 import type { AuditSink } from "../lib/auditLog.ts";
+import type { HarnessFailureRecord, HarnessFailureSink } from "../lib/harnessFailureLog.ts";
 import {
   buildResumeRequest,
   MAX_RESUME_ATTEMPTS,
@@ -73,6 +74,15 @@ export interface RunWithFallbackOptions {
    * paths alert nobody unless they inject their own.
    */
   alerter?: HarnessAlerter;
+  /**
+   * Evidence sink for harness failures (issue #638). Invoked at every
+   * failure the orchestrator records — recoverable fall-throughs, terminal
+   * errors, throws and empty replies — with the stderr tail and exit
+   * diagnostics the runtime otherwise only kept in memory. Undefined =
+   * no persistence (the default for tests and degraded paths). Contracted
+   * to never throw; it must not be able to break the turn.
+   */
+  onHarnessFailure?: HarnessFailureSink;
   /**
    * Absolute wall-clock deadline (epoch ms) for the WHOLE chain (issue #631).
    * When set, every attempt's `hardTimeoutMs` is clamped to the time REMAINING
@@ -114,10 +124,51 @@ export async function* runWithFallback(
   let headSkipReason: string | undefined;
   // Remembers the first harness that failed this turn, so that if a LATER
   // harness answers we can tell the owner which one is broken and who is
-  // covering for it. Only the first matters: that's the primary.
-  let firstFailure: { harnessId: string; error: string } | undefined;
+  // covering for it. Only the first matters: that's the primary. The excerpt
+  // is one bounded line of that failure's stderr (#638) — the quota prose a
+  // CLI prints to stderr is otherwise invisible everywhere, and the exhausted
+  // alert can then tell the whole story instead of only its last page.
+  let firstFailure: {
+    harnessId: string;
+    error: string;
+    excerpt?: string;
+  } | undefined;
   const priorKillHarness = new Map<string, string>();
   const repeatedKillCausesLogged = new Set<string>();
+
+  /** One bounded stderr line for the exhausted alert (#638). */
+  const stderrExcerpt = (tail?: readonly string[]): string | undefined => {
+    const last = tail?.[tail.length - 1];
+    return last && last.length > 0 ? last.slice(0, 160) : undefined;
+  };
+
+  /** Evidence sink wrapper (#638) — never throws, no-op when unset. */
+  const recordFailure = (
+    harnessId: string,
+    error: string,
+    extra?: Partial<
+      Pick<
+        HarnessFailureRecord,
+        "httpStatus" | "exitCode" | "killCause" | "cause" | "stderrTail"
+      >
+    >,
+  ): void => {
+    const sink = options.onHarnessFailure;
+    if (!sink) return;
+    try {
+      sink({
+        ts: new Date().toISOString(),
+        ...(req.persona ? { persona: req.persona } : {}),
+        harnessId,
+        error,
+        ...extra,
+      });
+    } catch (e) {
+      log.debug("orchestrator: failure-evidence sink threw (ignored)", {
+        err: String(e),
+      });
+    }
+  };
   const estimatedBytes = estimatePayloadBytes(req);
   // #631 — per-attempt hard cap clamp under a chain-wide deadline. Each
   // attempt gets min(configured hard cap, time left before the deadline);
@@ -194,6 +245,7 @@ export async function* runWithFallback(
           harnessId: harness.id,
           error,
           chain: chainIds,
+          persona: req.persona,
         });
         yield { type: "error", error, recoverable: false };
         return;
@@ -306,6 +358,34 @@ export async function* runWithFallback(
               priorKillHarness.set(chunk.killCause, harness.id);
             }
           }
+          // Issue #639: a soft-deadline kill is NOT a harness failure —
+          // no cooldown bump, no alerter incident, no fall-through. The
+          // chain run ends here and runTurnBody decides what happens next:
+          // a wrap-up nudge pass while the nudge budget lasts, or (budget
+          // exhausted) the hard cap as the backstop.
+          if (chunk.killCause === "soft") {
+            log.warn(
+              "orchestrator: soft deadline reached — ending chain run for nudge",
+              {
+                harnessId: harness.id,
+                error: chunk.error,
+              },
+            );
+            // A soft kill is deliberately NOT a harness failure — no cooldown
+            // bump, no alerter, no fall-through — but it IS evidence (#639's
+            // point is observability): record it in the failure JSONL with
+            // cause "soft" so nudge frequency stays visible when tuning
+            // harness_soft_timeout_s. Deliberately NOT firstFailure: a soft
+            // kill is not an outage and must not colour the exhausted alert.
+            recordFailure(harness.id, chunk.error, {
+              killCause: "soft",
+              stderrTail: chunk.stderrTail,
+            });
+            // The nudge pass is a FRESH process: hand it what this attempt
+            // had already started so it doesn't replay side-effecting calls.
+            yield { ...chunk, toolCallsSoFar: partial.toolCalls };
+            return;
+          }
           // Killed mid-flight with work already done: respawn this same
           // harness once, carrying what it had said and started. Checked BEFORE
           // the fall-through branch so a chain that HAS a next harness still
@@ -402,9 +482,17 @@ export async function* runWithFallback(
               chunk.httpStatus,
               chunk.stderrTail,
             );
+            recordFailure(harness.id, chunk.error, {
+              httpStatus: chunk.httpStatus,
+              exitCode: chunk.exitCode,
+              killCause: chunk.killCause,
+              cause,
+              stderrTail: chunk.stderrTail,
+            });
             firstFailure ??= {
               harnessId: harness.id,
               error: chunk.error,
+              excerpt: stderrExcerpt(chunk.stderrTail),
             };
             recoverableError = true;
             break;
@@ -422,12 +510,27 @@ export async function* runWithFallback(
               chunk.httpStatus,
               chunk.stderrTail,
             );
+            recordFailure(harness.id, chunk.error, {
+              httpStatus: chunk.httpStatus,
+              exitCode: chunk.exitCode,
+              killCause: chunk.killCause,
+              stderrTail: chunk.stderrTail,
+            });
             await alerter.noteExhausted({
               harnessId: harness.id,
               error: chunk.error,
               httpStatus: chunk.httpStatus,
               chain: chainIds,
               stderrTail: chunk.stderrTail,
+              persona: req.persona,
+              ...(firstFailure
+                ? {
+                    earlier: {
+                      harnessId: firstFailure.harnessId,
+                      excerpt: firstFailure.excerpt ?? firstFailure.error,
+                    },
+                  }
+                : {}),
             });
           }
           yield chunk;
@@ -475,7 +578,11 @@ export async function* runWithFallback(
           // own `empty` cause, so 3 consecutive empty turns fire a DEGRADED
           // push. The cost of a flake is one wasted round-trip.
           alerter.noteFailure(harness.id, "empty reply");
-          firstFailure ??= { harnessId: harness.id, error: "empty reply" };
+          recordFailure(harness.id, "empty reply", { cause: "empty" });
+          firstFailure ??= {
+            harnessId: harness.id,
+            error: "empty reply",
+          };
           recoverableError = true;
           break;
         }
@@ -527,10 +634,21 @@ export async function* runWithFallback(
       });
       cooldown.markFailure(harness.id);
       alerter.noteFailure(harness.id, error);
+      recordFailure(harness.id, error);
+      firstFailure ??= { harnessId: harness.id, error };
       await alerter.noteExhausted({
         harnessId: harness.id,
         error,
         chain: chainIds,
+        persona: req.persona,
+        ...(firstFailure && firstFailure.harnessId !== harness.id
+          ? {
+              earlier: {
+                harnessId: firstFailure.harnessId,
+                excerpt: firstFailure.excerpt ?? firstFailure.error,
+              },
+            }
+          : {}),
       });
       yield { type: "error", error, recoverable: true };
       return;
@@ -571,9 +689,10 @@ export async function* runWithFallback(
           harnessId: harness.id,
         });
         alerter.noteFailure(harness.id, "empty reply");
+        recordFailure(harness.id, "empty reply", { cause: "empty" });
         // No `servedBy`: nobody covered this turn. Below the threshold this
         // is a no-op, so a one-off empty stays as quiet as #499 wants.
-        await alerter.noteDegraded({ harnessId: harness.id });
+        await alerter.noteDegraded({ harnessId: harness.id, persona: req.persona });
         return;
       }
       alerter.noteSuccess(harness.id);
@@ -583,6 +702,7 @@ export async function* runWithFallback(
         await alerter.noteDegraded({
           harnessId: firstFailure.harnessId,
           servedBy: harness.id,
+          persona: req.persona,
         });
       }
       return;

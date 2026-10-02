@@ -354,6 +354,8 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
         memory,
         idleTimeoutMs: config.harnessIdleTimeoutMs,
         hardTimeoutMs: config.harnessHardTimeoutMs,
+        softTimeoutMs: config.harnessSoftTimeoutMs,
+        nudgeCap: config.harnessNudgeCap,
         toolTimeoutMs: config.harnessToolTimeoutMs,
         thinkingTimeoutMs: config.harnessThinkingTimeoutMs,
         // A terminal conversation is a conversation: history, retrieval,
