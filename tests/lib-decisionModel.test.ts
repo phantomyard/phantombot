@@ -11,6 +11,7 @@ import {
   decisionModelDecide,
   decisionModelDecisionsUrl,
   DECISION_MODEL_MAX_SCORE_LEVELS,
+  fetchDecisionModels,
   type DecisionModelQuestion,
 } from "../src/lib/decisionModel.ts";
 
@@ -371,4 +372,83 @@ describe("decisionModelDecide LIVE (opt-in via JEV_LIVE_KEY)", () => {
     },
     15_000,
   );
+});
+
+describe("fetchDecisionModels", () => {
+  it("queries the OpenRouter catalog, decision-specialized models first", async () => {
+    let seenUrl = "";
+    let seenAuth = "";
+    const models = await fetchDecisionModels(
+      "openrouter",
+      "sk-test",
+      undefined,
+      async (url, init) => {
+        seenUrl = String(url);
+        seenAuth = String(
+          init?.headers instanceof Headers
+            ? init.headers.get("authorization")
+            : (init?.headers as Record<string, string>).Authorization ??
+              (init?.headers as Record<string, string>).authorization,
+        );
+        return jsonResponse({
+          data: [
+            { id: "z-ai/glm-4.6" },
+            { id: "typesafe/jev-2.0" },
+            { id: "typesafe/jev-1.13" },
+            { id: "openai/gpt-5.1" },
+          ],
+        });
+      },
+    );
+    expect(seenUrl).toBe("https://openrouter.ai/api/v1/models");
+    expect(seenAuth).toBe("Bearer sk-test");
+    // The default model is always present and the decision-specialized ids
+    // sort ahead of the general catalog.
+    expect(models[0]).toBe("typesafe/jev-1.13");
+    expect(models.indexOf("typesafe/jev-2.0")).toBeLessThan(
+      models.indexOf("z-ai/glm-4.6"),
+    );
+    expect(models).toContain("openai/gpt-5.1");
+  });
+
+  it("probes {base_url}/models for a direct provider and dedupes the default", async () => {
+    let seenUrl = "";
+    const models = await fetchDecisionModels(
+      "typesafe",
+      "ts-key",
+      "https://api.typesafe.ai/v1/",
+      async (url) => {
+        seenUrl = String(url);
+        return jsonResponse({
+          data: [{ id: "typesafe/jev-1.13" }, { id: "typesafe/jev-2.0" }],
+        });
+      },
+    );
+    expect(seenUrl).toBe("https://api.typesafe.ai/v1/models");
+    // One entry, not two — the provider's own listing must not duplicate it.
+    expect(models.filter((m) => m === "typesafe/jev-1.13")).toHaveLength(1);
+    expect(models).toContain("typesafe/jev-2.0");
+  });
+
+  it("degrades to the default list on network failure — never throws", async () => {
+    const models = await fetchDecisionModels(
+      "openrouter",
+      "sk-test",
+      undefined,
+      async () => {
+        throw new Error("offline");
+      },
+    );
+    expect(models).toEqual(["typesafe/jev-1.13"]);
+  });
+
+  it("falls back to the default when the catalog response is unusable", async () => {
+    const models = await fetchDecisionModels(
+      "typesafe",
+      "ts-key",
+      "https://api.typesafe.ai/v1",
+      async () => jsonResponse({ nope: true }),
+    );
+    expect(models).toEqual(["typesafe/jev-1.13"]);
+  });
 });

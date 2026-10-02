@@ -36,6 +36,8 @@ export interface BrainTestRequest {
   persona: string;
   harness: string;
   probe: () => Promise<{ ok: boolean; detail: string }>;
+  frameTitle?: string[];
+  description?: string;
 }
 
 export type BrainTestResult =
@@ -126,7 +128,7 @@ export function BrainTestScreen(props: {
 
   return (
     <Frame
-      title={["brain", persona, "test"]}
+      title={props.request.frameTitle ?? ["brain", persona, "test"]}
       status={
         stage === "testing"
           ? "testing..."
@@ -158,7 +160,8 @@ export function BrainTestScreen(props: {
             <Text color={theme.accent}>{persona}</Text> ({harness})
           </Text>
           <Text color={theme.dim}>
-            Sending one turn through the harness to verify model routing and credentials.
+            {props.request.description ??
+              "Sending one turn through the harness to verify model routing and credentials."}
           </Text>
         </Box>
 

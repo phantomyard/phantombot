@@ -77,10 +77,26 @@ through it. Provider choice comes **first**:
   name. A token is only asked for when there is nothing to reuse.
 - **Direct (TypeSafe)** — a native TypeSafe token and the API base URL
   (confirm it against your TypeSafe dashboard; the prefill is a starting
-  point, not a verified constant).
+  point, not a verified constant). TypeSafe credentials already in the
+  current persona's vault (`TYPESAFE_API_KEY` or the block's own `key_env`)
+  are offered for reuse on the same terms — no token prompt when something
+  is already stored.
 
-The key is validated with one live decisions call before anything is
-stored, and credentials live in the **vault**, never `config.toml`.
+After the provider and key, the wizard asks for the **model** the same way
+Brain does: it fetches the provider's live model catalog (OpenRouter's
+`/api/v1/models`, or `{base_url}/models` for a direct endpoint) with the
+decision-specialized models sorted first, preselects the current or default
+model, and always accepts a free-typed custom model id — a future
+`typesafe/jev-2.0` or any other provider's catalog needs no wizard change.
+The catalog fetch never throws; a network failure degrades to the default
+model alone.
+
+The wizard closes with a **test & apply step**: one live decision probe
+confirms the credentials and the chosen model's routing before anything is
+applied (a revoked key or a wrong model id fails here, not at the first
+held message). The probe runs in the Brain test screen with retry and
+apply/discard options; the standalone CLI flow validates directly.
+Credentials live in the **vault**, never `config.toml`.
 Reusable-key discovery is **persona-scoped** — on a multi-persona daemon the
 ambient environment belongs to whichever vault was injected at startup, so
 the wizard reads the TARGET persona's vault (via `getPersonaSecret`) rather

@@ -226,6 +226,7 @@ export interface ReusableDecisionModelKey {
 export async function findReusableDecisionModelKeys(
   config: Config,
   persona?: string,
+  provider?: "openrouter" | "typesafe",
 ): Promise<ReusableDecisionModelKey[]> {
   const out: ReusableDecisionModelKey[] = [];
   const seen = new Set<string>();
@@ -236,18 +237,48 @@ export async function findReusableDecisionModelKeys(
     seen.add(env);
     out.push({ env, label });
   };
-  await add(DECISION_MODEL_DEFAULT_KEY_ENV, "the decision-model key already in the vault");
-  const embeddingsUrl = config.embeddings.openaiCompatible?.baseUrl ?? "";
-  if (/openrouter\.ai/i.test(embeddingsUrl)) {
-    await add(
-      "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
-      "the OpenRouter key already used for embeddings",
-    );
+
+  if (!provider || provider === "openrouter") {
+    // Current decision-model key if configured
+    if (config.jev?.provider === "openrouter" && config.jev.keyEnv) {
+      await add(config.jev.keyEnv, "the decision-model key already in the vault");
+    } else {
+      await add(DECISION_MODEL_DEFAULT_KEY_ENV, "the decision-model key already in the vault");
+    }
+
+    // OpenRouter key used for brain/pi routing
+    const piProvider = config.harnesses?.pi?.routing?.provider;
+    if (piProvider === "openrouter") {
+      await add(
+        "OPENROUTER_API_KEY",
+        "the OpenRouter key already used for brain routing",
+      );
+    } else {
+      await add(
+        "OPENROUTER_API_KEY",
+        "an OpenRouter key already stored for this persona",
+      );
+    }
+
+    // OpenRouter key used for embeddings
+    const embeddingsUrl = config.embeddings.openaiCompatible?.baseUrl ?? "";
+    if (/openrouter\.ai/i.test(embeddingsUrl)) {
+      await add(
+        "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
+        "the OpenRouter key already used for embeddings",
+      );
+    }
   }
-  await add(
-    "OPENROUTER_API_KEY",
-    "an OpenRouter key already stored for this persona",
-  );
+
+  if (!provider || provider === "typesafe") {
+    await add("TYPESAFE_API_KEY", "the TypeSafe API key already in the vault");
+    if (config.jev?.provider === "typesafe" && config.jev.keyEnv) {
+      await add(config.jev.keyEnv, "the decision-model key already in the vault");
+    } else if (provider === "typesafe") {
+      await add(DECISION_MODEL_DEFAULT_KEY_ENV, "the decision-model key already in the vault");
+    }
+  }
+
   return out;
 }
 
@@ -315,6 +346,7 @@ export async function runDecisionModel(input: RunInput = {}): Promise<number> {
     reusableKeys: await findReusableDecisionModelKeys(config, persona),
     validate: (settings: { baseUrl: string; apiKey: string; model?: string }) =>
       validateDecisionModelKey(settings),
+    getSecret: (name: string) => getPersonaSecret(config, name, persona),
   };
 
   const finish = async (
@@ -339,7 +371,13 @@ export async function runDecisionModel(input: RunInput = {}): Promise<number> {
     return await runStandaloneFlow(async (q) => {
       const chosen = await configureDecisionModel(
         persona,
-        { choose: (opts) => q.choose(opts), value: (opts) => q.value(opts) },
+        {
+          choose: (opts) => q.choose(opts),
+          search: (opts) => q.search(opts),
+          value: (opts) => q.value(opts),
+          testBrain: q.testBrain ? (opts) => q.testBrain!(opts) : undefined,
+          note: (title, body) => q.note(title, body),
+        },
         deps,
       );
       const message = await finish(chosen);

@@ -358,3 +358,91 @@ export async function decisionModelDecide(
   }
   return { ok: true, answers, latencyMs: latencyMs() };
 }
+
+/**
+ * Discover models available from a decision-model provider.
+ *
+ * For OpenRouter, hits /api/v1/models and prioritizes decision-specialized models
+ * (e.g. typesafe/jev-1.13) followed by the rest of the catalog.
+ * For TypeSafe or custom OpenAI-compatible endpoints, probes {base_url}/models.
+ * Always includes DECISION_MODEL_DEFAULT_MODEL ("typesafe/jev-1.13").
+ * Never throws — network or parsing errors degrade to the default list.
+ */
+export async function fetchDecisionModels(
+  provider: string,
+  apiKey: string,
+  baseUrl?: string,
+  fetchImpl: DecisionModelFetch = fetch,
+): Promise<string[]> {
+  const models: string[] = [];
+  const seen = new Set<string>();
+  const add = (id: string) => {
+    const trimmed = id.trim();
+    if (trimmed && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      models.push(trimmed);
+    }
+  };
+
+  add(DECISION_MODEL_DEFAULT_MODEL);
+
+  try {
+    const normalizedProvider = provider.toLowerCase();
+    if (normalizedProvider === "openrouter") {
+      const url = "https://openrouter.ai/api/v1/models";
+      const headers: Record<string, string> = apiKey
+        ? { Authorization: `Bearer ${apiKey}`, "User-Agent": "phantombot" }
+        : { "User-Agent": "phantombot" };
+      const res = await fetchImpl(url, {
+        headers,
+        signal: timeoutSignal(5000),
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { data?: Array<{ id?: string }> };
+        if (Array.isArray(body?.data)) {
+          const preferred: string[] = [];
+          const others: string[] = [];
+          for (const item of body.data) {
+            if (typeof item?.id === "string") {
+              const id = item.id.trim();
+              if (
+                id.toLowerCase().includes("typesafe") ||
+                id.toLowerCase().includes("jev") ||
+                id.toLowerCase().includes("decision")
+              ) {
+                preferred.push(id);
+              } else {
+                others.push(id);
+              }
+            }
+          }
+          for (const id of preferred) add(id);
+          for (const id of others) add(id);
+        }
+      }
+    } else {
+      const base = (baseUrl ?? DECISION_MODEL_TYPESAFE_BASE_URL).replace(/\/+$/, "");
+      const url = `${base}/models`;
+      const headers: Record<string, string> = apiKey
+        ? { Authorization: `Bearer ${apiKey}`, "User-Agent": "phantombot" }
+        : { "User-Agent": "phantombot" };
+      const res = await fetchImpl(url, {
+        headers,
+        signal: timeoutSignal(5000),
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { data?: Array<{ id?: string }> };
+        if (Array.isArray(body?.data)) {
+          for (const item of body.data) {
+            if (typeof item?.id === "string") add(item.id);
+          }
+        }
+      }
+    }
+  } catch {
+    // Network, timeout, or parse failure: graceful fallback to default
+  }
+
+  return models;
+}
+

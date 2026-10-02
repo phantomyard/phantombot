@@ -1562,15 +1562,22 @@ export function App(props: AppProps): React.ReactElement {
           await import("../cli/jev.ts");
         const { maybePromptRestart } = await import("../cli/harness.ts");
         const { defaultServiceControl } = await import("../lib/platform.ts");
+        const { getPersonaSecret } = await import("../lib/vaultSecrets.ts");
         const { config } = await loadConfigForPersona(target.name);
 
         const chosen = await configureDecisionModel(
           target.name,
-          { choose: askChoice, value: askValue },
+          {
+            choose: askChoice,
+            search: askSearch,
+            value: askValue,
+            testBrain: askBrainTest,
+          },
           {
             existing: config.jev,
             reusableKeys: await findReusableDecisionModelKeys(config, target.name),
             validate: (settings) => validateDecisionModelKey(settings),
+            getSecret: (name) => getPersonaSecret(config, name, target.name),
           },
         );
         if (!chosen) return setNotice("decision model unchanged");

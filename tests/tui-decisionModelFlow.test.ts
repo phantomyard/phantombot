@@ -1,29 +1,38 @@
 /**
- * The Jev flow (issue #597): the frictionless rule is the headline — a user
- * with an existing OpenRouter key configures Jev with NO token prompt and
- * nothing new stored. Also: provider-first ordering, independent consumers,
- * validation gating, and esc-cancels-everything.
+ * The Decision Model flow (issue #597 + revamp):
+ * - Provider selector (OpenRouter, TypeSafe, custom, off)
+ * - Frictionless OpenRouter & TypeSafe key reuse scoped strictly to the current persona
+ * - Model selector in the same way Brain gives a model list (q.search / fallback)
+ * - Live test & apply step confirming the decision model works before saving
+ * - Independent consumers, validation gating, and esc-cancels-everything.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { configureDecisionModel, type DecisionModelFlowDeps } from "../src/tui/decisionModelFlow.ts";
 import type { DecisionModelSettings } from "../src/config.ts";
+import type { BrainTestRequest, BrainTestResult } from "../src/tui/screens/BrainTest.tsx";
 
 interface Asked {
   chooses: { title: string; options: string[]; initial?: string }[];
+  searches: { title: string; banner?: string; options: string[]; initial?: string }[];
   values: string[];
 }
 
 /**
  * A scripted question harness. `script` holds the choose() answers IN ORDER;
- * value() answers `typed` (or the per-call queue in `typedQueue`). Every
- * question is recorded so tests can assert what was — and was NOT — asked.
+ * `typed` holds value() answers; `searched` holds search() answers.
  */
-function fakeQ(script: string[], typed: (string | undefined)[] = []) {
-  const asked: Asked = { chooses: [], values: [] };
+function fakeQ(
+  script: string[],
+  typed: (string | undefined)[] = [],
+  searched: (string | undefined)[] = [],
+  testResult?: BrainTestResult,
+) {
+  const asked: Asked = { chooses: [], searches: [], values: [] };
   const chooses = [...script];
   const values = [...typed];
+  const searches = [...searched];
   const q = {
     choose: async (input: {
       title: string;
@@ -37,10 +46,32 @@ function fakeQ(script: string[], typed: (string | undefined)[] = []) {
       });
       return chooses.shift();
     },
+    search: async (input: {
+      title: string;
+      banner?: string;
+      initial?: string;
+      options: readonly { value: string; label: string; hint?: string }[];
+    }) => {
+      asked.searches.push({
+        title: input.title,
+        banner: input.banner,
+        options: input.options.map((o) => o.value),
+        initial: input.initial,
+      });
+      return searches.shift() ?? input.initial;
+    },
     value: async (input: { title: string }) => {
       asked.values.push(input.title);
       return values.shift();
     },
+    testBrain: testResult
+      ? async (req: BrainTestRequest) => {
+          if (testResult.ok) {
+            await req.probe();
+          }
+          return testResult;
+        }
+      : undefined,
   };
   return { q, asked };
 }
@@ -67,6 +98,7 @@ function deps(overrides: Partial<DecisionModelFlowDeps> = {}): DecisionModelFlow
     reusableKeys: [
       { env: EMBED_KEY_ENV, label: "the OpenRouter key already used for embeddings" },
     ],
+    fetchModels: async () => ["typesafe/jev-1.13"],
     validate: async () => ({ ok: true }),
     ...overrides,
   };
@@ -78,6 +110,7 @@ describe("configureDecisionModel — frictionless OpenRouter reuse", () => {
       "openrouter",
       `reuse:${EMBED_KEY_ENV}`,
       "both",
+      "test",
     ]);
     const r = await configureDecisionModel("robbie", q as never, deps());
     expect(r).toBeDefined();
@@ -90,22 +123,20 @@ describe("configureDecisionModel — frictionless OpenRouter reuse", () => {
       expect(r.update.router).toEqual({ enabled: true });
       expect(r.summary).toContain(`reusing ${EMBED_KEY_ENV}`);
     }
-    // Provider FIRST, then credential, then consumers — three screens, no
-    // mode step (an enabled consumer decides), and not a single value
-    // (token/URL) prompt anywhere.
     expect(asked.values).toHaveLength(0);
     expect(asked.chooses.map((c) => c.title)).toEqual([
       "Decision model for robbie",
       "OpenRouter credential for robbie",
       "What should the decision model do for robbie?",
+      "Ready to test OpenRouter (typesafe/jev-1.13)?",
     ]);
-    // The reusable key is the DEFAULT.
+    expect(asked.searches.map((s) => s.title)).toEqual(["Decision model"]);
     expect(asked.chooses[1]!.initial).toBe(`reuse:${EMBED_KEY_ENV}`);
   });
 
   test("with nothing to reuse, the token prompt appears and the key is stored", async () => {
     const { q, asked } = fakeQ(
-      ["openrouter", "new", "router"],
+      ["openrouter", "new", "router", "test"],
       ["sk-or-typed"],
     );
     const r = await configureDecisionModel(
@@ -125,7 +156,7 @@ describe("configureDecisionModel — frictionless OpenRouter reuse", () => {
 
   test("validation runs even on a reused key, and a failure rejects", async () => {
     let validatedWith = "";
-    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "both"]);
+    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "both", "test"]);
     const r = await configureDecisionModel(
       "robbie",
       q as never,
@@ -144,7 +175,7 @@ describe("configureDecisionModel — frictionless OpenRouter reuse", () => {
 describe("configureDecisionModel — direct TypeSafe", () => {
   test("asks for endpoint and token on a fresh setup", async () => {
     const { q, asked } = fakeQ(
-      ["typesafe", "both"],
+      ["typesafe", "both", "test"],
       ["https://ts.example/v1", "ts-token-1"],
     );
     const r = await configureDecisionModel("robbie", q as never, deps());
@@ -168,7 +199,7 @@ describe("configureDecisionModel — direct TypeSafe", () => {
       router: { enabled: false, timeoutMs: 300 },
     };
     const { q, asked } = fakeQ(
-      ["typesafe", "keep", "judge"],
+      ["typesafe", "keep", "judge", "test"],
       ["https://api.typesafe.ai/v1"],
     );
     const r = await configureDecisionModel("robbie", q as never, deps({ existing }));
@@ -179,6 +210,123 @@ describe("configureDecisionModel — direct TypeSafe", () => {
     }
     // Only the base-URL box — no token prompt on keep.
     expect(asked.values).toHaveLength(1);
+  });
+});
+
+describe("configureDecisionModel — model selection like Brain", () => {
+  test("search list allows picking an alternative decision model", async () => {
+    const { q, asked } = fakeQ(
+      ["openrouter", `reuse:${EMBED_KEY_ENV}`, "both", "test"],
+      [],
+      ["typesafe/jev-2.0"],
+    );
+    const r = await configureDecisionModel(
+      "robbie",
+      q as never,
+      deps({
+        fetchModels: async () => ["typesafe/jev-1.13", "typesafe/jev-2.0"],
+      }),
+    );
+    expect(r && "update" in r).toBe(true);
+    if (r && "update" in r) {
+      expect(r.update.model).toBe("typesafe/jev-2.0");
+      expect(r.summary).toContain("typesafe/jev-2.0");
+    }
+    expect(asked.searches).toHaveLength(1);
+    expect(asked.searches[0]!.options).toContain("typesafe/jev-2.0");
+  });
+
+  test("falls back to choose when search is absent, allowing custom text input", async () => {
+    const chooses = [
+      "openrouter",
+      `reuse:${EMBED_KEY_ENV}`,
+      "custom_input",
+      "both",
+      "test",
+    ];
+    const values = ["custom/my-decision-model"];
+    const asked: Asked = { chooses: [], searches: [], values: [] };
+    const qWithoutSearch = {
+      choose: async (input: {
+        title: string;
+        initial?: string;
+        options: readonly { value: string; label: string }[];
+      }) => {
+        asked.chooses.push({
+          title: input.title,
+          options: input.options.map((o) => o.value),
+          initial: input.initial,
+        });
+        return chooses.shift();
+      },
+      value: async (input: { title: string }) => {
+        asked.values.push(input.title);
+        return values.shift();
+      },
+    };
+
+    const r = await configureDecisionModel("robbie", qWithoutSearch as never, deps());
+    expect(r && "update" in r).toBe(true);
+    if (r && "update" in r) {
+      expect(r.update.model).toBe("custom/my-decision-model");
+    }
+  });
+});
+
+describe("configureDecisionModel — live test & apply step", () => {
+  test("testBrain success with apply:true saves configuration", async () => {
+    let probeCalled = false;
+    const { q } = fakeQ(
+      ["openrouter", `reuse:${EMBED_KEY_ENV}`, "both", "test"],
+      [],
+      [],
+      { ok: true, apply: true, detail: "pong ok" },
+    );
+    const r = await configureDecisionModel(
+      "robbie",
+      q as never,
+      deps({
+        validate: async () => {
+          probeCalled = true;
+          return { ok: true };
+        },
+      }),
+    );
+    expect(probeCalled).toBe(true);
+    expect(r && "update" in r).toBe(true);
+  });
+
+  test("testBrain success with apply:false cancels without saving", async () => {
+    const { q } = fakeQ(
+      ["openrouter", `reuse:${EMBED_KEY_ENV}`, "both", "test"],
+      [],
+      [],
+      { ok: true, apply: false, detail: "pong ok" },
+    );
+    const r = await configureDecisionModel("robbie", q as never, deps());
+    expect(r).toBeUndefined();
+  });
+
+  test("choosing 'skip' bypasses live validation and applies immediately", async () => {
+    let probeCalled = false;
+    const { q } = fakeQ([
+      "openrouter",
+      `reuse:${EMBED_KEY_ENV}`,
+      "both",
+      "skip",
+    ]);
+    const r = await configureDecisionModel(
+      "robbie",
+      q as never,
+      deps({
+        validate: async () => {
+          probeCalled = true;
+          return { ok: true };
+        },
+      }),
+    );
+    expect(probeCalled).toBe(false);
+    expect(r && "update" in r).toBe(true);
   });
 });
 
@@ -203,7 +351,7 @@ describe("configureDecisionModel — off, consumers and cancel", () => {
   });
 
   test("consumers are independent: judge only, no router", async () => {
-    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "judge"]);
+    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "judge", "test"]);
     const r = await configureDecisionModel("robbie", q as never, deps());
     if (r && "update" in r) {
       expect(r.update.judge.enabled).toBe(true);
@@ -236,7 +384,7 @@ describe("configureDecisionModel — an unknown vendor name is kept, never rewri
   };
 
   test("'Keep acme' is offered and preselected; keeping it asks nothing vendor-specific", async () => {
-    const { q, asked } = fakeQ(["custom", "both"]);
+    const { q, asked } = fakeQ(["custom", "both", "test"]);
     const r = await configureDecisionModel("robbie", q as never, deps({ existing }));
     expect(asked.chooses[0]?.options).toContain("custom");
     expect(asked.chooses[0]?.initial).toBe("custom");
@@ -255,7 +403,7 @@ describe("configureDecisionModel — an unknown vendor name is kept, never rewri
 
   test("keeping it still validates at the custom endpoint; a missing key rejects instead of prompting", async () => {
     const validated: string[] = [];
-    const { q } = fakeQ(["custom", "judge"]);
+    const { q } = fakeQ(["custom", "judge", "test"]);
     await configureDecisionModel(
       "robbie",
       q as never,
@@ -269,7 +417,7 @@ describe("configureDecisionModel — an unknown vendor name is kept, never rewri
     );
     expect(validated).toEqual(["https://api.acme.dev/v1"]);
 
-    const { q: q2, asked } = fakeQ(["custom", "judge"]);
+    const { q: q2, asked } = fakeQ(["custom", "judge", "test"]);
     const r = await configureDecisionModel(
       "robbie",
       q2 as never,
@@ -289,9 +437,8 @@ describe("configureDecisionModel — an unknown vendor name is kept, never rewri
   });
 
   test("picking OpenRouter explicitly drops the stated name AND the custom endpoint", async () => {
-    const { q, asked } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "judge"]);
+    const { q, asked } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "judge", "test"]);
     const r = await configureDecisionModel("robbie", q as never, deps({ existing }));
-    // Not "current": the current provider is acme, not OpenRouter.
     expect(asked.chooses[0]?.initial).toBe("custom");
     if (r && "update" in r) {
       expect(r.update.statedProvider).toBeUndefined();
@@ -302,8 +449,6 @@ describe("configureDecisionModel — an unknown vendor name is kept, never rewri
 });
 
 describe("configureDecisionModel — a custom vendor with NO base_url is never probed at a guessed endpoint (PR #605)", () => {
-  // The shape config loads with both consumers off: an unknown vendor and
-  // no base_url. `baseUrl` is absent — a transport default is NOT stood in.
   const existing: DecisionModelSettings = {
     provider: "openrouter",
     statedProvider: "acme",
@@ -316,7 +461,7 @@ describe("configureDecisionModel — a custom vendor with NO base_url is never p
 
   test("keeping it asks for the endpoint and validates ONLY there — openrouter.ai never sees the key", async () => {
     const validated: { baseUrl: string; apiKey: string }[] = [];
-    const { q, asked } = fakeQ(["custom", "judge"], ["https://api.acme.dev/v1/"]);
+    const { q, asked } = fakeQ(["custom", "judge", "test"], ["https://api.acme.dev/v1/"]);
     const r = await configureDecisionModel(
       "robbie",
       q as never,
@@ -353,18 +498,18 @@ describe("configureDecisionModel — a custom vendor with NO base_url is never p
         return { ok: true };
       },
     });
-    const { q } = fakeQ(["custom", "judge"], [""]);
+    const { q } = fakeQ(["custom", "judge", "test"], [""]);
     const r = await configureDecisionModel("robbie", q as never, probe);
     expect(r && "rejected" in r ? r.rejected : "").toContain("base URL is required");
 
-    const { q: q2 } = fakeQ(["custom", "judge"], [undefined]);
+    const { q: q2 } = fakeQ(["custom", "judge", "test"], [undefined]);
     expect(await configureDecisionModel("robbie", q2 as never, probe)).toBeUndefined();
     expect(calls).toBe(0);
   });
 
   test("a missing key rejects first — no endpoint question, no call", async () => {
     let calls = 0;
-    const { q, asked } = fakeQ(["custom", "judge"], ["https://api.acme.dev/v1"]);
+    const { q, asked } = fakeQ(["custom", "judge", "test"], ["https://api.acme.dev/v1"]);
     const r = await configureDecisionModel(
       "robbie",
       q as never,
@@ -407,7 +552,7 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
   test("acme -> Direct TypeSafe: the new token lands in the DEFAULT slot, never over ACME_API_KEY", async () => {
     let validatedModel: string | undefined;
     const { q, asked } = fakeQ(
-      ["typesafe", "both"],
+      ["typesafe", "both", "test"],
       ["https://api.typesafe.ai/v1", "ts-token-new"],
     );
     const r = await configureDecisionModel(
@@ -421,10 +566,10 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
         },
       }),
     );
-    // No keep/replace question: there is no TypeSafe token to keep.
     expect(asked.chooses.map((c) => c.title)).toEqual([
       "Decision model for robbie",
       "What should the decision model do for robbie?",
+      "Ready to test TypeSafe (typesafe/jev-1.13)?",
     ]);
     expect(r && "update" in r).toBe(true);
     if (r && "update" in r) {
@@ -432,7 +577,6 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
       expect(r.update.statedProvider).toBeUndefined();
       expect(r.update.keyEnv).toBe("PHANTOMBOT_JEV_API_KEY");
       expect(r.update.apiKey).toBe("ts-token-new");
-      // The custom vendor's model id means nothing at TypeSafe.
       expect(r.update.model).toBe("typesafe/jev-1.13");
       expect(r.update.baseUrl).toBe("https://api.typesafe.ai/v1");
     }
@@ -441,7 +585,7 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
 
   test("acme -> OpenRouter: validates and persists the default model, not acme/decision-v2", async () => {
     let validatedModel: string | undefined;
-    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "judge"]);
+    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "judge", "test"]);
     const r = await configureDecisionModel(
       "robbie",
       q as never,
@@ -471,7 +615,7 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
       router: { enabled: true, timeoutMs: 800 },
     };
     const { q } = fakeQ(
-      ["typesafe", "both"],
+      ["typesafe", "both", "test"],
       ["https://api.typesafe.ai/v1", "ts-token-new"],
     );
     const r = await configureDecisionModel("robbie", q as never, deps({ existing }));
@@ -491,7 +635,7 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
       router: { enabled: true, timeoutMs: 800 },
     };
     let validatedModel: string | undefined;
-    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "both"]);
+    const { q } = fakeQ(["openrouter", `reuse:${EMBED_KEY_ENV}`, "both", "test"]);
     const r = await configureDecisionModel(
       "robbie",
       q as never,
@@ -517,7 +661,7 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
     };
     process.env.MY_TS_TOKEN = "ts-stored";
     try {
-      const { q: q2 } = fakeQ(["typesafe", "keep", "judge"], ["https://api.typesafe.ai/v1"]);
+      const { q: q2 } = fakeQ(["typesafe", "keep", "judge", "test"], ["https://api.typesafe.ai/v1"]);
       const r2 = await configureDecisionModel("robbie", q2 as never, deps({ existing: ts }));
       if (r2 && "update" in r2) {
         expect(r2.update.keyEnv).toBe("MY_TS_TOKEN");
