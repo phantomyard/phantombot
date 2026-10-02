@@ -362,10 +362,19 @@ export async function decisionModelDecide(
 /**
  * Discover models available from a decision-model provider.
  *
- * For OpenRouter, hits /api/v1/models and prioritizes decision-specialized models
- * (e.g. typesafe/jev-1.13) followed by the rest of the catalog.
- * For TypeSafe or custom OpenAI-compatible endpoints, probes {base_url}/models.
- * Always includes DECISION_MODEL_DEFAULT_MODEL ("typesafe/jev-1.13").
+ * For OpenRouter, hits the DECISIONS catalog — `/api/v1/models?output_modalities=decisions` —
+ * NOT the generic `/api/v1/models`: OpenRouter splits catalogues by output modality
+ * (the same split the voice picker makes for transcription/speech, invariant 65), and
+ * the decisions catalog is a DIFFERENT list from the chat catalog. Verified live
+ * 2026-10-02: the unfiltered endpoint carries 460+ chat models and NONE of the
+ * decisions models (`liquid/d1`, `togethercomputer/tev1-4b-experimental`,
+ * `inception/mercury-decide:free`, `upstage/solar-decide`, `respan/span-01`,
+ * `~typesafe/jev-latest`, … — 10 ids the day this was written), so a picker fed
+ * from it offers chat models that would all fail the /api/alpha/decisions endpoint
+ * and cannot see the decide models the operator is looking for.
+ * For TypeSafe or custom OpenAI-compatible endpoints, probes {base_url}/models
+ * (TypeSafe serves decisions only, so one list covers both).
+ * Always includes DECISION_MODEL_DEFAULT_MODEL ("typesafe/jev-1.13") first.
  * Never throws — network or parsing errors degrade to the default list.
  */
 export async function fetchDecisionModels(
@@ -389,7 +398,12 @@ export async function fetchDecisionModels(
   try {
     const normalizedProvider = provider.toLowerCase();
     if (normalizedProvider === "openrouter") {
-      const url = "https://openrouter.ai/api/v1/models";
+      // The pinned modality filter IS the filter — OpenRouter decides what
+      // answers; no client-side heuristic can reconstruct this list from the
+      // chat catalog, and one that promoted "jev"-ish chat ids just offered
+      // wrong models.
+      const url =
+        "https://openrouter.ai/api/v1/models?output_modalities=decisions";
       const headers: Record<string, string> = apiKey
         ? { Authorization: `Bearer ${apiKey}`, "User-Agent": "phantombot" }
         : { "User-Agent": "phantombot" };
@@ -400,24 +414,12 @@ export async function fetchDecisionModels(
       if (res.ok) {
         const body = (await res.json()) as { data?: Array<{ id?: string }> };
         if (Array.isArray(body?.data)) {
-          const preferred: string[] = [];
-          const others: string[] = [];
-          for (const item of body.data) {
-            if (typeof item?.id === "string") {
-              const id = item.id.trim();
-              if (
-                id.toLowerCase().includes("typesafe") ||
-                id.toLowerCase().includes("jev") ||
-                id.toLowerCase().includes("decision")
-              ) {
-                preferred.push(id);
-              } else {
-                others.push(id);
-              }
-            }
-          }
-          for (const id of preferred) add(id);
-          for (const id of others) add(id);
+          // Sorted for determinism — the wire order is not a contract.
+          const ids = body.data
+            .map((item) => (typeof item?.id === "string" ? item.id.trim() : ""))
+            .filter((id): id is string => id !== "")
+            .sort();
+          for (const id of ids) add(id);
         }
       }
     } else {

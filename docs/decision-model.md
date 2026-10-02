@@ -83,11 +83,14 @@ through it. Provider choice comes **first**:
   is already stored.
 
 After the provider and key, the wizard asks for the **model** the same way
-Brain does: it fetches the provider's live model catalog (OpenRouter's
-`/api/v1/models`, or `{base_url}/models` for a direct endpoint) with the
-decision-specialized models sorted first, preselects the current or default
-model, and always accepts a free-typed custom model id — a future
-`typesafe/jev-2.0` or any other provider's catalog needs no wizard change.
+Brain does: it fetches the provider's live model catalog — OpenRouter's
+**decisions catalog** (`/api/v1/models?output_modalities=decisions`, a
+different list from the chat catalog: the decide models `liquid/d1`,
+`inception/mercury-decide:free`, `~typesafe/jev-latest` and friends are not
+in the generic `/models` response at all), or `{base_url}/models` for a
+direct endpoint — preselects the current or default model, and always
+accepts a free-typed custom model id — a future `typesafe/jev-2.0` or any
+other provider's catalog needs no wizard change.
 The catalog fetch never throws; a network failure degrades to the default
 model alone.
 

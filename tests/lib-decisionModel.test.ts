@@ -375,7 +375,7 @@ describe("decisionModelDecide LIVE (opt-in via JEV_LIVE_KEY)", () => {
 });
 
 describe("fetchDecisionModels", () => {
-  it("queries the OpenRouter catalog, decision-specialized models first", async () => {
+  it("queries the OpenRouter DECISIONS catalog, never the chat catalog", async () => {
     let seenUrl = "";
     let seenAuth = "";
     const models = await fetchDecisionModels(
@@ -392,23 +392,35 @@ describe("fetchDecisionModels", () => {
         );
         return jsonResponse({
           data: [
-            { id: "z-ai/glm-4.6" },
-            { id: "typesafe/jev-2.0" },
+            { id: "liquid/d1" },
+            { id: "togethercomputer/tev1-4b-experimental" },
+            { id: "inception/mercury-decide:free" },
+            { id: "~typesafe/jev-latest" },
             { id: "typesafe/jev-1.13" },
-            { id: "openai/gpt-5.1" },
           ],
         });
       },
     );
-    expect(seenUrl).toBe("https://openrouter.ai/api/v1/models");
-    expect(seenAuth).toBe("Bearer sk-test");
-    // The default model is always present and the decision-specialized ids
-    // sort ahead of the general catalog.
-    expect(models[0]).toBe("typesafe/jev-1.13");
-    expect(models.indexOf("typesafe/jev-2.0")).toBeLessThan(
-      models.indexOf("z-ai/glm-4.6"),
+    // The pinned modality filter IS the filter: the decisions catalog is a
+    // different list from the chat catalog, so the endpoint must be asked
+    // for it directly (verified live 2026-10-02 — the unfiltered /models
+    // carries none of the decide models).
+    expect(seenUrl).toBe(
+      "https://openrouter.ai/api/v1/models?output_modalities=decisions",
     );
-    expect(models).toContain("openai/gpt-5.1");
+    expect(seenAuth).toBe("Bearer sk-test");
+    // The default model is always present, first, exactly once.
+    expect(models[0]).toBe("typesafe/jev-1.13");
+    expect(models.filter((m) => m === "typesafe/jev-1.13")).toHaveLength(1);
+    // The decisions catalog arrives — every decide id the operator sees on
+    // OpenRouter, including the tilde-prefixed one and free-tier ids.
+    expect(models).toContain("liquid/d1");
+    expect(models).toContain("togethercomputer/tev1-4b-experimental");
+    expect(models).toContain("inception/mercury-decide:free");
+    expect(models).toContain("~typesafe/jev-latest");
+    // Catalog ids are sorted deterministically after the pinned default.
+    expect(models.slice(1)).toEqual([...models.slice(1)].sort());
+    expect(models).toHaveLength(5);
   });
 
   it("probes {base_url}/models for a direct provider and dedupes the default", async () => {
