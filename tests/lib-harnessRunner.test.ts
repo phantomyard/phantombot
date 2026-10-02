@@ -297,6 +297,95 @@ describe("createKillCoordinator — tool cap (issue #351)", () => {
   });
 });
 
+describe("createKillCoordinator — thinking budget (issue #641)", () => {
+  test("sustained 'model' activity is capped by thinkingTimeoutMs — the tool-planning ceiling", async () => {
+    // The #641 shape: a stalled model streams liveness forever (heartbeats,
+    // nameless toolcall_* deltas — all 'model' class after the fix) with no
+    // productive output. The thinking budget must cap it: the idle deadline
+    // may not extend past lastProductiveAt + thinkingTimeoutMs, so the idle
+    // kill fires even though activity NEVER stops.
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 1000, // generous idle window — the budget must be the binding cap
+      thinkingTimeoutMs: 300,
+      hardTimeoutMs: 10_000,
+      harnessId: "test",
+    });
+
+    const interval = setInterval(() => killer.touch("model"), 30);
+    try {
+      await proc.exited; // killed at ~300ms, well before the 1000ms idle window
+    } finally {
+      clearInterval(interval);
+      await killer.dispose();
+    }
+    expect(killer.killCause()).toBe("idle");
+  });
+
+  test("without a thinking budget, 'model' heartbeats re-arm the idle window forever (legacy)", async () => {
+    // Regression guard for the LEGACY shape: thinkingTimeoutMs omitted means
+    // heartbeats keep the process alive indefinitely (up to the hard cap).
+    // Only the default-wired runHarnessProcess path gets the 600s budget.
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 150,
+      hardTimeoutMs: 10_000,
+      harnessId: "test",
+    });
+
+    const interval = setInterval(() => killer.touch("model"), 30);
+    await Bun.sleep(700);
+    clearInterval(interval);
+    await killer.dispose();
+    expect(killer.killCause()).toBeUndefined();
+  });
+
+  test("real in-tool activity ignores the thinking budget entirely (Kai counterexample)", async () => {
+    // A genuinely working tool run (tool_execution_start/_update → 'tool'
+    // class, per-tool timer) must not be starved by a thinking budget: with
+    // thinkingTimeoutMs shorter than the run, sustained 'tool' activity keeps
+    // the process alive. This pins the #641 design's other half — only real
+    // tool EXECUTION earns full idle resets, and it keeps earning them.
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 150,
+      thinkingTimeoutMs: 300,
+      toolTimeoutMs: 5000,
+      hardTimeoutMs: 10_000,
+      harnessId: "test",
+    });
+
+    killer.toolStart("tool-1");
+    const interval = setInterval(() => killer.touch("tool"), 30);
+    await Bun.sleep(700); // past BOTH the 300ms thinking budget and idle window
+    clearInterval(interval);
+    killer.toolEnd("tool-1");
+    await killer.dispose();
+    expect(killer.killCause()).toBeUndefined();
+  });
+});
+
 describe("createKillCoordinator — hard timer", () => {
   test("hard timer fires regardless of touch() activity", async () => {
     // Process keeps emitting (so idle never fires) but hard cap is short.

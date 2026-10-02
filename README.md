@@ -886,6 +886,9 @@ the last productive output: text, a tool starting or a tool result. The idle
 timeout is a floor, so a thinking budget below it just means heartbeats buy no
 extra time; it never kills sooner than the idle timeout. A harness streaming nothing but heartbeats is killed at that point
 and the chain fails over, instead of holding "Thinking..." until the hard cap.
+A model COMPOSING a tool call (pi's stream-side `toolcall_*` records) is model
+activity, not tool execution — only the harness's real tool-execution events
+count as "a tool starting".
 
 When the orchestrator fails over (a recoverable error mid-stream, such as
 claude's `server_error`), the abandoned harness's whole process group is killed
