@@ -1141,11 +1141,22 @@ export function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivit
   const ame = obj.assistantMessageEvent;
   if (isObject(ame) && typeof ame.type === "string") {
     // pi 0.79.x: `tool_use_*` → `toolcall_*`. Accept both.
-    if (ame.type === "toolcall_end" || ame.type === "tool_use_end") {
-      return "productive";
-    }
+    //
+    // ALL of these records are the MODEL composing a tool call inside its
+    // assistant message, not the execution: pi signals actual execution with
+    // the top-level tool_execution_start/_update events above, which stay
+    // "tool" and open a toolStart per-tool timer. The assistantMessageEvent
+    // toolcall_* stream never drives a toolStart, so there is no per-tool
+    // cap covering it — classifying it "tool" earned every delta a FULL
+    // unbounded idle reset (issue #641). That is exactly what let a stalled
+    // model emitting nameless toolcall_* noise outrun the thinking ceiling
+    // (873s observed vs the 600s cap). Model-class instead: the deltas keep
+    // proving liveness, but only within the thinkingTimeoutMs budget — a
+    // model that plans tools forever without executing anything dies at the
+    // ceiling and fails over, and one that DOES execute gets its full reset
+    // back on the very next tool_execution_start.
     if (ame.type.startsWith("toolcall") || ame.type.startsWith("tool_use")) {
-      return "tool";
+      return "model";
     }
   }
   return chunk.type === "heartbeat" ? "model" : "productive";

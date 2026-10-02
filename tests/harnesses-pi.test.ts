@@ -391,6 +391,50 @@ describe("piActivity — idle-watchdog classification", () => {
     expect(piActivity(parsed, { type: "heartbeat" })).toBe("model");
   });
 
+  test("assistantMessageEvent toolcall_* noise is 'model', NOT 'tool' (issue #641)", () => {
+    // These are the MODEL composing a tool call inside its message — the
+    // execution is signalled separately by top-level tool_execution_start,
+    // which is what earns "tool" + the per-tool timer. Classifying the
+    // stream-side noise "tool" gave every delta a FULL unbounded idle reset
+    // with no toolStart ever capping it — the 873s GLM stall in #641.
+    for (const ameType of [
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "tool_use_start",
+      "tool_use_end",
+      "tool_use",
+    ]) {
+      const parsed = {
+        type: "message_update",
+        assistantMessageEvent: { type: ameType, contentIndex: 0 },
+        message: {},
+      };
+      expect(piActivity(parsed, { type: "heartbeat" })).toBe("model");
+    }
+  });
+
+  test("a NAMED assistantMessageEvent toolcall is still 'model' — composition, not execution (issue #641)", () => {
+    // Even when the streaming record carries a real tool name, the execution
+    // signal is the top-level tool_execution_start that follows; until that
+    // fires the model is still only PLANNING the call, so it stays inside
+    // the thinking budget.
+    const parsed = {
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "toolcall_start",
+        contentIndex: 0,
+        toolName: "bash",
+        args: { command: "npm test" },
+      },
+      message: {},
+    };
+    const res = parsePiEvent(parsed)!;
+    if (isReasoningCapture(res)) throw new Error("unexpected reasoning capture");
+    expect(res.type).toBe("progress");
+    expect(piActivity(parsed, res)).toBe("model");
+  });
+
   test("text output is productive", () => {
     expect(piActivity({ type: "message_update" }, { type: "text", text: "hi" })).toBe(
       "productive",
