@@ -19,6 +19,12 @@
 import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import type { OpenAICompatibleConfigUpdate } from "../cli/embedding.ts";
 import type { Config } from "../config.ts";
+import {
+  embeddingModelPickerOptions,
+  fetchEmbeddingModels,
+  OTHER_EMBEDDING_MODEL,
+  sameEmbeddingEndpoint,
+} from "../lib/embeddingModels.ts";
 import type { EmbedResult } from "../lib/geminiEmbed.ts";
 import type { ChannelsQuestions } from "./channelsFlow.ts";
 
@@ -34,6 +40,8 @@ export interface MemoryQuestions {
     initial?: string;
     options: readonly { value: string; label: string; hint?: string }[];
   }): Promise<string | undefined>;
+  /** Filterable list for a long model catalogue; `choose` is the fallback. */
+  search?: ChannelsQuestions["search"];
   value: ChannelsQuestions["value"];
 }
 
@@ -52,6 +60,12 @@ export interface MemoryFlowDeps {
   ): Promise<EmbedResult>;
   /** Matching credential from this persona only; value is never rendered. */
   findOpenAICredential?(baseUrl: string): Promise<{ value: string } | undefined>;
+  /**
+   * The endpoint's embedding-capable models, for the picker. Defaults to
+   * `fetchEmbeddingModels`; `[]` means "nothing recognisable" and the flow
+   * falls back to the typed prompt.
+   */
+  fetchModels?(baseUrl: string, apiKey: string): Promise<string[]>;
 }
 
 export type MemoryFlowResult =
@@ -127,13 +141,6 @@ export async function configureMemory(
   if (baseUrl === undefined) return undefined;
   if (!baseUrl.trim()) return { rejected: "base URL is required" };
 
-  const model = await q.value({
-    title: "Embedding model",
-    initial: cur?.model ?? "",
-  });
-  if (model === undefined) return undefined;
-  if (!model.trim()) return { rejected: "model is required" };
-
   const stored = await deps.findOpenAICredential?.(baseUrl.trim());
   let apiKey = stored?.value;
   if (stored) {
@@ -159,6 +166,20 @@ export async function configureMemory(
     apiKey = typed;
   }
 
+  // The model is asked AFTER the key: the list comes from the endpoint's
+  // Models API, which needs the credential the user just confirmed.
+  const live = await (deps.fetchModels ?? fetchEmbeddingModels)(
+    baseUrl.trim(),
+    apiKey.trim(),
+  );
+  const model = await askEmbeddingModel(
+    q,
+    live,
+    sameEmbeddingEndpoint(cur?.baseUrl, baseUrl) ? cur?.model : undefined,
+  );
+  if (model === undefined) return undefined;
+  if (!model) return { rejected: "model is required" };
+
   const queryPrefix = await q.value({
     title: "Query prefix (optional)",
     initial: cur?.queryPrefix ?? "",
@@ -175,7 +196,7 @@ export async function configureMemory(
 
   const settings: OpenAICompatibleConfigUpdate = {
     baseUrl: baseUrl.trim(),
-    model: model.trim(),
+    model,
     apiKey: apiKey.trim(),
     queryPrefix: queryPrefix.trim(),
     documentPrefix: documentPrefix.trim(),
@@ -188,6 +209,34 @@ export async function configureMemory(
     update: { provider: "openai-compatible", openaiCompatible: { ...settings, dims: r.dims } },
     summary: `openai-compatible · ${settings.model}`,
   };
+}
+
+/**
+ * The model question: a list when the endpoint could be asked, the typed
+ * prompt when it could not (or when the user picks "Other"). Returns the
+ * trimmed id, `""` for an empty answer, `undefined` for a cancel.
+ */
+async function askEmbeddingModel(
+  q: MemoryQuestions,
+  live: readonly string[],
+  current?: string,
+): Promise<string | undefined> {
+  const title = "Embedding model";
+  const picker = embeddingModelPickerOptions(live, current);
+  if (picker) {
+    const input = {
+      title,
+      description:
+        "Embedding-capable models this endpoint offers — pick one, or choose Other to type an ID.",
+      options: picker.options,
+      initial: picker.initial,
+    };
+    const picked = q.search ? await q.search(input) : await q.choose(input);
+    if (picked === undefined) return undefined;
+    if (picked !== OTHER_EMBEDDING_MODEL) return picked.trim();
+  }
+  const typed = await q.value({ title, initial: current ?? "" });
+  return typed === undefined ? undefined : typed.trim();
 }
 
 async function geminiFlow(

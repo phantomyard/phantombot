@@ -2903,6 +2903,13 @@ phantombot embedding
 phantombot memory index --rebuild
 ```
 
+For an OpenAI-compatible endpoint the wizard asks for the base URL and key, then
+offers the endpoint's embedding models as a list: OpenRouter's embeddings
+catalogue where the endpoint tags models by modality, otherwise the models whose
+names look like embedding models (OpenAI, Ollama). **Other — type a model ID** is
+always available, and an endpoint that lists nothing recognisable falls back to
+the typed prompt.
+
 **Privacy boundary:** local SQLite and markdown memory remain local storage,
 PhantomBot sends the plaintext being embedded to the configured endpoint, which
 receives it. That includes note/KB chunks, indexed conversation-turn text, and
