@@ -24,6 +24,12 @@ import {
   geminiEmbed,
   type EmbedResult,
 } from "../lib/geminiEmbed.ts";
+import {
+  embeddingModelPickerOptions,
+  discoverEmbeddingModels,
+  OTHER_EMBEDDING_MODEL,
+  sameEmbeddingEndpoint,
+} from "../lib/embeddingModels.ts";
 import { openaiCompatibleEmbed } from "../lib/openaiCompatibleEmbed.ts";
 import { findOpenAICompatibleCredential } from "../lib/openAICompatibleCredentials.ts";
 import { getIn, setIn, updateConfigToml } from "../lib/configWriter.ts";
@@ -172,6 +178,8 @@ interface RunInput {
   validateOpenAI?: (
     settings: OpenAICompatibleConfigUpdate,
   ) => Promise<EmbedResult>;
+  /** Test seam for the model picker's discovery; defaults to the live fetch. */
+  fetchModels?: (baseUrl: string, apiKey: string) => Promise<string[]>;
   serviceControl?: ServiceControl;
   /**
    * When true, this runs as a sub-step of another wizard (e.g.
@@ -203,6 +211,7 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
       const existing = config.embeddings;
       const questions: MemoryQuestions = {
         choose: (opts) => q.choose(opts),
+        search: (opts) => q.search(opts),
         value: (opts) => q.value(opts),
       };
 
@@ -406,15 +415,6 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
       p.cancel("cancelled");
       return 0;
     }
-    const model = await p.text({
-      message: "Embedding model",
-      initialValue: existingOpenAI?.model ?? "",
-      validate: (v) => (!v?.trim() ? "model is required" : undefined),
-    });
-    if (p.isCancel(model)) {
-      p.cancel("cancelled");
-      return 0;
-    }
     const stored = await findOpenAICompatibleCredential(
       config,
       persona,
@@ -441,6 +441,29 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
         return 0;
       }
     }
+    // The model is asked AFTER the key: the list comes from the endpoint's
+    // Models API, which needs the credential the user just confirmed.
+    const discovery = p.spinner();
+    discovery.start("asking the endpoint for its embedding models…");
+    const live = await discoverEmbeddingModels(
+      { baseUrl: String(baseUrl), apiKey: optionalPromptText(apiKey) },
+      input.fetchModels,
+    );
+    discovery.stop(
+      live.length
+        ? `found ${live.length} embedding model${live.length === 1 ? "" : "s"}`
+        : "no embedding models listed — type the model ID",
+    );
+    const model = await askEmbeddingModel(
+      live,
+      sameEmbeddingEndpoint(existingOpenAI?.baseUrl, String(baseUrl))
+        ? existingOpenAI?.model
+        : undefined,
+    );
+    if (model === undefined) {
+      p.cancel("cancelled");
+      return 0;
+    }
     const queryPrefix = await p.text({
       message: "Query prefix (optional)",
       initialValue: existingOpenAI?.queryPrefix ?? "",
@@ -460,7 +483,7 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
 
     const settings: OpenAICompatibleConfigUpdate = {
       baseUrl: String(baseUrl).trim(),
-      model: String(model).trim(),
+      model,
       apiKey: optionalPromptText(apiKey),
       queryPrefix: optionalPromptText(queryPrefix),
       documentPrefix: optionalPromptText(documentPrefix),
@@ -506,6 +529,34 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
     p.outro("done");
   }
   return 0;
+}
+
+/**
+ * The clack twin of the screen flow's model question (`tui/memoryFlow.ts`):
+ * a list when the endpoint could be asked, the typed prompt otherwise or on
+ * "Other". Both build their rows from `embeddingModelPickerOptions`.
+ */
+async function askEmbeddingModel(
+  live: readonly string[],
+  current?: string,
+): Promise<string | undefined> {
+  const message = "Embedding model";
+  const picker = embeddingModelPickerOptions(live, current);
+  if (picker) {
+    const picked = await p.select({
+      message,
+      options: picker.options as never,
+      initialValue: picker.initial as never,
+    });
+    if (p.isCancel(picked)) return undefined;
+    if (picked !== OTHER_EMBEDDING_MODEL) return String(picked).trim();
+  }
+  const typed = await p.text({
+    message,
+    initialValue: current ?? "",
+    validate: (v) => (!v?.trim() ? "model is required" : undefined),
+  });
+  return p.isCancel(typed) ? undefined : String(typed).trim();
 }
 
 /** Empty optional prompts must stay empty, never become the string "undefined". */

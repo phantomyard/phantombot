@@ -1325,7 +1325,7 @@ export function App(props: AppProps): React.ReactElement {
         const { config } = await loadConfigForPersona(target.name);
         const chosen = await configureMemory(
           target.name,
-          { choose: askChoice, value: askValue },
+          { choose: askChoice, search: askSearch, value: askValue },
           {
             existing: config.embeddings,
             validateGemini: (key) =>
@@ -1405,7 +1405,7 @@ export function App(props: AppProps): React.ReactElement {
         await refresh();
       }
     },
-    [refresh, askChoice, askValue, askConfirmValue],
+    [refresh, askChoice, askSearch, askValue, askConfirmValue],
   );
 
   /**
