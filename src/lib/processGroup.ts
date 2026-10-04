@@ -37,10 +37,46 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { basename, delimiter, dirname, isAbsolute } from "node:path";
+import { basename, dirname, isAbsolute } from "node:path";
 import type { Subprocess, SpawnOptions } from "bun";
 import { log } from "./logger.ts";
 import { createWindowsJob } from "./windowsJob.ts";
+import { normalizePathKey, pathKeyOf, withWindowsLoginPath } from "./windowsPath.ts";
+
+/**
+ * Prepend `dirs` to the child's PATH, skipping any already present.
+ *
+ * The ONE place the three helpers below touch PATH, because getting the KEY
+ * right is the whole bug in issue #647: on Windows the variable is `Path`, and
+ * an env spread out of `process.env` is a plain, case-SENSITIVE object. Reading
+ * `env.PATH` there yields `undefined`, and writing `PATH` adds a SECOND
+ * variable holding only our own dirs — which the child then resolves instead
+ * of the real one, losing `C:\Windows\System32` and with it every shell.
+ * So: find the key that actually holds PATH (pathKeyOf), collapse any case
+ * duplicates into it (normalizePathKey), and write back to THAT key.
+ *
+ * Returns the same reference when there is nothing to add or collapse, a fresh
+ * object otherwise — never mutates the caller's env. `platform` is injectable
+ * for tests; POSIX behaviour is unchanged.
+ */
+export function prependToPath(
+  env: Record<string, string | undefined>,
+  dirs: string[],
+  platform: string = process.platform,
+): Record<string, string | undefined> {
+  const base = normalizePathKey(env, platform);
+  const key = pathKeyOf(base, platform);
+  const sep = platform === "win32" ? ";" : ":";
+  const currentPath = base[key] ?? "";
+  const present = new Set(currentPath.split(sep));
+  const missing = dirs.filter((dir) => !present.has(dir));
+  if (missing.length === 0) return base;
+  const prefix = missing.join(sep);
+  return {
+    ...base,
+    [key]: currentPath ? `${prefix}${sep}${currentPath}` : prefix,
+  };
+}
 
 /**
  * Ensure an absolute executable's OWN directory is on the child's PATH.
@@ -77,20 +113,14 @@ import { createWindowsJob } from "./windowsJob.ts";
 export function withCommandDirOnPath(
   bin: string,
   env: Record<string, string | undefined>,
+  platform: string = process.platform,
 ): Record<string, string | undefined> {
   // Only act on an ABSOLUTE path — a bare command name is resolved via the
   // existing PATH and `dirname("pi")` is "." which we must never inject.
   // `isAbsolute` + the platform `delimiter` (":" on POSIX, ";" on Windows)
   // keep this correct on both without changing POSIX behaviour.
   if (!isAbsolute(bin)) return env;
-  const binDir = dirname(bin);
-  const currentPath = env.PATH ?? "";
-  const entries = currentPath.split(delimiter);
-  if (entries.includes(binDir)) return env;
-  return {
-    ...env,
-    PATH: currentPath ? `${binDir}${delimiter}${currentPath}` : binDir,
-  };
+  return prependToPath(env, [dirname(bin)], platform);
 }
 
 /**
@@ -123,6 +153,7 @@ export function withCommandDirOnPath(
  */
 export function withPhantombotBinDirOnPath(
   env: Record<string, string | undefined>,
+  platform: string = process.platform,
 ): Record<string, string | undefined> {
   const exe = process.execPath;
   if (!exe || !isAbsolute(exe)) return env;
@@ -132,14 +163,7 @@ export function withPhantombotBinDirOnPath(
   // is named `phantombot` / `phantombot.exe`.
   const base = basename(exe).toLowerCase();
   if (!base.startsWith("phantombot")) return env;
-  const binDir = dirname(exe);
-  const currentPath = env.PATH ?? "";
-  const entries = currentPath.split(delimiter);
-  if (entries.includes(binDir)) return env;
-  return {
-    ...env,
-    PATH: currentPath ? `${binDir}${delimiter}${currentPath}` : binDir,
-  };
+  return prependToPath(env, [dirname(exe)], platform);
 }
 
 /**
@@ -194,17 +218,33 @@ export function clearHarnessBinDirs(): void {
  */
 export function withHarnessBinDirsOnPath(
   env: Record<string, string | undefined>,
+  platform: string = process.platform,
 ): Record<string, string | undefined> {
   if (harnessBinDirs.size === 0) return env;
-  const currentPath = env.PATH ?? "";
-  const present = new Set(currentPath.split(delimiter));
-  const missing = [...harnessBinDirs].filter((dir) => !present.has(dir));
-  if (missing.length === 0) return env;
-  const prefix = missing.join(delimiter);
-  return {
-    ...env,
-    PATH: currentPath ? `${prefix}${delimiter}${currentPath}` : prefix,
-  };
+  return prependToPath(env, [...harnessBinDirs], platform);
+}
+
+/**
+ * The full child env for a harness spawn: the three PATH prepends above, then
+ * — on Windows — the complete machine + user PATH a fresh interactive login
+ * would get (withWindowsLoginPath, issue #647). Copy-on-write throughout.
+ *
+ * Exported for testing; `spawnInNewSession` is the only production caller.
+ */
+export function harnessChildEnv(
+  bin: string,
+  env: Record<string, string | undefined>,
+  platform: string = process.platform,
+  loginPath: (
+    env: Record<string, string | undefined>,
+  ) => Record<string, string | undefined> = (e) => withWindowsLoginPath(e, { platform }),
+): Record<string, string | undefined> {
+  return loginPath(
+    withHarnessBinDirsOnPath(
+      withPhantombotBinDirOnPath(withCommandDirOnPath(bin, env, platform), platform),
+      platform,
+    ),
+  );
 }
 
 /**
@@ -240,16 +280,17 @@ export function spawnInNewSession<
   //  3. withHarnessBinDirsOnPath — the dirs of every RESOLVED harness binary
   //     (pi/claude/codex), so the agent's Bash tool can invoke a sibling
   //     harness by bare name too, retiring the machine-PATH band-aid (same day).
-  const env = opts.env
-    ? withHarnessBinDirsOnPath(
-        withPhantombotBinDirOnPath(
-          withCommandDirOnPath(
-            cmd[0]!,
-            opts.env as Record<string, string | undefined>,
-          ),
-        ),
-      )
-    : opts.env;
+  //  4. withWindowsLoginPath (Windows only) — the full machine + user PATH a
+  //     fresh interactive login gets, so the child is never narrower than the
+  //     user's own shell (issue #647).
+  // All four key PATH case-insensitively on Windows (`Path`), which is what
+  // 1-3 got wrong before #647. A caller that passes NO env would let the child
+  // inherit the daemon's PATH untouched, skipping all of the above — so on
+  // Windows it gets a copy of process.env to augment instead.
+  const baseEnv =
+    (opts.env as Record<string, string | undefined> | undefined) ??
+    (process.platform === "win32" ? { ...process.env } : undefined);
+  const env = baseEnv ? harnessChildEnv(cmd[0]!, baseEnv) : baseEnv;
   const proc = Bun.spawn(cmd, {
     ...opts,
     env,
