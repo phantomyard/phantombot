@@ -128,6 +128,37 @@ describe("configureMemory — embedding model picker", () => {
     );
   });
 
+  test("with NO fetchModels seam, the default discovery asks the URL with the key as bearer", async () => {
+    const { q, lists } = questions({
+      picks: { [PROVIDER_TITLE]: "openai-compatible" },
+      values: { [URL_TITLE]: "https://openrouter.ai/api/v1", [KEY_TITLE]: "or-key" },
+    });
+    const calls: string[] = [];
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: URL | string, init?: RequestInit) => {
+      const auth = (init?.headers as Record<string, string> | undefined)?.authorization;
+      calls.push(`${String(input)}|${auth}`);
+      return new Response(
+        JSON.stringify({
+          data: LIVE.map((id) => ({ id, architecture: { output_modalities: ["embeddings"] } })),
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    try {
+      await configureMemory("phantom", q, deps({ fetchModels: undefined }));
+    } finally {
+      globalThis.fetch = real;
+    }
+    expect(calls).toEqual([
+      "https://openrouter.ai/api/v1/models?output_modalities=embeddings|Bearer or-key",
+    ]);
+    expect(lists[MODEL_TITLE]!.options.map((o) => o.value)).toEqual([
+      ...LIVE,
+      OTHER_EMBEDDING_MODEL,
+    ]);
+  });
+
   test("falls back to the plain Choose screen when the host has no search screen", async () => {
     const { q, lists } = questions({
       search: false,

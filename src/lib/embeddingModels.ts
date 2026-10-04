@@ -35,7 +35,11 @@ export const OTHER_EMBEDDING_MODEL = "__other_embedding_model__";
 /** The output modality OpenRouter tags embedding models with. */
 export const EMBEDDING_MODALITY = "embeddings";
 
-/** Discovery must never stall the wizard on a dead endpoint. */
+/**
+ * Discovery must never stall the wizard on a dead endpoint. This bounds the
+ * WHOLE discovery — the tagged request and the plain-catalogue retry share one
+ * deadline, so a stalled endpoint costs 5 seconds, not 5 per request.
+ */
 export const EMBEDDING_MODELS_TIMEOUT_MS = 5000;
 
 /**
@@ -70,13 +74,13 @@ async function fetchRows(
   url: URL,
   apiKey: string,
   fetchImpl: typeof fetch,
-  signal?: AbortSignal,
+  signal: AbortSignal,
 ): Promise<ModelRow[] | undefined> {
   const key = apiKey.trim();
   const res = await fetchImpl(url, {
     // No key is a real configuration (a local llama-server or Ollama).
     headers: key ? { authorization: `Bearer ${key}` } : {},
-    signal: timeoutSignal(EMBEDDING_MODELS_TIMEOUT_MS, signal),
+    signal,
   });
   if (!res.ok) return undefined;
   const body = (await res.json().catch(() => null)) as
@@ -104,14 +108,21 @@ function isTagged(row: ModelRow): boolean {
 /**
  * The embedding-capable model ids an OpenAI-compatible endpoint offers, or
  * `[]` when it offers none that can be recognised (or cannot be asked).
+ *
+ * `(baseUrl, apiKey)` — the order of the wizards' `fetchModels` seam, which
+ * this is the default for. Both are strings, so the compiler cannot catch a
+ * swap: the default-wiring tests in the two flow suites are what pin it.
  */
 export async function fetchEmbeddingModels(
-  apiKey: string,
   baseUrl: string,
+  apiKey: string,
   fetchImpl: typeof fetch = fetch,
-  signal?: AbortSignal,
+  caller?: AbortSignal,
+  timeoutMs: number = EMBEDDING_MODELS_TIMEOUT_MS,
 ): Promise<string[]> {
   if (!baseUrl.trim()) return [];
+  // ONE deadline for both requests below.
+  const signal = timeoutSignal(timeoutMs, caller);
   try {
     let rows: ModelRow[] | undefined;
     try {
@@ -125,7 +136,9 @@ export async function fetchEmbeddingModels(
       if (tagged.length) return tagged;
     } else {
       // The filtered request itself failed (a strict endpoint may refuse an
-      // unknown query parameter): ask again for the plain catalogue.
+      // unknown query parameter): ask again for the plain catalogue — unless
+      // the deadline is what failed it, in which case there is no time left.
+      if (signal.aborted) return [];
       rows = await fetchRows(modelsUrl(baseUrl, false), apiKey, fetchImpl, signal);
     }
 
@@ -137,15 +150,49 @@ export async function fetchEmbeddingModels(
   }
 }
 
+/** The wizards' test seam for discovery — same order as the default. */
+export type EmbeddingModelFetcher = (
+  baseUrl: string,
+  apiKey: string,
+) => Promise<string[]>;
+
+/**
+ * The one place a wizard turns what the user typed into a discovery call.
+ *
+ * The endpoint is passed BY NAME because the screen flow and its clack twin
+ * each hold two bare strings, and a positional call lets them be swapped
+ * without a type error — which is exactly how the picker once sent the key as
+ * the URL and silently fell back to the typed prompt. Both wizards call this,
+ * so the positional hand-off exists once, here, under test.
+ */
+export function discoverEmbeddingModels(
+  endpoint: { baseUrl: string; apiKey: string },
+  fetchModels: EmbeddingModelFetcher = fetchEmbeddingModels,
+): Promise<string[]> {
+  return fetchModels(endpoint.baseUrl.trim(), endpoint.apiKey.trim());
+}
+
 export interface EmbeddingModelOption {
   value: string;
   label: string;
   hint?: string;
 }
 
-/** Trailing slashes and case in the host do not make a different endpoint. */
+/**
+ * Trailing slashes and case in the scheme/host do not make a different
+ * endpoint; case in the PATH can, so it is compared as written.
+ */
 export function sameEmbeddingEndpoint(a: string | undefined, b: string): boolean {
-  const norm = (v: string) => v.trim().replace(/\/+$/, "").toLowerCase();
+  const norm = (v: string) => {
+    const bare = v.trim().replace(/\/+$/, "");
+    try {
+      const url = new URL(bare);
+      // URL lowercases the scheme and host itself and leaves the path alone.
+      return `${url.origin}${url.pathname.replace(/\/+$/, "")}${url.search}`;
+    } catch {
+      return bare;
+    }
+  };
   return a !== undefined && norm(a) === norm(b);
 }
 

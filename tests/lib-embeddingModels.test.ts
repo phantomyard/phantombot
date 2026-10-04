@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  discoverEmbeddingModels,
   embeddingModelPickerOptions,
   fetchEmbeddingModels,
   looksLikeEmbeddingModel,
@@ -58,8 +59,8 @@ describe("fetchEmbeddingModels — modality tag", () => {
       }),
     );
     const models = await fetchEmbeddingModels(
-      "or-key",
       "https://openrouter.ai/api/v1/",
+      "or-key",
       fetchImpl,
     );
     expect(models).toEqual([
@@ -85,7 +86,7 @@ describe("fetchEmbeddingModels — modality tag", () => {
       }),
     );
     expect(
-      await fetchEmbeddingModels("k", "https://example.test/v1", fetchImpl),
+      await fetchEmbeddingModels("https://example.test/v1", "k", fetchImpl),
     ).toEqual(["voyageai/voyage-4"]);
   });
 });
@@ -103,7 +104,7 @@ describe("fetchEmbeddingModels — name filter", () => {
       }),
     );
     expect(
-      await fetchEmbeddingModels("sk", "https://api.openai.com/v1", fetchImpl),
+      await fetchEmbeddingModels("https://api.openai.com/v1", "sk", fetchImpl),
     ).toEqual(["text-embedding-3-large", "text-embedding-3-small"]);
     expect(calls.length).toBe(1);
   });
@@ -120,7 +121,7 @@ describe("fetchEmbeddingModels — name filter", () => {
       }),
     );
     expect(
-      await fetchEmbeddingModels("", "http://localhost:11434/v1", fetchImpl),
+      await fetchEmbeddingModels("http://localhost:11434/v1", "", fetchImpl),
     ).toEqual(["all-minilm:latest", "bge-m3:latest", "nomic-embed-text:latest"]);
     expect(calls[0]!.authorization).toBeUndefined();
   });
@@ -132,7 +133,7 @@ describe("fetchEmbeddingModels — name filter", () => {
         : json({ data: [{ id: "mxbai-embed-large" }, { id: "phi4" }] }),
     );
     expect(
-      await fetchEmbeddingModels("k", "https://strict.test/v1", fetchImpl),
+      await fetchEmbeddingModels("https://strict.test/v1", "k", fetchImpl),
     ).toEqual(["mxbai-embed-large"]);
     expect(calls.map((c) => c.url)).toEqual([
       "https://strict.test/v1/models?output_modalities=embeddings",
@@ -164,26 +165,26 @@ describe("fetchEmbeddingModels — nothing to offer", () => {
     const { fetchImpl } = fakeFetch(() =>
       json({ data: [{ id: "gpt-4o" }, { id: "llama3.2" }] }),
     );
-    expect(await fetchEmbeddingModels("k", "https://x.test/v1", fetchImpl)).toEqual([]);
+    expect(await fetchEmbeddingModels("https://x.test/v1", "k", fetchImpl)).toEqual([]);
   });
 
   test("HTTP errors, non-JSON bodies and network failures all degrade to []", async () => {
     const dead = fakeFetch(() => json({}, 500));
-    expect(await fetchEmbeddingModels("k", "https://x.test/v1", dead.fetchImpl)).toEqual([]);
+    expect(await fetchEmbeddingModels("https://x.test/v1", "k", dead.fetchImpl)).toEqual([]);
 
     const html = fakeFetch(() => new Response("<html>", { status: 200 }));
-    expect(await fetchEmbeddingModels("k", "https://x.test/v1", html.fetchImpl)).toEqual([]);
+    expect(await fetchEmbeddingModels("https://x.test/v1", "k", html.fetchImpl)).toEqual([]);
 
     const down = fakeFetch(() => {
       throw new Error("ECONNREFUSED");
     });
-    expect(await fetchEmbeddingModels("k", "http://127.0.0.1:1/v1", down.fetchImpl)).toEqual([]);
+    expect(await fetchEmbeddingModels("http://127.0.0.1:1/v1", "k", down.fetchImpl)).toEqual([]);
   });
 
   test("an empty or malformed base URL never reaches the network", async () => {
     const { fetchImpl, calls } = fakeFetch(() => json({ data: [] }));
-    expect(await fetchEmbeddingModels("k", "  ", fetchImpl)).toEqual([]);
-    expect(await fetchEmbeddingModels("k", "not a url", fetchImpl)).toEqual([]);
+    expect(await fetchEmbeddingModels("  ", "k", fetchImpl)).toEqual([]);
+    expect(await fetchEmbeddingModels("not a url", "k", fetchImpl)).toEqual([]);
     expect(calls.length).toBe(0);
   });
 
@@ -200,7 +201,93 @@ describe("fetchEmbeddingModels — nothing to offer", () => {
         ],
       }),
     );
-    expect(await fetchEmbeddingModels("k", "https://x.test/v1", fetchImpl)).toEqual(["a/embed"]);
+    expect(await fetchEmbeddingModels("https://x.test/v1", "k", fetchImpl)).toEqual(["a/embed"]);
+  });
+});
+
+describe("fetchEmbeddingModels — one deadline for the whole discovery", () => {
+  /** A fetch that never answers; it only rejects when its signal aborts. */
+  function stalled() {
+    const signals: AbortSignal[] = [];
+    const fetchImpl = ((_input: URL | string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init!.signal!;
+        signals.push(signal);
+        const fail = () => reject(signal.reason);
+        if (signal.aborted) fail();
+        else signal.addEventListener("abort", fail, { once: true });
+      })) as unknown as typeof fetch;
+    return { fetchImpl, signals };
+  }
+
+  test("a stalled endpoint costs one timeout, not one per request", async () => {
+    const { fetchImpl, signals } = stalled();
+    const started = performance.now();
+    expect(
+      await fetchEmbeddingModels("https://x.test/v1", "k", fetchImpl, undefined, 80),
+    ).toEqual([]);
+    const elapsed = performance.now() - started;
+    // A fresh timeout per request would take two (>= 160 ms) and call twice.
+    expect(elapsed).toBeLessThan(150);
+    expect(signals.length).toBe(1);
+  });
+
+  test("the plain-catalogue retry runs under the SAME deadline as the tagged request", async () => {
+    const signals: AbortSignal[] = [];
+    const fetchImpl = (async (input: URL | string, init?: RequestInit) => {
+      signals.push(init!.signal!);
+      return new URL(String(input)).searchParams.has("output_modalities")
+        ? json({ error: "unknown parameter" }, 400)
+        : json({ data: [{ id: "text-embedding-3-small" }] });
+    }) as unknown as typeof fetch;
+    expect(await fetchEmbeddingModels("https://strict.test/v1", "k", fetchImpl)).toEqual([
+      "text-embedding-3-small",
+    ]);
+    expect(signals.length).toBe(2);
+    expect(signals[1]).toBe(signals[0]!);
+  });
+
+  test("the caller's own signal still cancels discovery", async () => {
+    const { fetchImpl } = stalled();
+    const ctl = new AbortController();
+    const pending = fetchEmbeddingModels("https://x.test/v1", "k", fetchImpl, ctl.signal);
+    ctl.abort();
+    expect(await pending).toEqual([]);
+  });
+});
+
+describe("discoverEmbeddingModels — the wizards' default wiring", () => {
+  test("with no seam injected, the URL is fetched and the key is the bearer", async () => {
+    const real = globalThis.fetch;
+    const { fetchImpl, calls } = fakeFetch(() =>
+      json({ data: [tagged("openai/text-embedding-3-small")] }),
+    );
+    globalThis.fetch = fetchImpl;
+    try {
+      expect(
+        await discoverEmbeddingModels({
+          baseUrl: " https://openrouter.ai/api/v1/ ",
+          apiKey: " or-key ",
+        }),
+      ).toEqual(["openai/text-embedding-3-small"]);
+    } finally {
+      globalThis.fetch = real;
+    }
+    expect(calls).toEqual([
+      {
+        url: "https://openrouter.ai/api/v1/models?output_modalities=embeddings",
+        authorization: "Bearer or-key",
+      },
+    ]);
+  });
+
+  test("an injected seam receives (baseUrl, apiKey), trimmed", async () => {
+    const seen: string[] = [];
+    await discoverEmbeddingModels({ baseUrl: " u ", apiKey: " k " }, async (b, k) => {
+      seen.push(`${b}|${k}`);
+      return [];
+    });
+    expect(seen).toEqual(["u|k"]);
   });
 });
 
@@ -233,9 +320,16 @@ describe("embeddingModelPickerOptions", () => {
 });
 
 describe("sameEmbeddingEndpoint", () => {
-  test("ignores trailing slashes, whitespace and case; undefined never matches", () => {
+  test("ignores trailing slashes, whitespace and host case; undefined never matches", () => {
     expect(sameEmbeddingEndpoint("https://OpenRouter.ai/api/v1/", " https://openrouter.ai/api/v1")).toBe(true);
     expect(sameEmbeddingEndpoint("https://api.openai.com/v1", "https://openrouter.ai/api/v1")).toBe(false);
     expect(sameEmbeddingEndpoint(undefined, "https://openrouter.ai/api/v1")).toBe(false);
+  });
+
+  test("host case is ignored, path case is not; a non-URL compares as written", () => {
+    expect(sameEmbeddingEndpoint("HTTPS://Host.test/v1", "https://host.test/v1/")).toBe(true);
+    expect(sameEmbeddingEndpoint("https://host.test/Tenant/v1", "https://host.test/tenant/v1")).toBe(false);
+    expect(sameEmbeddingEndpoint("not a url/", "not a url")).toBe(true);
+    expect(sameEmbeddingEndpoint("Not a url", "not a url")).toBe(false);
   });
 });

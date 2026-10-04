@@ -21,7 +21,7 @@ import type { OpenAICompatibleConfigUpdate } from "../cli/embedding.ts";
 import type { Config } from "../config.ts";
 import {
   embeddingModelPickerOptions,
-  fetchEmbeddingModels,
+  discoverEmbeddingModels,
   OTHER_EMBEDDING_MODEL,
   sameEmbeddingEndpoint,
 } from "../lib/embeddingModels.ts";
@@ -168,9 +168,9 @@ export async function configureMemory(
 
   // The model is asked AFTER the key: the list comes from the endpoint's
   // Models API, which needs the credential the user just confirmed.
-  const live = await (deps.fetchModels ?? fetchEmbeddingModels)(
-    baseUrl.trim(),
-    apiKey.trim(),
+  const live = await discoverEmbeddingModels(
+    { baseUrl, apiKey },
+    deps.fetchModels,
   );
   const model = await askEmbeddingModel(
     q,

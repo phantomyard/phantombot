@@ -26,7 +26,7 @@ import {
 } from "../lib/geminiEmbed.ts";
 import {
   embeddingModelPickerOptions,
-  fetchEmbeddingModels,
+  discoverEmbeddingModels,
   OTHER_EMBEDDING_MODEL,
   sameEmbeddingEndpoint,
 } from "../lib/embeddingModels.ts";
@@ -445,9 +445,9 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
     // Models API, which needs the credential the user just confirmed.
     const discovery = p.spinner();
     discovery.start("asking the endpoint for its embedding models…");
-    const live = await (input.fetchModels ?? fetchEmbeddingModels)(
-      String(baseUrl).trim(),
-      optionalPromptText(apiKey).trim(),
+    const live = await discoverEmbeddingModels(
+      { baseUrl: String(baseUrl), apiKey: optionalPromptText(apiKey) },
+      input.fetchModels,
     );
     discovery.stop(
       live.length
