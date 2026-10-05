@@ -18,6 +18,16 @@ imports, inspect the installed command first:
 phantombot persona --help
 ```
 
+Switching the daemon-wide default is a confirmed operation. An interactive
+terminal prompts; a non-interactive caller must state consent explicitly:
+
+```bash
+phantombot persona robbie --yes
+```
+
+A running persona receives `PHANTOMBOT_PERSONA` from its harness and cannot use
+this command to repoint the daemon-wide default, even with `--yes`.
+
 Persona data lives under the platform data root. Do not copy only one file
 when moving a persona: identity, local configuration, memory, channel state,
 and vault data are a unit. Use the supported import and restore flows so that

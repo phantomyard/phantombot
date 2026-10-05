@@ -8,13 +8,17 @@ import { mainCommand } from "../src/cli/index.ts";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const markdownPaths = [
   "README.md",
+  "AGENTS.md",
   ...new Bun.Glob("docs/**/*.md").scanSync({ cwd: root }),
 ];
 const pages = new Map(
   markdownPaths.map((path) => [path, readFileSync(resolve(root, path), "utf8")]),
 );
 const readme = pages.get("README.md") ?? "";
-const publicDocs = [...pages.values()].join("\n");
+const publicDocs = [...pages]
+  .filter(([path]) => path !== "AGENTS.md")
+  .map(([, body]) => body)
+  .join("\n");
 
 describe("public documentation contract", () => {
   test("keeps the repository front door human-sized", () => {

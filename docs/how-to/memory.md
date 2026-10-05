@@ -28,8 +28,12 @@ through the installed command surface:
 
 ```bash
 phantombot memory backup --list
-phantombot memory restore --help
+phantombot memory restore --from /path/to/point.sqlite --yes
 ```
+
+Stop Phantombot before restoring. The command moves the live database aside,
+removes stale WAL sidecars, verifies the selected restore point, and requires
+`--yes` because it replaces the active memory database.
 
 Run `phantombot doctor` when indexing, nightly processing, or capture health
 looks wrong. See [Memory lifecycle](../concepts/memory-lifecycle.md) for the

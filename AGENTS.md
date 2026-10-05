@@ -59,10 +59,10 @@ phantombot/
 ├── README.md                 # user-facing docs
 ├── AGENTS.md                 # ← this file
 ├── docs/
-│   ├── architecture.md
-│   ├── memory-drawers.md     # drawer rows: weight, supersession, decay
-│   ├── engine.md             # the embeddable engine: API, trust, root, errors
-│   └── adding-a-harness.md
+│   ├── concepts/architecture.md
+│   ├── reference/memory-drawers.md # drawer rows: weight, supersession, decay
+│   ├── reference/engine.md   # the embeddable engine: API, trust, root, errors
+│   └── contributing/adding-a-harness.md
 ├── .github/workflows/release.yml   # auto-release per merged PR
 ├── package.json
 ├── bunfig.toml
@@ -288,7 +288,8 @@ Two rules that follow from this, and that new code keeps breaking:
 
 Migration from the old single-file layout is copy-only (never delete, so a rollback still boots), additive (fills only the keys the persona file omits, so a hand edit always wins) and runs on every daemon start, which is what makes `/update` order-independent from any older version.
 
-The README's [Personas](docs/how-to/personas.md) sections are the user-facing explanation; if you change this model, update both.
+The [Personas guide](docs/how-to/personas.md) is the user-facing explanation;
+if you change this model, update that guide and this invariant together.
 
 ## Service model (systemd + launchd + Windows Task Scheduler)
 
@@ -398,11 +399,14 @@ section.
 
 ## Release pipeline
 
-Every merge to `main` auto-releases `v1.1.<RUN_NUMBER>` as a **prerelease**. The
-workflow at `.github/workflows/release.yml`:
+Every runtime-affecting merge to `main` auto-releases `v1.1.<RUN_NUMBER>` as a
+**prerelease**. Docs-only merges run a lightweight classifier and no build or
+release job. The workflow at `.github/workflows/release.yml`:
 
-1. Triggers on `push: main` (branch protection means a push IS a merge), minus a
-   narrow `paths-ignore` denylist of docs/website surfaces. NOT
+1. Triggers on `push: main` (branch protection means a push IS a merge), then a
+   lightweight fail-safe classifier skips the release job for a narrow
+   denylist of docs/website surfaces. It checks old and new names for renames
+   and defaults to releasing if GitHub's file listing fails. NOT
    `pull_request: closed` — a fork-merged PR runs that with a read-only token and
    `gh release create` 403s.
 2. Checks out `github.sha` (the merge commit), so the tag pins to exactly the
@@ -495,7 +499,7 @@ version string can't carry that information.
 
 17. **macOS code-signing must shell out to `/usr/bin/openssl` (LibreSSL), never a PATH-resolved `openssl`.** `src/lib/macSigning.ts` builds the self-signed identity by generating a cert + PKCS#12 with openssl, then importing it via `security import`. The launchd environment phantombot runs under (and therefore the `/update` re-sign path) puts `/opt/homebrew/bin` **ahead** of `/usr/bin` on `PATH`, so a bare `openssl` resolves to Homebrew's OpenSSL 3.x. Its `pkcs12 -export` writes the MAC/PBE with modern algorithms that Apple's LibreSSL-era `security import` rejects with `MAC verification failed during PKCS12 import` — which silently failed the import step of **every** macOS `/update` re-sign (rollback → binary stays ad-hoc → TCC keeps nagging). Pin both calls to the exported `OPENSSL_BIN` (`/usr/bin/openssl`), the system LibreSSL that is always present and produces import-compatible p12s. `-legacy` is **not** the fix — that flag is an OpenSSL-3-ism and errors on LibreSSL. This is a distinct bug from the #363 keychain-search-list fix (which is downstream, at the codesign step); both are needed. **Dogfooding:** the `/update resign` chat subcommand (`handleUpdateResign` in `src/channels/commands.ts`, reusing `runFixSigning`) re-signs the current on-disk binary in place — no download/reinstall/restart/version-change — so this launchd-context bug can be reproduced and verified without cutting a release. It runs the same routine `/update` applies post-swap; macOS-only, a friendly no-op elsewhere. Because it's a user-facing chat command, its behaviour is documented in the `/update` row of `README.md`.
 
-18. **The default-persona switch is gated on confirmation and agent-scoped switches are refused (PR #383 / issue #371).** `phantombot persona <name>` persists `state.default_persona` **only after** an explicit confirmation: interactive TTYs get a @clack confirm, non-TTY contexts require `--yes` (exit 2 otherwise), and tests inject a `confirm`/`isInteractive` into `runSwitchPersona`. A persona agent (harness sets `PHANTOMBOT_PERSONA`) can't re-point the daemon-wide default — that's the #371 ghost-switch bug — so the scope check refuses with exit 2 regardless of `--yes`. After confirmation the state is **re-loaded** (not the pre-confirm snapshot) to avoid clobbering a concurrent writer (e.g. `harness_bins` discovery), and the persona dir is re-validated right before the commit (TOCTOU). Any new user-facing CLI flag needs its README.md **and** AGENTS.md documentation — this PR documented `--yes` in both.
+18. **The default-persona switch is gated on confirmation and agent-scoped switches are refused (PR #383 / issue #371).** `phantombot persona <name>` persists `state.default_persona` **only after** an explicit confirmation: interactive TTYs get a @clack confirm, non-TTY contexts require `--yes` (exit 2 otherwise), and tests inject a `confirm`/`isInteractive` into `runSwitchPersona`. A persona agent (harness sets `PHANTOMBOT_PERSONA`) can't re-point the daemon-wide default — that's the #371 ghost-switch bug — so the scope check refuses with exit 2 regardless of `--yes`. After confirmation the state is **re-loaded** (not the pre-confirm snapshot) to avoid clobbering a concurrent writer (e.g. `harness_bins` discovery), and the persona dir is re-validated right before the commit (TOCTOU). Any new user-facing CLI flag needs documentation in the relevant page under `docs/` and in AGENTS.md when it carries a contributor invariant; `--yes` is documented in [Personas](docs/how-to/personas.md).
 
 19. **A turn is registered for its lifetime, and `tick` defers a wake while the principal is talking (issue #391).** Two turns for one persona can run in DIFFERENT processes — the daemon serving a conversation and `phantombot tick` spawning its own harness — and the existing locks do not cover it: `runLock` guards `run` against `run`, `tick.lock` guards `tick` against `tick`, and nothing sits between the two. Observed twice: both turns worked the same PR and the same unlocked checkout 63 seconds apart, and a contributor got duplicate review comments. `src/lib/turnRegistry.ts` fixes it with a **registry, not a mutex** — one JSON file per in-flight turn under `$XDG_STATE_HOME/phantombot/turns/` (tmp+rename), read by `readdir`. Registration lives in `runTurn` itself (`src/orchestrator/turn.ts`), wrapping the body in a `try/finally`, precisely so a NEW entry point cannot forget to opt in; do not move it out to call sites. Two consumers: `cli/tick.ts` **defers** a due task while a turn is live or within `INTERACTIVE_COOLDOWN_MS` (3 min) of one ending, and `turn.ts` injects a one-line sibling notice into the system prompt for a turn that runs anyway. Load-bearing details, all of which have a failure mode if "simplified": deferral **never writes back to the task row**, so `run_count`, one-off deactivation and `--count` stay honest and "how long have we deferred" is just "how overdue is this task" — no extra column, no migration; it is bounded by `MAX_DEFERRAL_MS` (15 min) because a task that silently never fires is worse than the collision; **command-backed tasks are deferred too**, since the shipped poller contract (`src/persona/builder.ts`, and the README's Jira example) tells them to call `phantombot ask`, which starts a full turn — exempting them leaves a documented back door straight into the bug; and a live-looking entry is only believed if its pid is still the SAME process (`lib/processLiveness.ts`) AND it is younger than `MAX_TURN_LIFETIME_MS` (1 h), because `release()` cannot survive a SIGKILL or an abandoned generator. Kill switch `PHANTOMBOT_TURN_REGISTRY=0` degrades to the pre-#391 behaviour rather than to a crash, and it is off by default under `NODE_ENV=test` so unrelated suites cannot write live-looking entries into the real state dir — a test that means to exercise the registry must set it AND point `PHANTOMBOT_TURN_REGISTRY_DIR` at a temp dir. Both variables and the deferral behaviour are documented in [Concurrent work](docs/operations/concurrency.md); if you change the lifecycle, the locations, or either ceiling, update both.
 

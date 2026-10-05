@@ -32,6 +32,8 @@ New here? Start with [Install Phantombot](getting-started/install.md), then
   inspect logs, and understand background services.
 - [Configuration](operations/configuration.md) — config locations, precedence,
   persona overrides, and environment variables.
+- [Environment variables](reference/environment.md) — operator overrides,
+  internal harness context, and test-only controls.
 - [Windows](operations/windows.md) — native Windows setup, Task Scheduler, PATH,
   and recovery.
 - [macOS permissions](operations/macos-permissions.md) — repair repeated TCC
@@ -60,6 +62,8 @@ New here? Start with [Install Phantombot](getting-started/install.md), then
 ## Build with or contribute to Phantombot
 
 - [Engine API](reference/engine.md) — embed Phantombot in a Bun/TypeScript app.
+- [Memory drawer API](reference/memory-drawers.md) — row identity, lifecycle,
+  ranking, exports, imports, and third-party filing.
 - [Add a harness](contributing/adding-a-harness.md) — implement and register a
   new harness.
 - [AGENTS.md](../AGENTS.md) — repository invariants, testing rules, and
