@@ -15,9 +15,39 @@ on:
 # and survives any future change in org/repo defaults.
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      runtime: ${{ steps.classify.outputs.runtime }}
+    steps:
+      - name: Classify changed paths
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          runtime=false
+          while IFS= read -r file; do
+            case "$file" in
+              README.md|AGENTS.md|LICENSE|docs/*|www/*|tests/readme-contract.test.ts|.github/workflows/ci.yml|.github/workflows/release.yml)
+                ;;
+              *)
+                runtime=true
+                break
+                ;;
+            esac
+          done < <(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename')
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+          echo "Runtime-affecting changes: $runtime"
+
   typecheck:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     # Per-job concurrency so a new push to the PR cancels the in-flight run
     # of *this* job only — the sibling `test` job has its own group and
@@ -36,6 +66,8 @@ jobs:
       - run: bun tsc --noEmit
 
   test:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: ci-test-${{ github.head_ref }}
@@ -61,6 +93,8 @@ jobs:
   # actually exercise the win32 branches. Many other suites bake in POSIX
   # `sh`/`/tmp`/`:` assumptions and are out of scope for the port.
   test-windows:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: windows-latest
     concurrency:
       group: ci-test-windows-${{ github.head_ref }}

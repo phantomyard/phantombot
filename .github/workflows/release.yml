@@ -103,6 +103,9 @@ name: Release on PR merge
 #   - www/**   — the AIRE marketing website (deployed separately by
 #                deploy-pages.yml, which triggers on www/** — so website
 #                changes still ship, just via Pages, not a binary release)
+#   - tests/readme-contract.test.ts — executable documentation contract only
+#   - ci.yml / release.yml — pipeline policy, not runtime code; changing either
+#                            must not publish a byte-identical application build
 #
 # run_number implication: when only ignored paths change the workflow does not
 # run, so github.run_number does not increment for that merge. That is fine —
@@ -123,6 +126,9 @@ on:
       - 'LICENSE'
       - 'docs/**'
       - 'www/**'
+      - 'tests/readme-contract.test.ts'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
 
 permissions:
   contents: write        # create release + upload assets
