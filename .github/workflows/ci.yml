@@ -15,9 +15,51 @@ on:
 # and survives any future change in org/repo defaults.
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      runtime: ${{ steps.classify.outputs.runtime }}
+    steps:
+      - name: Classify changed paths
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Fail closed: a listing/API/parser failure must run the full suite.
+          runtime=true
+          if ! files=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)'); then
+            echo "Could not list PR paths; running the full suite" >&2
+            echo "runtime=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ -z "$files" ]; then
+            echo "PR path list was empty; running the full suite" >&2
+            echo "runtime=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          runtime=false
+          while IFS= read -r file; do
+            case "$file" in
+              README.md|AGENTS.md|LICENSE|docs/*|www/*|tests/readme-contract.test.ts)
+                ;;
+              *)
+                runtime=true
+                break
+                ;;
+            esac
+          done <<< "$files"
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+          echo "Runtime-affecting changes: $runtime"
+
   typecheck:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     # Per-job concurrency so a new push to the PR cancels the in-flight run
     # of *this* job only — the sibling `test` job has its own group and
@@ -36,6 +78,7 @@ jobs:
       - run: bun tsc --noEmit
 
   test:
+    needs: changes
     runs-on: ubuntu-latest
     concurrency:
       group: ci-test-${{ github.head_ref }}
@@ -46,7 +89,13 @@ jobs:
         with:
           bun-version: 1.x
       - run: bun install --frozen-lockfile
-      - run: bun test
+      # Keep the existing required `test` check meaningful for docs-only PRs.
+      - name: Test documentation contract
+        if: needs.changes.outputs.runtime != 'true'
+        run: bun test tests/readme-contract.test.ts
+      - name: Run full test suite
+        if: needs.changes.outputs.runtime == 'true'
+        run: bun test
 
   # Windows gate for the Windows port. Runs in PARALLEL with the Linux jobs,
   # on the same `pull_request` trigger — no path filter. The port shares ~95%
@@ -61,6 +110,8 @@ jobs:
   # actually exercise the win32 branches. Many other suites bake in POSIX
   # `sh`/`/tmp`/`:` assumptions and are out of scope for the port.
   test-windows:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: windows-latest
     concurrency:
       group: ci-test-windows-${{ github.head_ref }}

@@ -2,7 +2,7 @@ name: Release on PR merge
 
 # Fires on pushes to main (i.e. PR merges — branch protection requires PRs,
 # so a push to main IS a merge) EXCEPT docs/website-only merges, which are
-# filtered out by the paths-ignore denylist below. Cuts a GitHub Release tagged
+# classified as non-runtime below. Cuts a GitHub Release tagged
 # v1.1.<RUN_NUMBER> with cross-compiled binaries (linux x64-baseline +
 # arm64, darwin x64 + arm64, windows x64 + arm64) and a SHA256SUMS file.
 # `phantombot update` reads this feed.
@@ -78,13 +78,13 @@ name: Release on PR merge
 # Don't 'optimise' to plain x64 without verifying every deploy target has
 # AVX2 — see the SIGILL post-mortem from the May 2026 first deploy.
 
-# Why paths-ignore (docs/website-only merges do NOT cut a release): a README
+# Why classify paths (docs/website-only merges do NOT cut a release): a README
 # or website copy change is not functional to the app binary, and cutting a
 # fresh release for it churns `phantombot update` on every client for nothing.
 # The push still lands on main; it just doesn't produce a new binary.
 #
-# We use paths-ignore (a DENYLIST of non-functional surfaces) rather than a
-# paths ALLOWLIST of source dirs on purpose — the model is fail-open to
+# We use a DENYLIST of non-functional surfaces rather than an allowlist of
+# source dirs on purpose — the model is fail-open to
 # releasing. Anything NOT in this list still triggers a release, so a
 # functional change to a file type we forgot to allowlist can never silently
 # skip a release. Over-releasing is harmless (a duplicate-content binary at a
@@ -103,33 +103,68 @@ name: Release on PR merge
 #   - www/**   — the AIRE marketing website (deployed separately by
 #                deploy-pages.yml, which triggers on www/** — so website
 #                changes still ship, just via Pages, not a binary release)
+#   - tests/readme-contract.test.ts — executable documentation contract only
+#   - ci.yml / release.yml — pipeline policy, not runtime code; changing either
+#                            must not publish a byte-identical application build
 #
-# run_number implication: when only ignored paths change the workflow does not
-# run, so github.run_number does not increment for that merge. That is fine —
-# run_number only ever GROWS (the invariant above still holds); it just skips
-# the values that would have belonged to docs-only merges. Versions never
-# regress, they just aren't contiguous, which nothing depends on.
+# A lightweight classifier still runs for a docs-only merge, but the build and
+# release job does not. It checks both the new and previous filename so moving
+# runtime code into docs cannot suppress a release. API/listing failure defaults
+# to releasing; a redundant build is safer than silently withholding one.
 #
 # Squash-merge note: this repo squash-merges (linear history is required), so
-# the pushed commit on main carries the PR's FULL diff and the path filter sees
+# the pushed commit on main carries the PR's FULL diff and the classifier sees
 # every changed file. A mixed PR (docs + src) therefore still releases, because
 # not all of its files match the ignore list.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'README.md'
-      - 'AGENTS.md'
-      - 'LICENSE'
-      - 'docs/**'
-      - 'www/**'
 
 permissions:
   contents: write        # create release + upload assets
   pull-requests: read    # commits->pulls lookup for release title/notes audit trail
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      runtime: ${{ steps.classify.outputs.runtime }}
+    steps:
+      - name: Classify pushed paths
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          runtime=true
+          if ! files=$(gh api --paginate "repos/${REPO}/commits/${SHA}?per_page=100" \
+            --jq '.files[] | .filename, (.previous_filename // empty)'); then
+            echo "Could not list commit paths; releasing fail-safe" >&2
+          elif [ -z "$files" ]; then
+            echo "Commit path list was empty; releasing fail-safe" >&2
+          else
+            runtime=false
+            while IFS= read -r file; do
+              case "$file" in
+                README.md|AGENTS.md|LICENSE|docs/*|www/*|tests/readme-contract.test.ts|.github/workflows/ci.yml|.github/workflows/release.yml)
+                  ;;
+                *)
+                  runtime=true
+                  break
+                  ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+          echo "Runtime-affecting changes: $runtime"
+
   release:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
 
     steps:
