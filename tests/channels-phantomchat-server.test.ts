@@ -161,6 +161,9 @@ async function runOnce(opts: {
     reason: string;
     heldMessage?: string;
   }>;
+  // ServiceControl stub so a `/restart` from a non-principal can be proven to
+  // never reach the host (and a `bun test` run never bounces a real service).
+  serviceControl?: import("../src/lib/systemd.ts").ServiceControl;
   // Wait until the harness has been invoked this many times, then abort. The
   // server drains its own inFlight set after the listen loop ends (see the tail
   // of runPhantomchatServer), so once the turn has STARTED the drain guarantees
@@ -217,6 +220,7 @@ async function runOnce(opts: {
     allowedHex: opts.allowedHex,
     relayHex: opts.relayHex,
     screen: opts.screen,
+    serviceControl: opts.serviceControl,
     tofu: opts.tofu,
     persistTrust: opts.persistTrust,
     fetchProfiles: opts.profiles
@@ -251,6 +255,20 @@ async function runOnce(opts: {
 
   return pool;
 }
+
+/** A threat screen that passes everything and records what it was shown.
+ *  Shared by the relay-tier and open-bot tests: both tiers are untrusted, so
+ *  `runTurn` consults the screen, and `calls.length` proves it did. */
+const passingScreen = () => {
+  const calls: string[] = [];
+  return {
+    calls,
+    fn: async (content: string) => {
+      calls.push(content);
+      return { action: "pass" as const, score: 1, reason: "benign" };
+    },
+  };
+};
 
 describe("phantomchat auth gate", () => {
   test("allowed npub: turn runs and a reply is published", async () => {
@@ -327,6 +345,7 @@ describe("phantomchat auth gate", () => {
   test("empty allowlist answers anyone (open-bot parity with Telegram)", async () => {
     const senderSk = generateSecretKey();
     const botSk = generateSecretKey();
+    const screen = passingScreen();
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "open" },
     ]);
@@ -335,6 +354,7 @@ describe("phantomchat auth gate", () => {
       senderSk,
       botSk,
       allowedHex: [],
+      screen: screen.fn,
       harness,
       text: "anyone home",
       untilInvocations: 1,
@@ -343,6 +363,82 @@ describe("phantomchat auth gate", () => {
     expect(harness.invocations).toBe(1);
     // delivery receipt + v2 reply (single event, no self-wrap).
     expect(pool.published.filter((e) => e.kind === 1059).length).toBe(2);
+    // Answered, but as a STRANGER: the open-bot sender is the "open" tier, not
+    // a principal. Same as Telegram's empty allowlist — the turn is untrusted
+    // and went through the threat screen. (It used to resolve to "trusted".)
+    expect(screen.calls.length).toBe(1);
+    expect(harness.lastRequest!.systemPrompt).toContain(
+      "Security perimeter — UNTRUSTED turn",
+    );
+  });
+
+  test("open bot: a stranger's slash command is NOT a command — it runs as a screened turn", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const screen = passingScreen();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "that isn't a command here" },
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [],
+      screen: screen.fn,
+      harness,
+      text: "/status",
+      untilInvocations: 1,
+    });
+
+    expect(harness.invocations).toBe(1);
+    expect(screen.calls.length).toBe(1);
+    const replies = await dmBubbles(pool, senderSk);
+    expect(replies).toEqual(["that isn't a command here"]);
+    expect(replies[0]).not.toContain("uptime:");
+  });
+
+  test("open bot: a stranger's /restart never touches the service", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const screen = passingScreen();
+    let restartCalled = false;
+    const serviceControl = {
+      async isActive() {
+        return true;
+      },
+      async start() {
+        return { ok: true };
+      },
+      async stop() {
+        return { ok: true };
+      },
+      async restart() {
+        restartCalled = true;
+        return { ok: true };
+      },
+      async rerenderUnitIfStale() {
+        return { rerendered: false };
+      },
+    };
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "x" },
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [],
+      screen: screen.fn,
+      harness,
+      serviceControl,
+      text: "/restart",
+      untilInvocations: 1,
+    });
+
+    expect(restartCalled).toBe(false);
+    expect(harness.invocations).toBe(1);
+    const replies = await dmBubbles(pool, senderSk);
+    expect(replies).toEqual(["x"]);
   });
 });
 
@@ -2123,17 +2219,6 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
  * it would hand strangers on another network the owner's authority.
  */
 describe("phantomchat relay tier", () => {
-  const passingScreen = () => {
-    const calls: string[] = [];
-    return {
-      calls,
-      fn: async (content: string) => {
-        calls.push(content);
-        return { action: "pass" as const, score: 1, reason: "benign" };
-      },
-    };
-  };
-
   test("a relay npub is answered, but the turn is UNTRUSTED and screened", async () => {
     const relaySk = generateSecretKey();
     const botSk = generateSecretKey();

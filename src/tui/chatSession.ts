@@ -481,6 +481,9 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
       // identifier there is, and it is what the logs should name.
       chatId: conversation,
       persona,
+      // A human at a local TTY in the account that owns the persona directory
+      // (invariant 35) — the same reason chat turns here are `trusted: true`.
+      principalAuthenticated: true,
       conversation,
       memory,
       harnesses: harnesses!,

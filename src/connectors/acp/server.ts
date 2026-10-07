@@ -445,6 +445,9 @@ export async function runAcpServer(
       const result = await handleAcpCommand(text, {
         chatId: session.sessionId,
         persona: session.persona,
+        // The editor is run by the local user who owns this process and its
+        // persona directory — the same trust the ACP turn itself carries.
+        principalAuthenticated: true,
         conversation: session.conversation,
         memory,
         // The live array — `/harness` reorders it IN PLACE, and the next

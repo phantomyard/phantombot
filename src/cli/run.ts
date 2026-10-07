@@ -1323,12 +1323,13 @@ export async function runRun(input: RunInput = {}): Promise<number> {
 
         const openBot = allowedHex.length === 0 && tofu !== true;
         if (openBot) {
-          // Empty allowlist with TOFU off = answer anyone. Warn loudly.
+          // Empty allowlist with TOFU off = answer anyone, as untrusted. Warn
+          // loudly: nobody can issue commands until an owner is listed.
           log.warn(
-            `phantomchat[${spec.persona}]: no allowed_npubs and TOFU off — ANYONE who DMs this persona will be answered`,
+            `phantomchat[${spec.persona}]: no allowed_npubs and TOFU off — ANYONE who DMs this persona will be answered (untrusted: screened, no slash commands)`,
           );
           err.write(
-            `warning: phantomchat persona '${spec.persona}' has no allowlist — anyone who DMs it will be answered. Set allowed_npubs via \`phantombot phantomchat --persona ${spec.persona}\`.\n`,
+            `warning: phantomchat persona '${spec.persona}' has no allowlist — anyone who DMs it will be answered as an untrusted sender, and nobody can run slash commands. Set allowed_npubs via \`phantombot phantomchat --persona ${spec.persona}\`.\n`,
           );
         }
         const allowedLabel =

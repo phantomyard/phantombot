@@ -264,6 +264,11 @@ Phantombot decides trust from **where a request came from**, not how polite it
 looks.
 
 - Allow-listed owners and local editor sessions are trusted.
+- Chat commands (`/update`, `/restart`, `/reset`, `/harness`, …) answer only
+  an authenticated owner, on every channel. From a sender who is answered but
+  is not an owner — a Telegram bot or PhantomChat persona with no allowlist, a
+  PhantomChat bridge — a message starting with `/` is ordinary screened input,
+  not a command.
 - Email, webhooks, bridge traffic, and other ambient inputs are untrusted.
 - Untrusted requests pass through a capability-restricted threat judge before
   the capable harness receives conversation history or retrieved knowledge.

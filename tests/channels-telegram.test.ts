@@ -3492,6 +3492,90 @@ describe("runTelegramServer slash commands", () => {
     expect(transport.sent[0]!.text).toContain("cleared 1 turn");
   });
 
+  test("open bot: /reset from a non-principal is plain text, history survives", async () => {
+    // Empty allowlist = open bot. Messages on that path are already UNTRUSTED
+    // (screened); before the shared privilege gate the SAME sender could still
+    // run /reset, /update, /restart — the command path failed open while the
+    // message path failed closed. The line must now fall through to a normal
+    // (screened) turn and touch nothing.
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: "old",
+    });
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      conversationId: "1001",
+      senderId: "777",
+      text: "/reset",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "x" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ allowedUserIds: [] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
+    expect(stored[0]).toEqual({ role: "user", text: "old" });
+    expect(transport.sent.some((s) => s.text.includes("cleared"))).toBe(false);
+    // Proof it FELL THROUGH rather than being swallowed: the line ran as an
+    // ordinary turn — persisted as plain user text and answered by the harness.
+    // Without this a gate that silently dropped the line would pass too.
+    expect(stored).toContainEqual({ role: "user", text: "/reset" });
+    expect(transport.sent.some((s) => s.text === "x")).toBe(true);
+  });
+
+  test("open bot: /restart from a non-principal never touches the service", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      conversationId: "1001",
+      senderId: "777",
+      text: "/restart",
+    });
+    let restartCalled = false;
+    const stubServiceControl: ServiceControl = {
+      async isActive() {
+        return true;
+      },
+      async start() {
+        return { ok: true };
+      },
+      async stop() {
+        return { ok: true };
+      },
+      async restart() {
+        restartCalled = true;
+        return { ok: true };
+      },
+      async rerenderUnitIfStale() {
+        return { rerendered: false };
+      },
+    };
+    await runTelegramServer({
+      config: baseConfig({ allowedUserIds: [] }),
+      memory,
+      harnesses: [new ScriptedHarness("fake", [{ type: "done", finalText: "x" }])],
+      agentDir,
+      persona: "phantom",
+      transport,
+      serviceControl: stubServiceControl,
+      oneShot: true,
+    });
+    expect(restartCalled).toBe(false);
+    expect(transport.sent.some((s) => s.text.includes("restarting"))).toBe(false);
+    // The line ran as an ordinary turn, not a dropped command.
+    expect(transport.sent.some((s) => s.text === "x")).toBe(true);
+  });
+
   // Generous per-test cap: the waits above are the real deadlines and fail
   // with what they were waiting for, so the cap only has to be bigger than
   // them plus the harness's 5s fallback — never the thing that fires first.
