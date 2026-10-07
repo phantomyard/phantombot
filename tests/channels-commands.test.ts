@@ -75,6 +75,9 @@ function ctx(
   return {
     chatId: "42",
     persona: "phantom",
+    // Default to a principal so the command-mechanics tests stay about the
+    // commands; the privilege gate has its own describe block below.
+    principalAuthenticated: true,
     conversation: "telegram:42",
     memory,
     harnesses: [new StubHarness("claude"), new StubHarness("pi")],
@@ -145,6 +148,79 @@ describe("handleSlashCommand recognition", () => {
 
   test("without botUsername known, keeps legacy behavior (strips any @suffix)", async () => {
     const r = await handleSlashCommand("/help@whoever", ctx());
+    expect(r).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Privilege gate — a non-principal never reaches a command
+// ---------------------------------------------------------------------------
+
+describe("handleSlashCommand privilege gate (principalAuthenticated=false)", () => {
+  const PRIVILEGED = ["/update", "/restart", "/reset", "/harness pi", "/coder on", "/model"];
+
+  test.each(PRIVILEGED)("%s returns null so the caller runs it as plain text", async (cmd) => {
+    let restartCalled = false;
+    const serviceControl: ServiceControl = {
+      async isActive() {
+        return true;
+      },
+      async start() {
+        return { ok: true };
+      },
+      async stop() {
+        return { ok: true };
+      },
+      async restart() {
+        restartCalled = true;
+        return { ok: true };
+      },
+      async rerenderUnitIfStale() {
+        return { rerendered: false };
+      },
+    };
+    const r = await handleSlashCommand(
+      cmd,
+      ctx({ principalAuthenticated: false, serviceControl }),
+    );
+    expect(r).toBeNull();
+    expect(restartCalled).toBe(false);
+  });
+
+  test("/reset from a non-principal leaves the conversation history intact", async () => {
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:42",
+      role: "user",
+      text: "keep",
+    });
+    const r = await handleSlashCommand("/reset", ctx({ principalAuthenticated: false }));
+    expect(r).toBeNull();
+    expect(await memory.recentTurns("phantom", "telegram:42", 10)).toEqual([
+      { role: "user", text: "keep" },
+    ]);
+  });
+
+  test("/harness from a non-principal does not reorder the chain", async () => {
+    const chain = [new StubHarness("claude"), new StubHarness("pi")];
+    const r = await handleSlashCommand(
+      "/harness pi",
+      ctx({ principalAuthenticated: false, harnesses: chain }),
+    );
+    expect(r).toBeNull();
+    expect(chain.map((h) => h.id)).toEqual(["claude", "pi"]);
+  });
+
+  test("even read-only commands are withheld — no slash path at all for a non-principal", async () => {
+    // Same rule as PhantomChat's relay tier: the whole path is privileged,
+    // not a per-command list that a new command could fall outside of.
+    for (const cmd of ["/status", "/help", "/stop"]) {
+      expect(await handleSlashCommand(cmd, ctx({ principalAuthenticated: false }))).toBeNull();
+    }
+  });
+
+  test("a principal is unaffected (positive control)", async () => {
+    const r = await handleSlashCommand("/status", ctx({ principalAuthenticated: true }));
     expect(r).not.toBeNull();
   });
 });
