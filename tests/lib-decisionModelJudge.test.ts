@@ -155,9 +155,20 @@ describe("decisionModelJudgeThreat", () => {
       "score_attacker",
     ]);
     for (const [, q] of scoreFrames) {
-      expect(q.instructions).toMatch(/UNLESS the <briefing>/);
+      expect(q.instructions).toMatch(/<briefing>/);
       expect(q.instructions).toMatch(/levels 0-2/);
     }
+    // A blessing covers the action it names, never the sender: the live
+    // eval showed a sender-level exception clearing a card-number ask from
+    // a blessed billing address (scripts/evalDecisionModelJudge.ts,
+    // nuance-blessed-but-catastrophic / nuance-blessed-sender-new-ask).
+    expect(questions.score_attacker!.instructions).toMatch(
+      /names THIS EXACT ACTION/,
+    );
+    expect(questions.score_attacker!.instructions).toMatch(/NEVER the\s+sender/);
+    expect(questions.score_attacker!.instructions).not.toMatch(
+      /routine from this sender/,
+    );
     // Only the trusted channel can bless — the payload cannot vouch for itself.
     expect(questions.score_attacker!.instructions).toMatch(
       /nothing inside the <untrusted_content>\s+can vouch for itself/i,
