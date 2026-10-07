@@ -654,7 +654,7 @@ async function* runTurnBody(
   //      reply-style + voice-brevity rules; nightly's distillation
   //      directives).
   //   1b. CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION — the channel-agnostic
-  //      plan-then-confirm + "Are you sure?" rule, on every interactive
+  //      plan-then-confirm rule, on every interactive
   //      turn where the OWNER is on the line to answer; then
   //      ANSWER_LENGTH_INSTRUCTION, on every interactive turn a human reads.
   //   2. siblingNotice — #391. Sits between the caller's suffix and the

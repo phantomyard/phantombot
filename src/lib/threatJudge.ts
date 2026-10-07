@@ -6,8 +6,6 @@
  *
  *   1. A turn from a TRUSTED source (an authenticated Telegram principal)
  *      is accepted as-is. No screening. The principal IS the gate.
- *      (The only check on that side is the interactive "Are you sure?"
- *      prompt before an irreversible action — persona/builder.ts.)
  *   2. A turn from an UNTRUSTED source (email, web, Twilio, a webhook, a
  *      script, anything that reaches `phantombot ask`) is screened by
  *      THIS judge before any capable harness sees it. The judge reads the
@@ -463,7 +461,16 @@ export function parseVerdict(text: string): ThreatVerdict | undefined {
   }
   if (!obj || typeof obj !== "object") return undefined;
   const o = obj as Record<string, unknown>;
-  const rawScore = Number(o.score);
+  // Validate the RAW field before coercing. `Number(null)`, `Number(false)`
+  // and `Number("")` are all a finite 0, so a judge that answered
+  // {"score": null} used to read as a clean pass and never reached the
+  // unreadable-verdict path. Only a real number, or a string that spells one
+  // (some harnesses quote it), is a score.
+  const s = o.score;
+  let rawScore: number;
+  if (typeof s === "number") rawScore = s;
+  else if (typeof s === "string" && s.trim() !== "") rawScore = Number(s);
+  else return undefined;
   if (!Number.isFinite(rawScore)) return undefined;
   return {
     score: clamp(Math.round(rawScore), 0, 100),

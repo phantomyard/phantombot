@@ -89,6 +89,25 @@ describe("parseVerdict", () => {
     expect(parseVerdict("not json at all")).toBeUndefined();
     expect(parseVerdict('{"reason": "no score"}')).toBeUndefined();
   });
+
+  // Number(null), Number(false) and Number("") are all a finite 0 — a judge
+  // that answered with a blank score must NOT read as a clean pass.
+  it("a non-numeric score field is no verdict, never a score of 0", () => {
+    expect(parseVerdict('{"score": null}')).toBeUndefined();
+    expect(parseVerdict('{"score": false}')).toBeUndefined();
+    expect(parseVerdict('{"score": true}')).toBeUndefined();
+    expect(parseVerdict('{"score": ""}')).toBeUndefined();
+    expect(parseVerdict('{"score": "   "}')).toBeUndefined();
+    expect(parseVerdict('{"score": []}')).toBeUndefined();
+    expect(parseVerdict('{"score": [5]}')).toBeUndefined();
+    expect(parseVerdict('{"score": {}}')).toBeUndefined();
+    expect(parseVerdict('{"score": "high"}')).toBeUndefined();
+  });
+
+  it("a real 0 and a quoted number are still scores", () => {
+    expect(parseVerdict('{"score": 0}')?.score).toBe(0);
+    expect(parseVerdict('{"score": "85"}')?.score).toBe(85);
+  });
 });
 
 describe("judgeThreat", () => {
@@ -180,6 +199,17 @@ describe("judgeThreat", () => {
       expect(r.kind).toBe("unparseable");
     }
   });
+
+  // A blank score used to coerce to 0 and PASS on the first attempt, never
+  // reaching the unreadable-verdict path.
+  for (const blank of ["null", "false", '""']) {
+    it(`a judge that answers {"score": ${blank}} gave no verdict — not a pass`, async () => {
+      const { fn } = fakeComplete(`{"score": ${blank}, "reason": "r", "question": "q"}`);
+      const r = await judgeThreat("x", { complete: fn });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.kind).toBe("unparseable");
+    });
+  }
 
   it("retries once on an unparseable first reply and recovers", async () => {
     // The chatty persona answers in prose first, then clean JSON on the

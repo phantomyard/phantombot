@@ -37,13 +37,11 @@ Each side of the perimeter has exactly one check.
   is not on the line to answer it, and an approval they have to repeat forever
   is not a control. The persona still treats everything it reads as data, never
   as instructions, and reports content that tries to steer it.
-- **Interactive work gets an "Are you sure?" prompt, and only that.** When the
-  owner is on the line and asks for something that cannot be undone and would
-  seriously damage their world or the phantom itself — deleting data with no
-  backup, rewriting git history, destroying a machine or volume, moving money,
-  wiping the phantom's identity, vault or memory — the persona says what will
-  be lost and asks once. It is a second chance before an accident, not a
-  permission system: reversible work is never held for it.
+- **Interactive work has no security gate.** When the owner is on the line
+  their instructions are genuine and are acted on. The persona still outlines
+  a plan and asks before a long job or one it cannot easily undo, which the
+  owner can waive for the rest of the conversation — that is a planning
+  habit, not a permission system.
 
 If the judge cannot be reached at all, the request proceeds unscreened; the
 turn runs on the same model chain, so a real outage stops both. If the judge

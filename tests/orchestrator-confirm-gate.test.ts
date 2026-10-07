@@ -19,7 +19,6 @@ import { runTurn } from "../src/orchestrator/turn.ts";
 import { type MemoryStore, openMemoryStore } from "../src/memory/store.ts";
 import {
   ANSWER_LENGTH_INSTRUCTION,
-  ARE_YOU_SURE_INSTRUCTION,
   CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION,
 } from "../src/persona/builder.ts";
 import type {
@@ -171,8 +170,6 @@ describe("confirm-before-long-jobs overlay", () => {
   test("withheld from an untrusted turn — the judge is the gate there, and nobody can answer", async () => {
     const prompt = await promptFor({ trusted: false }, "cli:ask");
     expect(prompt).not.toContain("Confirm before long jobs");
-    expect(prompt).not.toContain("Are you sure?");
-    expect(prompt).not.toContain(ARE_YOU_SURE_INSTRUCTION);
   });
 
   test("an untrusted turn a human reads still gets the answer-length rule", async () => {
@@ -181,40 +178,28 @@ describe("confirm-before-long-jobs overlay", () => {
   });
 });
 
-describe("the 'Are you sure?' prompt — the owner's second chance", () => {
-  test("rides with the confirm gate on a trusted interactive turn", async () => {
+describe("no escalate rule on either side", () => {
+  // The untrusted ESCALATE rule was removed outright, not moved to trusted
+  // turns: the trusted side never had one. What trusted interactive turns
+  // carry is the plan check, with its original irreversibility trigger.
+  test("a trusted interactive turn carries no 'are you sure?' / escalate rule", async () => {
     const prompt = await promptFor({});
+    expect(prompt).not.toMatch(/are you sure\?/i);
+    expect(prompt).not.toContain("What to ESCALATE");
+  });
+
+  test("an untrusted turn carries none either", async () => {
+    const prompt = await promptFor({ trusted: false }, "cli:ask");
+    expect(prompt).not.toMatch(/are you sure\?/i);
+    expect(prompt).not.toContain("What to ESCALATE");
+  });
+
+  test("the confirm list keeps its own 'cannot easily undo' trigger", () => {
     expect(CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION).toContain(
-      ARE_YOU_SURE_INSTRUCTION,
+      "anything that changes state you cannot easily undo",
     );
-    expect(prompt).toContain(ARE_YOU_SURE_INSTRUCTION);
-  });
-
-  test("withheld from nightly, which is trusted but has nobody on the line", async () => {
-    const prompt = await promptFor({ origin: "internal" });
-    expect(prompt).not.toContain("Are you sure?");
-  });
-
-  test("is the ONE irreversibility rule — the confirm list no longer carries its own", () => {
-    expect(CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION).not.toContain(
-      "cannot easily undo",
+    expect(CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION).toContain(
+      "a destructive step",
     );
-  });
-
-  test("is narrow: irreversible damage asks, reversible work does not", () => {
-    expect(ARE_YOU_SURE_INSTRUCTION).toMatch(/CANNOT be undone/);
-    expect(ARE_YOU_SURE_INSTRUCTION).toMatch(/brick you/);
-    // Pushing code and editing config were on the old ESCALATE list; here
-    // they are named as things this rule never asks about.
-    expect(ARE_YOU_SURE_INSTRUCTION).toMatch(
-      /commits, pushes to\s+a branch, merges, config edits you backed up/,
-    );
-    expect(ARE_YOU_SURE_INSTRUCTION).toMatch(/not this\s+rule's business/);
-  });
-
-  test("asks once per job, and is not waived by a blanket go-ahead", () => {
-    expect(ARE_YOU_SURE_INSTRUCTION).toMatch(/ask once/);
-    expect(ARE_YOU_SURE_INSTRUCTION).toMatch(/do not ask again\s+for that job/);
-    expect(ARE_YOU_SURE_INSTRUCTION).toMatch(/does not cover this/);
   });
 });

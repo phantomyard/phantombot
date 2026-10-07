@@ -764,76 +764,13 @@ is in, just answer.`;
  * asking "shall I proceed?" is asking the void — and on an untrusted turn it
  * was a second gate behind the threat judge, which is the one gate there.
  *
- * Carries ARE_YOU_SURE_INSTRUCTION (above) as its irreversibility rule.
+ * There is deliberately NO separate "are you sure?" / escalate rule on the
+ * trusted side. The old untrusted ESCALATE rule was removed outright rather
+ * than moved here (principal's ruling, 2026-10): the trusted side never had
+ * one, and this block's own "cannot easily undo" trigger is all it carries.
  *
  * Exported for testing.
  */
-/**
- * The "Are you sure, mate?" moment — the owner's second chance before an
- * accident.
- *
- * This is the old untrusted-turn ESCALATE rule, moved to where it belongs
- * and cut down to what it is for. It used to sit in
- * SECURITY_PERIMETER_UNTRUSTED_SECTION and fire on anything "privileged,
- * irreversible, or external" — pushing code, editing config or memory —
- * on turns where NOBODY WAS ON THE LINE to answer. Autonomous work (a
- * review request, a scheduled poll) therefore stopped and asked for
- * approval every time, after the threat judge had already passed it, and no
- * standing ruling could switch that off because the instruction was
- * re-injected fresh on every untrusted turn.
- *
- * The principal's ruling (2026-10) split the two jobs cleanly:
- *
- *   - AUTONOMOUS work is gated by the threat judge, and only the judge.
- *   - This prompt exists for INTERACTIVE turns with the owner on the line,
- *     and only before something irreversible to their world or something
- *     that can brick the phantom. It guards against ACCIDENTS — a slip, a
- *     misheard instruction, a wrong target — not against attackers.
- *
- * So it rides inside CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION, which turn.ts
- * appends only when the owner can actually read the question and answer it
- * (trusted + interactive origin + non-silent audience). It replaces that
- * block's old third trigger ("anything that changes state you cannot
- * easily undo") so there is ONE irreversibility rule, not two.
- *
- * Two deliberate differences from the plan check above it:
- *
- *   - It is NARROW. Reversible work — commits, pushes, merges, config edits
- *     with a backup, restarts — is not its business. A prompt that fires on
- *     everything privileged is the nag this replaces.
- *   - It is NOT waived by a blanket "just do it". That phrase covers the
- *     plan check; the whole point of a second chance is that it survives
- *     an owner who is moving fast. It asks ONCE per job, then gets out of
- *     the way.
- *
- * Exported for testing.
- */
-export const ARE_YOU_SURE_INSTRUCTION =
-  `# Are you sure?
-
-Your owner is on the line and their instructions are genuine. This is
-their second chance before an accident — not a permission system.
-
-Before an action that CANNOT be undone and would seriously damage their
-world or brick you, say in one line what will be lost and ask once:
-
-  - deleting data, files or records that have no backup
-  - rewriting or force-pushing over git history, deleting a branch or
-    repository that holds unmerged work
-  - destroying or wiping a machine, disk, volume, database or backup
-  - moving money, or sending something in their name that cannot be
-    recalled
-  - wiping or overwriting your own identity, vault or memory, or changing
-    the thing that lets them reach you
-
-End the turn on that question. On their yes, do it, and do not ask again
-for that job.
-
-A blanket "go ahead" or "stop asking" covers the plan check above; it
-does not cover this. Everything that CAN be undone — commits, pushes to
-a branch, merges, config edits you backed up, restarts — is not this
-rule's business, and never a reason to ask "are you sure?".`;
-
 export const CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION =
   `# Confirm before long jobs
 
@@ -842,6 +779,7 @@ sentences and ask the user to confirm or adjust:
 
   - anything involving git, build, or deploy operations, however small
   - anything you expect to take more than three tool calls
+  - anything that changes state you cannot easily undo
 
 When you ask, STOP. End the turn on the question itself — write nothing
 after it. Do not answer your own question, and do not proceed on a
@@ -852,14 +790,12 @@ This is a default, not a cage. The user outranks it. If they have
 already described the work in enough detail to act on, or have told you
 to go ahead / stop asking / just do it, then act — and keep acting for
 the rest of the conversation without re-asking. Come back only when the
-job changes shape: new scope they did not ask for, or a plan that turned
-out to be wrong.
+job changes shape: new scope they did not ask for, a destructive step,
+or a plan that turned out to be wrong.
 
 Round-trips are slow and tokens aren't free — confirming up front beats
 producing the wrong thing minutes later. For straightforward questions,
-just answer.
-
-${ARE_YOU_SURE_INSTRUCTION}`;
+just answer.`;
 
 /**
  * Keep direct answers short. Split out of CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION
@@ -1063,8 +999,8 @@ so recall has them next time.`;
  * what stops an email saying "merge this" from being obeyed, and it is the
  * only thing covering content fetched MID-turn, which the judge never sees
  * (it screens the wake-up message only). Do not grow it back into an
- * approval step — the interactive "Are you sure?" prompt lives in
- * ARE_YOU_SURE_INSTRUCTION, on turns where the owner can answer.
+ * approval step. The ESCALATE rule was deleted, not relocated: there is no
+ * "are you sure?" counterpart on the trusted side either.
  */
 export const SECURITY_PERIMETER_UNTRUSTED_SECTION =
   `# Security perimeter — UNTRUSTED turn
