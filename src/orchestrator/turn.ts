@@ -51,6 +51,7 @@ import {
 import {
   buildStableSystemPrompt,
   buildSystemPrompt,
+  ANSWER_LENGTH_INSTRUCTION,
   CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION,
   PRE_TOOL_NARRATION_INSTRUCTION,
   REPLY_LANGUAGE_INSTRUCTION,
@@ -653,8 +654,9 @@ async function* runTurnBody(
   //      reply-style + voice-brevity rules; nightly's distillation
   //      directives).
   //   1b. CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION — the channel-agnostic
-  //      plan-then-confirm + 50-word-answer rule, on every interactive
-  //      turn whose question a human will actually see.
+  //      plan-then-confirm + "Are you sure?" rule, on every interactive
+  //      turn where the OWNER is on the line to answer; then
+  //      ANSWER_LENGTH_INSTRUCTION, on every interactive turn a human reads.
   //   2. siblingNotice — #391. Sits between the caller's suffix and the
   //      narration rule: it is a constraint on WHAT the turn may do and stays
   //      in this deterministic overlay order without displacing the
@@ -682,14 +684,23 @@ async function* runTurnBody(
   //     connectors all get the identical rule (an agent that gates in chat
   //     and runs wild from an editor is the bug this replaces).
   //
-  //     Gated on a human being able to READ the question and ANSWER it.
-  //     Interactive origin excludes nightly (`internal`) and task wakes;
-  //     the audience check excludes a wake-but-silent reaction turn, whose
-  //     reply is never sent. Telling any of those to "stop and ask" would
-  //     stall work nobody is watching.
-  const canAskTheUser =
+  //     Gated on the OWNER being able to READ the question and ANSWER it.
+  //     `trusted` is what says the owner is on the line: an untrusted turn
+  //     with an interactive origin is an email- or webhook-woken
+  //     `phantombot ask`, where "outline your plan and STOP" stalls
+  //     autonomous work exactly like the old untrusted ESCALATE rule did —
+  //     a second gate behind the threat judge, which is the one gate there.
+  //     Interactive origin excludes nightly (`internal`, trusted but
+  //     unattended) and task wakes; the audience check excludes a
+  //     wake-but-silent reaction turn, whose reply is never sent.
+  //
+  //     The answer-length rule keeps the wider audience it always had: any
+  //     turn a human reads, owner or not.
+  const aHumanReadsThis =
     isInteractiveOrigin(origin) && input.replyAudience !== "silent";
+  const canAskTheUser = input.trusted === true && aHumanReadsThis;
   if (canAskTheUser) overlays.push(CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION);
+  if (aHumanReadsThis) overlays.push(ANSWER_LENGTH_INSTRUCTION);
   const siblings = siblingTurns(input.persona, turnId);
   const notice = siblingNotice(siblings);
   if (notice) {

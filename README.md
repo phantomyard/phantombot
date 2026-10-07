@@ -273,7 +273,10 @@ looks.
 - Untrusted requests pass through a capability-restricted threat judge before
   the capable harness receives conversation history or retrieved knowledge.
 - Suspicious requests are held and surfaced to the owner for a trusted
-  conversation.
+  conversation. The judge is the only gate on autonomous work: a request it
+  passes is carried through without a second approval step.
+- On interactive turns the owner gets one "Are you sure?" prompt before an
+  action that cannot be undone.
 - Secrets are encrypted per persona with AES-256-GCM.
 
 This reduces the attack surface; it does not make an autonomous model
