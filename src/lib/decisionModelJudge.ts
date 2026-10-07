@@ -307,8 +307,9 @@ export async function decisionModelJudgeThreat(
     verdictAnswer?.type !== "choice"
   ) {
     // The model ANSWERED, in a shape no score can be read out of — the
-    // decision-model equivalent of an unparseable verdict. The screener still
-    // tries the harness judge; if that yields no verdict either, it HOLDS.
+    // decision-model equivalent of an unparseable verdict. Like any other
+    // decision-model failure it hands over silently to the harness judge,
+    // whose result alone decides the screen.
     return {
       ok: false,
       error: "jev decision failed schema mapping",

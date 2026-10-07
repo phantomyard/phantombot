@@ -194,9 +194,9 @@ describe("screener + Jev", () => {
     expect(v.reason).toContain("failed open");
   });
 
-  // An answer with no verdict in it is not an outage. It holds regardless of
-  // the operator's fail_closed setting, whichever backend produced it.
-  it("Jev down + a harness judge that answers without a verdict → HOLD, even with fail_closed off", async () => {
+  // A harness chain that answers without a verdict is a failed screening, not
+  // an outage. It holds regardless of the operator's fail_closed setting.
+  it("Jev down + a harness judge that answers without a verdict → ordinary HOLD, even with fail_closed off", async () => {
     const jev = decisionModelStub({ ok: false, error: "jev timeout after 1500ms" });
     let notified = "";
     const { screen, harnessCalls } = mk(
@@ -208,26 +208,38 @@ describe("screener + Jev", () => {
     expect(v.action).toBe("hold");
     // First ask + the one format re-ask.
     expect(harnessCalls).toHaveLength(2);
-    expect(notified).toContain("the judge gave no verdict");
+    // Graded on the HARNESS judge's bar, with the normal notification.
+    expect(notified).toContain("(threat 80/100)");
+    expect(notified).toContain("Why: the judge could not score this request");
+    expect(notified).not.toContain("no verdict");
   });
 
-  it("a Jev answer that failed schema mapping + a harness outage → HOLD (a judge read it and gave no score)", async () => {
+  // An unreadable decision-model answer NEVER prompts by itself: it hands
+  // over to the harness judge, and that judge's result alone decides. Here
+  // the harness judge never answers, so this is an outage → fail open.
+  it("a Jev answer that failed schema mapping + a harness outage → PASS (fails open), no prompt", async () => {
     const jev = decisionModelStub({
       ok: false,
       error: "jev decision failed schema mapping",
       kind: "unparseable",
     });
+    let notified = "";
     const screen = makeScreener(
       cfg(decisionModelSettings({ failClosed: false })),
       "robbie",
       "cli:ask",
       [], // empty chain ⇒ the harness judge never answers
       stubMemory(),
-      { recordHeld: async () => {}, notify: async () => 0, decisionModelJudge: jev.impl },
+      {
+        recordHeld: async () => {},
+        notify: async (m) => ((notified = m), 0),
+        decisionModelJudge: jev.impl,
+      },
     );
     const v = await screen("hello");
-    expect(v.action).toBe("hold");
-    expect(v.reason).toContain("schema mapping");
+    expect(v.action).toBe("pass");
+    expect(v.reason).toContain("failed open");
+    expect(notified).toBe("");
   });
 
   it("a Jev answer that failed schema mapping is rescued by a harness verdict — no hold", async () => {

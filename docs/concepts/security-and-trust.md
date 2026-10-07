@@ -47,9 +47,12 @@ Each side of the perimeter has exactly one check.
 
 If the judge cannot be reached at all, the request proceeds unscreened; the
 turn runs on the same model chain, so a real outage stops both. If the judge
-answers but no verdict can be read from the answer, the request is held and
-the owner is asked — an answer with no score in it is what a successful
-manipulation of the judge looks like.
+answers but no score can be read from the answer, the next model in the
+persona's chain is asked instead, without bothering the owner. Only when every
+model has been asked and none produced a score is the request held — as an
+ordinary failed screening, with the same notification as any other hold. An
+answer with no score in it is what a successful manipulation of the judge
+looks like, so it is never waved through.
 
 Limit worth knowing: the judge reads the message that starts a turn. Content
 the persona fetches while working — a web page, an API response, another

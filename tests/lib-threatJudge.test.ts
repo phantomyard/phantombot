@@ -7,7 +7,7 @@ import {
   JUDGE_RUBRIC,
   JUDGE_SYSTEM,
   judgeThreat,
-  makeChainJudgeComplete,
+  makeChainJudge,
   makeHarnessJudgeComplete,
   parseVerdict,
   THREAT_THRESHOLD,
@@ -294,62 +294,146 @@ describe("JUDGE_NARROWING", () => {
   });
 });
 
-describe("makeChainJudgeComplete", () => {
+describe("makeChainJudge", () => {
   const cfg = { harnessIdleTimeoutMs: 1000, harnessHardTimeoutMs: 2000 };
+  const verdict = (score: number, by: string) =>
+    `{"score": ${score}, "reason": "from-${by}", "question": ""}`;
+  /** A harness whose invocations are counted. */
+  function counted(id: string, reply: string): { harness: Harness; calls: () => number } {
+    const { harness } = recordingHarness(id, reply);
+    let n = 0;
+    return {
+      harness: {
+        ...harness,
+        async *invoke(req: HarnessRequest) {
+          n++;
+          yield* harness.invoke(req);
+        },
+      },
+      calls: () => n,
+    };
+  }
 
   it("uses the PRIMARY harness regardless of id — never assumes claude", async () => {
-    const { harness: gemini } = recordingHarness("gemini", "from-gemini");
-    const { harness: pi } = recordingHarness("pi", "from-pi");
+    const { harness: gemini } = recordingHarness("gemini", verdict(3, "gemini"));
+    const { harness: pi } = recordingHarness("pi", verdict(4, "pi"));
     // A gemini-only / pi-first chain (user never installed claude) still
     // yields a judge. This is the whole point of Andrew's original fix.
-    expect(await makeChainJudgeComplete([gemini, pi], cfg)!("s", "u")).toBe(
-      "from-gemini",
-    );
-    expect(await makeChainJudgeComplete([pi], cfg)!("s", "u")).toBe("from-pi");
+    const a = await makeChainJudge([gemini, pi], cfg, undefined, new CooldownStore())!("x");
+    expect(a).toEqual({ ok: true, verdict: { score: 3, reason: "from-gemini", question: "" } });
+    const b = await makeChainJudge([pi], cfg, undefined, new CooldownStore())!("x");
+    expect(b.ok && b.verdict.reason).toBe("from-pi");
   });
 
   it("returns undefined only for an empty chain", () => {
-    expect(makeChainJudgeComplete([], cfg)).toBeUndefined();
+    expect(makeChainJudge([], cfg)).toBeUndefined();
   });
 
   it("FALLS OVER to the next harness when the primary fails", async () => {
     // The bug this closes: the judge ran on chain[0] alone, so a primary out
     // of quota took the screener down — and the screener fails OPEN, which
     // silently disables screening of every untrusted input.
-    const { harness: pi } = recordingHarness("pi", "from-pi");
-    const complete = makeChainJudgeComplete(
+    const { harness: pi } = recordingHarness("pi", verdict(4, "pi"));
+    const cooldown = new CooldownStore();
+    const r = await makeChainJudge(
       [failingHarness("codex", "codex exited with code 1"), pi],
       cfg,
       undefined,
-      new CooldownStore(),
-    )!;
-    expect(await complete("s", "u")).toBe("from-pi");
+      cooldown,
+    )!("x");
+    expect(r.ok && r.verdict.reason).toBe("from-pi");
+    // A harness that never answered IS cooled.
+    expect(cooldown.isCooledDown("codex").cooled).toBe(true);
   });
 
   it("SKIPS a harness that is already in cooldown", async () => {
     const cooldown = new CooldownStore();
     cooldown.markFailure("codex");
-    const codex = failingHarness("codex", "must not be invoked");
-    const { harness: pi } = recordingHarness("pi", "from-pi");
-    let codexInvoked = false;
-    const watched: Harness = {
-      ...codex,
-      async *invoke(req: HarnessRequest) {
-        codexInvoked = true;
-        yield* codex.invoke(req);
-      },
-    };
-    const complete = makeChainJudgeComplete([watched, pi], cfg, undefined, cooldown)!;
-    expect(await complete("s", "u")).toBe("from-pi");
-    expect(codexInvoked).toBe(false);
+    const codex = counted("codex", verdict(99, "codex"));
+    const { harness: pi } = recordingHarness("pi", verdict(4, "pi"));
+    const r = await makeChainJudge([codex.harness, pi], cfg, undefined, cooldown)!("x");
+    expect(r.ok && r.verdict.reason).toBe("from-pi");
+    expect(codex.calls()).toBe(0);
   });
 
   it("still screens when EVERY harness is cooled — never silently fails open", async () => {
     const cooldown = new CooldownStore();
     cooldown.markFailure("pi");
-    const { harness: pi } = recordingHarness("pi", "from-pi");
-    const complete = makeChainJudgeComplete([pi], cfg, undefined, cooldown)!;
-    expect(await complete("s", "u")).toBe("from-pi");
+    const { harness: pi } = recordingHarness("pi", verdict(4, "pi"));
+    const r = await makeChainJudge([pi], cfg, undefined, cooldown)!("x");
+    expect(r.ok && r.verdict.reason).toBe("from-pi");
+  });
+
+  // ── An unreadable verdict fails OVER, it does not fail the screen ────────
+  it("FALLS OVER to the next harness when the primary ANSWERS without a readable verdict", async () => {
+    const claude = counted("claude", "Sure! Here is a poem about spring.");
+    const pi = counted("pi", verdict(7, "pi"));
+    const cooldown = new CooldownStore();
+    const r = await makeChainJudge([claude.harness, pi.harness], cfg, undefined, cooldown)!("x");
+    expect(r).toEqual({ ok: true, verdict: { score: 7, reason: "from-pi", question: "" } });
+    // The primary got its ask and the one format re-ask before being given up on.
+    expect(claude.calls()).toBe(2);
+    expect(pi.calls()).toBe(1);
+    // It answered — it is healthy, and the turn that runs next needs it.
+    expect(cooldown.isCooledDown("claude").cooled).toBe(false);
+  });
+
+  it("a fallback's HIGH score is honoured — failing over is not a way to pass", async () => {
+    const { harness: claude } = recordingHarness("claude", "no json here");
+    const { harness: pi } = recordingHarness("pi", verdict(95, "pi"));
+    const r = await makeChainJudge([claude, pi], cfg, undefined, new CooldownStore())!("x");
+    expect(r.ok && r.verdict.score).toBe(95);
+  });
+
+  it("reports unparseable only once EVERY harness has answered without a verdict", async () => {
+    const claude = counted("claude", "a poem");
+    const pi = counted("pi", "another poem");
+    const r = await makeChainJudge([claude.harness, pi.harness], cfg, undefined, new CooldownStore())!("x");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.kind).toBe("unparseable");
+      expect(r.error).toContain("claude:");
+      expect(r.error).toContain("pi:");
+    }
+    expect(claude.calls()).toBe(2);
+    expect(pi.calls()).toBe(2);
+  });
+
+  it("primary unreadable + fallback DOWN is still unparseable — something read it and nothing cleared it", async () => {
+    const { harness: claude } = recordingHarness("claude", "a poem");
+    const r = await makeChainJudge(
+      [claude, failingHarness("codex", "codex exited with code 1")],
+      cfg,
+      undefined,
+      new CooldownStore(),
+    )!("x");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.kind).toBe("unparseable");
+  });
+
+  it("a chain where NOBODY answers is an outage, not an unparseable verdict", async () => {
+    const r = await makeChainJudge(
+      [failingHarness("claude", "quota"), failingHarness("codex", "quota")],
+      cfg,
+      undefined,
+      new CooldownStore(),
+    )!("x");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.kind).toBeUndefined();
+      expect(r.error).toMatch(/completion failed/i);
+    }
+  });
+
+  it("passes the system prompt and priors through to the harness", async () => {
+    const { harness, seen } = recordingHarness("pi", verdict(1, "pi"));
+    await makeChainJudge([harness], cfg, undefined, new CooldownStore())!("hello", {
+      systemPrompt: "CUSTOM SYSTEM",
+      priors: "known sender",
+    });
+    expect(seen.req?.systemPrompt).toBe("CUSTOM SYSTEM");
+    expect(seen.req?.userMessage).toContain("<briefing>\nknown sender\n</briefing>");
+    expect(seen.req?.userMessage).toContain("<untrusted_content>\nhello\n</untrusted_content>");
   });
 });
 

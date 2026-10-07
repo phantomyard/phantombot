@@ -1046,8 +1046,8 @@ so recall has them next time.`;
  * Injected for EVERY non-principal turn that reaches a harness: email /
  * Plane / GitHub-woken asks, voice, webhooks, scripts, scheduled tasks. By
  * the time this prompt runs the content has ALREADY passed the tool-less
- * threat judge (orchestrator/screen.ts) — a risky score, or an answer with
- * no verdict in it, would have held the turn before it got here.
+ * threat judge (orchestrator/screen.ts) — a risky score, or a judge chain
+ * that could not score it at all, would have held the turn before it got here.
  *
  * THE JUDGE IS THE ONLY GATE. This block used to be "the second layer": it
  * told the persona to ESCALATE anything privileged (it named merging/pushing

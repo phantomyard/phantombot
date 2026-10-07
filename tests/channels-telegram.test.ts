@@ -190,8 +190,8 @@ class ScriptedHarness implements Harness {
   }
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
     // The threat judge runs on this same harness, tool-less, ahead of an
-    // UNTRUSTED turn. Answer it with a real pass verdict: a judge reply with
-    // no verdict in it now HOLDS the turn (fail closed) instead of passing,
+    // UNTRUSTED turn. Answer it with a real pass verdict: a judge chain
+    // that returns no verdict at all now HOLDS the turn instead of passing,
     // so a scripted turn reply is no longer a usable judge answer. Not
     // counted or captured — `invocations`/`lastRequest` describe the turn.
     if (req.toolsMode === "none") {
