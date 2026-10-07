@@ -121,4 +121,66 @@ describe("memory drawers stdio sentinels (--export - / --import -)", () => {
     const listing = await runDrawers(["--kind", "lessons"]);
     expect(listing).toContain("refiled through stdin");
   });
+
+  test("`--export=-` (equals form) also writes the drawer markdown to stdout", async () => {
+    await runDrawers(["--file", "the equals-export lesson", "--kind", "lessons"]);
+    const out = await runDrawers(["--export=-"]);
+    expect(process.exitCode ?? 0).toBe(0);
+    expect(out).toContain("the equals-export lesson");
+    expect(out).toContain("# Lessons");
+  });
+
+  test("`--import=-` (equals form) also reads the drawer from stdin", async () => {
+    const originalStdin = process.stdin;
+    Object.defineProperty(process, "stdin", {
+      value: stdinFromText("- refiled via the equals form\n"),
+      configurable: true,
+    });
+    try {
+      const out = await runDrawers(["--import=-", "--kind", "lessons"]);
+      expect(process.exitCode ?? 0).toBe(0);
+      expect(out).not.toContain("no file, skipped");
+    } finally {
+      Object.defineProperty(process, "stdin", { value: originalStdin });
+    }
+    const listing = await runDrawers(["--kind", "lessons"]);
+    expect(listing).toContain("refiled via the equals form");
+  });
+
+  test("omitted value (`--export` with nothing after it) is NOT recovered to stdout", async () => {
+    await runDrawers(["--file", "omitted-value entry", "--kind", "lessons"]);
+    // citty parses a missing value to "" just like it parses the bare `-` on
+    // the released build — but the raw argv carries no `-` token, so the
+    // empty path must fall through to the directory form and fail loudly
+    // (mkdir(""), ENOENT), never silently dumping every drawer to stdout.
+    let out = "";
+    let threw: unknown;
+    try {
+      out = await runDrawers(["--export"]);
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeDefined();
+    expect(out).not.toContain("omitted-value entry");
+    expect(out).not.toContain("# Lessons");
+  });
+
+  test("omitted value (`--import` with nothing after it) is NOT recovered to stdin", async () => {
+    const originalStdin = process.stdin;
+    Object.defineProperty(process, "stdin", {
+      value: stdinFromText("- never consumed: no dash token was passed\n"),
+      configurable: true,
+    });
+    try {
+      // "" stays "" (no literal `-` in the raw argv), so the import takes
+      // its pre-#652 path — probing `<kind>.md` in the cwd — instead of
+      // quietly draining stdin into the drawer.
+      const out = await runDrawers(["--import", "--kind", "lessons"]);
+      expect(out).toContain("no file, skipped");
+    } finally {
+      Object.defineProperty(process, "stdin", { value: originalStdin });
+    }
+    const listing = await runDrawers(["--kind", "lessons"]);
+    expect(listing).not.toContain("never consumed");
+  });
 });

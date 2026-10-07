@@ -1432,18 +1432,33 @@ const drawersCmd = defineCommand({
     },
     json: { type: "boolean", description: "JSON output.", default: false },
   },
-  async run({ args }) {
+  async run({ args, rawArgs }) {
     const limit = Number(args.limit);
     // citty's value reader refuses tokens that start with `-` — it takes them
     // for flags — so the documented `-` sentinel never arrives as `-`:
     // `--export -` parsed to "" and the empty path then fell through to
     // mkdir(""), the #652 ENOENT crash, while `--import -` went looking for
     // `<kind>.md` in the current directory and quietly reported "no file".
-    // An exactly-empty string cannot be a meaningful target here (mkdir("")
-    // fails with the same ENOENT), so an empty value can only be the bare
-    // `-` the caller typed: recover the sentinel.
-    const stdioSentinel = (v: string | undefined): string | undefined =>
-      v === undefined ? undefined : v === "" ? "-" : v;
+    //
+    // But "" is ambiguous: citty produces it for a MISSING value too
+    // (`--export` with nothing after it), and recovering every "" would
+    // silently turn a malformed invocation into "dump every drawer to
+    // stdout". Recover the sentinel only when the raw argv actually carries
+    // the literal `-` for the flag — the space form (`--export -`, next raw
+    // token exactly "-") or the equals form (`--export=-`). A bare
+    // `--export` keeps its "" and fails the way it always has.
+    const literalDash = (flag: string): boolean => {
+      for (let k = 0; k < rawArgs.length; k++) {
+        if (rawArgs[k] === `--${flag}`) return rawArgs[k + 1] === "-";
+        if (rawArgs[k] === `--${flag}=-`) return true;
+      }
+      return false;
+    };
+    const stdioSentinel = (
+      flag: string,
+      v: string | undefined,
+    ): string | undefined =>
+      v === undefined || v !== "" || !literalDash(flag) ? v : "-";
     process.exitCode = await runMemoryDrawers({
       persona: args.persona ? String(args.persona) : undefined,
       kind: args.kind ? String(args.kind) : undefined,
@@ -1452,10 +1467,12 @@ const drawersCmd = defineCommand({
       force: Boolean(args.force),
       file: args.file === undefined ? undefined : String(args.file),
       export: stdioSentinel(
+        "export",
         args.export === undefined ? undefined : String(args.export),
       ),
       withId: Boolean(args["with-id"]),
       import: stdioSentinel(
+        "import",
         args.import === undefined ? undefined : String(args.import),
       ),
       retire: Boolean(args.retire),
