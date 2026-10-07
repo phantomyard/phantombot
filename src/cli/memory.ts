@@ -1434,6 +1434,16 @@ const drawersCmd = defineCommand({
   },
   async run({ args }) {
     const limit = Number(args.limit);
+    // citty's value reader refuses tokens that start with `-` — it takes them
+    // for flags — so the documented `-` sentinel never arrives as `-`:
+    // `--export -` parsed to "" and the empty path then fell through to
+    // mkdir(""), the #652 ENOENT crash, while `--import -` went looking for
+    // `<kind>.md` in the current directory and quietly reported "no file".
+    // An exactly-empty string cannot be a meaningful target here (mkdir("")
+    // fails with the same ENOENT), so an empty value can only be the bare
+    // `-` the caller typed: recover the sentinel.
+    const stdioSentinel = (v: string | undefined): string | undefined =>
+      v === undefined ? undefined : v === "" ? "-" : v;
     process.exitCode = await runMemoryDrawers({
       persona: args.persona ? String(args.persona) : undefined,
       kind: args.kind ? String(args.kind) : undefined,
@@ -1441,9 +1451,13 @@ const drawersCmd = defineCommand({
       sync: Boolean(args.sync),
       force: Boolean(args.force),
       file: args.file === undefined ? undefined : String(args.file),
-      export: args.export === undefined ? undefined : String(args.export),
+      export: stdioSentinel(
+        args.export === undefined ? undefined : String(args.export),
+      ),
       withId: Boolean(args["with-id"]),
-      import: args.import === undefined ? undefined : String(args.import),
+      import: stdioSentinel(
+        args.import === undefined ? undefined : String(args.import),
+      ),
       retire: Boolean(args.retire),
       json: Boolean(args.json),
     });
