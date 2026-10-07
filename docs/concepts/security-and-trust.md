@@ -26,6 +26,11 @@ a durable ruling.
 
 - Quoted messages, retrieved memory, documents, tool output, and catch-up text
   are data. They do not become commands by appearing inside a trusted turn.
+- Slash commands (`/update`, `/restart`, `/reset`, `/harness`, …) are answered
+  only for an authenticated owner, on every channel. From a sender who is
+  answered but is not an owner — a Telegram bot or PhantomChat persona with no
+  allowlist, a PhantomChat bridge — a line starting with `/` is ordinary
+  screened input, not a command.
 - Secrets are encrypted per persona and loaded only into that persona's harness
   environment.
 - Harness failover preserves the same trust decision; it does not broaden the

@@ -549,6 +549,17 @@ export async function runTelegramServer(
           continue;
         }
 
+        // Security perimeter: this sender is a PRINCIPAL only if explicitly
+        // allow-listed. An empty allowlist means "open bot" (anyone can DM) —
+        // that is NOT an authenticated principal, so trust stays false and
+        // the system fails closed. `checkAllowed` (which lets the empty case
+        // through for *answering*) is deliberately NOT reused here: answering
+        // an open bot is fine; granting it authority is not. This one value
+        // gates BOTH the slash-command path below and the turn's `trusted`
+        // flag, so the two can never disagree about who the owner is.
+        const principalAuthenticated =
+          allowedSet.size > 0 && allowedSet.has(Number(msg.senderId));
+
         const isVoice = Boolean(msg.voice);
         log.info("telegram: incoming", {
           chatId: msg.conversationId,
@@ -576,6 +587,11 @@ export async function runTelegramServer(
         // and any in-flight turn. Voice messages are never slash commands
         // (the body is empty until STT runs, by which point we've already
         // committed to the LLM path).
+        //
+        // Slash commands are PRIVILEGED. The shared dispatcher refuses them
+        // for a non-principal (returns null, see `principalAuthenticated` on
+        // SlashCommandContext), so on an open bot a stranger's "/…" line
+        // falls through to the ordinary UNTRUSTED (screened) turn below.
         if (!isVoice && msg.text.startsWith("/")) {
           // Group addressing applies to slash commands too. With privacy
           // mode off, EVERY bot in the group receives the command, so an
@@ -619,6 +635,7 @@ export async function runTelegramServer(
           const result = await handleSlashCommand(msg.text, {
             chatId: msg.conversationId,
             persona: input.persona,
+            principalAuthenticated,
             conversation: `telegram:${msg.conversationId}`,
             memory: input.memory,
             harnesses,
@@ -809,16 +826,9 @@ export async function runTelegramServer(
             botUsername,
             groupContext,
             isGroupChat,
-            // Security perimeter: this turn is TRUSTED only if the sender
-            // is an explicitly allow-listed principal. An empty allowlist
-            // means "open bot" (anyone can DM) — that is NOT an
-            // authenticated principal, so trust stays false and the
-            // system fails closed. `checkAllowed` (which lets the empty
-            // case through for *answering*) is deliberately NOT reused
-            // here: answering an open bot is fine; granting it authority
-            // to write security rules is not.
-            principalAuthenticated:
-              allowedSet.size > 0 && allowedSet.has(Number(msg.senderId)),
+            // Security perimeter: TRUSTED only for an allow-listed principal
+            // (computed once above, shared with the slash gate).
+            principalAuthenticated,
           });
         });
         // Detach completed entries so the maps don't leak.

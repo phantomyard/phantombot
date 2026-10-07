@@ -82,6 +82,33 @@ export interface SlashCommandContext {
    *  conversation id (e.g. Telegram's stringified chat id). */
   chatId: string;
   persona: string;
+  /**
+   * Is the sender an authenticated PRINCIPAL — the owner speaking — on
+   * whichever surface delivered this command? Slash commands are privileged
+   * (`/update`, `/restart`, `/reset`, `/harness` control the process or
+   * destroy state), so the dispatcher refuses the whole command path for
+   * anyone else: `handleSlashCommand` returns `null`, and the caller does what
+   * it does for any non-command — runs the line as ordinary (untrusted,
+   * screened) input.
+   *
+   * This gate is CHANNEL-AGNOSTIC and lives only here. Every surface that
+   * accepts slash commands — Telegram, PhantomChat, the ACP editor bridge, the
+   * terminal chat, and any channel added later — dispatches through this one
+   * function, so no surface can ship with the command path open and no
+   * channel carries a gate of its own.
+   *
+   * REQUIRED, never defaulted: trust is stated by the caller, the same rule
+   * `runTurn` applies to its `trusted` flag. Each surface derives it from its
+   * own authentication — Telegram from the numeric allowlist (an EMPTY
+   * allowlist is an open bot, not a principal), PhantomChat from its sender
+   * tier (`"trusted"`, never `"relay"`), the ACP editor bridge and the
+   * terminal chat from the fact that a local user owns the process. Gating
+   * here rather than per channel is what keeps the command path and the
+   * message path from disagreeing about who the owner is: before this field
+   * existed Telegram screened an open bot's messages but ran its `/update`,
+   * while PhantomChat had the same rule written locally in its own server.
+   */
+  principalAuthenticated: boolean;
   /** Conversation key, e.g. "telegram:42". Used by /reset. */
   conversation: string;
   /** Memory store for /reset's context-watermark advance and /stop's note. */
@@ -286,6 +313,20 @@ export async function handleSlashCommand(
 ): Promise<SlashCommandResult | null> {
   const trimmed = text.trim();
   if (!trimmed.startsWith("/")) return null;
+
+  // Privilege gate (see `SlashCommandContext.principalAuthenticated`), applied
+  // to EVERY surface that dispatches here — Telegram, PhantomChat, ACP, TUI: a
+  // non-principal's "/…" line is not a command, it is text. `null` is the
+  // existing "not ours — fall through" contract every caller already honours,
+  // so the line lands in an ordinary screened turn instead of being swallowed.
+  if (!ctx.principalAuthenticated) {
+    log.info("slash: command from non-principal — treating as plain text", {
+      chatId: ctx.chatId,
+      persona: ctx.persona,
+      command: trimmed.split(/\s+/)[0]!.slice(0, 32),
+    });
+    return null;
+  }
 
   // Telegram convention in groups: `/cmd@BotName arg1 arg2`. If the
   // @suffix names a different bot, this command isn't ours — fall through.

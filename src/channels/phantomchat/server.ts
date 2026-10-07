@@ -104,7 +104,7 @@ import {
  *               never granted principal authority.
  *   "drop"    — not allowed at all: ignored silently.
  */
-export type SenderTier = "trusted" | "relay" | "drop";
+export type SenderTier = "trusted" | "relay" | "open" | "drop";
 
 // Don't download absurdly large attachments. The harness reads from the inbox;
 // a multi-hundred-MB blob would blow memory + disk for little benefit.
@@ -239,8 +239,10 @@ export interface RunPhantomchatServerInput {
    * Trust-on-first-use. Only consulted when `allowedHex` is empty:
    *   - tofu true  → the FIRST sender is trusted, persisted via `persistTrust`,
    *     and the bot locks to it (every later stranger is dropped).
-   *   - tofu false → open bot: answer anyone (parallel to Telegram's empty
-   *     `allowedUserIds`), with a loud startup warning emitted by the caller.
+   *   - tofu false → open bot: answer anyone, but as the `"open"` tier — never
+   *     a principal. Parallel to Telegram's empty `allowedUserIds`: every turn
+   *     is untrusted and screened, no slash commands, no reaction turns. A
+   *     loud startup warning is emitted by the caller.
    */
   tofu?: boolean;
   /**
@@ -461,11 +463,22 @@ export async function runPhantomchatServer(
   // Returns a TIER rather than a boolean (#400), because "may this sender talk
   // to us" and "does this sender command us" are different questions:
   //
-  //   "trusted" — an allow-listed principal (or TOFU/open-bot). Runs with the
-  //               trusted SECURITY_PERIMETER block and skips the threat screen.
+  //   "trusted" — an allow-listed principal (or the TOFU claimant). Runs with
+  //               the trusted SECURITY_PERIMETER block and skips the threat
+  //               screen.
   //   "relay"   — an allow-listed BRIDGE. Answered, but every turn is untrusted
   //               and threat-screened; see the `relayHex` field doc.
-  //   "drop"    — stranger. Silently ignored.
+  //   "open"    — any sender on an OPEN bot (empty allowlist, TOFU off).
+  //               Answered, but never a principal: untrusted and screened like
+  //               a relay, minus the relay envelope and the shared audience.
+  //               This is Telegram's empty-allowlist semantics; "open" used to
+  //               resolve to "trusted", which handed every stranger the
+  //               trusted turn path AND the command path.
+  //   "drop"    — stranger on a locked bot. Silently ignored.
+  //
+  // Every consumer asks `tier === "trusted"` for authority (the turn's
+  // `trusted` flag, `principalAuthenticated` for slash commands, the reaction
+  // path), so a new tier is untrusted by construction.
   //
   // RELAY IS CHECKED FIRST, so an npub present in both lists resolves to relay:
   // least privilege wins, and a mistaken double-entry can only ever de-escalate.
@@ -509,8 +522,12 @@ export async function runPhantomchatServer(
           });
         });
       }
+    } else {
+      // Empty set + TOFU off = open bot. Answered (the caller warned at
+      // startup), but nobody is the owner: same rule as Telegram's empty
+      // `allowed_user_ids`.
+      return "open";
     }
-    // else: empty set + tofu off = open bot — answer anyone (caller warned).
     return "trusted";
   };
 
@@ -999,8 +1016,8 @@ export async function runPhantomchatServer(
         // the bridge. The bridge's own DM is a pipe, not a private channel.
         replyAudience: msg.groupId || tier === "relay" ? "shared" : "private",
         // Trusted turns never screen; this is what actually screens a RELAY
-        // turn. Also passed for open-bot parity (empty allowlist → trusted
-        // still, matching Telegram's "answer anyone" semantics).
+        // turn and an OPEN-bot turn (empty allowlist, TOFU off: answered but
+        // untrusted, matching Telegram's empty-allowlist semantics).
         screen:
           input.screen ??
           makeScreener(
@@ -1310,18 +1327,17 @@ export async function runPhantomchatServer(
   const runSlash = async (msg: ChannelMessage): Promise<void> => {
     const tier = authorize(msg);
     if (tier === "drop") return;
-    // Slash commands are PRIVILEGED — /restart, /update, /reset destroy state or
-    // control the process. Only a principal may take that path. A relay's "/…"
-    // line is not a command from the bridge, it is text somebody typed on
-    // another network, so it falls through to an ordinary screened turn.
-    if (tier === "relay") {
-      enqueue(msg);
-      return;
-    }
     const senderHex = msg.senderId;
     const result = await handleSlashCommand(msg.text, {
       chatId: msg.conversationId,
       persona: input.persona,
+      // Slash commands are PRIVILEGED — /restart, /update, /reset destroy
+      // state or control the process. Only a principal may take that path. A
+      // relay's "/…" line is not a command from the bridge, it is text
+      // somebody typed on another network: the shared dispatcher returns null
+      // for it and the `result === null` branch below runs it as an ordinary
+      // screened turn.
+      principalAuthenticated: tier === "trusted",
       // Must match handle()'s DM conversationKey EXACTLY so /reset and /coder
       // target the same persisted history. senderId is already lowercase hex
       // (the channel lowercases rumor.pubkey).

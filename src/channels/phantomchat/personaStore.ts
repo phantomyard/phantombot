@@ -47,7 +47,9 @@
  *   - allowed_npubs non-empty → only those npubs are answered. The FIRST entry
  *     is the incident-notification target.
  *   - allowed_npubs empty + tofu true → TOFU: first DMer is trusted + locked.
- *   - allowed_npubs empty + tofu false/absent → open bot (answer anyone), warned.
+ *   - allowed_npubs empty + tofu false/absent → open bot: anyone is answered,
+ *     but as an UNTRUSTED sender (screened, no slash commands, no reaction
+ *     turns) — nobody is the owner. Warned at startup.
  *
  * Relay semantics:
  *   - relay_npubs is a SEPARATE, LOWER tier — never merged into the allowlist.
