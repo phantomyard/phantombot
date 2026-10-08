@@ -585,7 +585,8 @@ function formatTaskFull(t: Task): string {
 }
 
 function formatTaskRun(r: TaskRunRow): string {
-  const flag = r.status === "error" ? " !ERR" : "";
+  const flag =
+    r.status === "error" ? " !ERR" : r.status === "held" ? " !HELD" : "";
   const delivered = r.delivered ? " [notified]" : "";
   return (
     `  ${r.firedAt.toISOString()}  ${r.status}  exit=${r.exitCode}${flag}${delivered}\n` +

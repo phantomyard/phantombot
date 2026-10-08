@@ -25,6 +25,12 @@ waking a model and receives a minimal environment. Expose only explicitly
 needed vault variables with repeated `--secret NAME` options. The command can
 call `phantombot ask` when it detects agent work.
 
+Every agent wake is read by the threat judge before the model sees it, the
+same as any other request that did not come from you directly in chat. If the
+judge holds a wake, that fire does nothing, you get the usual held-request
+notification, and `phantombot task log` shows the run as `held`. See
+[Security and trust](../concepts/security-and-trust.md).
+
 Tasks run silently by default. Use `phantombot notify` only when the owner
 asked to be interrupted or something material happened. Run `phantombot task
 selftest` to verify the scheduler end to end.
