@@ -17,7 +17,10 @@ import { join } from "node:path";
 import { runBridgeTurn } from "../src/connectors/acp/turnBridge.ts";
 import { runTurn } from "../src/orchestrator/turn.ts";
 import { type MemoryStore, openMemoryStore } from "../src/memory/store.ts";
-import { CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION } from "../src/persona/builder.ts";
+import {
+  ANSWER_LENGTH_INSTRUCTION,
+  CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION,
+} from "../src/persona/builder.ts";
 import type {
   Harness,
   HarnessChunk,
@@ -65,6 +68,9 @@ async function promptFor(
     hardTimeoutMs: 5_000,
     userMessage: "refactor the parser",
     harnesses: [harness],
+    // The owner is on the line by default: the confirm gate is for turns the
+    // OWNER can answer. Untrusted cases override this explicitly.
+    trusted: true,
     ...extra,
   } as Parameters<typeof runTurn>[0])) {
     // drain
@@ -154,5 +160,46 @@ describe("confirm-before-long-jobs overlay", () => {
   test("still applied to a shared (group) turn — the humans there can answer", async () => {
     const prompt = await promptFor({ replyAudience: "shared" });
     expect(prompt).toContain("Confirm before long jobs");
+  });
+
+  // One gate per channel. An UNTRUSTED turn with an interactive origin is an
+  // email- or webhook-woken `phantombot ask`: the threat judge already passed
+  // it and the owner is not on the line, so "outline your plan and STOP" (or
+  // "ask once before deleting") would stall autonomous work behind a second
+  // gate nobody can open.
+  test("withheld from an untrusted turn — the judge is the gate there, and nobody can answer", async () => {
+    const prompt = await promptFor({ trusted: false }, "cli:ask");
+    expect(prompt).not.toContain("Confirm before long jobs");
+  });
+
+  test("an untrusted turn a human reads still gets the answer-length rule", async () => {
+    const prompt = await promptFor({ trusted: false }, "cli:ask");
+    expect(prompt).toContain(ANSWER_LENGTH_INSTRUCTION);
+  });
+});
+
+describe("no escalate rule on either side", () => {
+  // The untrusted ESCALATE rule was removed outright, not moved to trusted
+  // turns: the trusted side never had one. What trusted interactive turns
+  // carry is the plan check, with its original irreversibility trigger.
+  test("a trusted interactive turn carries no 'are you sure?' / escalate rule", async () => {
+    const prompt = await promptFor({});
+    expect(prompt).not.toMatch(/are you sure\?/i);
+    expect(prompt).not.toContain("What to ESCALATE");
+  });
+
+  test("an untrusted turn carries none either", async () => {
+    const prompt = await promptFor({ trusted: false }, "cli:ask");
+    expect(prompt).not.toMatch(/are you sure\?/i);
+    expect(prompt).not.toContain("What to ESCALATE");
+  });
+
+  test("the confirm list keeps its own 'cannot easily undo' trigger", () => {
+    expect(CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION).toContain(
+      "anything that changes state you cannot easily undo",
+    );
+    expect(CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION).toContain(
+      "a destructive step",
+    );
   });
 });

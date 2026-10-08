@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  ChainFallThrough,
   completeOverChain,
   HarnessCompletionError,
 } from "../src/lib/chainComplete.ts";
@@ -107,6 +108,20 @@ describe("completeOverChain", () => {
     const out = await completeOverChain(
       [fake("codex"), fake("pi")],
       async (h) => (h.id === "codex" ? "" : "from-pi"),
+      { ...LABEL, cooldown },
+    );
+    expect(out).toBe("from-pi");
+    expect(cooldown.isCooledDown("codex").cooled).toBe(false);
+  });
+
+  test("a ChainFallThrough falls through but does NOT cool — the harness answered", async () => {
+    const cooldown = new CooldownStore();
+    const out = await completeOverChain(
+      [fake("codex"), fake("pi")],
+      async (h) => {
+        if (h.id === "codex") throw new ChainFallThrough("unreadable_verdict", "no score");
+        return "from-pi";
+      },
       { ...LABEL, cooldown },
     );
     expect(out).toBe("from-pi");

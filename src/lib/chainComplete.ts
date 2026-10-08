@@ -26,7 +26,11 @@
  *     order anyway (a screener that refuses to run is the fail-open bug);
  *   - a thrown attempt cools the harness, a successful one clears it;
  *   - an EMPTY result falls through WITHOUT cooling (#499): the process ran
- *     clean and produced no text, which is a model flake, not ill health.
+ *     clean and produced no text, which is a model flake, not ill health;
+ *   - an attempt that throws `ChainFallThrough` does the same: the harness
+ *     answered, the CALLER could not use the answer (the threat judge's
+ *     reply with no score in it), so the next harness gets a go and this one
+ *     is not benched for it.
  */
 
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
@@ -70,6 +74,26 @@ export class HarnessCompletionError extends Error {
     this.stderrTail = chunk.stderrTail;
     this.retryAfterMs = chunk.retryAfterMs;
     this.recoverable = chunk.recoverable;
+  }
+}
+
+/**
+ * Thrown by an `attempt` to say "this harness ran fine, but what it returned is
+ * no use to me — try the next one". The chain falls through WITHOUT cooling
+ * the harness, exactly as it does for an empty completion: an answer the
+ * caller could not use is a model flake (or, for the threat judge, content
+ * that knocked the model off its job), not ill health, and benching a healthy
+ * binary for it would take it away from the turn that runs next.
+ *
+ * `cause` is the label recorded in the exhaustion log line.
+ */
+export class ChainFallThrough extends Error {
+  readonly cause: string;
+
+  constructor(cause: string, message: string) {
+    super(message);
+    this.name = "ChainFallThrough";
+    this.cause = cause;
   }
 }
 
@@ -140,6 +164,19 @@ export async function completeOverChain(
       // harness for it would bench a healthy binary because a turn was
       // cancelled, and there is no point trying the next one either.
       if (options.signal?.aborted) throw e;
+      if (e instanceof ChainFallThrough) {
+        // The harness answered; the caller could not use it. Next harness,
+        // no cooldown.
+        log.warn(`${options.label}: harness answer unusable — falling through`, {
+          harnessId: harness.id,
+          cause: e.cause,
+          error: e.message,
+          nextHarnessId: nextEligibleId(harnesses, i, cooled),
+        });
+        lastError = e;
+        causes.push({ harnessId: harness.id, cause: e.cause });
+        continue;
+      }
       // Classify BEFORE cooling, on the same evidence the orchestrator uses.
       // A bare Error still works (tests, and any caller that has not been
       // taught to carry the chunk) — it just classifies on the message alone,

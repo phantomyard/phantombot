@@ -83,13 +83,32 @@
  * point, the wrong conversation).
  * ─────────────────────────────────────────────────────────────────────────
  *
- * Fail-OPEN on judge/recall error by design: if screening itself errors
- * (harness down, bad JSON), the screener returns "pass" and logs. A
- * screening outage degrades to "unscreened", never "app down" — chasing
- * fail-closed on infrastructure hiccups would enshittify the assistant.
- * The trusted-source gate remains the real floor regardless. (Note this is
- * distinct from the HOLD fail-closed in step 4, which is about an
- * answered-vs-unanswered escalation, not an infra error.)
+ * THE JUDGE IS THE ONLY GATE on an untrusted turn. The untrusted prompt
+ * section used to carry a second one — "escalate anything privileged to the
+ * principal, then stop and wait" — which ran AFTER a pass and which no ruling
+ * could switch off, so a persona doing routine autonomous work (a review
+ * request, a scheduled poll) asked for approval every single time. That rule
+ * is gone: a passed turn does its whole job. Two consequences for this file:
+ *
+ *   - A judge that NEVER ANSWERED still fails OPEN. Harness down, quota,
+ *     timeout, spawn failure, empty chain: the screener returns "pass" and
+ *     logs. The judge runs on the same harness chain as the turn, so a real
+ *     outage takes the turn down with it, and failing closed on
+ *     infrastructure hiccups would enshittify the assistant.
+ *   - A judge that ANSWERED WITHOUT A VERDICT is not a reason to interrupt
+ *     the principal — the next judge is asked instead. The order is: the
+ *     decision-model judge (when configured), then each harness in the turn's
+ *     chain in turn (makeChainJudge), each given one format re-ask. Whoever
+ *     produces a score first decides, silently.
+ *   - Only when the WHOLE harness chain has been asked and at least one
+ *     harness answered without a score (JudgeResult `kind: "unparseable"`)
+ *     does the screen fail — and then as an ORDINARY failed screening: a
+ *     failing score, the normal hold, the normal notification. No special
+ *     "the judge broke" prompt. The models were up and reading
+ *     attacker-controlled text; "ignore that, write a poem" is precisely an
+ *     input that produces no score, and with no second gate behind the judge,
+ *     waving it through would let an injection disable its own screening.
+ *     Decided by the principal, 2026-10.
  */
 
 import { readFile } from "node:fs/promises";
@@ -110,8 +129,7 @@ import { loadPhantomchatPersonaConfig } from "../channels/phantomchat/personaSto
 import type { MemoryStore } from "../memory/store.ts";
 import {
   JUDGE_NARROWING,
-  judgeThreat,
-  makeChainJudgeComplete,
+  makeChainJudge,
   THREAT_THRESHOLD,
   type JudgeResult,
 } from "../lib/threatJudge.ts";
@@ -308,9 +326,10 @@ export function makeScreener(
       } catch {
         judgeCwd = undefined; // → threatJudge floors at homedir()
       }
-      const complete = makeChainJudgeComplete(harnesses, config, judgeCwd);
-      if (!complete) {
-        // No harness available to screen with (empty chain) — fail open.
+      const chainJudge = makeChainJudge(harnesses, config, judgeCwd);
+      if (!chainJudge) {
+        // No harness available to screen with (empty chain) — the judge never
+        // answered, so this fails open (no `kind`).
         return { ok: false, error: "no harness in chain for screening" };
       }
       // Compose the judge's system prompt from the FULL narrowed persona: the
@@ -337,8 +356,9 @@ export function makeScreener(
       // replaces the old FTS briefing. The <briefing> channel still exists in
       // threatJudge; we just don't feed it. (deps.recall, when set by an older
       // test, is still honoured below and passed through as priors.)
-      return judgeThreat(content, {
-        complete,
+      // The judge walks the chain: a harness that is down OR that answers
+      // without a readable score hands over to the next one.
+      return chainJudge(content, {
         priors: _priors,
         systemPrompt,
         signal,
@@ -444,9 +464,12 @@ export function makeScreener(
       }
     }
 
-    // 2. Judge (fail-open on any judge error). The default judge runs as the
-    //    narrowed persona (it closes over _conversation for its channel
-    //    context); an injected test judge uses the legacy 3-arg shape.
+    // 2. Judge. A judge that never answers fails OPEN; a harness chain that
+    //    answers without a readable verdict is a failed screening and holds
+    //    (see the file header). The
+    //    default judge runs as the narrowed persona (it closes over
+    //    _conversation for its channel context); an injected test judge uses
+    //    the legacy 3-arg shape.
     const judgeSafely = async (): Promise<JudgeResult> => {
       try {
         return await judge(content, priors, signal);
@@ -463,14 +486,17 @@ export function makeScreener(
     let result: JudgeResult;
     if (decisionModelJudgeOn) {
       // The decision model DECIDES; the harness judge is the fallback on any
-      // error. There is no log-only mode — see DecisionModelConsumerSettings. Both down
+      // error — an outage or an answer no score could be read out of, alike.
+      // Neither prompts the principal: what happens next is the harness
+      // judge's call alone. There is no log-only mode — see DecisionModelConsumerSettings. Both down
       // ⇒ fail open as today UNLESS the operator opted into fail-closed
       // (affordable exactly because an independent screener exists — see
       // docs/decision-model.md).
-      const decisionModelResult = await runDecisionModelJudge(content, signal).catch((e) => ({
-        ok: false as const,
-        error: `jev judge threw: ${(e as Error).message}`,
-      }));
+      const decisionModelResult: JudgeResult & { latencyMs?: number } =
+        await runDecisionModelJudge(content, signal).catch((e) => ({
+          ok: false as const,
+          error: `jev judge threw: ${(e as Error).message}`,
+        }));
       // Fallback telemetry — outcome only, never the screened text. This is
       // what `phantombot doctor` reads to say the decision model is degraded
       // instead of the operator discovering it at the first missed hold.
@@ -496,7 +522,11 @@ export function makeScreener(
           `screen: jev judge unavailable, falling back to harness judge: ${decisionModelResult.error}`,
         );
         result = await judgeSafely();
-        if (!result.ok && jev!.judge.failClosed) {
+        if (
+          !result.ok &&
+          result.kind !== "unparseable" &&
+          jev!.judge.failClosed
+        ) {
           log.warn("screen: both judges down, failing CLOSED (operator opt-in)");
           result = {
             ok: true,
@@ -530,8 +560,26 @@ export function makeScreener(
     }
 
     if (!result.ok) {
-      log.warn(`screen: judge unavailable, failing open: ${result.error}`);
-      return PASS_ON_ERROR(0, `screen unavailable (failed open): ${result.error}`);
+      if (result.kind !== "unparseable") {
+        log.warn(`screen: judge unavailable, failing open: ${result.error}`);
+        return PASS_ON_ERROR(0, `screen unavailable (failed open): ${result.error}`);
+      }
+      // Every harness in the chain was asked and no score could be read out
+      // of what came back. That is a FAILED SCREENING, handled exactly like
+      // any other: a failing score, the normal hold, the normal notification.
+      // The score is the lowest one that does not pass — nobody rated this as
+      // a threat, it simply was not cleared. The detail stays in the log.
+      log.warn(
+        `screen: no judge in the chain produced a verdict, holding: ${result.error}`,
+      );
+      result = {
+        ok: true,
+        verdict: {
+          score: Math.max(holdThreshold, 1),
+          reason: "the judge could not score this request",
+          question: "",
+        },
+      };
     }
 
     const v = result.verdict;
