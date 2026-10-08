@@ -12,7 +12,7 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import chalk from "chalk";
+import inkChalk from "../node_modules/ink/node_modules/chalk/source/index.js";
 import { render } from "ink";
 
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
@@ -21,7 +21,7 @@ import type { ChatSession } from "../src/tui/chatSession.ts";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 import { TurnStore } from "../src/tui/turnRunner.ts";
 
-chalk.level = 3;
+inkChalk.level = 3;
 
 const ESC = "\u001b";
 /** bgBlackBright, i.e. `theme.bar.bg`. */

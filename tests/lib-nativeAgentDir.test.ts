@@ -626,7 +626,7 @@ describe("nativeAgentDir issue #614 — win32 seeds pi's opt-in powershell tool"
     ]);
   });
 
-  test("pi 0.85.1 still treats powershell as opt-in — the premise this fix rests on", () => {
+  test("pi 1.0.4 still treats powershell as opt-in — the premise this fix rests on", () => {
     // If a pi upgrade ever makes powershell a default, this assertion fails and
     // the seed can be reconsidered instead of quietly duplicating pi's work.
     const sdk = readFileSync(
@@ -638,11 +638,11 @@ describe("nativeAgentDir issue #614 — win32 seeds pi's opt-in powershell tool"
         "pi-coding-agent",
         "dist",
         "core",
-        "sdk.js",
+        "settings-manager.js",
       ),
       "utf8",
     );
-    const defaults = sdk.match(/defaultActiveToolNames = (\[[^\]]*\])/)?.[1];
+    const defaults = sdk.match(/DEFAULT_TOOL_NAMES = (\[[^\]]*\])/)?.[1];
     expect(defaults).toBeDefined();
     expect(JSON.parse(defaults!.replace(/'/g, '"'))).toEqual([
       "read",
