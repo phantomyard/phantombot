@@ -19,7 +19,7 @@ and updates.
 | **One continuous persona** | The same identity, preferences, and context across chat, terminal, and editor sessions. |
 | **Memory that compounds** | Local journals, structured decisions and lessons, durable knowledge, and meaning-based retrieval. |
 | **Bring your own brain** | Built-in native harness, plus Pi, Claude Code, and Codex as primary or fallback options. |
-| **Safe by origin** | Trusted owners act directly; untrusted email, webhooks, and bridges are screened before a capable model runs. |
+| **Safe by origin** | Trusted owners act directly; untrusted email, webhooks, bridges, and scheduled task wakes are screened before a capable model runs. |
 | **Real background work** | Persistent scheduled tasks, health checks, notifications, and service management survive restarts. |
 | **Local control** | Persona state and encrypted secrets stay on your machine. Model-provider privacy terms still apply to prompts sent to that provider. |
 
@@ -269,12 +269,19 @@ looks.
   is not an owner — a Telegram bot or PhantomChat persona with no allowlist, a
   PhantomChat bridge — a message starting with `/` is ordinary screened input,
   not a command.
-- Email, webhooks, bridge traffic, and other ambient inputs are untrusted.
+- Email, webhooks, bridge traffic, raw `phantombot ask` calls, scheduled task
+  wakes, and other ambient inputs are untrusted.
 - Untrusted requests pass through a capability-restricted threat judge before
   the capable harness receives conversation history or retrieved knowledge.
 - Suspicious requests are held and surfaced to the owner for a trusted
   conversation. The judge is the only gate on autonomous work: a request it
   passes is carried through without a second approval step.
+- Every agent task fire is judged, including a task the owner scheduled:
+  nobody is typing when it runs, and a poller can schedule a wake whose prompt
+  is inbound text. A held fire does nothing, is recorded as `held` in
+  `phantombot task log`, and still counts as that fire — a one-off is consumed
+  rather than retried. Only system tasks, whose prompt the runtime wrote itself
+  (today the scheduler selftest), skip the judge.
 - Secrets are encrypted per persona with AES-256-GCM.
 
 This reduces the attack surface; it does not make an autonomous model
