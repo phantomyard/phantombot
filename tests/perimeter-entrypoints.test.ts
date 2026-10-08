@@ -31,28 +31,68 @@ function sourceFiles(dir: string): string[] {
   return out;
 }
 
-/** The balanced `{ … }` argument object starting at `open`. */
-function objectLiteralAt(text: string, open: number): string {
+/**
+ * Index just past the string literal or comment starting at `i`, or `i`
+ * itself when none starts there. Lets the brace scan ignore a `{` or `}` that
+ * is text rather than structure. A template literal is skipped whole —
+ * nested backticks inside a `${ … }` are not followed, and such a call site
+ * fails loudly (unbalanced) rather than passing.
+ */
+function skipTrivia(text: string, i: number): number {
+  const c = text[i];
+  if (c === "/" && text[i + 1] === "/") {
+    const end = text.indexOf("\n", i);
+    return end === -1 ? text.length : end;
+  }
+  if (c === "/" && text[i + 1] === "*") {
+    const end = text.indexOf("*/", i + 2);
+    return end === -1 ? text.length : end + 2;
+  }
+  if (c === '"' || c === "'" || c === "`") {
+    for (let j = i + 1; j < text.length; j++) {
+      if (text[j] === "\\") j++;
+      else if (text[j] === c) return j + 1;
+    }
+    return text.length;
+  }
+  return i;
+}
+
+/**
+ * The TOP-LEVEL text of the balanced `{ … }` argument object starting at
+ * `open`: strings and comments dropped, and everything nested inside a
+ * further `{}`, `()` or `[]` dropped too. What is left is the object's own
+ * keys, so a `screen` belonging to some nested literal — or sitting in a
+ * string — cannot stand in for the call site's own.
+ */
+function ownKeysAt(text: string, open: number): string {
   let depth = 0;
+  let out = "";
   for (let i = open; i < text.length; i++) {
+    const next = skipTrivia(text, i);
+    if (next !== i) {
+      if (depth === 1) out += " ";
+      i = next - 1;
+      continue;
+    }
     const c = text[i];
-    if (c === "{") depth++;
-    else if (c === "}") {
+    if (c === "{" || c === "(" || c === "[") {
+      depth++;
+      if (depth === 1) out += c;
+    } else if (c === "}" || c === ")" || c === "]") {
       depth--;
-      if (depth === 0) return text.slice(open, i + 1);
+      if (depth === 0) return out + c;
+    } else if (depth === 1) {
+      out += c;
     }
   }
   throw new Error("unbalanced runTurn argument object");
 }
 
-/** Strip comments so prose mentioning `screen`/`trusted` proves nothing. */
-function stripComments(code: string): string {
-  return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-}
-
 interface CallSite {
   file: string;
-  args: string;
+  /** Own keys of the inline argument object; null when a variable is passed. */
+  args: string | null;
 }
 
 function runTurnCallSites(): CallSite[] {
@@ -68,20 +108,18 @@ function runTurnCallSites(): CallSite[] {
     const re = /\brunTurn\(\s*/g;
     for (let m = re.exec(text); m; m = re.exec(text)) {
       const at = m.index + m[0].length;
-      if (text[at] === "{") {
-        sites.push({ file, args: stripComments(objectLiteralAt(text, at)) });
-      } else {
-        // Called with a variable: the object is built elsewhere in the file,
-        // so the whole file has to carry the gate.
-        sites.push({ file, args: stripComments(text) });
-      }
+      // A variable argument is built somewhere the scan cannot follow, so it
+      // proves nothing here — it is only tolerated on the closed list below.
+      sites.push({ file, args: text[at] === "{" ? ownKeysAt(text, at) : null });
     }
   }
   return sites;
 }
 
-const passesScreen = (args: string): boolean => /(^|[\s,{])screen\s*[:,}]/.test(args);
-const statesTrusted = (args: string): boolean => /(^|[\s,{])trusted\s*[:,}]/.test(args);
+const passesScreen = (args: string | null): boolean =>
+  args !== null && /(^|[\s,{])screen\s*[:,}]/.test(args);
+const statesTrusted = (args: string | null): boolean =>
+  args !== null && /(^|[\s,{])trusted\s*[:,}]/.test(args);
 
 /**
  * Entry points that run with NO screener because the turn is trusted by
@@ -97,6 +135,13 @@ const TRUSTED_WITHOUT_SCREEN = new Set([
   // Emoji reactions: both callers drop non-principal reactions first.
   "channels/core/reactions.ts",
 ]);
+
+/**
+ * Call sites allowed to hand `runTurn` a prebuilt variable instead of an
+ * inline object. The scan cannot read their keys, so each must ALSO be on the
+ * trusted list — an entry point that needs a screen has to show it inline.
+ */
+const VARIABLE_ARGUMENT = new Set(["connectors/acp/turnBridge.ts"]);
 
 describe("security perimeter — every runTurn entry point is gated", () => {
   const sites = runTurnCallSites();
@@ -121,7 +166,12 @@ describe("security perimeter — every runTurn entry point is gated", () => {
     const ungated = sites
       .filter((s) => !passesScreen(s.args))
       .filter(
-        (s) => !(TRUSTED_WITHOUT_SCREEN.has(s.file) && statesTrusted(s.args)),
+        (s) =>
+          !(
+            TRUSTED_WITHOUT_SCREEN.has(s.file) &&
+            (statesTrusted(s.args) ||
+              (s.args === null && VARIABLE_ARGUMENT.has(s.file)))
+          ),
       )
       .map((s) => s.file);
     expect(ungated).toEqual([]);
@@ -143,5 +193,27 @@ describe("security perimeter — every runTurn entry point is gated", () => {
   test("the trusted list holds no stale entries", () => {
     const files = new Set(sites.map((s) => s.file));
     for (const f of TRUSTED_WITHOUT_SCREEN) expect(files.has(f)).toBe(true);
+  });
+
+  test("a variable argument is only accepted from the closed list", () => {
+    const variable = new Set(
+      sites.filter((s) => s.args === null).map((s) => s.file),
+    );
+    expect([...variable].sort()).toEqual([...VARIABLE_ARGUMENT].sort());
+    for (const f of VARIABLE_ARGUMENT) {
+      expect(TRUSTED_WITHOUT_SCREEN.has(f)).toBe(true);
+    }
+  });
+
+  test("the scan reads own keys only — nested or quoted `screen` proves nothing", () => {
+    const own = (code: string) => ownKeysAt(code, code.indexOf("{"));
+    expect(passesScreen(own("f({ a: 1, screen: s })"))).toBe(true);
+    expect(passesScreen(own("f({ a: 1, screen })"))).toBe(true);
+    expect(passesScreen(own("f({ a: { screen: s } })"))).toBe(false);
+    expect(passesScreen(own("f({ a: g({ screen: s }) })"))).toBe(false);
+    expect(passesScreen(own('f({ a: "} screen: x" })'))).toBe(false);
+    expect(passesScreen(own("f({ a: 1 /* screen: s */ })"))).toBe(false);
+    expect(passesScreen(own("f({ a: 1 }); g({ screen: s })"))).toBe(false);
+    expect(passesScreen(null)).toBe(false);
   });
 });
