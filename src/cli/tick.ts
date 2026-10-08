@@ -73,7 +73,13 @@ import {
   acquireRunLock,
   isLockHandle,
 } from "../lib/runLock.ts";
-import { openTaskStore, type Task, type TaskStore } from "../lib/tasks.ts";
+import {
+  isSystemTask,
+  openTaskStore,
+  type Task,
+  type TaskRunStatus,
+  type TaskStore,
+} from "../lib/tasks.ts";
 import { ambientEnvKeyAllowed, getPersonaSecretStrict } from "../lib/vaultSecrets.ts";
 import { recordTickFired } from "../lib/timerHealth.ts";
 import { healStaleMaintenanceFromTick } from "../lib/maintenanceHeal.ts";
@@ -81,6 +87,7 @@ import { shouldDeferWake } from "../lib/turnRegistry.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 import { makeRetriever } from "../orchestrator/retrieval.ts";
+import { makeScreener, type ScreenVerdict } from "../orchestrator/screen.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 import {
   makeDurableFactPuller,
@@ -544,6 +551,13 @@ export interface RunTaskWakeInput {
    * across the harness chain via the runWithFallback deadline.
    */
   wakeBudgetMs?: number;
+  /**
+   * Override the threat screen (test seam). Production passes undefined →
+   * `makeScreener` on the task persona's own chain. There is deliberately no
+   * way to switch the screen OFF from here: the one exemption is
+   * {@link isSystemTask}, decided from the task row.
+   */
+  screen?: (content: string, signal?: AbortSignal) => Promise<ScreenVerdict>;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -644,6 +658,13 @@ export async function runTaskWake(
     let finalText = "";
     let runError: string | undefined;
     let exitCode = 0;
+    // Set when the threat judge held this wake: no harness ran, nothing was
+    // done, and the screener has already notified the owner in code.
+    let held = false;
+    // Security perimeter: a task wake is UNTRUSTED (no principal typed it this
+    // minute), so it is judged like every other untrusted turn. The single
+    // exemption is a task the runtime authored itself.
+    const systemTask = isSystemTask(task);
     const startedAt = Date.now();
     // One wall-clock budget across the WHOLE harness chain (#631).
     const wakeBudgetMs = input.wakeBudgetMs ?? BACKGROUND_WAKE_HARD_TIMEOUT_MS;
@@ -750,10 +771,39 @@ export async function runTaskWake(
         // that lets tier-2 retrieval avoid replaying my own unreviewed
         // speculation back to me as though someone had said it.
         origin: "task",
+        // Threat screen. Only a turn the principal typed into Telegram,
+        // PhantomChat, ACP or the chat TUI is trusted; a scheduled wake is
+        // not, whoever scheduled it — the prompt sat in a table since then,
+        // and a poller (`phantombot task add --in 1m "<what an email said>"`)
+        // can put inbound content straight into one. So the tool-less judge
+        // reads the wake message BEFORE any capable harness does, exactly as
+        // it does for `phantombot ask`. On a hold runTurn stops before
+        // retrieval, the screener notifies the owner, and this fire does
+        // nothing. The judge sees the SAME text the harness would (prompt +
+        // hygiene footer, or the review prompt), so nothing reaches the
+        // harness that the judge did not read.
+        //
+        // The one exemption is a SYSTEM task (see isSystemTask): a row whose
+        // prompt this binary wrote. Do not add a per-task or per-config
+        // opt-out here — an exemption a task row can claim for itself is a
+        // perimeter bypass.
+        screen: systemTask
+          ? undefined
+          : (input.screen ??
+            makeScreener(
+              taskConfig,
+              task.persona,
+              conversation,
+              taskHarnesses,
+              memory,
+            )),
       })) {
         logBackgroundWakeChunk(task, conversation, chunk);
         if (chunk.type === "text") finalText += chunk.text;
-        if (chunk.type === "done") finalText = chunk.finalText;
+        if (chunk.type === "done") {
+          finalText = chunk.finalText;
+          if (chunk.meta?.screenedHold === true) held = true;
+        }
       }
       // #626 — hand eviction-cliff extraction to the daemon drain. This
       // is AWAITED (a plain INSERT) so the request is durable BEFORE the
@@ -784,11 +834,17 @@ export async function runTaskWake(
       isReview,
       durationMs: Date.now() - startedAt,
       outputChars: finalText.length,
+      screening: systemTask ? "exempt-system-task" : "judged",
     };
     if (runError) {
       log.error("tick: background wake failed", {
         ...fields,
         error: redactForLog(runError),
+      });
+    } else if (held) {
+      log.warn("tick: background wake HELD by threat judge — nothing ran", {
+        ...fields,
+        status: "held",
       });
     } else {
       log.info("tick: background wake completed", {
@@ -800,8 +856,10 @@ export async function runTaskWake(
     // Log the fire to task_runs for auditability.
     const outputExcerpt = runError
       ? `ERROR: ${runError}${finalText ? `\n${finalText}` : ""}`.slice(0, 500)
-      : finalText.slice(0, 500);
-    const status = runError ? "error" : "ok";
+      : held
+        ? `HELD by threat judge — nothing ran. ${finalText}`.slice(0, 500)
+        : finalText.slice(0, 500);
+    const status: TaskRunStatus = runError ? "error" : held ? "held" : "ok";
 
     // Quiet-by-default: neither tick nor the wake child auto-posts the
     // harness reply to Telegram. The agent calls `phantombot notify` from
@@ -811,18 +869,25 @@ export async function runTaskWake(
     taskStore.logRun({
       taskId: task.id,
       firedAt: now,
-      status: status as "ok" | "error",
+      status,
       exitCode,
       outputExcerpt,
       delivered: false,
     });
 
+    // A HELD fire is still a consumed fire: the schedule advances (a one-off
+    // deactivates) exactly as for a run. Leaving it due would re-judge and
+    // re-notify the owner every minute for the same content; what happens
+    // next is the owner's call, from their own trusted turn.
+    //
     // Record BEFORE releasing the claim: if the child dies between the two,
     // the next tick finds the task no longer due (recordRun advanced it /
     // deactivated the one-off) and only the claim needs sweeping — the
     // reverse order would let a crash re-fire a completed run.
     if (isReview) {
-      const decision = parseReviewDecision(finalText);
+      // A held review never reached the agent, so there is no decision to
+      // read — and the hold notice must never be parsed as one. Keep.
+      const decision = held ? "keep" : parseReviewDecision(finalText);
       log.info("tick: review decision", {
         id: task.id,
         decision,

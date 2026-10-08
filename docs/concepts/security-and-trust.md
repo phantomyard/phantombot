@@ -12,10 +12,21 @@ channel identity.
 
 ## Untrusted requests
 
-Email, webhooks, bridges, raw programmatic `ask` calls, and future ambient
-inputs are untrusted. Before a capable harness receives conversation history or
-retrieved knowledge, a capability-restricted threat judge scores the request.
-A suspicious request is held and surfaced to the owner; it does not execute.
+Email, webhooks, bridges, raw programmatic `ask` calls, scheduled task wakes,
+and future ambient inputs are untrusted. Before a capable harness receives
+conversation history or retrieved knowledge, a capability-restricted threat
+judge scores the request. A suspicious request is held and surfaced to the
+owner; it does not execute.
+
+A scheduled task is judged on every fire, including one the owner asked for:
+nobody is typing at the moment it runs, the prompt has sat in a table since it
+was written, and a poller can schedule a wake whose prompt is the text of an
+inbound email. A held fire does nothing, is recorded as `held` in
+`phantombot task log`, and still counts as that fire, so the owner is asked
+once rather than every minute. The only wakes that skip the judge are system
+tasks, whose prompt the runtime wrote itself (today the scheduler selftest).
+The nightly memory cycle is a system job as well; it runs on its own timer and
+is not a task at all.
 
 The judge receives only the context needed to decide risk, including ranked
 prior rulings from the decisions, people, and norms drawers. It has no tools.

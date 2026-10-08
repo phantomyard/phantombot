@@ -74,11 +74,50 @@ export interface Task {
   claim?: TaskClaim;
 }
 
+/** `created_by` stamp of the scheduler selftest row (`TaskStore.selftest`). */
+export const SELFTEST_CREATED_BY = "selftest";
+
+/** The selftest's prompt — a constant authored by the runtime, never by a caller. */
+export const SELFTEST_PROMPT =
+  "This is a phantombot scheduler selftest. Reply with only: 'SELFTEST OK — ' followed by the current time. Then exit.";
+
+/**
+ * Is this row a SYSTEM task — one the runtime authored itself, as opposed to
+ * one somebody asked to have scheduled?
+ *
+ * This is the ONLY exemption from the threat judge on the tick path
+ * (`cli/tick.ts#runTaskWake`), so it is deliberately a closed, exact match
+ * and not a flag: the row must carry the runtime's own `created_by` stamp AND
+ * the runtime's own byte-identical prompt. `phantombot task add` always stamps
+ * `cli` and has no way to say otherwise, and a row that borrows the stamp but
+ * carries any other prompt is NOT a system task — whatever text reaches the
+ * harness unjudged is text this binary wrote.
+ *
+ * Today that is the scheduler selftest alone. The nightly memory cycle is a
+ * system job too, but it never comes through the task table (it runs from
+ * `cli/nightly.ts` on its own timer). A future runtime-authored task joins
+ * the exemption by being added HERE, with its own constant prompt.
+ */
+export function isSystemTask(task: Pick<Task, "createdBy" | "prompt" | "command">): boolean {
+  return (
+    task.createdBy === SELFTEST_CREATED_BY &&
+    task.prompt === SELFTEST_PROMPT &&
+    (task.command === undefined || task.command.trim() === "")
+  );
+}
+
+/**
+ * Outcome of one fire. `held` = the threat judge held the wake before any
+ * capable harness ran (see `cli/tick.ts#runTaskWake`): nothing was done and
+ * the owner was notified. It is neither a success nor a runner failure.
+ */
+export type TaskRunStatus = "ok" | "error" | "held";
+
 export interface TaskRunRow {
   id: number;
   taskId: number;
   firedAt: Date;
-  status: "ok" | "error";
+  status: TaskRunStatus;
   exitCode: number;
   outputExcerpt: string; // first 500 chars
   /**
@@ -685,7 +724,7 @@ export class TaskStore {
   logRun(input: {
     taskId: number;
     firedAt: Date;
-    status: "ok" | "error";
+    status: TaskRunStatus;
     exitCode: number;
     outputExcerpt: string;
     delivered: boolean;
@@ -773,8 +812,7 @@ export class TaskStore {
       $persona: persona,
       $description: "selftest",
       $schedule: "",
-      $prompt:
-        "This is a phantombot scheduler selftest. Reply with only: 'SELFTEST OK — ' followed by the current time. Then exit.",
+      $prompt: SELFTEST_PROMPT,
       $createdAt: now.toISOString(),
       $nextRunAt: firesAt.toISOString(),
       $nextReviewAt: new Date(
@@ -785,7 +823,7 @@ export class TaskStore {
       $expiresAt: null,
       $maxRuns: null,
       $silent: 0,
-      $createdBy: "selftest",
+      $createdBy: SELFTEST_CREATED_BY,
       $command: null,
       $commandSecrets: "[]",
     });
