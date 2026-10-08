@@ -646,6 +646,29 @@ footer {
     transform: translateY(-1px);
 }
 
+/* Additive: PhantomChat download link (secondary CTA next to onboarding) */
+.phantomchat-ctas {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1rem;
+}
+
+.download-cta {
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px solid var(--accent);
+    transition: opacity 0.15s ease;
+}
+
+.download-cta:hover,
+.download-cta:focus-visible {
+    opacity: 0.8;
+}
+
 /* Additive: Why phantombot: firewall section (issue #339) */
 .why-firewall {
     margin-bottom: 8rem;
