@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,7 +12,6 @@ import {
   buildScratchNotice,
   provisionScratch,
   sanitizeScratchName,
-  SCRATCH_ENV_VAR,
   SCRATCH_SWEEP_MAX_AGE_MS,
   sweepScratch,
   teardownScratch,
