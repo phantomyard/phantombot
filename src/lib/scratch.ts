@@ -195,16 +195,20 @@ export function sanitizeScratchName(raw: string): string {
 
 /**
  * Collision-free dir name for a conversation key or turn id: the readable
- * slug plus a 12-hex digest of the FULL raw key. The slug alone is lossy
+ * slug plus the FULL sha256 hex digest of the raw key. The slug alone is lossy
  * (substitution + truncation), so two distinct conversations could alias into
  * one trusted scratch tree and read or overwrite each other's files —
  * `matrix:room/a` and `matrix:room:a` both resolved to `matrix_room_a`, and
  * keys sharing their first 96 chars collided on truncation (review of #662).
- * The digest is derived from the raw key and nothing else, so a conversation
- * keeps the same dir across turns and restarts.
+ * A TRUNCATED digest is not an isolation boundary either: 12 hex chars is a
+ * 48-bit key and a birthday search finds a colliding pair in seconds (a real
+ * collision was produced in ~22s in the #662 review), so no truncation is
+ * applied — the full 64-hex digest is the cryptographic boundary. It is
+ * derived from the raw key and nothing else, so a conversation keeps the same
+ * dir across turns and restarts.
  */
 export function scratchDirName(raw: string): string {
-  const digest = createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 12);
+  const digest = createHash("sha256").update(raw, "utf8").digest("hex");
   return `${sanitizeScratchName(raw)}-${digest}`;
 }
 

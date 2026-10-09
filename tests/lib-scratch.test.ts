@@ -3,6 +3,7 @@
  * ephemeral untrusted teardown, and the runtime-owned env var.
  */
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -91,7 +92,27 @@ describe("scratchDirName", () => {
     const name = scratchDirName("telegram:123");
     expect(name.startsWith("telegram_123-")).toBe(true);
     expect(name).toMatch(/^[A-Za-z0-9._-]+$/);
-    expect(name.length).toBeLessThanOrEqual(96 + 1 + 12);
+    expect(name.length).toBeLessThanOrEqual(96 + 1 + 64);
+  });
+
+  test("digest is the FULL sha256 hex — no truncation", () => {
+    // A truncated digest is not an isolation boundary: 12 hex chars is 48 bits
+    // and a birthday search found a real colliding pair in ~22s (#662 review:
+    // `matrix::://::::/:::/::/::/:////:/` vs `matrix://///:/::/:/://:::://://:/`,
+    // both `45b4c10eeee5`). The full 64-hex digest is the contract.
+    const digest = scratchDirName("telegram:123").slice(-64);
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    const sha256 = createHash("sha256").update("telegram:123", "utf8").digest("hex");
+    expect(digest).toBe(sha256);
+  });
+
+  test("distinct keys sharing a slug never share a dir even in principle", () => {
+    // The birthday-collision pair from the #662 review: both slugged and
+    // truncated identically at 12 hex — only the full digest separates them.
+    const a = "matrix::://::::/:::/::/::/:////:/";
+    const b = "matrix://///:/::/:/://:::://://:/";
+    expect(sanitizeScratchName(a)).toBe(sanitizeScratchName(b));
+    expect(scratchDirName(a)).not.toBe(scratchDirName(b));
   });
 });
 

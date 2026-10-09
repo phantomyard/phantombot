@@ -312,8 +312,11 @@ variable — under the persona's own directory, never the shared system `/tmp`:
   deleted when the turn ends; nothing written there survives it.
 
 The variable is runtime-owned: an inherited `PHANTOMBOT_SCRATCH` is overridden
-or removed, never trusted. Directory names carry a stable digest of the raw
-conversation key, so two distinct conversations can never share a directory.
+or removed, never trusted. Directory names are `<slug>-<full sha256 hex of the
+raw conversation key>`, so two distinct conversations can never share a
+directory — the slug alone is lossy, and a truncated digest would be a
+collision away from the same failure (the full digest is the isolation
+boundary).
 
 ## Build and embed
 
