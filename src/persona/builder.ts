@@ -36,6 +36,7 @@ export function buildSystemPrompt(
   retrievedMemory?: string,
   durableFacts?: string,
   dailyRecall?: string,
+  scratch?: string,
 ): string {
   const sections = buildStableSections(persona, channelCtx);
 
@@ -59,6 +60,13 @@ export function buildSystemPrompt(
   // within a single turn — so the cacheable prefix above it stays stable.
   if (dailyRecall && dailyRecall.trim().length > 0) {
     sections.push("# Daily journal\n\n" + dailyRecall.trim());
+  }
+
+  // Scratch workspace (issue #661): the turn's working-files dir + what
+  // earlier turns left there. Volatile (path is per-conversation, listing
+  // changes within a turn), so it sits with the other volatile blocks.
+  if (scratch && scratch.trim().length > 0) {
+    sections.push("# Scratch workspace\n\n" + scratch.trim());
   }
 
   sections.push(

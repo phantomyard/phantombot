@@ -9,6 +9,8 @@ export interface TurnContextInput {
   durableFacts?: string;
   retrievedMemory?: string;
   dailyRecall?: string;
+  /** Scratch-workspace notice (issue #661): path, lifetime, capped file listing. */
+  scratch?: string;
   channel: TurnContextChannel;
 }
 
@@ -41,6 +43,7 @@ export function buildTurnContext(input: TurnContextInput): string {
   appendSection(sections, "Durable facts", input.durableFacts);
   appendSection(sections, "Retrieved context", input.retrievedMemory);
   appendSection(sections, "Daily journal", input.dailyRecall);
+  appendSection(sections, "Scratch workspace", input.scratch);
 
   const channelLines = [
     `- Channel: ${input.channel.channel}`,

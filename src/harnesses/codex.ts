@@ -79,7 +79,7 @@ export class CodexHarness implements Harness {
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
-      env: withPersonaEnv(spawnEnv, req.persona, req.conversation, req.turnId),
+      env: withPersonaEnv(spawnEnv, req.persona, req.conversation, req.turnId, req.scratchDir),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

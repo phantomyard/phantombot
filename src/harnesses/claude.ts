@@ -225,6 +225,7 @@ export class ClaudeHarness implements Harness {
       req.persona,
       req.conversation,
       req.turnId,
+      req.scratchDir,
     );
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
