@@ -12,6 +12,9 @@
  *   trusted/<conversation>/          cross-turn working files; kept until
  *                                    24h idle, then swept.
  *   untrusted/<conversation>/<turn>/ ONE turn's lifetime — deleted at turn end
+ *
+ * Dir names are `scratchDirName` output (`<slug>-<digest>`), so distinct
+ * conversation keys / turn ids can never alias into one tree.
  *                                    (ephemeral by construction), so an
  *                                    untrusted turn can never leave files a
  *                                    later trusted turn would read. Per-TURN
@@ -27,6 +30,7 @@
  * attacker-influenced — every interpolated field goes through promptSafeText.
  */
 
+import { createHash } from "node:crypto";
 import { mkdir, readdir, rm, rmdir, stat, utimes } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 
@@ -85,11 +89,11 @@ export async function provisionScratch(
   input: ScratchProvisionInput,
 ): Promise<TurnScratch> {
   const root = scratchRoot(input.agentDir);
-  const conv = sanitizeScratchName(input.conversation);
+  const conv = scratchDirName(input.conversation);
   const conversationDir = join(root, input.tier, conv);
   const ephemeral = input.tier === "untrusted";
   const dir = ephemeral
-    ? join(conversationDir, sanitizeScratchName(input.turnId ?? "turn"))
+    ? join(conversationDir, scratchDirName(input.turnId ?? "turn"))
     : conversationDir;
 
   await sweepScratch(input.agentDir, { now: input.now });
@@ -178,11 +182,30 @@ export function scratchRoot(agentDir: string): string {
  * Path-safe slug for a conversation key / turn id. Keeps `[A-Za-z0-9._-]`,
  * maps everything else to `_`, and refuses the empty/dot results that would
  * escape or collapse the layout. Bounded so a hostile key cannot bloat paths.
+ *
+ * The mapping is LOSSY in two ways — substitution (many raw chars fold to `_`)
+ * and truncation (96 chars) — so this must never be used alone to name a
+ * scratch dir; see `scratchDirName` below.
  */
 export function sanitizeScratchName(raw: string): string {
   const slug = raw.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 96);
   if (!slug || slug === "." || slug === "..") return "default";
   return slug;
+}
+
+/**
+ * Collision-free dir name for a conversation key or turn id: the readable
+ * slug plus a 12-hex digest of the FULL raw key. The slug alone is lossy
+ * (substitution + truncation), so two distinct conversations could alias into
+ * one trusted scratch tree and read or overwrite each other's files —
+ * `matrix:room/a` and `matrix:room:a` both resolved to `matrix_room_a`, and
+ * keys sharing their first 96 chars collided on truncation (review of #662).
+ * The digest is derived from the raw key and nothing else, so a conversation
+ * keeps the same dir across turns and restarts.
+ */
+export function scratchDirName(raw: string): string {
+  const digest = createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 12);
+  return `${sanitizeScratchName(raw)}-${digest}`;
 }
 
 /**

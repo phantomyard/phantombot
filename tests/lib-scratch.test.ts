@@ -12,6 +12,7 @@ import {
   buildScratchNotice,
   provisionScratch,
   sanitizeScratchName,
+  scratchDirName,
   SCRATCH_SWEEP_MAX_AGE_MS,
   sweepScratch,
   teardownScratch,
@@ -70,6 +71,30 @@ describe("sanitizeScratchName", () => {
   });
 });
 
+describe("scratchDirName", () => {
+  test("substituted-but-distinct conversation keys never share a dir", () => {
+    // The #662 review repro: both slugged to matrix_room_a before the digest.
+    expect(scratchDirName("matrix:room/a")).not.toBe(scratchDirName("matrix:room:a"));
+  });
+
+  test("keys differing only past the slug truncation never share a dir", () => {
+    const base = "k".repeat(120);
+    expect(sanitizeScratchName(base + ":a")).toBe(sanitizeScratchName(base + ":b"));
+    expect(scratchDirName(base + ":a")).not.toBe(scratchDirName(base + ":b"));
+  });
+
+  test("is stable — a conversation keeps its dir across turns", () => {
+    expect(scratchDirName("telegram:123")).toBe(scratchDirName("telegram:123"));
+  });
+
+  test("keeps the slug readable and the name path-safe", () => {
+    const name = scratchDirName("telegram:123");
+    expect(name.startsWith("telegram_123-")).toBe(true);
+    expect(name).toMatch(/^[A-Za-z0-9._-]+$/);
+    expect(name.length).toBeLessThanOrEqual(96 + 1 + 12);
+  });
+});
+
 describe("provisionScratch", () => {
   test("trusted scratch is the conversation dir and survives the turn", async () => {
     const agentDir = await tempAgentDir();
@@ -80,7 +105,7 @@ describe("provisionScratch", () => {
         conversation: "telegram:123",
       });
       expect(scratch.ephemeral).toBe(false);
-      expect(scratch.dir).toBe(join(agentDir, "scratch", "trusted", "telegram_123"));
+      expect(scratch.dir).toBe(join(agentDir, "scratch", "trusted", scratchDirName("telegram:123")));
       expect(existsSync(scratch.dir)).toBe(true);
       expect(scratch.notice).toContain("Kept across turns");
       await teardownScratch(scratch); // no-op for trusted
@@ -118,7 +143,29 @@ describe("provisionScratch", () => {
 
       await teardownScratch(b);
       expect(existsSync(b.dir)).toBe(false);
-      expect(existsSync(join(agentDir, "scratch", "untrusted", "email_9"))).toBe(false);
+      expect(existsSync(join(agentDir, "scratch", "untrusted", scratchDirName("email:9")))).toBe(false);
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("distinct conversations never alias into one scratch tree", async () => {
+    const agentDir = await tempAgentDir();
+    try {
+      // Substitution collision class (matrix:room/a vs matrix:room:a) and
+      // truncation collision class (keys sharing their first 96 chars).
+      const tail = "z".repeat(120);
+      const pairs: [string, string][] = [
+        ["matrix:room/a", "matrix:room:a"],
+        [`${tail}:a`, `${tail}:b`],
+      ];
+      for (const [x, y] of pairs) {
+        const a = await provisionScratch({ agentDir, tier: "trusted", conversation: x });
+        const b = await provisionScratch({ agentDir, tier: "trusted", conversation: y });
+        expect(a.dir).not.toBe(b.dir);
+        expect(existsSync(a.dir)).toBe(true);
+        expect(existsSync(b.dir)).toBe(true);
+      }
     } finally {
       await rm(agentDir, { recursive: true, force: true });
     }
@@ -325,7 +372,7 @@ describe("runTurn integration", () => {
         }),
       );
       const req = harness.captured!;
-      expect(req.scratchDir).toContain(join("scratch", "untrusted", "telegram_123"));
+      expect(req.scratchDir).toContain(join("scratch", "untrusted", scratchDirName("telegram:123")));
       const prompt = `${req.systemPrompt}\n${req.turnContext ?? ""}`;
       expect(prompt).toContain("Scratch workspace");
       expect(prompt).toContain("EPHEMERAL");
@@ -359,7 +406,7 @@ describe("runTurn integration", () => {
         }),
       );
       const req = harness.captured!;
-      expect(req.scratchDir).toContain(join("scratch", "trusted", "telegram_123"));
+      expect(req.scratchDir).toContain(join("scratch", "trusted", scratchDirName("telegram:123")));
       expect(req.turnContext).toContain("Scratch workspace");
       expect(req.turnContext).toContain("Kept across turns");
       expect(req.systemPrompt).not.toContain("Scratch workspace");
