@@ -57,6 +57,11 @@ import {
   REPLY_LANGUAGE_INSTRUCTION,
 } from "../persona/builder.ts";
 import { buildTurnContext } from "../persona/turnContext.ts";
+import {
+  provisionScratch,
+  teardownScratch,
+  type TurnScratch,
+} from "../lib/scratch.ts";
 import { loadPersona } from "../persona/loader.ts";
 import { buildDailyRecall } from "../lib/dailyRecall.ts";
 import { isNightlyConversation } from "../lib/nightly.ts";
@@ -433,12 +438,28 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     conversation: input.conversation,
     origin: input.origin ?? "channel",
   });
+  // Scratch workspace (issue #661): provisioned HERE, before the body runs,
+  // so the prompt notice, the harness env var and the teardown all see the
+  // same dir — and so the `finally` below covers every exit path (early hold,
+  // throw, clean drain). Fail-open: a scratch failure degrades the turn to
+  // "no scratch dir", it never takes the turn down.
+  let scratch: TurnScratch | undefined;
+  try {
+    scratch = await provisionScratch({
+      agentDir: input.agentDir,
+      tier: input.trusted === true ? "trusted" : "untrusted",
+      conversation: input.conversation,
+      turnId: handle.id,
+    });
+  } catch {
+    scratch = undefined;
+  }
   let outcome: import("../lib/turnRegistry.ts").TurnOutcome = {
     status: "failed",
     error: "turn ended without a completion marker",
   };
   try {
-    for await (const chunk of runTurnBody(input, handle.id)) {
+    for await (const chunk of runTurnBody(input, handle.id, scratch)) {
       if (chunk.type === "error") {
         outcome = {
           status: "failed",
@@ -462,12 +483,16 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       outcome = { status: "cancelled" };
     }
     handle.release(outcome);
+    // Untrusted scratch is ephemeral by construction: gone at turn end, so an
+    // untrusted turn can never leave files a later trusted turn would read.
+    await teardownScratch(scratch);
   }
 }
 
 async function* runTurnBody(
   input: TurnInput,
   turnId: string,
+  scratch: TurnScratch | undefined,
 ): AsyncGenerator<HarnessChunk> {
   const origin: TurnOrigin = input.origin ?? "channel";
   const startedAt = new Date();
@@ -638,6 +663,7 @@ async function* runTurnBody(
       durableFacts,
       retrievedMemory,
       dailyRecall,
+      scratch: scratch?.notice,
       channel: channelCtx,
     });
   } else {
@@ -647,6 +673,7 @@ async function* runTurnBody(
       retrievedMemory,
       durableFacts,
       dailyRecall,
+      scratch?.notice,
     );
   }
   // Channel-layer overlays in append order:
@@ -821,6 +848,7 @@ async function* runTurnBody(
         retrievedMemory,
         durableFacts,
         dailyRecall,
+        scratch?.notice,
       );
       turnContext = undefined;
       systemPrompt =
@@ -954,6 +982,9 @@ async function* runTurnBody(
           // Harness temp files land under the persona's own dir, not the shared
           // system /tmp (issue #365) — per-persona isolation + survives a full /tmp.
           tmpBaseDir: join(input.agentDir, "tmp"),
+          // This turn's scratch workspace (issue #661) — the harness passes it
+          // on as PHANTOMBOT_SCRATCH (runtime-owned, see withPersonaEnv).
+          ...(scratch ? { scratchDir: scratch.dir } : {}),
           idleTimeoutMs: input.idleTimeoutMs,
           hardTimeoutMs: input.hardTimeoutMs,
           ...(softArmed ? { softTimeoutMs: effectiveSoftTimeoutMs } : {}),

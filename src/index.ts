@@ -42,6 +42,7 @@ import {
   type LaunchPersona,
 } from "./lib/tuiGate.ts";
 import { cleanupPersonaTmpDir } from "./lib/harnessArgvFiles.ts";
+import { sweepScratch } from "./lib/scratch.ts";
 import { runComplete } from "./lib/completion.ts";
 import { log } from "./lib/logger.ts";
 import { loadVaultIntoEnv } from "./lib/vault.ts";
@@ -134,6 +135,16 @@ async function runPhantombotCli(): Promise<void> {
         cleanupPersonaTmpDir(activePersonaDir);
       } catch (e) {
         log.warn("startup: persona tmp cleanup failed", {
+          error: (e as Error).message,
+        });
+      }
+      // Scratch workspace TTL (issue #661): reap conversation dirs idle over
+      // 24h — crash residue from turns whose `finally` never ran. Provisioning
+      // sweeps too; this covers a persona whose dir sat unused. Best-effort.
+      try {
+        await sweepScratch(activePersonaDir);
+      } catch (e) {
+        log.warn("startup: scratch sweep failed", {
           error: (e as Error).message,
         });
       }

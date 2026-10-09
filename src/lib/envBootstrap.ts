@@ -28,6 +28,7 @@ import {
   HOST_LOCATION_ENV,
   scopedChildEnv,
 } from "./engineScope.ts";
+import { SCRATCH_ENV_VAR } from "./scratch.ts";
 
 export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = Object.freeze({
   CI: "true",
@@ -48,6 +49,7 @@ export function withPersonaEnv<T extends NodeJS.ProcessEnv>(
   persona: string | undefined,
   conversation?: string,
   turnId?: string,
+  scratchDir?: string,
 ): T {
   const env = {
     ...NON_INTERACTIVE_ENV,
@@ -60,7 +62,16 @@ export function withPersonaEnv<T extends NodeJS.ProcessEnv>(
     ...(persona ? { PHANTOMBOT_PERSONA: persona } : {}),
     ...(conversation ? { PHANTOMBOT_CONVERSATION: conversation } : {}),
     ...(turnId ? { PHANTOMBOT_TURN_ID: turnId } : {}),
+    // PHANTOMBOT_SCRATCH is RUNTIME-owned (issue #661): the path is derived
+    // from the persona dir + tier + conversation, never taken from input or an
+    // ambient value. Set AFTER the base spread (and cleared when this turn has
+    // no scratch dir) so an inherited PHANTOMBOT_SCRATCH can never point a turn
+    // at someone else's tree.
+    ...(scratchDir ? { PHANTOMBOT_SCRATCH: scratchDir } : {}),
   } as T;
+  if (!scratchDir) {
+    for (const name of [SCRATCH_ENV_VAR]) delete env[name];
+  }
   if (currentEngineScope()) {
     // The host's own location overrides would point the child at the HOST's
     // phantombot, not the embedding app's root (see hostLocationEnv).

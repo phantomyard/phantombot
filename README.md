@@ -300,6 +300,24 @@ under that provider's privacy and retention terms.
 Phantombot never installs an optional host harness for you. Missing fallbacks
 do not stop the daemon; `phantombot doctor` reports what is available.
 
+### Scratch workspace
+
+Every harness subprocess gets a workspace for working files (repro clones,
+test output, intermediate artifacts) via the `PHANTOMBOT_SCRATCH` environment
+variable — under the persona's own directory, never the shared system `/tmp`:
+
+- **Trusted conversations** — `<persona dir>/scratch/trusted/<conversation>/`,
+  kept across turns and reaped after 24 hours idle.
+- **Untrusted turns** — `<persona dir>/scratch/untrusted/<conversation>/<turn>/`,
+  deleted when the turn ends; nothing written there survives it.
+
+The variable is runtime-owned: an inherited `PHANTOMBOT_SCRATCH` is overridden
+or removed, never trusted. Directory names are `<slug>-<full sha256 hex of the
+raw conversation key>`, so two distinct conversations can never share a
+directory — the slug alone is lossy, and a truncated digest would be a
+collision away from the same failure (the full digest is the isolation
+boundary).
+
 ## Build and embed
 
 Released binaries do not require Bun. Building from source does:

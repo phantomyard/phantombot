@@ -71,6 +71,16 @@ export interface HarnessRequest {
    */
   tmpBaseDir?: string;
   /**
+   * This turn's scratch workspace (issue #661), exposed to the subprocess as
+   * `PHANTOMBOT_SCRATCH`. Derived by the orchestrator from the persona dir +
+   * trust tier + conversation — never taken from input or the ambient env (see
+   * withPersonaEnv, which also CLEARS any inherited value when this is absent).
+   * Trusted tier: the conversation's dir, kept across turns until 24h idle.
+   * Untrusted tier: one turn's dir, deleted at turn end. Optional — degraded
+   * paths get no scratch dir and no env var.
+   */
+  scratchDir?: string;
+  /**
    * Idle timeout: kill the subprocess if no chunk lands on stdout for this
    * long. Resets on every emitted chunk. This is the right knob for
    * "subprocess is wedged" (e.g. a tool call hanging on a TCP read) —
