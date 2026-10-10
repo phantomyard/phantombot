@@ -553,22 +553,53 @@ async function* runTurnBody(
       verdict = await input.screen(input.userMessage, input.signal);
       if (verdict?.action === "pass") effectiveScreening = "screened";
     } catch (e) {
-      // Unreachable through makeScreener, which catches everything it awaits
-      // and holds with a notification of its own. A screener that throws
-      // regardless has notified nobody, so this hold is logged at error and
-      // the held message does not claim the owner was told.
-      log.error("turn: threat screen threw, holding the turn unscreened", {
-        persona: input.persona,
-        error: (e as Error)?.message ?? String(e),
-      });
-      verdict = {
-        action: "hold",
-        score: 0,
-        reason: "the threat screen failed to run",
-        heldMessage:
-          "🔒 I couldn't run my safety check on that request, so I've paused " +
-          "it. Nothing was done.",
+      if (input.signal?.aborted) {
+        // The caller cancelled and the screen threw on the way out (an abort
+        // surfacing from a judge call or a briefing read). That is a
+        // cancelled turn, not a broken screen — same rule as makeScreener's
+        // own "cancelled" verdict, handled just below.
+        verdict = {
+          action: "cancelled",
+          score: 0,
+          reason: "cancelled before the threat screen finished",
+        };
+      } else {
+        // Unreachable through makeScreener, which catches everything it
+        // awaits and holds with a notification of its own. A screener that
+        // throws regardless has notified nobody, so this hold is logged at
+        // error and the held message does not claim the owner was told.
+        log.error("turn: threat screen threw, holding the turn unscreened", {
+          persona: input.persona,
+          error: (e as Error)?.message ?? String(e),
+        });
+        verdict = {
+          action: "hold",
+          score: 0,
+          reason: "the threat screen failed to run",
+          heldMessage:
+            "🔒 I couldn't run my safety check on that request, so I've paused " +
+            "it. Nothing was done.",
+        };
+      }
+    }
+    if (verdict && verdict.action !== "pass" && verdict.action !== "hold") {
+      // Written as "neither pass nor hold" on purpose: only an explicit
+      // `pass` may reach the harness, so a verdict action added later can
+      // never fall through into running an uncleared request.
+      //
+      // Cancelled mid-screen: nothing was cleared, so nothing runs — no
+      // retrieval, no harness — and nothing was found, so this is not a hold
+      // either (no held message, no `screenedHold`). End exactly as a turn
+      // aborted inside a harness does: an error chunk carrying the structural
+      // `killCause: "aborted"`, which runTurn's finally records as a
+      // `cancelled` outcome and the engine maps to its `cancelled` code.
+      yield {
+        type: "error",
+        error: "turn cancelled during threat screening",
+        recoverable: false,
+        killCause: "aborted",
       };
+      return;
     }
     if (verdict?.action === "hold") {
       // A held untrusted request never reaches prompt-cache preparation, so

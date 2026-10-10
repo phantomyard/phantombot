@@ -72,6 +72,32 @@ describe("public documentation contract", () => {
     }
   });
 
+  test("the security overview states what an unscreened request does (issue #663)", async () => {
+    // The perimeter's user-facing contract. Each claim is checked against
+    // the code it describes, so the README cannot drift back to the
+    // fail-open wording while the screener holds.
+    const security = readme.replace(/\s+/g, " ");
+    const screenSource = readFileSync(
+      resolve(root, "src/orchestrator/screen.ts"),
+      "utf8",
+    );
+    const notifyLine = "I held an untrusted request because I could not screen it";
+    expect(screenSource).toContain(notifyLine);
+    expect(security).toContain(notifyLine);
+    expect(security).toContain("no threat score");
+    expect(security).toContain("the request does not run");
+    expect(security).toContain("cancels it");
+
+    // The removed opt-out: documented as gone, and gone from the settings.
+    expect(security).toMatch(/`\[jev\.judge\] fail_closed` key was removed/);
+    const configSource = readFileSync(resolve(root, "src/config.ts"), "utf8");
+    expect(configSource).not.toMatch(/failClosed\??:/);
+
+    // The log line operators are pointed at exists under that name.
+    expect(security).toContain("`screen: judge call`");
+    expect(screenSource).toContain('"screen: judge call"');
+  });
+
   test("keeps temporary plans out of permanent documentation", () => {
     expect(existsSync(resolve(root, "docs/plans"))).toBe(false);
     for (const obsolete of [

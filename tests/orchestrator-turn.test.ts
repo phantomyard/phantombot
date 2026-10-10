@@ -581,6 +581,102 @@ describe("runTurn — failure path", () => {
   });
 });
 
+describe("runTurn — a turn cancelled mid-screen (PR #664 review)", () => {
+  // The registry is inert under NODE_ENV=test; opt in, isolated to a temp
+  // dir, so the recorded OUTCOME (cancelled vs held) can be asserted.
+  let turnsDir: string;
+  let prevEnabled: string | undefined;
+
+  beforeEach(async () => {
+    prevEnabled = process.env.PHANTOMBOT_TURN_REGISTRY;
+    turnsDir = await mkdtemp(join(tmpdir(), "phantombot-turns-"));
+    process.env.PHANTOMBOT_TURN_REGISTRY = "1";
+    process.env.PHANTOMBOT_TURN_REGISTRY_DIR = turnsDir;
+  });
+
+  afterEach(async () => {
+    await rm(turnsDir, { recursive: true, force: true });
+    if (prevEnabled === undefined) delete process.env.PHANTOMBOT_TURN_REGISTRY;
+    else process.env.PHANTOMBOT_TURN_REGISTRY = prevEnabled;
+    delete process.env.PHANTOMBOT_TURN_REGISTRY_DIR;
+  });
+
+  async function expectCancelled(chunks: HarnessChunk[], invoked: number) {
+    // Nothing ran: an uncleared request never reaches the capable harness.
+    expect(invoked).toBe(0);
+    // Not a hold: no held message, no `screenedHold` completion.
+    expect(chunks.some((c) => c.type === "done")).toBe(false);
+    expect(chunks.some((c) => c.type === "text")).toBe(false);
+    expect(chunks.at(-1)).toMatchObject({ type: "error", killCause: "aborted" });
+    expect(await memory.recentTurns("phantom", "cli:default", 10)).toEqual([]);
+    const { readRegistry } = await import("../src/lib/turnRegistry.ts");
+    expect(readRegistry({ now: new Date() }).recent[0]).toMatchObject({
+      status: "cancelled",
+    });
+  }
+
+  test("a `cancelled` screen verdict ends the turn cancelled — not held, not run", async () => {
+    const ac = new AbortController();
+    let invoked = 0;
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ran" }], () => invoked++);
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "untrusted",
+        harnesses: [harness],
+        signal: ac.signal,
+        screen: async () => {
+          ac.abort();
+          return { action: "cancelled", score: 0, reason: "cancelled" };
+        },
+      }),
+    );
+    await expectCancelled(chunks, invoked);
+  });
+
+  test("a screen that THROWS while the caller's signal is aborted ends cancelled — not held", async () => {
+    const ac = new AbortController();
+    let invoked = 0;
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ran" }], () => invoked++);
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "untrusted",
+        harnesses: [harness],
+        signal: ac.signal,
+        screen: async () => {
+          ac.abort();
+          throw new DOMException("The operation was aborted.", "AbortError");
+        },
+      }),
+    );
+    await expectCancelled(chunks, invoked);
+  });
+
+  test("a screen that throws WITHOUT a caller abort still holds (fail closed)", async () => {
+    const ac = new AbortController();
+    let invoked = 0;
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ran" }], () => invoked++);
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "untrusted",
+        harnesses: [harness],
+        signal: ac.signal,
+        screen: async () => {
+          throw new Error("judge unavailable");
+        },
+      }),
+    );
+    expect(invoked).toBe(0);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", meta: { screenedHold: true } });
+    const { readRegistry } = await import("../src/lib/turnRegistry.ts");
+    expect(readRegistry({ now: new Date() }).recent[0]).toMatchObject({
+      status: "succeeded",
+    });
+  });
+});
+
 describe("runTurn — purge-after-ruling (trusted success)", () => {
   /** Wrap the real store, counting purgeQuarantined calls. */
   function spyStore(inner: MemoryStore): {

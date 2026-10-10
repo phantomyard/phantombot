@@ -72,6 +72,13 @@ turn a few seconds later, so "unreachable" cannot be read as "nothing will run
 anyway". The cost is that a persona on a bad connection holds scheduled tasks
 and inbound mail it would otherwise have run, and asks.
 
+A turn that is stopped while it is being screened — a `/stop`, a caller that
+gave up, the daemon shutting down — is cancelled, not held. Nothing runs, and
+nothing is reported: there was no verdict to report and no outage either, and
+a hold notification for a turn somebody deliberately stopped would be a false
+alarm on the one message that should never be skimmed. Only the caller's own
+stop counts; a judge that ran out of time is unreachable, and that is held.
+
 Limit worth knowing: the judge reads the message that starts a turn. Content
 the persona fetches while working — a web page, an API response, another
 email — is not screened; it is covered only by the data-not-instructions

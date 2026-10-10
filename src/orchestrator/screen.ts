@@ -157,8 +157,14 @@ import {
 } from "../memory/drawerSync.ts";
 
 export interface ScreenVerdict {
-  /** "pass" → run the turn normally; "hold" → already escalated, stop. */
-  action: "pass" | "hold";
+  /**
+   * "pass" → run the turn normally; "hold" → already escalated, stop;
+   * "cancelled" → the CALLER aborted while the screen was still waiting on a
+   * judge, so there is no verdict and nothing was escalated. runTurn ends
+   * the turn as cancelled: no capable turn runs (this is never a pass) and
+   * no hold is recorded (nothing was found, and nothing was unavailable).
+   */
+  action: "pass" | "hold" | "cancelled";
   /** Threat score (0–100). */
   score: number;
   /** Why — the judge's rationale. */
@@ -515,6 +521,17 @@ export function makeScreener(
       return result;
     };
 
+    // The caller aborted before any judge produced a verdict — see the check
+    // in front of the two hold conversions below for the full reasoning.
+    const cancelledVerdict = (): ScreenVerdict => {
+      log.info("screen: cancelled by the caller before a verdict, not holding");
+      return {
+        action: "cancelled",
+        score: 0,
+        reason: "cancelled before the threat screen finished",
+      };
+    };
+
     // The hold threshold this screen applies. THREAT_THRESHOLD normally; the
     // operator's jev.judge.threshold when Jev actively decides (the judge is
     // a security control — its bar is the operator's to set, per consumer).
@@ -545,6 +562,13 @@ export function makeScreener(
           : {}),
         timeoutMs: jev!.judge.timeoutMs,
       });
+      if (!decisionModelResult.ok && signal?.aborted) {
+        // The caller cancelled mid-request. Not a decision-model failure:
+        // recording it would make `phantombot doctor` report the judge
+        // DEGRADED for a /stop, and falling back would spawn a harness judge
+        // for a turn nobody is waiting on. Same rule as the check below.
+        return cancelledVerdict();
+      }
       // Fallback telemetry — outcome only, never the screened text. This is
       // what `phantombot doctor` reads to say the decision model is degraded
       // instead of the operator discovering it at the first missed hold.
@@ -600,6 +624,22 @@ export function makeScreener(
     // score. (An unparseable chain keeps its ordinary-hold wording, by the
     // principal's earlier ruling — see the file header.)
     let screeningUnavailable = false;
+
+    // A CANCELLED screen is not a screen nobody answered. Every backend
+    // reports a caller abort as the same kindless `{ ok: false }` an outage
+    // produces — makeChainJudge on purpose ("a cancelled turn is not a
+    // screening result"), the decision-model judge when its fetch is
+    // aborted, judgeSafely's catch when a judge throws on the abort — so the
+    // check lives HERE, once, in front of both conversions below, rather
+    // than in each backend. Without it a /stop, a caller cancellation or a
+    // daemon shutdown mid-judge wrote the payload into the principal's
+    // conversation, told them screening was unavailable, and finished as
+    // `held`: a false alarm on the one notification that must never be
+    // skimmed. Only the CALLER's signal counts — a judge's own timeout is a
+    // real "nobody answered" and still holds. Not a pass either: runTurn
+    // stops on "cancelled" without running the capable turn. A verdict that
+    // did arrive (`result.ok`) is kept and handled normally.
+    if (!result.ok && signal?.aborted) return cancelledVerdict();
 
     if (!result.ok && result.kind !== "unparseable") {
       // No judge answered: the decision model (if any) and every harness in
