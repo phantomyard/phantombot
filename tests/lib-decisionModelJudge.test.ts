@@ -298,6 +298,21 @@ describe("decisionModelJudgeThreat", () => {
     expect(r.ok).toBe(false);
   });
 
+  it("retries a dropped connection once before giving up to the fallback (issue #663)", async () => {
+    // The judge opts into the transport's one network retry: a DNS lookup or
+    // a connection that failed is the difference between a 300 ms verdict
+    // and a harness-judge round trip.
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      if (calls === 1) throw new Error("getaddrinfo EAI_AGAIN openrouter.ai");
+      return decisionsResponse(0.3, "allow");
+    }) as unknown as typeof fetch;
+    const r = await decisionModelJudgeThreat("x", { settings: SETTINGS, fetchImpl });
+    expect(calls).toBe(2);
+    expect(r.ok).toBe(true);
+  });
+
   it("propagates a client failure as { ok: false } for the screener's fallback", async () => {
     const fetchImpl = (async () =>
       new Response("down", { status: 503 })) as unknown as typeof fetch;

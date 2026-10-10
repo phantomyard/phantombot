@@ -116,7 +116,7 @@ function deleteIn(root: Record<string, unknown>, path: readonly string[]): void 
  * Persist a Jev configuration: the key (when a new one was typed) into the
  * persona's vault, everything else into `[jev]` in the persona's
  * config.toml. Merge semantics throughout: fields the update omits
- * (judge.timeout_ms, judge.threshold, judge.fail_closed, router.timeout_ms)
+ * (judge.timeout_ms, judge.threshold, router.timeout_ms)
  * keep whatever is already in the file — a wizard re-run never silently
  * resets an operator's tuning, and `api_key` is scrubbed if it ever appears
  * (secrets never live in the plaintext file).

@@ -26,9 +26,20 @@ The decision model is optional and every failure falls back:
 - the threat screen uses the tool-less harness judge;
 - model routing uses the local keyword scorer.
 
+The threat judge gives a decision 4 seconds by default (`[jev.judge]
+timeout_ms`) and, inside that same budget, retries once when the request never
+got a response — a failed DNS lookup, a refused or reset connection. A timeout
+or an HTTP error is not retried. If the harness judge then produces no verdict
+either, the turn is **held** and the owner is asked; there is no fail-open
+mode and no setting for one (the former `[jev.judge] fail_closed` key is
+ignored). See [Security and trust](security-and-trust.md).
+
 Timeouts, missing keys, invalid responses, and provider errors are recorded in
 a persona-local health ledger without storing the screened text. `phantombot
-doctor` reports degraded use and expires old failures at report time.
+doctor` reports degraded use and expires old failures at report time. Each
+judge call also logs a `screen: judge call` line with the backend, the outcome
+and the duration in milliseconds — never the screened text — which is the
+data to tune `timeout_ms` on.
 
 The threat score uses the maximum of two views in one request: a defender frame
 and a red-team frame. The calibrated default threshold belongs to this backend

@@ -319,7 +319,7 @@ describe("gatherStatusProbes — jev", () => {
       model: "typesafe/jev-1.13",
       baseUrl: "https://openrouter.ai/api/v1",
       keyEnv: "PHANTOMBOT_JEV_API_KEY",
-      judge: { enabled: true, timeoutMs: 1500, threshold: 80, failClosed: false },
+      judge: { enabled: true, timeoutMs: 1500, threshold: 80 },
       router: { enabled: false, timeoutMs: 300 },
       ...over,
     }) as NonNullable<Config["jev"]>;
@@ -411,7 +411,6 @@ describe("gatherStatusProbes — jev", () => {
             enabled: false,
             timeoutMs: 1500,
             threshold: 70,
-            failClosed: false,
           },
           router: { enabled: false, timeoutMs: 800 },
         }),

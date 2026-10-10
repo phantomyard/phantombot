@@ -65,9 +65,9 @@ describe("config [jev]", () => {
     expect(config.jev!.keyEnv).toBe("PHANTOMBOT_JEV_API_KEY");
     expect(config.jev!.judge).toEqual({
       enabled: false,
-      timeoutMs: 1500,
+      // 4 s since issue #663 — 1.5 s was the cap bad connections hit.
+      timeoutMs: 4000,
       threshold: 70,
-      failClosed: false,
     });
     expect(config.jev!.router).toEqual({
       enabled: false,
@@ -80,7 +80,9 @@ describe("config [jev]", () => {
     await writePersonaToml(
       config,
       '[jev]\nprovider = "typesafe"\nbase_url = "https://ts.example/v1"\n\n' +
-        '[jev.judge]\nenabled = true\nthreshold = 65\nfail_closed = true\n\n' +
+        // `fail_closed` was removed in issue #663 (holding is unconditional).
+        // A config that still carries it — either value — must keep loading.
+        '[jev.judge]\nenabled = true\nthreshold = 65\nfail_closed = false\n\n' +
         '[jev.router]\nenabled = true\ntimeout_ms = 250\n',
     );
     config = await loadConfig();
@@ -88,7 +90,11 @@ describe("config [jev]", () => {
     expect(config.jev!.baseUrl).toBe("https://ts.example/v1");
     expect(config.jev!.judge.enabled).toBe(true);
     expect(config.jev!.judge.threshold).toBe(65);
-    expect(config.jev!.judge.failClosed).toBe(true);
+    expect(config.jev!.judge).toEqual({
+      enabled: true,
+      timeoutMs: 4000,
+      threshold: 65,
+    });
     expect(config.jev!.router.enabled).toBe(true);
     expect(config.jev!.router.timeoutMs).toBe(250);
   });

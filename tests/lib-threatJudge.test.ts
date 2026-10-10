@@ -361,8 +361,9 @@ describe("makeChainJudge", () => {
 
   it("FALLS OVER to the next harness when the primary fails", async () => {
     // The bug this closes: the judge ran on chain[0] alone, so a primary out
-    // of quota took the screener down — and the screener fails OPEN, which
-    // silently disables screening of every untrusted input.
+    // of quota took the screener down — and the screener then failed OPEN,
+    // silently disabling screening of every untrusted input. (It holds now,
+    // issue #663; the chain walk keeps one quota window from holding it all.)
     const { harness: pi } = recordingHarness("pi", verdict(4, "pi"));
     const cooldown = new CooldownStore();
     const r = await makeChainJudge(
@@ -546,7 +547,7 @@ describe("makeHarnessJudgeComplete", () => {
     expect(detail.stderrTail).toEqual(["ERROR: You've hit your usage limit."]);
   });
 
-  it("propagates a harness error chunk as a thrown error (screener fails open)", async () => {
+  it("propagates a harness error chunk as a thrown error (the screener then holds)", async () => {
     const harness: Harness = {
       id: "pi",
       available: async () => true,

@@ -54,14 +54,23 @@ Each side of the perimeter has exactly one check.
   owner can waive for the rest of the conversation — that is a planning
   habit, not a permission system.
 
-If the judge cannot be reached at all, the request proceeds unscreened; the
-turn runs on the same model chain, so a real outage stops both. If the judge
-answers but no score can be read from the answer, the next model in the
-persona's chain is asked instead, without bothering the owner. Only when every
-model has been asked and none produced a score is the request held — as an
-ordinary failed screening, with the same notification as any other hold. An
-answer with no score in it is what a successful manipulation of the judge
-looks like, so it is never waved through.
+A request is only carried out when a judge has scored it. If the judge answers
+but no score can be read from the answer, the next model in the persona's
+chain is asked instead, without bothering the owner. When every model has been
+asked and none produced a score, the request is held — as an ordinary failed
+screening, with the same notification as any other hold. An answer with no
+score in it is what a successful manipulation of the judge looks like, so it
+is never waved through.
+
+If no judge can be reached at all — the decision model and every model in the
+chain are down, or the connection is — the request is held as well, and the
+owner is told that it could not be screened (not that it looked dangerous).
+There is no setting that turns this into a pass. The alternative would let a
+flaky connection do an attacker's work: the judge and the turn can use
+different providers, and a lookup that fails for the judge may succeed for the
+turn a few seconds later, so "unreachable" cannot be read as "nothing will run
+anyway". The cost is that a persona on a bad connection holds scheduled tasks
+and inbound mail it would otherwise have run, and asks.
 
 Limit worth knowing: the judge reads the message that starts a turn. Content
 the persona fetches while working — a web page, an API response, another

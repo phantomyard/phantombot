@@ -518,9 +518,9 @@ function clamp(n: number, lo: number, hi: number): number {
  * `workingDir` is the cwd the judge's subprocess spawns in. It MUST be an
  * accessible directory: if the spawn inherits an ambient cwd the persona
  * can't traverse (e.g. another user's mode-700 home), `posix_spawn` fails
- * EACCES *before* exec — and the screener fails OPEN, silently disabling
- * screening. That is exactly the class of failure this whole perimeter
- * exists to prevent, so the judge NEVER relies on ambient cwd: callers pass
+ * EACCES *before* exec — and no judge can answer. That used to fail the
+ * screen OPEN, silently disabling it; it now holds every untrusted turn
+ * (issue #663), which is safe but still an outage, so the judge NEVER relies on ambient cwd: callers pass
  * the persona's own dir, and we floor it at `homedir()` (the running user's
  * home, always traversable) — mirroring the executor's `?? homedir()`.
  */
@@ -531,7 +531,7 @@ export function makeHarnessJudgeComplete(
   workingDir?: string,
 ): CompleteFn {
   // Floor at the running user's home so the judge spawn never inherits an
-  // inaccessible ambient cwd (→ EACCES → silent fail-open).
+  // inaccessible ambient cwd (→ EACCES → no judge → every turn held).
   const cwd = workingDir ?? homedir();
   return async (systemPrompt, userMessage, signal) => {
     const chunks: string[] = [];
@@ -587,9 +587,11 @@ export function makeHarnessJudgeComplete(
  *
  *   - It never answered (quota, timeout, spawn failure). It used to be that
  *     the judge took `chain[0]` and stopped there, so a primary that was out
- *     of quota took the screener down with it — and the screener fails OPEN,
- *     so an exhausted subscription silently disabled the perimeter that
- *     stands in front of every untrusted input. The harness is cooled, on the
+ *     of quota took the screener down with it — and the screener then failed
+ *     OPEN, so an exhausted subscription silently disabled the perimeter that
+ *     stands in front of every untrusted input. (It holds now — issue #663 —
+ *     but walking the chain is still what keeps autonomous work moving
+ *     through a one-harness outage.) The harness is cooled, on the
  *     same evidence the orchestrator uses.
  *   - It answered, twice (the ask and the one format re-ask), and no score
  *     could be read out of either reply. That is no reason to interrupt the
@@ -605,7 +607,8 @@ export function makeHarnessJudgeComplete(
  *     The screener holds, as an ordinary failed screening. A mixed chain
  *     (primary derailed, fallback down) lands here too: something read the
  *     content and could not rate it, and nothing else cleared it.
- *   - nobody answered at all → no `kind`. An outage; the screener passes.
+ *   - nobody answered at all → no `kind`. An outage; the screener holds
+ *     too, with "screening was unavailable" wording (issue #663).
  *
  * `config` is accepted for symmetry / future model selection; only the
  * timeouts are read today. `workingDir` is the accessible cwd the judge spawns

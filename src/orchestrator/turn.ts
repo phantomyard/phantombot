@@ -404,10 +404,11 @@ export interface TurnInput {
    * lets the turn proceed normally and silently.
    *
    * Only consulted when `trusted !== true`. Trusted turns never screen.
-   * Contracted to never throw; runTurn still guards defensively and
-   * fails OPEN (proceeds) if the screen itself errors, so a judge/API
-   * outage degrades to "unscreened" rather than "app down" — see the
-   * design doc for why fail-open is the deliberate choice here.
+   * Contracted to never throw — a judge outage is the SCREENER's to turn
+   * into a hold, with the notification that goes with it. runTurn still
+   * guards defensively, and a screen that throws anyway HOLDS the turn
+   * (issue #663): the judge is the only gate, so "the gate broke" can never
+   * mean "the gate is open".
    */
   screen?: (
     content: string,
@@ -540,8 +541,9 @@ async function* runTurnBody(
   // audit IN CODE (a model can never fake "I escalated this"); we stop here
   // and NO retrieval ever happens. Trusted turns skip the screen entirely (the
   // authenticated principal is the gate). The screen contracts not to throw;
-  // the catch is belt-and-suspenders and fails OPEN so a judge outage degrades
-  // to "unscreened", never "app down".
+  // the catch is belt-and-suspenders and fails CLOSED (issue #663): a screen
+  // that broke did not clear the content, so the turn is held, not run
+  // unscreened.
   const screening: "screened" | "unscreened" | "trusted" =
     input.trusted === true ? "trusted" : "unscreened";
   let effectiveScreening: "screened" | "unscreened" | "trusted" = screening;
@@ -550,8 +552,23 @@ async function* runTurnBody(
     try {
       verdict = await input.screen(input.userMessage, input.signal);
       if (verdict?.action === "pass") effectiveScreening = "screened";
-    } catch {
-      verdict = undefined;
+    } catch (e) {
+      // Unreachable through makeScreener, which catches everything it awaits
+      // and holds with a notification of its own. A screener that throws
+      // regardless has notified nobody, so this hold is logged at error and
+      // the held message does not claim the owner was told.
+      log.error("turn: threat screen threw, holding the turn unscreened", {
+        persona: input.persona,
+        error: (e as Error)?.message ?? String(e),
+      });
+      verdict = {
+        action: "hold",
+        score: 0,
+        reason: "the threat screen failed to run",
+        heldMessage:
+          "🔒 I couldn't run my safety check on that request, so I've paused " +
+          "it. Nothing was done.",
+      };
     }
     if (verdict?.action === "hold") {
       // A held untrusted request never reaches prompt-cache preparation, so

@@ -7,9 +7,10 @@
  * instead of prose — over a credential and quota pool independent of the
  * harness chain. Why that matters:
  *
- *   - the chain judge FAILS OPEN when every harness is exhausted (the
- *     residual `judge unavailable, failing open` line); Jev keeps screening
- *     through a fleet-wide harness quota outage;
+ *   - the chain judge has nothing to say when every harness is exhausted,
+ *     and a screen with no verdict HOLDS the turn (issue #663); Jev keeps
+ *     screening — and autonomous work moving — through a fleet-wide harness
+ *     quota outage;
  *   - a Jev decision is ~300 ms and ~$0.00002 (measured live 2026-09-20),
  *     against seconds and a full frontier-model round trip per untrusted
  *     message.
@@ -93,8 +94,20 @@ export const DECISION_MODEL_JUDGE_BRIEFING_CAP_BYTES = 12 * 1024;
  */
 export const DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES = 48 * 1024;
 
-/** Hard default wall-clock cap for a Jev judge decision. */
-export const DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS = 1500;
+/**
+ * Hard default wall-clock cap for a Jev judge decision, covering the first
+ * attempt AND the one network retry (see decisionModelDecide).
+ *
+ * 4 s, raised from 1.5 s in issue #663. A decision normally lands in
+ * 300-700 ms, so the old cap was generous on a good link — and was the cap
+ * a bad one hit: fleet telemetry showed the timeout fallbacks clustering on
+ * wifi laptops (2 of 8 calls on one), with none on wired hosts. The judge
+ * only ever runs ahead of an UNTRUSTED turn, which is background work nobody
+ * is waiting on, and a miss costs a full harness-judge round trip — seconds
+ * to tens of seconds — so a few extra seconds of patience is the cheap side
+ * of the trade. Operator-tunable via [jev.judge] timeout_ms.
+ */
+export const DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS = 4000;
 
 /**
  * The Jev judge's default hold threshold — deliberately NOT the harness
@@ -185,7 +198,7 @@ export function capPayloadUtf8(content: string, capBytes: number): string {
  * Judge untrusted content with Jev. Returns the same JudgeResult contract as
  * judgeThreat so the screener can treat the two backends interchangeably.
  * Never throws: any failure is { ok: false } and the screener falls back to
- * the harness judge (unless [jev.judge] failClosed is set, which holds).
+ * the harness judge. If that produces no verdict either, the turn is held.
  */
 export async function decisionModelJudgeThreat(
   content: string,
@@ -324,6 +337,9 @@ export async function decisionModelJudgeThreat(
       },
     },
     timeoutMs: opts.settings.timeoutMs ?? DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS,
+    // A dropped connection or a failed DNS lookup gets one more try before
+    // the judge gives up to the harness fallback (issue #663).
+    retryNetworkErrorOnce: true,
     signal: opts.signal,
     fetchImpl: opts.fetchImpl,
   });
