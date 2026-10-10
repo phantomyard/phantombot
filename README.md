@@ -276,6 +276,16 @@ looks.
 - Suspicious requests are held and surfaced to the owner for a trusted
   conversation. The judge is the only gate on autonomous work: a request it
   passes is carried through without a second approval step.
+- A request nobody could screen is held too. If no judge answers — provider
+  outage, timeout, no network — the request does not run: the owner gets
+  `🔒 I held an untrusted request because I could not screen it`, with the
+  cause and no threat score, because nothing was rated. Say go ahead, or let
+  it be retried once the judge is reachable. There is no setting that turns
+  this back into a pass: the old `[jev.judge] fail_closed` key was removed
+  and is ignored if still present. Expect more holds on a poor connection;
+  the `screen: judge call` log lines carry each call's outcome and duration.
+- Stopping a turn while it is being screened cancels it: nothing runs,
+  nothing is held, and nobody is notified.
 - Every agent task fire is judged, including a task the owner scheduled:
   nobody is typing when it runs, and a poller can schedule a wake whose prompt
   is inbound text. A held fire does nothing, is recorded as `held` in

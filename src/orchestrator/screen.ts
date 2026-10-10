@@ -90,11 +90,20 @@
  * request, a scheduled poll) asked for approval every single time. That rule
  * is gone: a passed turn does its whole job. Two consequences for this file:
  *
- *   - A judge that NEVER ANSWERED still fails OPEN. Harness down, quota,
- *     timeout, spawn failure, empty chain: the screener returns "pass" and
- *     logs. The judge runs on the same harness chain as the turn, so a real
- *     outage takes the turn down with it, and failing closed on
- *     infrastructure hiccups would enshittify the assistant.
+ *   - A screen where NOBODY ANSWERED HOLDS (issue #663). Decision model
+ *     unreachable and harness down, quota, timeout, spawn failure, empty
+ *     chain: the turn is held and the principal is asked, with wording that
+ *     says screening was unavailable rather than that a threat was found.
+ *     This used to fail OPEN, on the argument that the judge runs on the same
+ *     harness chain as the turn, so a real outage takes the turn down too.
+ *     True of a hard outage — and false of what a bad connection actually
+ *     produces: the decision model and the harness are different providers; a
+ *     DNS lookup that timed out is fine again when the turn starts seconds
+ *     later; a harness cooled by the failed judge call is skipped and the
+ *     turn runs on the next. Each handed untrusted text to a tool-capable
+ *     turn nobody had screened, with a warn line as the only trace. There is
+ *     no opt-out: a setting that turns the only gate back into a pass is a
+ *     setting an attacker benefits from. Decided by the principal, 2026-10.
  *   - A judge that ANSWERED WITHOUT A VERDICT is not a reason to interrupt
  *     the principal — the next judge is asked instead. The order is: the
  *     decision-model judge (when configured), then each harness in the turn's
@@ -148,8 +157,14 @@ import {
 } from "../memory/drawerSync.ts";
 
 export interface ScreenVerdict {
-  /** "pass" → run the turn normally; "hold" → already escalated, stop. */
-  action: "pass" | "hold";
+  /**
+   * "pass" → run the turn normally; "hold" → already escalated, stop;
+   * "cancelled" → the CALLER aborted while the screen was still waiting on a
+   * judge, so there is no verdict and nothing was escalated. runTurn ends
+   * the turn as cancelled: no capable turn runs (this is never a pass) and
+   * no hold is recorded (nothing was found, and nothing was unavailable).
+   */
+  action: "pass" | "hold" | "cancelled";
   /** Threat score (0–100). */
   score: number;
   /** Why — the judge's rationale. */
@@ -160,11 +175,25 @@ export interface ScreenVerdict {
   heldMessage?: string;
 }
 
-const PASS_ON_ERROR = (score: number, reason: string): ScreenVerdict => ({
-  action: "pass",
-  score,
-  reason,
-});
+/**
+ * How much of a judge's error text reaches the hold reason (and through it
+ * the principal's notification). The full text is in the log.
+ */
+const JUDGE_ERROR_CAP = 200;
+
+/** One line, bounded — a judge error is diagnostic text, not a message body. */
+function briefJudgeError(error: string): string {
+  const flat = error.replace(/\s+/g, " ").trim();
+  return flat.length > JUDGE_ERROR_CAP
+    ? flat.slice(0, JUDGE_ERROR_CAP) + "…"
+    : flat;
+}
+
+/** A judge call's outcome, as logged: who answered, and with what. */
+function judgeOutcome(result: JudgeResult): "verdict" | "unparseable" | "unavailable" {
+  if (result.ok) return "verdict";
+  return result.kind === "unparseable" ? "unparseable" : "unavailable";
+}
 
 /**
  * The threat judge's briefing drawers — and ONLY these. Decisions (prior
@@ -252,7 +281,7 @@ export interface ScreenerDeps {
   /**
    * Override the Jev judge call (tests). Production uses lib/decisionModelJudge.ts —
    * which hits the network — so screen-level tests inject a stub and assert
-   * the enabled/fail-closed wiring around it.
+   * the enabled/fallback/hold wiring around it.
    */
   decisionModelJudge?: typeof decisionModelJudgeThreat;
 }
@@ -278,7 +307,8 @@ export function makeScreener(
   _conversation: string,
   // The turn's harness chain — the judge runs on the PRIMARY harness in it
   // (chain[0], whichever binary the user configured). An empty chain (e.g. a
-  // test fake chain with no harness) → screening fails open and spawns nothing.
+  // test fake chain with no harness) → nothing is spawned, no verdict exists,
+  // and the turn is held.
   harnesses: Harness[],
   // The open memory store. On a HOLD the screener writes the held episode
   // into the principal's telegram conversation(s) so their approve/deny reply
@@ -315,8 +345,8 @@ export function makeScreener(
       signal?: AbortSignal,
     ): Promise<JudgeResult> => {
       // Spawn the judge in the persona's own dir, never the ambient cwd — an
-      // inaccessible cwd makes the harness spawn EACCES, which would fail the
-      // screen OPEN (silently unscreened). personaDir is owned by the running
+      // inaccessible cwd makes the harness spawn EACCES, which would take the
+      // screen down and hold every untrusted turn. personaDir is owned by the running
       // persona user; threatJudge floors it at homedir() as a backstop. Resolve
       // defensively: a degenerate config must degrade to that floor, not throw
       // on the screening path.
@@ -329,7 +359,7 @@ export function makeScreener(
       const chainJudge = makeChainJudge(harnesses, config, judgeCwd);
       if (!chainJudge) {
         // No harness available to screen with (empty chain) — the judge never
-        // answered, so this fails open (no `kind`).
+        // answered (no `kind`), so the screener holds.
         return { ok: false, error: "no harness in chain for screening" };
       }
       // Compose the judge's system prompt from the FULL narrowed persona: the
@@ -464,18 +494,42 @@ export function makeScreener(
       }
     }
 
-    // 2. Judge. A judge that never answers fails OPEN; a harness chain that
-    //    answers without a readable verdict is a failed screening and holds
-    //    (see the file header). The
+    // 2. Judge. A screen that ends without a verdict HOLDS — whether nobody
+    //    answered or the chain answered without a readable score (see the
+    //    file header). The
     //    default judge runs as the narrowed persona (it closes over
     //    _conversation for its channel context); an injected test judge uses
     //    the legacy 3-arg shape.
+    //
+    //    Every judge call logs its duration and outcome (issue #663): the
+    //    timeout can only be tuned on data, and before this a failed
+    //    decision-model call and every harness-judge call left no timing at
+    //    all. Outcome and milliseconds only — never the screened text.
     const judgeSafely = async (): Promise<JudgeResult> => {
+      const started = Date.now();
+      let result: JudgeResult;
       try {
-        return await judge(content, priors, signal);
+        result = await judge(content, priors, signal);
       } catch (e) {
-        return { ok: false, error: `judge threw: ${(e as Error).message}` };
+        result = { ok: false, error: `judge threw: ${(e as Error).message}` };
       }
+      log.info("screen: judge call", {
+        backend: "harness",
+        outcome: judgeOutcome(result),
+        durationMs: Date.now() - started,
+      });
+      return result;
+    };
+
+    // The caller aborted before any judge produced a verdict — see the check
+    // in front of the two hold conversions below for the full reasoning.
+    const cancelledVerdict = (): ScreenVerdict => {
+      log.info("screen: cancelled by the caller before a verdict, not holding");
+      return {
+        action: "cancelled",
+        score: 0,
+        reason: "cancelled before the threat screen finished",
+      };
     };
 
     // The hold threshold this screen applies. THREAT_THRESHOLD normally; the
@@ -487,16 +541,34 @@ export function makeScreener(
     if (decisionModelJudgeOn) {
       // The decision model DECIDES; the harness judge is the fallback on any
       // error — an outage or an answer no score could be read out of, alike.
-      // Neither prompts the principal: what happens next is the harness
-      // judge's call alone. There is no log-only mode — see DecisionModelConsumerSettings. Both down
-      // ⇒ fail open as today UNLESS the operator opted into fail-closed
-      // (affordable exactly because an independent screener exists — see
-      // docs/decision-model.md).
+      // Neither prompts the principal on its own: what happens next is the
+      // harness judge's call. There is no log-only mode — see
+      // DecisionModelConsumerSettings. Both down ⇒ no verdict ⇒ the hold
+      // below, like any other screen nobody answered.
+      const decisionModelStarted = Date.now();
       const decisionModelResult: JudgeResult & { latencyMs?: number } =
         await runDecisionModelJudge(content, signal).catch((e) => ({
           ok: false as const,
           error: `jev judge threw: ${(e as Error).message}`,
         }));
+      log.info("screen: judge call", {
+        backend: "decision-model",
+        outcome: judgeOutcome(decisionModelResult),
+        // Wall clock for the whole step (briefing read + request + retry);
+        // latencyMs is the provider round trip alone, when one happened.
+        durationMs: Date.now() - decisionModelStarted,
+        ...(decisionModelResult.latencyMs !== undefined
+          ? { latencyMs: decisionModelResult.latencyMs }
+          : {}),
+        timeoutMs: jev!.judge.timeoutMs,
+      });
+      if (!decisionModelResult.ok && signal?.aborted) {
+        // The caller cancelled mid-request. Not a decision-model failure:
+        // recording it would make `phantombot doctor` report the judge
+        // DEGRADED for a /stop, and falling back would spawn a harness judge
+        // for a turn nobody is waiting on. Same rule as the check below.
+        return cancelledVerdict();
+      }
       // Fallback telemetry — outcome only, never the screened text. This is
       // what `phantombot doctor` reads to say the decision model is degraded
       // instead of the operator discovering it at the first missed hold.
@@ -522,24 +594,12 @@ export function makeScreener(
           `screen: jev judge unavailable, falling back to harness judge: ${decisionModelResult.error}`,
         );
         result = await judgeSafely();
-        if (
-          !result.ok &&
-          result.kind !== "unparseable" &&
-          jev!.judge.failClosed
-        ) {
-          log.warn("screen: both judges down, failing CLOSED (operator opt-in)");
+        if (!result.ok && result.kind !== "unparseable") {
+          // Both backends down. Carry both causes into the one error the
+          // hold below reports, so the principal sees why neither answered.
           result = {
-            ok: true,
-            verdict: {
-              score: Math.max(holdThreshold, 1),
-              reason:
-                `threat screening is down on both backends (jev: ${decisionModelResult.error}; ` +
-                `harness: ${result.error}) and this persona fails closed`,
-              question:
-                "Screening is unavailable and this persona is set to hold rather " +
-                "than pass unscreened input. Talk it through, or retry once the " +
-                "judge is back.",
-            },
+            ok: false,
+            error: `decision model: ${decisionModelResult.error}; harness: ${result.error}`,
           };
         }
       }
@@ -559,11 +619,51 @@ export function makeScreener(
       result = await judgeSafely();
     }
 
+    // Set when the hold below is for a screen NOBODY answered: the content
+    // was not rated at all, so the notification must not read as a threat
+    // score. (An unparseable chain keeps its ordinary-hold wording, by the
+    // principal's earlier ruling — see the file header.)
+    let screeningUnavailable = false;
+
+    // A CANCELLED screen is not a screen nobody answered. Every backend
+    // reports a caller abort as the same kindless `{ ok: false }` an outage
+    // produces — makeChainJudge on purpose ("a cancelled turn is not a
+    // screening result"), the decision-model judge when its fetch is
+    // aborted, judgeSafely's catch when a judge throws on the abort — so the
+    // check lives HERE, once, in front of both conversions below, rather
+    // than in each backend. Without it a /stop, a caller cancellation or a
+    // daemon shutdown mid-judge wrote the payload into the principal's
+    // conversation, told them screening was unavailable, and finished as
+    // `held`: a false alarm on the one notification that must never be
+    // skimmed. Only the CALLER's signal counts — a judge's own timeout is a
+    // real "nobody answered" and still holds. Not a pass either: runTurn
+    // stops on "cancelled" without running the capable turn. A verdict that
+    // did arrive (`result.ok`) is kept and handled normally.
+    if (!result.ok && signal?.aborted) return cancelledVerdict();
+
+    if (!result.ok && result.kind !== "unparseable") {
+      // No judge answered: the decision model (if any) and every harness in
+      // the chain were unreachable, or there was no harness to ask. NOT a
+      // pass — see the file header for why failing open here was a bypass a
+      // bad connection could trigger on its own (issue #663). Held at the
+      // lowest score that does not pass: nobody rated this as a threat, it
+      // simply was not cleared.
+      log.warn(`screen: no judge answered, holding: ${result.error}`);
+      screeningUnavailable = true;
+      result = {
+        ok: true,
+        verdict: {
+          score: Math.max(holdThreshold, 1),
+          reason: `threat screening was unavailable (${briefJudgeError(result.error)})`,
+          question:
+            "This was not screened, so I held it rather than run it unchecked. " +
+            "Tell me to go ahead if it looks fine, or it can be retried once " +
+            "the judge is reachable again.",
+        },
+      };
+    }
+
     if (!result.ok) {
-      if (result.kind !== "unparseable") {
-        log.warn(`screen: judge unavailable, failing open: ${result.error}`);
-        return PASS_ON_ERROR(0, `screen unavailable (failed open): ${result.error}`);
-      }
       // Every harness in the chain was asked and no score could be read out
       // of what came back. That is a FAILED SCREENING, handled exactly like
       // any other: a failing score, the normal hold, the normal notification.
@@ -603,7 +703,9 @@ export function makeScreener(
         : "I'm not sure this is safe to act on — can we talk it through?";
     const preview = content.replace(/\s+/g, " ").trim().slice(0, 280);
     const notifyMessage =
-      `🔒 I held an untrusted request (threat ${v.score}/100) — nothing was done.\n` +
+      (screeningUnavailable
+        ? "🔒 I held an untrusted request because I could not screen it — nothing was done.\n"
+        : `🔒 I held an untrusted request (threat ${v.score}/100) — nothing was done.\n`) +
       `Why: ${v.reason}\n` +
       `What it asked: "${preview}"\n` +
       `${concern}`;
@@ -641,9 +743,11 @@ export function makeScreener(
       score: v.score,
       reason: v.reason,
       question: concern,
-      heldMessage:
-        "🔒 That request touched something sensitive, so I've paused it and " +
-        "pinged the owner to talk it through before doing anything. Nothing was done.",
+      heldMessage: screeningUnavailable
+        ? "🔒 I couldn't run my safety check on that request, so I've paused it and " +
+          "pinged the owner before doing anything. Nothing was done."
+        : "🔒 That request touched something sensitive, so I've paused it and " +
+          "pinged the owner to talk it through before doing anything. Nothing was done.",
     };
   };
 }

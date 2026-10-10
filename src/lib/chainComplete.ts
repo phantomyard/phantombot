@@ -14,6 +14,8 @@
  *   - the threat judge FAILED OPEN. A quota exhaustion on the primary
  *     silently switched off the screener that stands in front of every
  *     untrusted input — the one failure mode the perimeter exists to prevent.
+ *     (Since issue #663 a screen nobody answered holds instead; the chain
+ *     walk is what stops one harness's quota window holding everything.)
  *
  * Both are background/inline calls with no user watching a stream, so unlike
  * `runWithFallback` there is nothing to yield and no partial-reply trade-off
@@ -23,7 +25,7 @@
  * share one store and must not fight each other:
  *   - cooled harnesses are skipped, snapshot at call time;
  *   - if EVERYONE is cooled the snapshot is ignored and the chain is tried in
- *     order anyway (a screener that refuses to run is the fail-open bug);
+ *     order anyway (a screener that refuses to run screens nothing);
  *   - a thrown attempt cools the harness, a successful one clears it;
  *   - an EMPTY result falls through WITHOUT cooling (#499): the process ran
  *     clean and produced no text, which is a model flake, not ill health;
@@ -213,8 +215,8 @@ export async function completeOverChain(
   }
 
   // Nothing answered. For durable facts that is a dropped batch; for the
-  // threat judge it is a FAIL-OPEN — every untrusted input for the length of
-  // the outage goes unscreened. Either way it deserves a record naming why
+  // threat judge it is a HOLD — every untrusted input for the length of the
+  // outage is held for the principal. Either way it deserves a record naming why
   // EVERY harness contributed nothing — failed (with its classified cause),
   // skipped for cooldown, or answered empty — because a chain-wide quota
   // window and a chain-wide misconfiguration look identical from the one

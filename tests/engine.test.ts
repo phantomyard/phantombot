@@ -498,9 +498,10 @@ describe("turn", () => {
 
   test("a decision model judge does not lift the codex-only refusal", async () => {
     // The decision model decides first, but the harness judge is its
-    // FALLBACK and an empty screen chain fails open: a decision-model outage
-    // would hand the text to codex unscreened. So the tool-less harness is
-    // required either way, and the decision model is not even called.
+    // FALLBACK and an empty screen chain has nothing to judge with: a
+    // decision-model outage would hold every untrusted turn (and before
+    // issue #663 handed the text to codex unscreened). So the tool-less
+    // harness is required either way, and the decision model is not even called.
     const codex = new FakeHarness("codex");
     _setHarnessFactoryForTesting(() => [codex]);
     const e = await openEngine();

@@ -270,6 +270,167 @@ describe("decisionModelDecide", () => {
     if (!r.ok) expect(r.error).toContain("connection refused");
   });
 
+  // ── The one network retry (issue #663) ──────────────────────────────────
+  // A request that died before any response — DNS, refused, reset — gets one
+  // more try when the caller asks for it. The threat judge does: for it a
+  // failed call is the slow harness fallback and, behind that, a held turn.
+  describe("retryNetworkErrorOnce", () => {
+    /** A fetch whose first `failures` calls reject, counting every call. */
+    function flaky(failures: number, error = "getaddrinfo EAI_AGAIN jev.test") {
+      const signals: Array<AbortSignal | null | undefined> = [];
+      const fetchImpl = async (_url: unknown, init?: RequestInit) => {
+        signals.push(init?.signal);
+        if (signals.length <= failures) throw new Error(error);
+        return jsonResponse(decisionsResponse());
+      };
+      return { fetchImpl, signals };
+    }
+
+    it("retries a network failure once and returns the second answer", async () => {
+      const { fetchImpl, signals } = flaky(1);
+      const r = await decisionModelDecide({
+        ...BASE,
+        retryNetworkErrorOnce: true,
+        fetchImpl,
+      });
+      expect(r.ok).toBe(true);
+      expect(signals).toHaveLength(2);
+    });
+
+    it("does not retry unless asked — the router keeps its single attempt", async () => {
+      const { fetchImpl, signals } = flaky(1);
+      const r = await decisionModelDecide({ ...BASE, fetchImpl });
+      expect(r.ok).toBe(false);
+      expect(signals).toHaveLength(1);
+    });
+
+    it("retries ONCE: a second network failure is the result", async () => {
+      const { fetchImpl, signals } = flaky(5, "socket hang up");
+      const r = await decisionModelDecide({
+        ...BASE,
+        retryNetworkErrorOnce: true,
+        fetchImpl,
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toBe("jev request failed: socket hang up");
+      expect(signals).toHaveLength(2);
+    });
+
+    it("never retries an HTTP response — the provider answered", async () => {
+      let calls = 0;
+      const r = await decisionModelDecide({
+        ...BASE,
+        retryNetworkErrorOnce: true,
+        fetchImpl: async () => {
+          calls++;
+          return new Response("overloaded", { status: 503 });
+        },
+      });
+      expect(r.ok).toBe(false);
+      expect(calls).toBe(1);
+    });
+
+    it("never retries a timeout — the budget is spent", async () => {
+      let calls = 0;
+      const r = await decisionModelDecide({
+        ...BASE,
+        timeoutMs: 50,
+        retryNetworkErrorOnce: true,
+        fetchImpl: (_url, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            calls++;
+            init?.signal?.addEventListener("abort", () => {
+              const e = new Error("aborted");
+              e.name = "TimeoutError";
+              reject(e);
+            });
+          }),
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toBe("jev timeout after 50ms");
+      expect(calls).toBe(1);
+    });
+
+    it("never retries a caller abort", async () => {
+      let calls = 0;
+      const controller = new AbortController();
+      const pending = decisionModelDecide({
+        ...BASE,
+        timeoutMs: 5000,
+        signal: controller.signal,
+        retryNetworkErrorOnce: true,
+        fetchImpl: (_url, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            calls++;
+            init?.signal?.addEventListener("abort", () => {
+              const e = new Error("aborted");
+              e.name = "AbortError";
+              reject(e);
+            });
+          }),
+      });
+      controller.abort();
+      const r = await pending;
+      expect(r.ok).toBe(false);
+      expect(calls).toBe(1);
+    });
+
+    it("the retry runs inside the SAME deadline — it never doubles the wait", async () => {
+      // First attempt fails fast; the retry then hangs. With a deadline per
+      // attempt this would take ~2x timeoutMs and the second attempt would
+      // carry a fresh signal.
+      const signals: Array<AbortSignal | null | undefined> = [];
+      const started = Date.now();
+      const r = await decisionModelDecide({
+        ...BASE,
+        timeoutMs: 400,
+        retryNetworkErrorOnce: true,
+        fetchImpl: (_url, init) => {
+          signals.push(init?.signal);
+          if (signals.length === 1) {
+            return new Promise<Response>((_resolve, reject) =>
+              setTimeout(() => reject(new Error("ECONNRESET")), 200),
+            );
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              const e = new Error("aborted");
+              e.name = "TimeoutError";
+              reject(e);
+            });
+          });
+        },
+      });
+      const elapsed = Date.now() - started;
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toBe("jev timeout after 400ms");
+      expect(signals).toHaveLength(2);
+      expect(signals[1]).toBe(signals[0]);
+      // One 400 ms budget, not 200 + 150 + 400.
+      expect(elapsed).toBeLessThan(650);
+    });
+
+    it("does not start a retry the deadline has already overtaken", async () => {
+      // The network error arrives after the deadline fired: there is no
+      // budget left, so this is a timeout and there is no second request.
+      let calls = 0;
+      const r = await decisionModelDecide({
+        ...BASE,
+        timeoutMs: 40,
+        retryNetworkErrorOnce: true,
+        fetchImpl: () => {
+          calls++;
+          return new Promise<Response>((_resolve, reject) =>
+            setTimeout(() => reject(new Error("ECONNRESET")), 120),
+          );
+        },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toBe("jev timeout after 40ms");
+      expect(calls).toBe(1);
+    });
+  });
+
   it("maps non-JSON success bodies to { ok: false }", async () => {
     const r = await decisionModelDecide({
       ...BASE,

@@ -128,6 +128,22 @@ export interface DecisionModelDecisionRequest {
   /** Optional caller cancellation, composed with the timeout. */
   signal?: AbortSignal;
   /**
+   * Retry ONCE when the request died before any response arrived — a DNS
+   * lookup that failed, a refused or reset connection (issue #663). Off by
+   * default; the threat judge turns it on, because for it a failed call means
+   * the slow harness-judge fallback and, behind that, a held turn.
+   *
+   * Three limits, all deliberate:
+   *   - the retry runs inside the SAME deadline as the first attempt, so the
+   *     worst case stays bounded by `timeoutMs` — it rescues a fast failure
+   *     and never doubles the wait;
+   *   - a timeout or a caller abort is never retried (the budget is spent, or
+   *     the caller is gone);
+   *   - an HTTP response of any status is never retried: the provider
+   *     ANSWERED, and repeating the question would not change it.
+   */
+  retryNetworkErrorOnce?: boolean;
+  /**
    * Test seam — production omits this and gets the global fetch. Typed as a
    * plain function (not `typeof fetch`) so tests can pass a bare arrow
    * without Bun's `preconnect` property getting in the way.
@@ -263,6 +279,27 @@ function parseAnswer(q: DecisionModelQuestion, raw: unknown): DecisionModelAnswe
  * timeout, HTTP error, malformed or missing answers — comes back as
  * { ok: false, error } so the caller can fall back to its existing method.
  */
+/**
+ * Pause before the one network retry. Long enough for a resolver or a route
+ * that blipped to settle, short enough to be noise against the judge's
+ * multi-second budget.
+ */
+export const DECISION_MODEL_NETWORK_RETRY_DELAY_MS = 150;
+
+/** Sleep that ends early — without throwing — when `signal` aborts. */
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
 export async function decisionModelDecide(
   req: DecisionModelDecisionRequest,
 ): Promise<DecisionModelDecision> {
@@ -282,20 +319,42 @@ export async function decisionModelDecide(
     questions: req.questions,
   };
 
-  let res: Response;
-  try {
-    res = await doFetch(decisionModelDecisionsUrl(req.baseUrl), {
+  // ONE deadline for the whole call, shared by the first attempt and the
+  // retry: `timeoutMs` is a wall-clock cap on the decision, not per attempt.
+  const signal = timeoutSignal(req.timeoutMs, req.signal);
+  const attempt = (): Promise<Response> =>
+    doFetch(decisionModelDecisionsUrl(req.baseUrl), {
       method: "POST",
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${req.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: timeoutSignal(req.timeoutMs, req.signal),
+      signal,
     });
+  const isAbort = (e: unknown): boolean => {
+    const name = (e as Error)?.name;
+    return name === "TimeoutError" || name === "AbortError";
+  };
+
+  let res: Response;
+  try {
+    try {
+      res = await attempt();
+    } catch (first) {
+      // A rejected fetch that is not an abort never got a response. `signal`
+      // is checked as well as the error name: a runtime may surface an abort
+      // that lands mid-connect under a network-error name, and retrying into
+      // a spent deadline would only relabel the timeout.
+      if (!req.retryNetworkErrorOnce || isAbort(first) || signal.aborted) {
+        throw first;
+      }
+      await abortableDelay(DECISION_MODEL_NETWORK_RETRY_DELAY_MS, signal);
+      res = await attempt();
+    }
   } catch (e) {
     const err = e as Error;
-    const timedOut = err.name === "TimeoutError" || err.name === "AbortError";
+    const timedOut = isAbort(err) || signal.aborted;
     return {
       ok: false,
       error: timedOut

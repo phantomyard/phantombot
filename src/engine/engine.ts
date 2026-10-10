@@ -714,11 +714,12 @@ export class Persona {
       }
       // An untrusted turn needs a harness the screen can run on, whatever
       // `tools` the turn itself was granted. This holds with the decision
-      // model judge enabled too: it decides first, the harness judge is its
-      // FALLBACK, and a screener with an empty chain fails OPEN — so on a
-      // codex-only chain a decision-model outage would hand the untrusted
-      // text to codex with full tools, unscreened. Refused before anything
-      // runs; the text never reaches a harness.
+      // model judge enabled too: it decides first and the harness judge is its
+      // FALLBACK, so on a codex-only chain a decision-model outage leaves
+      // nothing to screen with. The screener would hold that turn (issue
+      // #663; it used to pass it, unscreened, to codex with full tools) —
+      // refusing here, before anything runs, says so as a configuration
+      // error instead of a hold on every untrusted turn.
       if (!trusted && toolless.length === 0) {
         yield {
           type: "error",

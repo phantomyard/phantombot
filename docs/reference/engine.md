@@ -123,9 +123,10 @@ turn asked for. `"principal"` turns on such a chain are unaffected.
 
 With `decisionModel.judge` enabled, the persona's decision model screens
 untrusted input first. If it is unavailable, screening falls back to the
-harness judge, so it never goes dark. The tool-less harness is therefore
-required either way: without it a decision-model outage would let the text
-through unscreened.
+harness judge. If that produces no verdict either, the turn is held: a
+`held` event, never a reply. The tool-less harness is therefore required
+either way: without it a decision-model outage would leave nothing to screen
+with, and every untrusted turn would be held.
 
 ## Tools: `"none"` by default
 

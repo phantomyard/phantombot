@@ -202,9 +202,9 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       // Threat screen. `ask` is always untrusted, so every turn is judged
       // by the tool-less classifier (running on the chain's claude harness)
       // before the harness runs. runTurn only consults this when
-      // trusted !== true (always the case here). If the chain has no claude
-      // harness the screener fails open (unscreened) — same posture as a
-      // judge outage.
+      // trusted !== true (always the case here). If the chain has no harness
+      // to judge with, the screener HOLDS — same posture as a judge outage
+      // (issue #663).
       screen:
         input.screen ??
         makeScreener(config, persona, conversation, harnesses, memory),

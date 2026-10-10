@@ -2142,7 +2142,6 @@ describe("runDoctor — decision model (issue #597)", () => {
           enabled: judge,
           timeoutMs: 1500,
           threshold: 70,
-          failClosed: false,
         },
         router: { enabled: router, timeoutMs: 800 },
       },

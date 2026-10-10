@@ -1145,7 +1145,10 @@ describe("cache-friendly prompt layout", () => {
     }
   });
 
-  test("fail-open screening changes the cache security state", async () => {
+  // A screen that THROWS used to fail open: the turn ran, fingerprinted as
+  // unscreened. It now holds (issue #663) — the harness never sees the text,
+  // and the hold discards the epoch like any other.
+  test("a throwing screen HOLDS the turn and resets the cache epoch", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "phantombot-cache-screen-"));
     const memory = await openMemoryStore(":memory:");
     const harness = new CapturingHarness();
@@ -1176,10 +1179,30 @@ describe("cache-friendly prompt layout", () => {
       await collect(runTurn({ ...input, userMessage: "first", screen: pass }));
       expect(harness.captured?.epochTurns).toBeUndefined();
 
-      await collect(runTurn({ ...input, userMessage: "judge down", screen: fail }));
-      expect(harness.captured?.epochTurns).toBeUndefined();
+      expect(harness.invocations).toBe(1);
+
+      const held: HarnessChunk[] = [];
+      for await (const chunk of runTurn({
+        ...input,
+        userMessage: "judge down",
+        screen: fail,
+      })) {
+        held.push(chunk);
+      }
+      // Held: the harness was NOT invoked with the unscreened text.
+      expect(harness.invocations).toBe(1);
+      expect(held.at(-1)).toMatchObject({
+        type: "done",
+        meta: { screenedHold: true },
+      });
+      // Nobody was notified by a screener that threw, so the message must
+      // not claim the owner was pinged.
+      const finalText = (held.at(-1) as { finalText?: string }).finalText ?? "";
+      expect(finalText).toContain("couldn't run my safety check");
+      expect(finalText).not.toContain("pinged");
 
       await collect(runTurn({ ...input, userMessage: "recovered", screen: pass }));
+      expect(harness.invocations).toBe(2);
       expect(harness.captured?.epochTurns).toBeUndefined();
 
       await collect(runTurn({ ...input, userMessage: "warm again", screen: pass }));

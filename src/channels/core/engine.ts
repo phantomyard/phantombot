@@ -1327,7 +1327,7 @@ async function processChatMessage(
       // sender). runTurn only consults this when trusted !== true, so an
       // allow-listed principal is never screened. The judge runs as the
       // narrowed persona on the chain's primary harness; if the chain has
-      // none, screening fails open. `input.memory` is passed so a HOLD can
+      // none, the screener holds (issue #663). `input.memory` is passed so a HOLD can
       // write the held episode into the principal's telegram conversation
       // (the grounding write — see orchestrator/screen.ts recordHeld).
       screen: makeScreener(

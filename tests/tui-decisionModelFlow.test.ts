@@ -195,7 +195,7 @@ describe("configureDecisionModel — direct TypeSafe", () => {
       model: "typesafe/jev-1.13",
       baseUrl: "https://api.typesafe.ai/v1",
       keyEnv: "PHANTOMBOT_JEV_API_KEY",
-      judge: { enabled: true, timeoutMs: 1500, threshold: 80, failClosed: false },
+      judge: { enabled: true, timeoutMs: 1500, threshold: 80 },
       router: { enabled: false, timeoutMs: 300 },
     };
     const { q, asked } = fakeQ(
@@ -337,7 +337,7 @@ describe("configureDecisionModel — off, consumers and cancel", () => {
       model: "typesafe/jev-1.13",
       baseUrl: "https://openrouter.ai/api/v1",
       keyEnv: "PHANTOMBOT_JEV_API_KEY",
-      judge: { enabled: true, timeoutMs: 1500, threshold: 80, failClosed: false },
+      judge: { enabled: true, timeoutMs: 1500, threshold: 80 },
       router: { enabled: true, timeoutMs: 300 },
     };
     const { q } = fakeQ(["off"]);
@@ -379,7 +379,7 @@ describe("configureDecisionModel — an unknown vendor name is kept, never rewri
     baseUrl: "https://api.acme.dev/v1",
     keyEnv: "ACME_API_KEY",
     apiKey: "sk-acme",
-    judge: { enabled: true, timeoutMs: 1500, threshold: 70, failClosed: false },
+    judge: { enabled: true, timeoutMs: 1500, threshold: 70 },
     router: { enabled: false, timeoutMs: 800 },
   };
 
@@ -455,7 +455,7 @@ describe("configureDecisionModel — a custom vendor with NO base_url is never p
     model: "acme/decision-v2",
     keyEnv: "ACME_API_KEY",
     apiKey: "sk-acme",
-    judge: { enabled: false, timeoutMs: 1500, threshold: 70, failClosed: false },
+    judge: { enabled: false, timeoutMs: 1500, threshold: 70 },
     router: { enabled: false, timeoutMs: 800 },
   };
 
@@ -545,7 +545,7 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
     baseUrl: "https://api.acme.dev/v1",
     keyEnv: "ACME_API_KEY",
     apiKey: "sk-acme",
-    judge: { enabled: true, timeoutMs: 1500, threshold: 70, failClosed: false },
+    judge: { enabled: true, timeoutMs: 1500, threshold: 70 },
     router: { enabled: false, timeoutMs: 800 },
   };
 
@@ -611,7 +611,7 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
       model: "typesafe/jev-1.13",
       baseUrl: "https://openrouter.ai/api/v1",
       keyEnv: EMBED_KEY_ENV,
-      judge: { enabled: true, timeoutMs: 1500, threshold: 70, failClosed: false },
+      judge: { enabled: true, timeoutMs: 1500, threshold: 70 },
       router: { enabled: true, timeoutMs: 800 },
     };
     const { q } = fakeQ(
@@ -631,7 +631,7 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
       model: "typesafe/jev-next",
       baseUrl: "https://openrouter.ai/api/v1",
       keyEnv: EMBED_KEY_ENV,
-      judge: { enabled: true, timeoutMs: 1500, threshold: 70, failClosed: false },
+      judge: { enabled: true, timeoutMs: 1500, threshold: 70 },
       router: { enabled: true, timeoutMs: 800 },
     };
     let validatedModel: string | undefined;
@@ -656,7 +656,7 @@ describe("configureDecisionModel — a provider SWITCH never reaches into the pr
       model: "typesafe/jev-next",
       baseUrl: "https://api.typesafe.ai/v1",
       keyEnv: "MY_TS_TOKEN",
-      judge: { enabled: true, timeoutMs: 1500, threshold: 70, failClosed: false },
+      judge: { enabled: true, timeoutMs: 1500, threshold: 70 },
       router: { enabled: false, timeoutMs: 800 },
     };
     process.env.MY_TS_TOKEN = "ts-stored";

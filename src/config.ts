@@ -1009,13 +1009,13 @@ export interface DecisionModelJudgeSettings extends DecisionModelConsumerSetting
    */
   threshold: number;
   /**
-   * Both-down semantics when Jev is ACTIVE: Jev errored AND the harness
-   * judge errored. false (default) = fail open exactly as today; true =
-   * hold the turn and notify. Fail-closed only becomes affordable with a
-   * cheap independent screener in front, and even then it is the operator's
-   * call — see docs/decision-model.md for the analysis.
+   * There is deliberately NO fail-open/fail-closed switch here (issue #663).
+   * `fail_closed` used to opt a persona into holding when both judges were
+   * down; holding is now what every screen does when no judge produced a
+   * verdict, decision model or not, so there is nothing left to opt into —
+   * and no setting that can turn screening back into a pass. A leftover
+   * `fail_closed` key in an existing config.toml is ignored.
    */
-  failClosed: boolean;
 }
 
 /** The `[jev]` block, resolved. The API key is vault/env-only — never TOML. */
@@ -2837,7 +2837,6 @@ function buildDecisionModelConfig(
       enabled: judgeEnabled,
       timeoutMs: judgeTimeoutMs,
       threshold: judgeThreshold,
-      failClosed: asBool(tomlJudge.fail_closed) ?? false,
     },
     router: {
       enabled: routerEnabled,
