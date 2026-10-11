@@ -21,6 +21,7 @@ import {
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 import { createPhantomchatChannel } from "../src/channels/phantomchat/channel.ts";
+import { encryptFileBytes } from "../src/channels/phantomchat/fileEncrypt.ts";
 import { runPhantomchatServer } from "../src/channels/phantomchat/server.ts";
 import {
   SimplePoolPhantomchatTransport,
@@ -2800,5 +2801,260 @@ describe("phantomchat turn failure is surfaced, never silent", () => {
     expect(
       typing.filter(({ e }) => e.content === "stop").length,
     ).toBeGreaterThan(1);
+  });
+});
+
+/**
+ * Reply modality: voice in → voice out, even when the model says a line before
+ * running a tool.
+ *
+ * The post-turn guard ("never switch INTO voice once text has already
+ * streamed") used to test `consumedReplyChars > 0`. A tool boundary consumes
+ * the pre-tool text whether or not a bubble was published, and on a voice-out
+ * turn nothing is published at all — so any voice note whose answer needed a
+ * tool came back as TEXT, silently: no TTS call, no log line.
+ *
+ * These drive the REAL path end to end (inbound voice envelope → Blossom fetch
+ * + decrypt → STT → turn → TTS → Blossom upload → voice envelope); only the
+ * network edge (`fetch`) is stubbed.
+ */
+describe("phantomchat reply modality: voice in → voice out", () => {
+  const SAVED_KEY = process.env.PHANTOMBOT_OPENAI_API_KEY;
+  const SAVED_REPLY_MODE_STATE = process.env.PHANTOMBOT_REPLY_MODE_STATE;
+  const originalFetch = globalThis.fetch;
+  beforeEach(() => {
+    process.env.PHANTOMBOT_OPENAI_API_KEY = "test-key";
+    // The second test persists a reply-mode override; keep it in the tmpdir.
+    process.env.PHANTOMBOT_REPLY_MODE_STATE = join(workdir, "reply-mode.json");
+  });
+  afterEach(() => {
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    if (SAVED_KEY === undefined) delete process.env.PHANTOMBOT_OPENAI_API_KEY;
+    else process.env.PHANTOMBOT_OPENAI_API_KEY = SAVED_KEY;
+    if (SAVED_REPLY_MODE_STATE === undefined) {
+      delete process.env.PHANTOMBOT_REPLY_MODE_STATE;
+    } else {
+      process.env.PHANTOMBOT_REPLY_MODE_STATE = SAVED_REPLY_MODE_STATE;
+    }
+  });
+
+  const VOICE_NOTE_URL = "https://blossom.test/voicenote";
+
+  /**
+   * Run one inbound DM through the server with a working STT/TTS provider and
+   * report what went back to the sender, by wire type, plus the provider calls.
+   */
+  async function runVoiceCapable(opts: {
+    harness: Harness & { invocations: number };
+    /** "voice" sends an encrypted voice note; "text" sends a typed message. */
+    inbound: "voice" | "text";
+  }): Promise<{
+    replies: Array<{ type: string; content: string }>;
+    sttCalls: number;
+    ttsCalls: number;
+  }> {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const senderHex = getPublicKey(senderSk);
+    const botHex = getPublicKey(botSk);
+
+    const note = encryptFileBytes(Buffer.from("fake opus voice note bytes"));
+    let sttCalls = 0;
+    let ttsCalls = 0;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const u = String(url);
+      if (u === VOICE_NOTE_URL) return new Response(note.ciphertext);
+      if (u.includes("audio/transcriptions")) {
+        sttCalls++;
+        return new Response(JSON.stringify({ text: "why is it so cold" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (u.includes("audio/speech")) {
+        ttsCalls++;
+        return new Response(Buffer.from([1, 2, 3]), {
+          status: 200,
+          headers: { "content-type": "audio/ogg" },
+        });
+      }
+      if (u.endsWith("/upload") && init?.method === "PUT") {
+        const host = u.replace(/\/upload$/, "");
+        return new Response(
+          JSON.stringify({ url: `${host}/abc`, sha256: "abc" }),
+          { status: 200 },
+        );
+      }
+      // Server-list probes (blossom.json / relays.json) and anything else.
+      return new Response("nope", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    // The DM wire shapes the PWA sends: a voice note carries its file metadata
+    // as a JSON STRING in `content`; a typed message carries the text.
+    const envelope = JSON.stringify(
+      opts.inbound === "voice"
+        ? {
+            id: "in-voice-1",
+            from: senderHex,
+            to: botHex,
+            type: "voice",
+            content: JSON.stringify({
+              url: VOICE_NOTE_URL,
+              sha256: note.sha256Hex,
+              key: note.keyHex,
+              iv: note.ivHex,
+              mimeType: "audio/ogg",
+              mediaType: "voice",
+              size: note.ciphertext.length,
+              duration: 3,
+            }),
+            timestamp: Date.now(),
+          }
+        : {
+            id: "in-text-1",
+            from: senderHex,
+            to: botHex,
+            type: "text",
+            content: "answer me out loud",
+            timestamp: Date.now(),
+          },
+    );
+    const { wraps } = wrapNip17Message(senderSk, botHex, envelope);
+
+    const config: Config = {
+      ...baseConfig(),
+      telegramStreaming: STREAM_ONE_PER_SENTENCE,
+      voice: {
+        provider: "openai-compatible",
+        openaiCompatible: {
+          baseUrl: "https://api.openai.com/v1",
+          keyEnv: "PHANTOMBOT_OPENAI_API_KEY",
+          sttModel: "whisper-1",
+          ttsModel: "tts-1",
+          voice: "nova",
+          speed: 1,
+        },
+      },
+    };
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config,
+      memory,
+      harnesses: [opts.harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [senderHex],
+      oneShot: true,
+      signal: ac.signal,
+    });
+    pool.feed(wraps[0] as NTNostrEvent);
+    await waitUntil(
+      () => opts.harness.invocations >= 1,
+      "the harness to be invoked",
+    );
+    ac.abort();
+    await serverPromise;
+
+    // Every reply envelope the sender can read, classified by wire type.
+    const replies: Array<{ type: string; content: string }> = [];
+    for (const e of pool.published) {
+      if (e.kind !== 1059) continue;
+      if (!e.tags.some((t) => t[0] === "v" && t[1] === "pc-v2")) continue;
+      const rumor = await unwrapV2(e as NTNostrEvent, senderSk);
+      try {
+        const parsed = JSON.parse(rumor.content) as {
+          type?: unknown;
+          content?: unknown;
+        };
+        if (typeof parsed.type === "string") {
+          replies.push({ type: parsed.type, content: String(parsed.content ?? "") });
+          continue;
+        }
+      } catch {
+        /* a plain-text body */
+      }
+      replies.push({ type: "text", content: rumor.content });
+    }
+    return { replies, sttCalls, ttsCalls };
+  }
+
+  test("a voice note whose answer narrates before a tool call still gets a VOICE reply", async () => {
+    // The live shape of the bug: a line, a tool, then the answer.
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "Checking Home Assistant. " },
+      { type: "progress", note: "running home assistant tool" },
+      { type: "text", text: "It dropped at nine." },
+      {
+        type: "done",
+        finalText: "Checking Home Assistant. It dropped at nine.",
+      },
+    ]);
+
+    const r = await runVoiceCapable({ harness, inbound: "voice" });
+
+    // The voice note was transcribed and drove the turn.
+    expect(r.sttCalls).toBe(1);
+    expect(harness.lastRequest?.userMessage).toBe("why is it so cold");
+    // The reply was SPOKEN: synthesized, and delivered as a voice envelope…
+    expect(r.ttsCalls).toBeGreaterThan(0);
+    expect(r.replies.filter((x) => x.type === "voice").length).toBeGreaterThan(0);
+    // …and nothing went out as text. Nothing HAD gone out as text before the
+    // tool either, which is exactly why the reply must not be downgraded.
+    expect(r.replies.filter((x) => x.type !== "voice")).toEqual([]);
+  });
+
+  test("a voice note answered without any tool call gets a voice reply (baseline)", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "It is nineteen and a half." },
+      { type: "done", finalText: "It is nineteen and a half." },
+    ]);
+
+    const r = await runVoiceCapable({ harness, inbound: "voice" });
+
+    expect(r.ttsCalls).toBeGreaterThan(0);
+    expect(r.replies.filter((x) => x.type === "voice").length).toBeGreaterThan(0);
+    expect(r.replies.filter((x) => x.type !== "voice")).toEqual([]);
+  });
+
+  test("the guard still holds: text already PUBLISHED is never followed by a switch into voice", async () => {
+    // Typed message in, so text streams. A narration bubble is published at the
+    // tool boundary, then the model asks for voice mid-turn. Switching now
+    // would mix wire formats for one answer — the reply must stay text.
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "Checking your calendar" },
+      { type: "progress", note: "running calendar tool" },
+      { type: "text", text: "You are free at 3pm." },
+      {
+        type: "done",
+        finalText: "Checking your calendarYou are free at 3pm.",
+        meta: { replyMode: "voice" },
+      },
+    ]);
+
+    const r = await runVoiceCapable({ harness, inbound: "text" });
+
+    expect(r.ttsCalls).toBe(0);
+    expect(r.replies).toEqual([
+      { type: "text", content: "Checking your calendar" },
+      { type: "text", content: "You are free at 3pm." },
+    ]);
   });
 });

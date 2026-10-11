@@ -823,6 +823,14 @@ export async function runPhantomchatServer(
     // the reply, so it must still send. Narration is deliberately NOT counted
     // here — see the comment in sendBubble.
     let finalBubblesSent = 0;
+    // NARRATION bubbles actually published this turn. Together with
+    // finalBubblesSent this is the only honest answer to "has text already
+    // reached the user?" — the question the post-turn voice guard asks.
+    // `consumedReplyChars` cannot answer it: a tool boundary consumes the
+    // pre-tool text whether or not any bubble went out, and on a voice-out turn
+    // none does (text streaming is off), so gating on it turned every
+    // voice-in turn that narrated before a tool into a text reply.
+    let narrationBubblesSent = 0;
 
     // Reply-modality routing (mirrors core/engine.ts). Default: mirror the
     // input — a voice note in → a voice note back, text in → text out. An
@@ -920,6 +928,7 @@ export async function runPhantomchatServer(
           // and publishes both wraps. conversationId === recipient hex pubkey.
           await transport.sendMessage(senderHex, text);
         }
+        if (kind === "narration") narrationBubblesSent++;
         if (kind === "final") finalBubblesSent++;
       } catch (e) {
         log.warn("phantomchat: bubble send failed", {
@@ -1257,13 +1266,22 @@ export async function runPhantomchatServer(
       // `phantombot reply-mode voice|text` call affects THIS reply too. Never
       // switch INTO voice once text bubbles have already streamed — that would
       // mix wire formats and duplicate content for one answer.
+      //
+      // "Already streamed" means bubbles that were PUBLISHED, counted where
+      // they are sent — the same test core/engine.ts applies. It must not be
+      // `consumedReplyChars > 0`: that also counts pre-tool text a voice-out
+      // turn consumed without sending, which silently downgraded a spoken
+      // reply to text whenever the model said a line before running a tool.
       modalityOverride = await getReplyModeOverride({
         persona: input.persona,
         conversation: conversationKey,
         ttlMs: DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
       });
       willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
-      if (willReplyWithVoice && consumedReplyChars > 0) {
+      if (
+        willReplyWithVoice &&
+        (narrationBubblesSent > 0 || finalBubblesSent > 0)
+      ) {
         willReplyWithVoice = false;
       }
     }
