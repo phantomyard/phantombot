@@ -176,7 +176,9 @@ export interface TurnInput {
    * mid-work turns at the cap. Only armed when a hard cap is set and the
    * soft deadline is strictly below it; the hard cap stays as the backstop
    * once the nudge budget is exhausted. Default: DEFAULT_SOFT_TIMEOUT_MS
-   * (3000s) whenever hardTimeoutMs is set.
+   * (3000s) whenever hardTimeoutMs is set. With chainDeadlineMs set the
+   * "strictly below" test is replaced by a per-attempt fit to the clamped
+   * cap (issue #668) — see orchestrator/softDeadline.ts.
    */
   softTimeoutMs?: number;
   /**
@@ -971,13 +973,26 @@ async function* runTurnBody(
   // only arms when it is strictly below the hard cap (a soft deadline at or
   // above the backstop is pointless, and a turn with NO hard cap must not
   // gain one — after the nudge budget the hard cap is the only stopper).
+  //
+  // #668: a turn under a chain deadline (a background task wake) is the
+  // exception to "strictly below the hard cap". Its real cap is the time
+  // REMAINING before the deadline, recomputed per attempt, so the comparison
+  // cannot be made here — runWithFallback fits the soft deadline to each
+  // attempt's clamped cap instead (see orchestrator/softDeadline.ts). The
+  // configured value is passed through; only 0 (disabled) still disarms it.
   const effectiveSoftTimeoutMs =
     input.hardTimeoutMs !== undefined
       ? (() => {
           const soft = input.softTimeoutMs ?? DEFAULT_SOFT_TIMEOUT_MS;
-          return soft > 0 && soft < input.hardTimeoutMs ? soft : undefined;
+          if (soft <= 0) return undefined;
+          if (input.chainDeadlineMs !== undefined) return soft;
+          return soft < input.hardTimeoutMs ? soft : undefined;
         })()
       : undefined;
+  // Wall-clock start of the pass loop. Under a chain deadline the soft
+  // deadline that actually fired is a per-attempt fitted value, so the nudge
+  // reports the time the turn has really run rather than the configured one.
+  const passLoopStartedAt = Date.now();
   const nudgeCap = Math.max(0, input.nudgeCap ?? DEFAULT_NUDGE_CAP);
 
   // Synthetic epoch turns carrying the interrupted pairs a nudge pass needs
@@ -1107,8 +1122,12 @@ async function* runTurnBody(
         });
         const nudgeNumber = nudgePairs.length;
         const finalWarning = nudgeNumber >= nudgeCap;
+        const lastedMs =
+          input.chainDeadlineMs !== undefined
+            ? Date.now() - passLoopStartedAt
+            : effectiveSoftTimeoutMs!;
         passUserMessage = `Your turn has lasted ${Math.round(
-          effectiveSoftTimeoutMs! / 1000,
+          lastedMs / 1000,
         )}s — that's too long for one turn. Wrap up and deliver your reply now.${
           finalWarning
             ? " This is the final wrap-up window: after it the turn is terminated and undelivered."

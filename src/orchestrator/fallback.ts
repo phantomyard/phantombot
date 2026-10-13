@@ -38,6 +38,7 @@
 
 import type { Harness, HarnessChunk, HarnessRequest } from "../harnesses/types.ts";
 import { type CooldownStore, cooldownStore as defaultStore } from "../lib/cooldown.ts";
+import { fitSoftTimeoutToCap } from "./softDeadline.ts";
 import {
   classifyFailure,
   type HarnessAlerter,
@@ -338,7 +339,22 @@ export async function* runWithFallback(
         yield { type: "error", error, recoverable: false };
         return;
       }
-      attemptReq = { ...attemptReq, hardTimeoutMs: attemptHardCapMs() };
+      const attemptCapMs = attemptHardCapMs();
+      attemptReq = { ...attemptReq, hardTimeoutMs: attemptCapMs };
+      // #668: under a chain deadline the cap above is the time REMAINING, so
+      // the soft deadline is fitted to it per attempt as well — always from
+      // the ORIGINAL request's value, never from an earlier attempt's fitted
+      // one. Otherwise a soft deadline configured against the interactive
+      // hour sits at or past the clamped cap and the wrap-up nudge can never
+      // fire. Foreground turns (no chain deadline) are left exactly as sent.
+      if (chainDeadline !== undefined && req.softTimeoutMs !== undefined) {
+        const { softTimeoutMs: _configuredSoft, ...withoutSoft } = attemptReq;
+        const fittedSoftMs = fitSoftTimeoutToCap(req.softTimeoutMs, attemptCapMs);
+        attemptReq =
+          fittedSoftMs !== undefined
+            ? { ...withoutSoft, softTimeoutMs: fittedSoftMs }
+            : withoutSoft;
+      }
       // Chunk log for THIS attempt only — a resume must describe the attempt
       // that actually wedged, not an earlier one it already recovered from.
       const partial = new PartialAttempt();

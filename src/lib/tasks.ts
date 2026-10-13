@@ -30,6 +30,15 @@ import {
 export interface TaskClaim {
   /** Absolute time the claim was taken (ms epoch). */
   claimedAt: number;
+  /**
+   * Wall-clock budget of the run holding this claim, ms (issue #668) — a
+   * wake's `tick.wake_timeout_s`, a command task's timeout. Recorded by the
+   * runner via {@link TaskStore.adoptClaimPid} once it knows its own config;
+   * absent on a claim that has not been adopted yet and on one written by an
+   * older binary. The stale TTL and doctor's claim-age warning derive from
+   * it, so raising a budget can never get a live run reclaimed.
+   */
+  budgetMs?: number;
   /** Hostname the claiming tick process ran on (multi-host shared DBs). */
   host: string;
   /** OS pid of the claiming process. */
@@ -164,11 +173,34 @@ export interface TaskAddInput {
 }
 
 /**
- * A claim older than this is stale even if its pid still probes alive —
- * the runner hung rather than died. Deliberately far beyond any legitimate
- * wake's hard budget (2× the 30-min background cap); see TaskStore.claimIsStale.
+ * Budget assumed for a claim that does not record one (issue #668): not yet
+ * adopted by its runner, or written by a binary from before budgets were
+ * recorded, when every wake was capped at 30 minutes.
  */
-export const CLAIM_STALE_TTL_MS = 2 * 30 * 60 * 1000;
+export const DEFAULT_CLAIM_BUDGET_MS = 30 * 60 * 1000;
+
+/**
+ * FLOOR for the stale TTL: a claim older than its TTL is stale even if its
+ * pid still probes alive — the runner hung rather than died. The TTL itself
+ * is per claim, see {@link claimStaleTtlMs}; this is the value a claim with
+ * no recorded budget gets, and no claim ever gets less.
+ */
+export const CLAIM_STALE_TTL_MS = 2 * DEFAULT_CLAIM_BUDGET_MS;
+
+/**
+ * Stale TTL for one claim: twice the budget of the run holding it, never
+ * below {@link CLAIM_STALE_TTL_MS} (issue #668). Deliberately far beyond any
+ * legitimate run — the run is killed at 1× its budget, so a claim that
+ * outlives 2× belongs to a hung runner. Deriving it from the claim rather
+ * than a constant is what keeps a configured budget above 30 minutes from
+ * being swept mid-run and dispatched a second time.
+ */
+export function claimStaleTtlMs(claim: TaskClaim): number {
+  return Math.max(
+    CLAIM_STALE_TTL_MS,
+    2 * (claim.budgetMs ?? DEFAULT_CLAIM_BUDGET_MS),
+  );
+}
 
 export type TaskAddResult =
   | { ok: true; id: number; task: Task }
@@ -289,8 +321,25 @@ export function parseTaskClaim(raw: string | null | undefined): TaskClaim | unde
     ) {
       return undefined;
     }
-    const p = parsed as { claimed_at: number; host: string; pid: number };
-    return { claimedAt: p.claimed_at, host: p.host, pid: p.pid };
+    const p = parsed as {
+      claimed_at: number;
+      host: string;
+      pid: number;
+      budget_ms?: unknown;
+    };
+    // budget_ms is optional and tolerant: a missing or nonsense value reads
+    // as "unknown budget" (the default TTL applies), never as an invalid
+    // claim — dropping the claim over a bad hint would allow a double fire.
+    const budgetMs =
+      typeof p.budget_ms === "number" && Number.isFinite(p.budget_ms) && p.budget_ms > 0
+        ? p.budget_ms
+        : undefined;
+    return {
+      claimedAt: p.claimed_at,
+      host: p.host,
+      pid: p.pid,
+      ...(budgetMs !== undefined ? { budgetMs } : {}),
+    };
   } catch {
     return undefined;
   }
@@ -533,10 +582,18 @@ export class TaskStore {
    * No-op when the claim is gone (a fast-finishing runner already released
    * it) — adoption must never resurrect a released claim.
    */
-  adoptClaimPid(id: number, pid: number): void {
+  adoptClaimPid(id: number, pid: number, budgetMs?: number): void {
     this.db.transaction(() => {
       const t = this.get(id);
       if (!t?.claim) return;
+      // #668: the runner records its wall-clock budget here, once it has
+      // resolved its own persona config. A handoff that names no budget
+      // (the dispatcher re-pointing at the spawned child) preserves whatever
+      // is already recorded — it must never erase one.
+      const budget =
+        budgetMs !== undefined && Number.isFinite(budgetMs) && budgetMs > 0
+          ? budgetMs
+          : t.claim.budgetMs;
       this.db
         .prepare("UPDATE tasks SET claim = ? WHERE id = ?")
         .run(
@@ -544,6 +601,7 @@ export class TaskStore {
             claimed_at: t.claim.claimedAt,
             host: t.claim.host,
             pid,
+            ...(budget !== undefined ? { budget_ms: budget } : {}),
           }),
           id,
         );
@@ -553,7 +611,7 @@ export class TaskStore {
   /**
    * True when the claim is stale: either its pid is dead on this host (the
    * runner crashed before releasing — the next tick may reclaim the task),
-   * or the claim is past {@link CLAIM_STALE_TTL_MS} (the runner hung; a
+   * or the claim is past its {@link claimStaleTtlMs} (the runner hung; a
    * foreign-host claim can't be probed, so the TTL is its only clock).
    * A LIVE local pid within the TTL is never stale — stealing it would
    * double-fire a task whose process may still be running, violating #631's
@@ -563,20 +621,18 @@ export class TaskStore {
     claim: TaskClaim,
     opts: { nowMs?: number } = {},
   ): boolean {
+    const ttlMs = claimStaleTtlMs(claim);
     const expired =
-      opts.nowMs !== undefined &&
-      opts.nowMs - claim.claimedAt > CLAIM_STALE_TTL_MS;
+      opts.nowMs !== undefined && opts.nowMs - claim.claimedAt > ttlMs;
     if (claim.host !== hostname()) return expired;
-    // Backstop: a claim older than CLAIM_STALE_TTL_MS is stale even if its
-    // pid still probes alive — the runner hung rather than died. The TTL is
-    // deliberately far beyond any legitimate wake (a wake's hard budget is
-    // BACKGROUND_WAKE_HARD_TIMEOUT_MS); reclaiming a HUNG runner would risk
+    // Backstop: a claim older than its TTL is stale even if its pid still
+    // probes alive — the runner hung rather than died. The TTL is twice the
+    // run's own recorded budget (claimStaleTtlMs, #668), deliberately far
+    // beyond any legitimate run; reclaiming a HUNG runner would risk
     // double-firing a task whose process may still be running, so the
     // automatic reclaim is late on purpose. Doctor surfaces live claims
-    // past the wake budget long before this.
-    if (opts.nowMs !== undefined && opts.nowMs - claim.claimedAt > CLAIM_STALE_TTL_MS) {
-      return true;
-    }
+    // past their budget long before this.
+    if (expired) return true;
     try {
       process.kill(claim.pid, 0);
       return false; // probe succeeded — alive

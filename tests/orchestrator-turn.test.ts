@@ -2274,4 +2274,91 @@ describe("runTurn — soft deadline + wrap-up nudge (#639)", () => {
     );
     expect(harness.requests[0]!.softTimeoutMs).toBeUndefined();
   });
+
+  // ── issue #668: a task wake runs under a chain deadline ──────────────
+  test("#668 wake: soft above the wake budget is armed and fitted, not dropped", async () => {
+    const harness = new MultiScriptHarness("fake", [
+      [{ type: "done", finalText: "ok", meta: {} }],
+    ]);
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "go",
+        harnesses: [harness],
+        // The pre-#668 production shape: 30 min wake budget, 50 min soft.
+        hardTimeoutMs: 1_800_000,
+        chainDeadlineMs: Date.now() + 1_800_000,
+        softTimeoutMs: 3_000_000,
+      }),
+    );
+    const req = harness.requests[0]!;
+    expect(req.hardTimeoutMs!).toBeLessThanOrEqual(1_800_000);
+    expect(req.softTimeoutMs).toBe(Math.floor(req.hardTimeoutMs! * 0.8));
+  });
+
+  test("#668 wake: the same numbers WITHOUT a chain deadline stay disarmed (foreground rule unchanged)", async () => {
+    const harness = new MultiScriptHarness("fake", [
+      [{ type: "done", finalText: "ok", meta: {} }],
+    ]);
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "go",
+        harnesses: [harness],
+        hardTimeoutMs: 1_800_000,
+        softTimeoutMs: 3_000_000,
+      }),
+    );
+    expect(harness.requests[0]!.softTimeoutMs).toBeUndefined();
+  });
+
+  test("#668 wake: soft 0 still disables the nudge under a chain deadline", async () => {
+    const harness = new MultiScriptHarness("fake", [
+      [{ type: "done", finalText: "ok", meta: {} }],
+    ]);
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "go",
+        harnesses: [harness],
+        hardTimeoutMs: 1_800_000,
+        chainDeadlineMs: Date.now() + 1_800_000,
+        softTimeoutMs: 0,
+      }),
+    );
+    expect(harness.requests[0]!.softTimeoutMs).toBeUndefined();
+  });
+
+  test("#668 wake: a soft kill gets its wrap-up nudge, which reports real elapsed time", async () => {
+    const harness = new MultiScriptHarness("fake", [
+      [{ type: "text", text: "half way..." }, SOFT_ERROR],
+      [{ type: "done", finalText: " wrapped up", meta: {} }],
+    ]);
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "long scheduled job",
+        harnesses: [harness],
+        hardTimeoutMs: 1_800_000,
+        chainDeadlineMs: Date.now() + 1_800_000,
+        softTimeoutMs: 3_000_000,
+      }),
+    );
+    // Before #668 the soft deadline was never armed here, so a soft kill
+    // was not followed by a nudge pass at all.
+    expect(harness.invocations).toBe(2);
+    expect(chunks.at(-1)).toMatchObject({
+      type: "done",
+      finalText: "half way... wrapped up",
+    });
+    const nudge = harness.requests[1]!;
+    expect(nudge.userMessage).toContain("Wrap up and deliver");
+    // The configured 3000s never elapsed (and could not: the budget is
+    // 1800s) — the nudge must not claim it did.
+    expect(nudge.userMessage).not.toContain("3000s");
+    expect(nudge.userMessage).toMatch(/lasted [0-2]s/);
+    // The nudge pass is clamped to the REMAINING wake budget and re-fitted.
+    expect(nudge.hardTimeoutMs!).toBeLessThanOrEqual(1_800_000);
+    expect(nudge.softTimeoutMs).toBe(Math.floor(nudge.hardTimeoutMs! * 0.8));
+  });
 });

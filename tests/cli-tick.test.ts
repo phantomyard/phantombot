@@ -7,6 +7,7 @@ import {
   previewForLog,
   runTaskWake,
   runTick,
+  wakeBudgetMs,
   type RunTaskWakeInput,
   type RunTickInput,
 } from "../src/cli/tick.ts";
@@ -780,6 +781,42 @@ describe("runTick — normal task fire", () => {
     expect(await readFile(markerPath, "utf8")).toBe("true/noninteractive/0");
   });
 
+  test("#668 a command task records its timeout as the claim's budget while it runs", async () => {
+    if (process.platform === "win32") return;
+    const cmdConfig: Config = { ...config, harnessHardTimeoutMs: 90 * 60_000 };
+    const created = store.add({
+      persona: "phantom",
+      description: "slow poller",
+      schedule: "0 * * * *",
+      prompt: "audit context",
+      command: "sleep 0.6",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const running = tickInline({
+      config: cmdConfig,
+      taskStore: store,
+      memory,
+      harnesses: [],
+      lockPath,
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+    // Peek at the claim while the command is still sleeping.
+    let claim = store.get(created.id)!.claim;
+    for (let i = 0; i < 40 && claim?.budgetMs === undefined; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      claim = store.get(created.id)!.claim;
+    }
+    expect(claim?.budgetMs).toBe(90 * 60_000);
+    // 70 minutes in: past the old fixed 60-minute TTL, inside this command's
+    // 90-minute timeout — it must not be reclaimed and run twice.
+    expect(
+      store.claimIsStale(claim!, { nowMs: claim!.claimedAt + 70 * 60_000 }),
+    ).toBe(false);
+    expect(await running).toBe(0);
+    expect(store.get(created.id)!.claim).toBeUndefined();
+  });
+
   test("command-backed task timeout reaps orphan grandchildren via process group", async () => {
     if (process.platform === "win32") return;
     const markerPath = join(workdir, "command-grandchild.pid");
@@ -908,13 +945,16 @@ describe("runTick — normal task fire", () => {
     expect(code).toBe(0);
     expect(harness.invocations).toBe(1);
     expect(harness.lastRequest?.idleTimeoutMs).toBe(config.harnessIdleTimeoutMs);
-    // #631: the 30-min wake budget is now a chain-wide deadline, so the
-    // first attempt's hard cap is min(30 min, time-remaining) — a hair under
-    // the budget once the clock has ticked, still the full budget in spirit.
+    // #631: the wake budget is a chain-wide deadline, so the first attempt's
+    // hard cap is min(budget, time-remaining) — a hair under the budget once
+    // the clock has ticked. #668: the budget is no longer a hard-coded 30
+    // minutes; unset, it is the persona's harness hard cap.
     expect(harness.lastRequest?.hardTimeoutMs).toBeGreaterThan(
-      30 * 60 * 1000 - 1_000,
+      config.harnessHardTimeoutMs - 1_000,
     );
-    expect(harness.lastRequest?.hardTimeoutMs!).toBeLessThanOrEqual(30 * 60 * 1000);
+    expect(harness.lastRequest?.hardTimeoutMs!).toBeLessThanOrEqual(
+      config.harnessHardTimeoutMs,
+    );
     // The original prompt is still there...
     expect(harness.lastUserMessage).toContain("do the thing");
     // ...followed by the hygiene footer because there's no expiry.
@@ -2064,6 +2104,139 @@ describe("runTaskWake — threat judge on scheduled wakes", () => {
     expect(isSystemTask({ ...base, command: "/bin/true" })).toBe(false);
     expect(
       isSystemTask({ createdBy: "", prompt: SELFTEST_PROMPT, command: undefined }),
+    ).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Issue #668: the wake budget was a hard-coded 30 minutes, which (a) differed
+// from the interactive hard cap for no reason and (b) sat BELOW the default
+// 50-minute soft deadline, so the wrap-up nudge could never fire on a wake.
+// These run the real runTick → runTaskWake → runTurn → runWithFallback path;
+// only the harness is a stub, and it records the request it was handed.
+// ─────────────────────────────────────────────────────────────────────────
+describe("wake budget is configurable and the soft deadline fits it (#668)", () => {
+  const MIN = 60_000;
+
+  /** Records the request AND the task's claim as seen from inside the run. */
+  class ClaimPeekHarness implements Harness {
+    lastRequest?: HarnessRequest;
+    claimDuringRun?: ReturnType<TaskStore["get"]>;
+    constructor(public readonly id: string, private readonly taskId: () => number) {}
+    async available(): Promise<boolean> {
+      return true;
+    }
+    async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+      this.lastRequest = req;
+      this.claimDuringRun = store.get(this.taskId());
+      yield { type: "done", finalText: "ok" };
+    }
+  }
+
+  async function fireOnce(cfg: Config): Promise<ClaimPeekHarness> {
+    const created = store.add({
+      persona: "phantom",
+      description: "long job",
+      schedule: "0 * * * *",
+      prompt: "do the long thing",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const harness = new ClaimPeekHarness("h", () => created.id);
+    const code = await tickInline({
+      config: cfg,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+    expect(code).toBe(0);
+    expect(harness.lastRequest).toBeDefined();
+    return harness;
+  }
+
+  test("wakeBudgetMs: unset follows the harness hard cap; an explicit value wins; 0 is ignored", () => {
+    expect(wakeBudgetMs({ harnessHardTimeoutMs: 60 * MIN })).toBe(60 * MIN);
+    expect(wakeBudgetMs({ harnessHardTimeoutMs: 60 * MIN, tick: {} })).toBe(60 * MIN);
+    expect(
+      wakeBudgetMs({ harnessHardTimeoutMs: 60 * MIN, tick: { wakeTimeoutMs: 20 * MIN } }),
+    ).toBe(20 * MIN);
+    expect(
+      wakeBudgetMs({ harnessHardTimeoutMs: 60 * MIN, tick: { wakeTimeoutMs: 120 * MIN } }),
+    ).toBe(120 * MIN);
+    expect(
+      wakeBudgetMs({ harnessHardTimeoutMs: 60 * MIN, tick: { wakeTimeoutMs: 0 } }),
+    ).toBe(60 * MIN);
+  });
+
+  test("default: a wake gets the interactive hard cap, and the default soft deadline arms under it", async () => {
+    const h = await fireOnce({
+      ...config,
+      harnessHardTimeoutMs: 60 * MIN,
+      harnessSoftTimeoutMs: 50 * MIN,
+    });
+    const cap = h.lastRequest!.hardTimeoutMs!;
+    expect(cap).toBeLessThanOrEqual(60 * MIN);
+    expect(cap).toBeGreaterThan(60 * MIN - 5_000);
+    // 50 min fits under ~60 min: used as configured.
+    expect(h.lastRequest!.softTimeoutMs).toBe(50 * MIN);
+  });
+
+  test("the pre-#668 shape (30 min budget, 50 min soft): the nudge now fires before the kill", async () => {
+    const h = await fireOnce({
+      ...config,
+      harnessHardTimeoutMs: 60 * MIN,
+      harnessSoftTimeoutMs: 50 * MIN,
+      tick: { wakeTimeoutMs: 30 * MIN },
+    });
+    const cap = h.lastRequest!.hardTimeoutMs!;
+    expect(cap).toBeLessThanOrEqual(30 * MIN);
+    expect(cap).toBeGreaterThan(30 * MIN - 5_000);
+    const soft = h.lastRequest!.softTimeoutMs;
+    // The bug: this was undefined — never armed, work discarded at the cap.
+    expect(soft).toBeDefined();
+    expect(soft!).toBe(Math.floor(cap * 0.8));
+    expect(soft!).toBeLessThan(cap);
+  });
+
+  test("harness_soft_timeout_s = 0 keeps the nudge off on wakes", async () => {
+    const h = await fireOnce({
+      ...config,
+      harnessHardTimeoutMs: 60 * MIN,
+      harnessSoftTimeoutMs: 0,
+      tick: { wakeTimeoutMs: 30 * MIN },
+    });
+    expect(h.lastRequest!.softTimeoutMs).toBeUndefined();
+  });
+
+  test("a budget ABOVE the interactive cap is honoured (wake cap is its own knob)", async () => {
+    const h = await fireOnce({
+      ...config,
+      harnessHardTimeoutMs: 60 * MIN,
+      harnessSoftTimeoutMs: 50 * MIN,
+      tick: { wakeTimeoutMs: 120 * MIN },
+    });
+    const cap = h.lastRequest!.hardTimeoutMs!;
+    expect(cap).toBeGreaterThan(120 * MIN - 5_000);
+    expect(cap).toBeLessThanOrEqual(120 * MIN);
+  });
+
+  test("the running wake records its budget on the claim, so the stale TTL covers it", async () => {
+    const h = await fireOnce({
+      ...config,
+      harnessHardTimeoutMs: 60 * MIN,
+      tick: { wakeTimeoutMs: 120 * MIN },
+    });
+    const claim = h.claimDuringRun?.claim;
+    expect(claim).toBeDefined();
+    expect(claim!.budgetMs).toBe(120 * MIN);
+    expect(claim!.pid).toBe(process.pid);
+    // 90 minutes in — past the old fixed 60-minute TTL, well inside this
+    // run's 120-minute budget. The claim must still be LIVE, or the next
+    // tick would dispatch the task a second time under the running wake.
+    expect(
+      store.claimIsStale(claim!, { nowMs: claim!.claimedAt + 90 * MIN }),
     ).toBe(false);
   });
 });

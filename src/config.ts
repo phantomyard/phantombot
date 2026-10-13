@@ -883,6 +883,15 @@ export interface Config {
      * tasks are never blocked by them.
      */
     maxConcurrentWakes?: number;
+    /**
+     * Total wall-clock budget for ONE scheduled agent wake, across its whole
+     * harness chain, ms (issue #668). toml `[tick] wake_timeout_s`, env
+     * PHANTOMBOT_TICK_WAKE_TIMEOUT_MS. Unset (the default) means "the same
+     * as an interactive turn": the persona's harnessHardTimeoutMs — read it
+     * through `wakeBudgetMs()` in cli/tick.ts, never directly. Per persona
+     * like every other harness timeout.
+     */
+    wakeTimeoutMs?: number;
   };
 
   /**
@@ -1463,6 +1472,15 @@ export async function loadConfig(persona?: string): Promise<Config> {
       ? asInt(toml.harness_soft_timeout_s)! * 1000
       : undefined) ??
     3_000_000;
+  const configuredWakeTimeoutMs =
+    asInt(process.env.PHANTOMBOT_TICK_WAKE_TIMEOUT_MS) ??
+    (asInt(tomlTick.wake_timeout_s) !== undefined
+      ? asInt(tomlTick.wake_timeout_s)! * 1000
+      : undefined);
+  const wakeTimeoutMs =
+    configuredWakeTimeoutMs !== undefined && configuredWakeTimeoutMs > 0
+      ? configuredWakeTimeoutMs
+      : undefined;
   const harnessNudgeCap =
     asInt(process.env.PHANTOMBOT_HARNESS_NUDGE_CAP) ??
     (asInt(toml.harness_nudge_cap) !== undefined
@@ -1741,6 +1759,11 @@ export async function loadConfig(persona?: string): Promise<Config> {
         1,
         asInt(tomlTick?.max_concurrent_wakes) ?? 1,
       ),
+      // #668: the wake budget. Left UNSET unless explicitly configured, so
+      // the default tracks harness_hard_timeout_s instead of freezing a copy
+      // of it here. A zero or negative value is ignored rather than honoured:
+      // a hand-edited `wake_timeout_s = 0` must not kill every wake at start.
+      ...(wakeTimeoutMs !== undefined ? { wakeTimeoutMs } : {}),
     },
 
     // Standing default for interim progress-narration bubbles. An explicit

@@ -2309,6 +2309,56 @@ describe("runDoctor — orphaned scheduled tasks (#632)", () => {
     }
   });
 
+  // Issue #668: the claim-age warning used a fixed 30 minutes. It now reads
+  // the budget the run recorded on its own claim, so a wake legitimately 45
+  // minutes into a 120-minute budget is healthy, while the same age on a
+  // claim with no recorded budget still warns.
+  test("#668 a running claim is judged against ITS OWN budget, not a fixed 30 minutes", async () => {
+    const { openTaskStore } = await import("../src/lib/tasks.ts");
+    const { hostname } = await import("node:os");
+    const taskStore = await openTaskStore(join(workdir, "memory.sqlite"));
+    try {
+      await mkdir(join(workdir, "personas", "phantom"), { recursive: true });
+      const claimedAt = Date.now() - 45 * 60_000;
+      const mk = (description: string): number => {
+        const created = taskStore.add({
+          persona: "phantom",
+          description,
+          schedule: "0 * * * *",
+          prompt: "x",
+          now: new Date(claimedAt - 2 * 60 * 60_000),
+        });
+        if (!created.ok) throw new Error("setup");
+        const claimed = taskStore.claimForRun(created.id, {
+          claimedAt,
+          host: hostname(),
+          pid: process.pid, // live: this process stands in for the runner
+          nowMs: claimedAt,
+        });
+        if (!claimed) throw new Error("claim setup");
+        return created.id;
+      };
+      const longId = mk("long budget job");
+      const legacyId = mk("legacy claim job");
+      taskStore.adoptClaimPid(longId, process.pid, 120 * 60_000);
+
+      const out = new CaptureStream();
+      await runDoctor({ config, out, ...DISABLED, repair: false });
+      const lineFor = (id: number): string =>
+        out.text.split("\n").find((l) => l.includes(`task ${id} `)) ?? "";
+      const healthy = lineFor(longId);
+      const warned = lineFor(legacyId);
+      expect(healthy).toContain("claimed 45m ago (budget 120m)");
+      expect(warned).toContain("claimed 45m ago (budget 30m)");
+      // Same age, different verdicts — and the verdicts differ only because
+      // of the recorded budget.
+      const mark = (l: string): string => l.split("—")[0]!;
+      expect(mark(healthy)).not.toBe(mark(warned));
+    } finally {
+      taskStore.close();
+    }
+  });
+
   test("healthy queue is silent — no tasks line at all", async () => {
     const out = new CaptureStream();
     const code = await runDoctor({ config, out, ...DISABLED });

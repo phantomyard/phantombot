@@ -39,6 +39,7 @@ service-bootstrap compatibility inputs; new credentials must use the vault.
 | `PHANTOMBOT_PI_PROVIDER`, `PHANTOMBOT_PI_KEY_ENV`, `PHANTOMBOT_PI_MAX_OLD_SPACE_MB`, `PHANTOMBOT_PI_MAX_PAYLOAD` | Configure Pi routing and resource limits. |
 | `PHANTOMBOT_IMAGE_MODEL` | Override the image-capable model. |
 | `PHANTOMBOT_HARNESS_STARTUP_TIMEOUT_MS`, `PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS`, `PHANTOMBOT_HARNESS_SOFT_TIMEOUT_MS`, `PHANTOMBOT_HARNESS_IDLE_TIMEOUT_MS`, `PHANTOMBOT_HARNESS_TOOL_TIMEOUT_MS`, `PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS` | Override watchdog stages. A zero soft timeout disables soft nudges. |
+| `PHANTOMBOT_TICK_WAKE_TIMEOUT_MS` | Total wall-clock budget for one scheduled agent wake, across its whole harness chain (toml `[tick] wake_timeout_s`). Unset: the same as `PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS`. On a wake the soft deadline is fitted under this budget, so the wrap-up nudge fires before the kill. |
 | `PHANTOMBOT_HARNESS_NUDGE_CAP` | Limit soft-timeout nudges. |
 | `PHANTOMBOT_TURN_TIMEOUT_MS` | Set the overall turn deadline used by channel orchestration. |
 | `PHANTOMBOT_COOLDOWN_STATE` | Relocate harness cooldown state. |

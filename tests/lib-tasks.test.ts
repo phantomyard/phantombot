@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openTaskStore, type TaskStore } from "../src/lib/tasks.ts";
+import {
+  CLAIM_STALE_TTL_MS,
+  claimStaleTtlMs,
+  openTaskStore,
+  parseTaskClaim,
+  type TaskStore,
+} from "../src/lib/tasks.ts";
 import { hostname } from "node:os";
 
 let workdir: string;
@@ -678,6 +684,95 @@ describe("TaskStore.claimForRun (issue #631)", () => {
         nowMs: NOW.getTime() + 60_000,
       }),
     ).toBeUndefined();
+  });
+
+  // ── issue #668: the stale TTL follows the run's own budget ───────────
+  const MIN = 60_000;
+
+  test("#668 claimStaleTtlMs: 2x the recorded budget, never below the 60-minute floor", () => {
+    const base = { claimedAt: 0, host: "h", pid: 1 };
+    expect(claimStaleTtlMs(base)).toBe(CLAIM_STALE_TTL_MS);
+    expect(CLAIM_STALE_TTL_MS).toBe(60 * MIN);
+    expect(claimStaleTtlMs({ ...base, budgetMs: 60 * MIN })).toBe(120 * MIN);
+    expect(claimStaleTtlMs({ ...base, budgetMs: 120 * MIN })).toBe(240 * MIN);
+    // A short budget never SHORTENS the TTL below what it was before.
+    expect(claimStaleTtlMs({ ...base, budgetMs: 5_000 })).toBe(CLAIM_STALE_TTL_MS);
+  });
+
+  test("#668 a live claim with a 60-minute budget survives past the old fixed TTL", () => {
+    const id = addDue();
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: 424242,
+      nowMs: NOW.getTime(),
+    });
+    // The runner (this live process) adopts the claim and records its budget.
+    store.adoptClaimPid(id, process.pid, 60 * MIN);
+    const claim = store.get(id)!.claim!;
+    expect(claim.budgetMs).toBe(60 * MIN);
+    // 90 min: beyond the old 60-min TTL, the run would have been reclaimed
+    // and double-fired. With the budget recorded it is still live.
+    expect(store.claimIsStale(claim, { nowMs: NOW.getTime() + 90 * MIN })).toBe(false);
+    expect(
+      store.claimForRun(id, {
+        claimedAt: NOW.getTime() + 90 * MIN,
+        host: hostname(),
+        pid: 424243,
+        nowMs: NOW.getTime() + 90 * MIN,
+      }),
+    ).toBeUndefined();
+    // Past 2x the budget a pid that still probes alive is a HUNG runner.
+    expect(store.claimIsStale(claim, { nowMs: NOW.getTime() + 121 * MIN })).toBe(true);
+  });
+
+  test("#668 a claim with no recorded budget keeps the pre-existing 60-minute TTL", () => {
+    const id = addDue();
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: process.pid,
+      nowMs: NOW.getTime(),
+    });
+    const claim = store.get(id)!.claim!;
+    expect(claim.budgetMs).toBeUndefined();
+    expect(store.claimIsStale(claim, { nowMs: NOW.getTime() + 59 * MIN })).toBe(false);
+    expect(store.claimIsStale(claim, { nowMs: NOW.getTime() + 61 * MIN })).toBe(true);
+  });
+
+  test("#668 a pid handoff that names no budget preserves the recorded one", () => {
+    const id = addDue();
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: 424242,
+      nowMs: NOW.getTime(),
+    });
+    store.adoptClaimPid(id, process.pid, 90 * MIN);
+    store.adoptClaimPid(id, process.pid); // dispatcher-style handoff
+    expect(store.get(id)!.claim).toEqual({
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: process.pid,
+      budgetMs: 90 * MIN,
+    });
+    // A nonsense budget is ignored rather than recorded or allowed to erase.
+    store.adoptClaimPid(id, process.pid, 0);
+    store.adoptClaimPid(id, process.pid, Number.NaN);
+    expect(store.get(id)!.claim!.budgetMs).toBe(90 * MIN);
+  });
+
+  test("#668 parseTaskClaim: a bad budget_ms reads as 'no budget', never as an invalid claim", () => {
+    const base = { claimed_at: 5, host: "h", pid: 7 };
+    expect(parseTaskClaim(JSON.stringify(base))).toEqual({ claimedAt: 5, host: "h", pid: 7 });
+    expect(parseTaskClaim(JSON.stringify({ ...base, budget_ms: 1000 }))).toEqual({
+      claimedAt: 5, host: "h", pid: 7, budgetMs: 1000,
+    });
+    for (const bad of ["x", -1, 0, null]) {
+      expect(parseTaskClaim(JSON.stringify({ ...base, budget_ms: bad }))).toEqual({
+        claimedAt: 5, host: "h", pid: 7,
+      });
+    }
   });
 
   test("adoptClaimPid never resurrects a released claim", () => {

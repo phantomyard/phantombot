@@ -1315,3 +1315,104 @@ describe("soft-kill observability (#638/#639 review)", () => {
     ]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// Soft deadline under a chain deadline (issue #668): the hard cap is the time
+// REMAINING, so a soft deadline configured against the interactive hour sat
+// at or past it and the wrap-up nudge could never fire on a task wake.
+// ─────────────────────────────────────────────────────────────────────────
+describe("runWithFallback — soft deadline fitted to the chain budget (#668)", () => {
+  const MIN = 60_000;
+
+  test("soft above the wake budget is fitted to 80% of the attempt's clamped cap", async () => {
+    const h = new FakeHarness("claude", [{ type: "done", finalText: "ok" }]);
+    await collect(
+      runWithFallback(
+        [h],
+        newRequest({ hardTimeoutMs: 30 * MIN, softTimeoutMs: 50 * MIN }),
+        { cooldown: new CooldownStore(), chainDeadlineMs: Date.now() + 30 * MIN },
+      ),
+    );
+    const cap = h.lastRequest!.hardTimeoutMs!;
+    const soft = h.lastRequest!.softTimeoutMs!;
+    expect(cap).toBeLessThanOrEqual(30 * MIN);
+    expect(cap).toBeGreaterThan(30 * MIN - 1_000);
+    // Fitted against the cap this attempt was actually handed.
+    expect(soft).toBe(Math.floor(cap * 0.8));
+    expect(soft).toBeLessThan(cap);
+  });
+
+  test("soft already under the remaining budget is passed through unchanged", async () => {
+    const h = new FakeHarness("claude", [{ type: "done", finalText: "ok" }]);
+    await collect(
+      runWithFallback(
+        [h],
+        newRequest({ hardTimeoutMs: 60 * MIN, softTimeoutMs: 50 * MIN }),
+        { cooldown: new CooldownStore(), chainDeadlineMs: Date.now() + 60 * MIN },
+      ),
+    );
+    expect(h.lastRequest!.softTimeoutMs).toBe(50 * MIN);
+  });
+
+  test("a fallback that starts late is fitted to what is LEFT, from the original value", async () => {
+    // The primary fails recoverably; by then only 10 of the 60 minutes
+    // remain (the deadline is simply set 10 minutes out). The configured 50
+    // minute soft deadline would never fire in a 10 minute attempt.
+    const first = new FakeHarness("claude", [
+      { type: "error", error: "recoverable", recoverable: true },
+    ]);
+    const second = new FakeHarness("native", [{ type: "done", finalText: "ok" }]);
+    await collect(
+      runWithFallback(
+        [first, second],
+        newRequest({ hardTimeoutMs: 60 * MIN, softTimeoutMs: 50 * MIN }),
+        { cooldown: new CooldownStore(), chainDeadlineMs: Date.now() + 10 * MIN },
+      ),
+    );
+    for (const h of [first, second]) {
+      const cap = h.lastRequest!.hardTimeoutMs!;
+      expect(cap).toBeLessThanOrEqual(10 * MIN);
+      expect(h.lastRequest!.softTimeoutMs).toBe(Math.floor(cap * 0.8));
+    }
+  });
+
+  test("no soft deadline on the request: none is invented", async () => {
+    const h = new FakeHarness("claude", [{ type: "done", finalText: "ok" }]);
+    await collect(
+      runWithFallback([h], newRequest({ hardTimeoutMs: 30 * MIN }), {
+        cooldown: new CooldownStore(),
+        chainDeadlineMs: Date.now() + 30 * MIN,
+      }),
+    );
+    expect(h.lastRequest!.softTimeoutMs).toBeUndefined();
+    expect("softTimeoutMs" in h.lastRequest!).toBe(false);
+  });
+
+  test("too little budget left for a wrap-up window: the soft deadline is dropped, not sent stale", async () => {
+    const h = new FakeHarness("claude", [{ type: "done", finalText: "ok" }]);
+    await collect(
+      runWithFallback(
+        [h],
+        newRequest({ hardTimeoutMs: 60 * MIN, softTimeoutMs: 50 * MIN }),
+        { cooldown: new CooldownStore(), chainDeadlineMs: Date.now() + 20_000 },
+      ),
+    );
+    expect(h.lastRequest!.hardTimeoutMs!).toBeLessThanOrEqual(20_000);
+    expect("softTimeoutMs" in h.lastRequest!).toBe(false);
+  });
+
+  test("foreground (no chain deadline): a soft deadline above the cap is NOT touched here", async () => {
+    // runTurn owns the foreground arming rule; runWithFallback must not
+    // start fitting for callers that pass no chain deadline.
+    const h = new FakeHarness("claude", [{ type: "done", finalText: "ok" }]);
+    await collect(
+      runWithFallback(
+        [h],
+        newRequest({ hardTimeoutMs: 30 * MIN, softTimeoutMs: 50 * MIN }),
+        { cooldown: new CooldownStore() },
+      ),
+    );
+    expect(h.lastRequest!.softTimeoutMs).toBe(50 * MIN);
+    expect(h.lastRequest!.hardTimeoutMs).toBe(30 * MIN);
+  });
+});

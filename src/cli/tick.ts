@@ -99,10 +99,24 @@ const WAKE_STREAM_PREVIEW_CHARS = 2000;
  * Total wall-clock budget for ONE background wake, across its whole harness
  * chain (issue #631). The wake child clamps every attempt's hard cap to the
  * time remaining, so a timed-out primary hands the fallback only what is
- * left — the value is unchanged from before the claim-then-dispatch change;
- * it just stopped being PER-HARNESS.
+ * left.
+ *
+ * Issue #668: this was a hard-coded 30 minutes while every interactive
+ * surface used the configurable harness hard cap (default 60), which also
+ * left the soft deadline (#639, default 50 min) permanently above the cap —
+ * so a long scheduled task was killed with its work discarded instead of
+ * being nudged to wrap up. It is now `[tick] wake_timeout_s` from the TASK
+ * PERSONA's config layer, defaulting to that persona's harness hard cap: a
+ * scheduled turn and an interactive turn share one default.
  */
-const BACKGROUND_WAKE_HARD_TIMEOUT_MS = 30 * 60 * 1000;
+export function wakeBudgetMs(
+  taskConfig: Pick<Config, "harnessHardTimeoutMs" | "tick">,
+): number {
+  const configured = taskConfig.tick?.wakeTimeoutMs;
+  return configured !== undefined && configured > 0
+    ? configured
+    : taskConfig.harnessHardTimeoutMs;
+}
 
 export function defaultTickLockPath(): string {
   return join(xdgStateHome(), "phantombot", "tick.lock");
@@ -422,6 +436,14 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
       let exitCode = 0;
       try {
         const taskConfig = await effectiveConfigFor(task.persona);
+        // #668: record the command's timeout as the claim's budget, so its
+        // stale TTL is 2× what it may legitimately run for. Before this the
+        // default 60-min command timeout EQUALLED the fixed 60-min TTL.
+        taskStore.adoptClaimPid(
+          task.id,
+          process.pid,
+          taskConfig.harnessHardTimeoutMs,
+        );
         const result = await runCommandTask(task.command!, {
           timeoutMs: taskConfig.harnessHardTimeoutMs,
           cwd: personaDir(config, task.persona),
@@ -547,8 +569,8 @@ export interface RunTaskWakeInput {
   loadPersonaConfig?: (persona: string) => Promise<Config>;
   /**
    * Override the wake's wall-clock budget (test seam). Default:
-   * {@link BACKGROUND_WAKE_HARD_TIMEOUT_MS} — the TOTAL for the wake, shared
-   * across the harness chain via the runWithFallback deadline.
+   * {@link wakeBudgetMs} of the task persona's config — the TOTAL for the
+   * wake, shared across the harness chain via the runWithFallback deadline.
    */
   wakeBudgetMs?: number;
   /**
@@ -666,9 +688,6 @@ export async function runTaskWake(
     // exemption is a task the runtime authored itself.
     const systemTask = isSystemTask(task);
     const startedAt = Date.now();
-    // One wall-clock budget across the WHOLE harness chain (#631).
-    const wakeBudgetMs = input.wakeBudgetMs ?? BACKGROUND_WAKE_HARD_TIMEOUT_MS;
-    const chainDeadlineMs = startedAt + wakeBudgetMs;
     try {
       // Resolve harness binaries against the live filesystem the same way
       // the `run` daemon does — the tick oneshot otherwise relied solely on
@@ -680,6 +699,16 @@ export async function runTaskWake(
         ({ config } = await resolveHarnessBinsForConfig(config, { err }));
       }
       const taskConfig = await effectiveConfigFor(task.persona);
+      // One wall-clock budget across the WHOLE harness chain (#631), from
+      // the task persona's config (#668). Measured from startedAt, so config
+      // and harness resolution above spend the budget rather than extend it.
+      const budgetMs = input.wakeBudgetMs ?? wakeBudgetMs(taskConfig);
+      const chainDeadlineMs = startedAt + budgetMs;
+      // Record the budget on the claim: the stale-claim TTL and doctor's
+      // claim-age warning derive from it (#668). Without this a budget above
+      // the old 30 minutes would have its LIVE claim swept as stale and the
+      // task dispatched a second time while this run is still going.
+      taskStore.adoptClaimPid(task.id, process.pid, budgetMs);
       const taskHarnesses =
         input.harnesses ??
         (input.buildHarnesses ?? buildHarnessChain)(
@@ -705,18 +734,21 @@ export async function runTaskWake(
         // #631: the wake budget is TOTAL for the wake, not per harness —
         // runWithFallback clamps every attempt's hard cap to the time left
         // before chainDeadlineMs, so a timed-out primary hands the fallback
-        // only what remains instead of a fresh 30 minutes.
-        hardTimeoutMs: wakeBudgetMs,
+        // only what remains instead of a fresh budget.
+        hardTimeoutMs: budgetMs,
         chainDeadlineMs,
         toolTimeoutMs: Math.min(
           taskConfig.harnessToolTimeoutMs ?? 1_200_000,
-          wakeBudgetMs,
+          budgetMs,
         ),
         thinkingTimeoutMs: taskConfig.harnessThinkingTimeoutMs,
         // #639: soft deadline + nudge budget come from the task persona's
         // own config layer. The chain deadline still bounds every pass —
         // runWithFallback clamps each attempt to the time REMAINING, so a
         // nudge pass inherits the leftover wake budget, never a fresh hour.
+        // #668: because the cap is the time remaining, runWithFallback also
+        // FITS this soft deadline to each attempt's cap, so the nudge fires
+        // before the kill even when the configured value exceeds the budget.
         softTimeoutMs: taskConfig.harnessSoftTimeoutMs,
         nudgeCap: taskConfig.harnessNudgeCap,
         promptCache: taskConfig.promptCache,

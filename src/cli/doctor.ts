@@ -132,7 +132,11 @@ import {
   TICK_STALE_MINUTES,
   type TimerLastFired,
 } from "../lib/timerHealth.ts";
-import { openTaskStore } from "../lib/tasks.ts";
+import {
+  DEFAULT_CLAIM_BUDGET_MS,
+  openTaskStore,
+  type TaskClaim,
+} from "../lib/tasks.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import {
   classifyCadence,
@@ -147,12 +151,15 @@ import { drawerPath } from "../memory/drawerIngest.ts";
 const CAPTURE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Wake budget for the doctor's claim-age warning (#631): a background wake
- * is capped at 30 min of wall clock (BACKGROUND_WAKE_HARD_TIMEOUT_MS in
- * cli/tick.ts); a claim older than this is either a hung runner or a stale
- * one the sweeper has not reached yet. Matched as minutes for rendering.
+ * Budget for the doctor's claim-age warning (#631, #668), in minutes: the
+ * wall-clock budget the run recorded on its own claim (a wake's
+ * `tick.wake_timeout_s`, a command task's timeout), or the pre-#668 30
+ * minutes for a claim that records none. A claim older than this is either
+ * a hung runner or a stale one the sweeper has not reached yet.
  */
-const WAKE_BUDGET_WARN_MINUTES = 30;
+function claimBudgetMinutes(claim: TaskClaim): number {
+  return Math.ceil((claim.budgetMs ?? DEFAULT_CLAIM_BUDGET_MS) / 60_000);
+}
 
 /**
  * Scheduled-task dispatch health (#631). Best-effort: an unreadable task
@@ -183,6 +190,7 @@ async function defaultTaskClaimHealth(
             description: t.description,
             persona: t.persona,
             minutes: Math.round((now - t.claim.claimedAt) / 60_000),
+            budget_minutes: claimBudgetMinutes(t.claim),
           });
         }
       }
@@ -495,6 +503,8 @@ export interface DoctorReport {
       description: string;
       persona: string;
       minutes: number;
+      /** The run's own wall-clock budget, minutes (issue #668). */
+      budget_minutes: number;
     }>;
     stale: Array<{
       id: number;
@@ -2011,8 +2021,9 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     if (nClaims > 0) {
       for (const r of taskClaims.running) {
         out.write(
-          `  scheduled tasks: ${tick(r.minutes <= WAKE_BUDGET_WARN_MINUTES)} — ` +
-            `task ${r.id} "${r.description}" (${r.persona}) claimed ${r.minutes}m ago\n`,
+          `  scheduled tasks: ${tick(r.minutes <= r.budget_minutes)} — ` +
+            `task ${r.id} "${r.description}" (${r.persona}) claimed ${r.minutes}m ago ` +
+            `(budget ${r.budget_minutes}m)\n`,
         );
       }
       for (const r of taskClaims.stale) {

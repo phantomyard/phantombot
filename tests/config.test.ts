@@ -1590,3 +1590,41 @@ max_old_space_mb = 2560
     expect((await loadConfig()).harnesses.pi.maxOldSpaceMb).toBe(2560);
   });
 });
+
+describe("loadConfig — [tick] wake_timeout_s (#668)", () => {
+  test("unset by default: the wake budget tracks the harness hard cap, no frozen copy", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.tick?.wakeTimeoutMs).toBeUndefined();
+  });
+
+  test("reads TOML seconds from the [tick] table", async () => {
+    const path = join(workdir, "config", "phantombot", "config.toml");
+    await mkdir(join(workdir, "config", "phantombot"), { recursive: true });
+    await writeFile(path, "[tick]\nwake_timeout_s = 7200\n");
+    const cfg = await loadConfig();
+    expect(cfg.tick?.wakeTimeoutMs).toBe(7_200_000);
+    // The sibling key in the same table is untouched.
+    expect(cfg.tick?.maxConcurrentWakes).toBe(1);
+  });
+
+  test("0 or negative is ignored — a hand-edit must not kill every wake at start", async () => {
+    const path = join(workdir, "config", "phantombot", "config.toml");
+    await mkdir(join(workdir, "config", "phantombot"), { recursive: true });
+    await writeFile(path, "[tick]\nwake_timeout_s = 0\n");
+    expect((await loadConfig()).tick?.wakeTimeoutMs).toBeUndefined();
+    await writeFile(path, "[tick]\nwake_timeout_s = -5\n");
+    expect((await loadConfig()).tick?.wakeTimeoutMs).toBeUndefined();
+  });
+
+  test("environment overrides TOML", async () => {
+    const path = join(workdir, "config", "phantombot", "config.toml");
+    await mkdir(join(workdir, "config", "phantombot"), { recursive: true });
+    await writeFile(path, "[tick]\nwake_timeout_s = 7200\n");
+    process.env.PHANTOMBOT_TICK_WAKE_TIMEOUT_MS = "900000";
+    try {
+      expect((await loadConfig()).tick?.wakeTimeoutMs).toBe(900_000);
+    } finally {
+      delete process.env.PHANTOMBOT_TICK_WAKE_TIMEOUT_MS;
+    }
+  });
+});
