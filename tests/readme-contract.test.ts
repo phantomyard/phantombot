@@ -14,9 +14,14 @@ const markdownPaths = [
 const pages = new Map(
   markdownPaths.map((path) => [path, readFileSync(resolve(root, path), "utf8")]),
 );
+// Contributor-facing pages are not public documentation: AGENTS.md and the
+// invariants it indexes describe internals — and name the regressions to
+// watch for — in words the public docs must never use.
+const contributorDocs =
+  /^(?:AGENTS\.md|docs\/contributing\/(?:invariants\/|repo-layout\.md))/;
 const readme = pages.get("README.md") ?? "";
 const publicDocs = [...pages]
-  .filter(([path]) => path !== "AGENTS.md")
+  .filter(([path]) => !contributorDocs.test(path))
   .map(([, body]) => body)
   .join("\n");
 
@@ -109,6 +114,92 @@ describe("public documentation contract", () => {
       expect(publicDocs, `obsolete public guidance survived: ${obsolete}`).not.toContain(
         obsolete,
       );
+    }
+  });
+});
+
+describe("contributor invariants index", () => {
+  const index = pages.get("AGENTS.md") ?? "";
+  const INVARIANTS = "docs/contributing/invariants/";
+  const areaPages = [...pages].filter(
+    ([path]) => path.startsWith(INVARIANTS) && !path.endsWith("/README.md"),
+  );
+
+  test("every invariant is filed once and indexed once, with the same number, file and title", () => {
+    const indexed = new Map<number, string>();
+    for (const m of index.matchAll(
+      /^- \[(\d+)\]\(docs\/contributing\/invariants\/([a-z-]+\.md)#inv-(\d+)\) (.+)$/gm,
+    )) {
+      const n = Number(m[1]);
+      expect(m[3], `index entry ${n} links to anchor inv-${m[3]}`).toBe(m[1]);
+      expect(indexed.has(n), `invariant ${n} is indexed twice`).toBe(false);
+      indexed.set(n, `${m[2]}: ${m[4]}`);
+    }
+    const filed = new Map<number, string>();
+    for (const [path, body] of areaPages) {
+      const file = path.slice(INVARIANTS.length);
+      const anchored = [...body.matchAll(/^<a id="inv-(\d+)"><\/a>\n### (\d+)\. (.+)$/gm)];
+      expect(
+        anchored.length,
+        `${path}: every numbered heading needs an <a id="inv-N"> anchor`,
+      ).toBe([...body.matchAll(/^### \d+\. /gm)].length);
+      for (const m of anchored) {
+        const n = Number(m[1]);
+        expect(m[2], `${path}: anchor inv-${n} sits on invariant ${m[2]}`).toBe(m[1]);
+        expect(filed.has(n), `invariant ${n} is filed twice`).toBe(false);
+        filed.set(n, `${file}: ${m[3]}`);
+      }
+    }
+    expect(filed.size).toBeGreaterThan(0);
+    const byNumber = (a: number, b: number) => a - b;
+    expect([...indexed.keys()].sort(byNumber)).toEqual([...filed.keys()].sort(byNumber));
+    for (const [n, entry] of filed) expect(indexed.get(n), `index entry for ${n}`).toBe(entry);
+  });
+
+  test("every #inv-N link lands on an anchor in the page it names", () => {
+    for (const [page, body] of pages) {
+      for (const m of body.matchAll(/\]\(([^)#\s]*)#(inv-\d+)\)/g)) {
+        const target = m[1] ? resolve(root, dirname(page), m[1]) : resolve(root, page);
+        expect(
+          readFileSync(target, "utf8").includes(`<a id="${m[2]}"></a>`),
+          `${page} links to missing ${m[1]}#${m[2]}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  test("every invariant cited by number exists", () => {
+    const known = new Set([...index.matchAll(/^- \[(\d+)\]\(/gm)].map((m) => Number(m[1])));
+    const cite = (where: string, text: string, pattern: RegExp) => {
+      for (const m of text.matchAll(pattern)) {
+        expect(known.has(Number(m[1])), `${where} cites unknown invariant ${m[1]}`).toBe(true);
+      }
+    };
+    for (const [page, body] of pages) {
+      if (page === "AGENTS.md" || page.startsWith("docs/contributing/")) {
+        cite(page, body, /\b[Ii]nvariants? (\d+)\b/g);
+      }
+    }
+    for (const dir of ["src", "tests"]) {
+      for (const path of new Bun.Glob(`${dir}/**/*.{ts,tsx}`).scanSync({ cwd: root })) {
+        cite(path, readFileSync(resolve(root, path), "utf8"), /\bAGENTS(?:\.md)? invariants? (\d+)\b/g);
+      }
+    }
+  });
+
+  test("the AGENTS.md path map names paths that exist", () => {
+    const rows = [
+      ...index.matchAll(/^\| (.+) \| \[[^\]]+\]\(docs\/contributing\/invariants\/[a-z-]+\.md\) \|$/gm),
+    ];
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      for (const span of row[1]!.matchAll(/`([^`]+)`/g)) {
+        const path = span[1]!;
+        const found = /[*{]/.test(path)
+          ? [...new Bun.Glob(path).scanSync({ cwd: root })].length > 0
+          : existsSync(resolve(root, path));
+        expect(found, `AGENTS.md path map names missing ${path}`).toBe(true);
+      }
     }
   });
 });
