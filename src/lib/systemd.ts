@@ -79,15 +79,22 @@ export const PHANTOMBOT_SERVICE_PATH =
  * `systemd-run --user` fails within about a second (issues #671/#672).
  * Cheap and side-effect-free: a file-existence probe, no process spawn.
  */
-export function userBusAvailable(): boolean {
+export function userBusAvailable(fallbackDir?: string): boolean {
   if (process.platform !== "linux") return false;
   const uid =
     typeof process.getuid === "function" ? process.getuid() : undefined;
-  const dir =
-    process.env.XDG_RUNTIME_DIR ??
-    (uid !== undefined ? join("/run/user", String(uid)) : undefined);
-  if (!dir) return false;
-  return existsSync(join(dir, "systemd", "private"));
+  // A stale or foreign XDG_RUNTIME_DIR (e.g. after `su`) must not mask a
+  // healthy bus at /run/user/<uid> — try both before answering no. The
+  // parameter is a test seam; production always probes /run/user/<uid>.
+  const realFallback =
+    fallbackDir ?? (uid !== undefined ? join("/run/user", String(uid)) : undefined);
+  const candidates = new Set<string>();
+  if (process.env.XDG_RUNTIME_DIR) candidates.add(process.env.XDG_RUNTIME_DIR);
+  if (realFallback) candidates.add(realFallback);
+  for (const dir of candidates) {
+    if (existsSync(join(dir, "systemd", "private"))) return true;
+  }
+  return false;
 }
 
 export function defaultUnitPath(): string {

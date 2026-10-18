@@ -1377,14 +1377,32 @@ describe("userBusAvailable (issues #671/#672)", () => {
     const dir = await mkdtemp(join(tmpdir(), "user-bus-"));
     try {
       process.env.XDG_RUNTIME_DIR = dir;
-      expect(userBusAvailable()).toBe(false); // scratch dir has no systemd/private
+      expect(userBusAvailable("/nonexistent-bus-fallback")).toBe(false); // scratch dir has no systemd/private
       mkdirSync(join(dir, "systemd"), { recursive: true });
       writeFileSync(join(dir, "systemd", "private"), "");
-      expect(userBusAvailable()).toBe(true);
+      expect(userBusAvailable("/nonexistent-bus-fallback")).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test(
+    "stale XDG_RUNTIME_DIR falls back to /run/user/<uid> (issues #671/#672 review)",
+    async () => {
+      if (savedPlatform !== "linux") return;
+      const dir = await mkdtemp(join(tmpdir(), "user-bus-stale-"));
+      try {
+        // env points at a dir with no bus; the seam stands in for a healthy
+        // /run/user/<uid> — the fallback must rescue the answer.
+        process.env.XDG_RUNTIME_DIR = dir;
+        mkdirSync(join(dir, "real", "systemd"), { recursive: true });
+        writeFileSync(join(dir, "real", "systemd", "private"), "");
+        expect(userBusAvailable(join(dir, "real"))).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("no XDG_RUNTIME_DIR and no /run/user/<uid> → false (no crash off-linux either)", () => {
     delete process.env.XDG_RUNTIME_DIR;

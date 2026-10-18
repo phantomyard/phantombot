@@ -2303,6 +2303,8 @@ describe("spawnWakeChild — no-user-bus refusal and closed-store safety", () =>
         err,
         taskStore: store,
         userBus: false,
+        systemdBooted: true,
+        inUnit: true,
         spawnFn: (cmd: string) => {
           spawnCalls.push(String(cmd));
           return makeFakeChild();
@@ -2325,6 +2327,8 @@ describe("spawnWakeChild — no-user-bus refusal and closed-store safety", () =>
         err,
         taskStore: store,
         userBus: true,
+        systemdBooted: true,
+        inUnit: true,
         spawnFn: (cmd: string) => {
           if (cmd === "systemd-run") {
             const c = makeFakeChild();
@@ -2354,6 +2358,8 @@ describe("spawnWakeChild — no-user-bus refusal and closed-store safety", () =>
       err,
       taskStore: store,
       userBus: true,
+      systemdBooted: true,
+      inUnit: true,
       spawnFn: () => c,
     });
     c.emit("exit", 0);
@@ -2368,6 +2374,8 @@ describe("spawnWakeChild — no-user-bus refusal and closed-store safety", () =>
       err,
       taskStore: store,
       userBus: true,
+      systemdBooted: true,
+      inUnit: true,
       spawnFn: () => c,
     });
     // runTick's finally has already closed the store; the scope exits early.
@@ -2383,6 +2391,8 @@ describe("spawnWakeChild — no-user-bus refusal and closed-store safety", () =>
       err,
       taskStore: store,
       userBus: true,
+      systemdBooted: true,
+      inUnit: true,
       spawnFn: () => {
         const c = makeFakeChild(555100 + children.length);
         children.push(c);
@@ -2402,4 +2412,110 @@ describe("spawnWakeChild — no-user-bus refusal and closed-store safety", () =>
     scoped.emit("exit", 1);
     expect(children).toHaveLength(2);
   });
+
+  test(
+    "#672 review: systemd host + no bus + tick NOT in a unit → plain spawn fires once",
+    async () => {
+      if (process.platform !== "linux") return;
+      errLines.length = 0;
+      const { store, released, adopted } = fakeStore();
+      const spawnCalls: string[] = [];
+      await spawnWakeChild(task, {
+        err,
+        taskStore: store,
+        userBus: false,
+        systemdBooted: true,
+        inUnit: false,
+        spawnFn: (cmd: string) => {
+          spawnCalls.push(String(cmd));
+          return makeFakeChild();
+        },
+      });
+      // Interactive/cron tick on a systemd box: no INVOCATION_ID, no tick
+      // unit's control group — the plain detached child survives, exactly
+      // the pre-#672 behaviour for this shape.
+      expect(spawnCalls).toHaveLength(1);
+      expect(spawnCalls[0]).not.toBe("systemd-run");
+      expect(released).toEqual([]); // claim adopted, not refused
+      expect(adopted).toHaveLength(1);
+      expect(errLines.join("\n")).not.toContain("NOT dispatched");
+    },
+  );
+
+  test(
+    "#672 review: Linux NOT systemd-booted + no bus → plain spawn (no regression on OpenRC/Alpine/WSL)",
+    async () => {
+      if (process.platform !== "linux") return;
+      const { store, released } = fakeStore();
+      const spawnCalls: string[] = [];
+      await spawnWakeChild(task, {
+        err,
+        taskStore: store,
+        userBus: false,
+        systemdBooted: false,
+        inUnit: true, // irrelevant without a boot; still plain
+        spawnFn: (cmd: string) => {
+          spawnCalls.push(String(cmd));
+          return makeFakeChild();
+        },
+      });
+      expect(spawnCalls).toHaveLength(1);
+      expect(spawnCalls[0]).not.toBe("systemd-run");
+      expect(released).toEqual([]);
+    },
+  );
+
+  test(
+    "#672 review: first no-bus refusal logs the hint, later ones stay one line",
+    async () => {
+      if (process.platform !== "linux") return;
+      errLines.length = 0;
+      const { store } = fakeStore();
+      const dedupe = { logged: false };
+      const common = {
+        err,
+        taskStore: store,
+        userBus: false,
+        systemdBooted: true,
+        inUnit: true,
+        refusalDedupe: dedupe,
+        spawnFn: () => {
+          throw new Error("no spawn expected on refusal");
+        },
+      } as const;
+      await spawnWakeChild({ id: 8, persona: "phantom" } as unknown as Task,
+        common);
+      await spawnWakeChild({ id: 9, persona: "phantom" } as unknown as Task,
+        common);
+      const joined = errLines.join("\n");
+      expect(joined.match(/loginctl enable-linger/g)).toHaveLength(1);
+      expect(joined).toContain("task 8");
+      expect(joined).toMatch(/task 9 .+NOT dispatched — no systemd user bus \(same cause as above\)/);
+      expect(dedupe.logged).toBe(true);
+    },
+  );
+
+  test(
+    "#672 review: scope exit AFTER the dispatch window is the wake's own outcome — no release, no refusal text",
+    async () => {
+      if (process.platform !== "linux") return;
+      errLines.length = 0;
+      const { store, released } = fakeStore();
+      let t = 1_000_000;
+      const c = makeFakeChild();
+      await spawnWakeChild(task, {
+        err,
+        taskStore: store,
+        userBus: true,
+        systemdBooted: true,
+        inUnit: true,
+        now: () => t,
+        spawnFn: () => c,
+      });
+      t += 5_000; // scope lived 5s: it materialised, the wake itself failed
+      c.emit("exit", 1);
+      expect(released).toEqual([]); // the wake child owns the claim now
+      expect(errLines.join("\n")).not.toContain("NOT dispatched");
+    },
+  );
 });
