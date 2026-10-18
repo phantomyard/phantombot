@@ -232,11 +232,26 @@ describe("chat scrollback", () => {
       stdin.write("\x1b[A");
       await sleep(60);
       expect(lastFrame(stdout.frames)).toContain("below");
-      // ↓ from the first row moves the cursor back down; still scrolled.
+      stdin.write("\x1b[A");
+      await sleep(60);
+      // Scrolled away: ↓ undoes ↑ line by line instead of jumping into the
+      // box — the transcript must not stay stranded (smoke test on #673).
       stdin.write("\x1b[B");
       await sleep(60);
       expect(lastFrame(stdout.frames)).toContain("below");
-      // Last row: ↓ scrolls back to the live end.
+      stdin.write("\x1b[B");
+      await sleep(60);
+      expect(lastFrame(stdout.frames)).not.toContain("below");
+      // Back at the live end, ↓ moves the cursor again: first row → second,
+      // goal column clamped to the end of "second".
+      stdin.write("\x1b[B");
+      await sleep(60);
+      expect(lastFrame(stdout.frames)).not.toContain("below");
+      stdin.write("Y");
+      await sleep(60);
+      expect(lastFrame(stdout.frames)).toContain("secondY");
+      expect(lastFrame(stdout.frames)).toContain("firstX");
+      // Last row: ↓ scrolls the transcript (already at the live end — no-op).
       stdin.write("\x1b[B");
       await sleep(60);
       expect(lastFrame(stdout.frames)).not.toContain("below");

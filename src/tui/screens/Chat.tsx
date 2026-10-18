@@ -446,8 +446,15 @@ export function ChatScreen(props: {
     // first/last row do they fall through to scrolling the transcript one
     // line; shift+↑↓ and PgUp/PgDn (above) always scroll. With a one-row box
     // — the common case — plain ↑↓ therefore scroll exactly as before.
+    // While the transcript is scrolled away from the live end, ↑↓ keep
+    // scrolling it until it is back at the bottom, so ↓ undoes ↑ instead of
+    // jumping into the box and leaving the transcript stranded.
     if (key.upArrow || key.downArrow) {
       const dir = key.upArrow ? -1 : 1;
+      if (scrollRef.current > 0) {
+        goalRef.current = undefined;
+        return scrollBy(-dir);
+      }
       const cur = inputRef.current;
       const run = goalRef.current;
       const goal = run && run.text === cur.text && run.cursor === cur.cursor ? run.goal : undefined;
