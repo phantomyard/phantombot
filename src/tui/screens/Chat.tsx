@@ -50,10 +50,12 @@ import type { Span } from "../markdown.ts";
 import { commandHints, commandName, completeCommand } from "../slash.ts";
 import {
   backspaceAtCursor,
+  cursorDown,
   cursorEnd,
   cursorHome,
   cursorLeft,
   cursorRight,
+  cursorUp,
   graphemeCount,
   insertAtCursor,
   promptRows,
@@ -284,6 +286,15 @@ export function ChatScreen(props: {
    * window was when the handler was made — wrong after any resize.
    */
   const pageRef = useRef(10);
+  /** The width the prompt box is wrapped to — a ref for the same reason as
+   *  `pageRef`: ↑↓ must walk the rows as last drawn, not as first mounted. */
+  const promptWidthRef = useRef(8);
+  /**
+   * The goal column of a run of ↑↓, valid only while the box is EXACTLY as
+   * the last vertical move left it. Any other edit or cursor move changes the
+   * text or cursor, which silently ends the run — no reset in every branch.
+   */
+  const goalRef = useRef<{ text: string; cursor: number; goal: number } | undefined>(undefined);
   const scrollBy = useCallback((rows: number) => {
     const next = Math.max(0, scrollRef.current + rows);
     scrollRef.current = next;
@@ -430,13 +441,26 @@ export function ChatScreen(props: {
       else void submit(text);
       return;
     }
+    // ↑↓ move the cursor between the box's VISUAL rows (wrapped rows count),
+    // keeping the goal column across short rows (issue #667). Only from the
+    // first/last row do they fall through to scrolling the transcript one
+    // line; shift+↑↓ and PgUp/PgDn (above) always scroll. With a one-row box
+    // — the common case — plain ↑↓ therefore scroll exactly as before.
+    if (key.upArrow || key.downArrow) {
+      const dir = key.upArrow ? -1 : 1;
+      const cur = inputRef.current;
+      const run = goalRef.current;
+      const goal = run && run.text === cur.text && run.cursor === cur.cursor ? run.goal : undefined;
+      const moved = (dir < 0 ? cursorUp : cursorDown)(cur, promptWidthRef.current, goal);
+      if (!moved) {
+        goalRef.current = undefined;
+        return scrollBy(-dir);
+      }
+      goalRef.current = { text: moved.state.text, cursor: moved.state.cursor, goal: moved.goal };
+      return void setInputValue(moved.state);
+    }
     // ←→ move the cursor inside the box — the editing primitive that was
     // missing: without it a typo could only be fixed by deleting back to it.
-    // Plain ↑↓ still scroll the transcript (one line, like PgUp/PgDn, works
-    // while a turn runs); there is no input history to walk, and vertical
-    // cursor movement inside a chat box is what ↑↓ history is FOR.
-    if (key.upArrow) return scrollBy(1);
-    if (key.downArrow) return scrollBy(-1);
     if (key.leftArrow) return void setInputValue(cursorLeft(inputRef.current));
     if (key.rightArrow) return void setInputValue(cursorRight(inputRef.current));
     // Line editing: ^a/^e move to start/end (readline muscle memory; the
@@ -512,10 +536,11 @@ export function ChatScreen(props: {
   // constant assumes ONE input row; every extra wrapped row is paid for by
   // the transcript in the same render, so a long prompt shrinks the scroll
   // region instead of pushing the footer off the screen.
+  promptWidthRef.current = Math.max(8, size.columns - 4);
   const inputRows = promptRows(
     input.text,
     input.cursor,
-    Math.max(8, size.columns - 4),
+    promptWidthRef.current,
     // The box stays LIVE during a turn (caret shown, text undimmed): typing
     // a prompt mid-turn interrupts it, so what you are typing must be
     // visible. The dim rules around it remain the "turn running" cue.

@@ -183,7 +183,7 @@ describe("chat scrollback", () => {
     }
   });
 
-  test("plain ↑/↓ scroll the transcript one line at a time", async () => {
+  test("plain ↑/↓ scroll the transcript one line at a time (one-row input)", async () => {
     // Regression: the prompt-box PR dropped these two handlers while adding
     // ←→ cursor movement — plain ↑↓ went dead and the prose claimed they
     // still scrolled. One keystroke moves exactly one line, so a turn that
@@ -205,6 +205,45 @@ describe("chat scrollback", () => {
       await sleep(80);
       expect(lastFrame(stdout.frames)).toContain("turn-19");
       expect(lastFrame(stdout.frames)).not.toContain("below");
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  test("multi-line input: ↑↓ move the cursor first, scroll only from the edge rows (#667)", async () => {
+    const { stdin, stdout, instance } = await mount();
+    try {
+      // ^J inserts a newline; the cursor ends on the second line.
+      stdin.write("first");
+      await sleep(30);
+      stdin.write("\n");
+      await sleep(30);
+      stdin.write("second");
+      await sleep(60);
+      // ↑ from row 2 moves the CURSOR to row 1 — the transcript stays put.
+      stdin.write("\x1b[A");
+      await sleep(60);
+      expect(lastFrame(stdout.frames)).not.toContain("below");
+      stdin.write("X");
+      await sleep(60);
+      // Goal column 6 clamps to the end of "first".
+      expect(lastFrame(stdout.frames)).toContain("firstX");
+      // Already on the first row: ↑ now scrolls the transcript.
+      stdin.write("\x1b[A");
+      await sleep(60);
+      expect(lastFrame(stdout.frames)).toContain("below");
+      // ↓ from the first row moves the cursor back down; still scrolled.
+      stdin.write("\x1b[B");
+      await sleep(60);
+      expect(lastFrame(stdout.frames)).toContain("below");
+      // Last row: ↓ scrolls back to the live end.
+      stdin.write("\x1b[B");
+      await sleep(60);
+      expect(lastFrame(stdout.frames)).not.toContain("below");
+      // shift+↑ always scrolls, wherever the cursor is.
+      stdin.write("\x1b[1;2A");
+      await sleep(60);
+      expect(lastFrame(stdout.frames)).toContain("below");
     } finally {
       instance.unmount();
     }
