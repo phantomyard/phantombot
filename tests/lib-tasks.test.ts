@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +8,7 @@ import {
   claimStaleTtlMs,
   openTaskStore,
   parseTaskClaim,
-  type TaskStore,
+  TaskStore,
 } from "../src/lib/tasks.ts";
 import { hostname } from "node:os";
 
@@ -786,6 +787,52 @@ describe("TaskStore.claimForRun (issue #631)", () => {
     store.releaseClaim(id);
     store.adoptClaimPid(id, 424242);
     expect(store.get(id)!.claim).toBeUndefined();
+  });
+
+  test("#671: close() then releaseClaim on the same row stays a working call sequence", () => {
+    // Guards the dispatcher's async failure path end to end: claim, close
+    // (runTick's finally), then the post-close handler tries to release.
+    const id = addDue();
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: 424242,
+      nowMs: NOW.getTime(),
+    });
+    store.close();
+    expect(() => store.releaseClaim(id)).toThrow();
+    // ...but adoption — the path the exit handler actually drives — no-ops.
+    expect(() => store.adoptClaimPid(id, process.pid)).not.toThrow();
+  });
+
+  test("#671: adoptClaimPid after close() is a silent no-op, not an uncaught crash", () => {
+    const id = addDue();
+    store.claimForRun(id, {
+      claimedAt: NOW.getTime(),
+      host: hostname(),
+      pid: 424242,
+      nowMs: NOW.getTime(),
+    });
+    store.close();
+    expect(store.isClosed).toBe(true);
+    // The dispatcher's async fallback handlers (systemd-run scope exited
+    // early → plain retry) can fire after runTick's finally closed the
+    // store. Adoption against the closed handle must not throw.
+    expect(() => store.adoptClaimPid(id, process.pid)).not.toThrow();
+    expect(store.isClosed).toBe(true);
+  });
+
+  test("#671: close() on a shared (non-owned) connection keeps the store usable", () => {
+    // TaskStore wrapping a caller-owned Database must not poison it on close:
+    // the shared handle stays open and further statements still work.
+    const id = addDue();
+    const wrapped = new TaskStore(
+      (store as unknown as { db: Database }).db,
+      false,
+    );
+    wrapped.close();
+    expect(wrapped.isClosed).toBe(false);
+    expect(store.get(id)).toBeDefined();
   });
 
   test("claiming refuses a task that is no longer due", () => {

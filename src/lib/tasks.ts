@@ -413,7 +413,22 @@ export class TaskStore {
    * Safe to call when sharing a connection — silently no-ops in that case.
    */
   close(): void {
-    if (this.ownsConnection) this.db.close();
+    if (this.ownsConnection && !this.closed) {
+      this.closed = true;
+      this.db.close();
+    }
+  }
+
+  private closed = false;
+
+  /**
+   * True once {@link close} actually closed the underlying connection —
+   * after that, further statements throw (bun: "Cannot use a closed
+   * database"). Callers in async dispatch-failure paths (issue #671) check
+   * this before touching the store, and {@link adoptClaimPid} self-guards.
+   */
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   /**
@@ -583,6 +598,10 @@ export class TaskStore {
    * it) — adoption must never resurrect a released claim.
    */
   adoptClaimPid(id: number, pid: number, budgetMs?: number): void {
+    // #671: the dispatcher's async fallback handlers can run after runTick's
+    // finally has closed the store. An adoption against a closed handle must
+    // be a no-op, not an uncaught RangeError that crashes the tick with exit 1.
+    if (this.closed) return;
     this.db.transaction(() => {
       const t = this.get(id);
       if (!t?.claim) return;

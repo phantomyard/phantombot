@@ -50,8 +50,9 @@ import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, hostname } from "node:os";
-import { spawn } from "node:child_process";
+import { spawn, type SpawnOptions } from "node:child_process";
 import { signalProcessGroup } from "../lib/processGroup.ts";
+import { userBusAvailable } from "../lib/systemd.ts";
 import { NON_INTERACTIVE_ENV } from "../lib/envBootstrap.ts";
 import { isCompiledBinary } from "../lib/embeddedPi.ts";
 import { vaultTrackedKeys } from "../lib/vault.ts";
@@ -977,12 +978,28 @@ function wakeChildEnv(persona: string): NodeJS.ProcessEnv {
 
 /**
  * Whether `systemd-run --user --scope` is worth trying for cgroup escape.
- * Optimistic on Linux: the actual spawn falls back to a plain detached child
- * if systemd-run errors, and the next tick retries via the stale-claim sweep.
+ * Linux only; the user-bus probe itself ({@link userBusAvailable}) is done
+ * per dispatch — without it the scoped path cannot work and the old plain
+ * child fallback would be killed with the tick unit (issue #672).
  */
 function systemdScopeAvailable(): boolean {
   return process.platform === "linux";
 }
+
+/**
+ * Minimal spawn shape for the {@link spawnWakeChild} seam: the real `spawn`
+ * satisfies it, and tests substitute a fake child without dragging in the
+ * full ChildProcess surface.
+ */
+type WakeSpawn = (
+  cmd: string,
+  args?: readonly string[],
+  opts?: SpawnOptions,
+) => {
+  pid?: number;
+  on(ev: string, cb: (arg?: unknown) => void): unknown;
+  unref(): void;
+};
 
 /**
  * Dispatch one agent wake as a DETACHED child process (issue #631).
@@ -997,15 +1014,31 @@ function systemdScopeAvailable(): boolean {
  * oneshot would be killed by systemd the moment the tick unit deactivates
  * (KillMode=control-group is the default) — exactly when the parent exits.
  * On launchd, Windows and non-systemd Linux a plain detached spawn survives
- * its parent, so that is the fallback there.
+ * its parent, so that is the fallback there. When the user bus is missing
+ * the dispatch is REFUSED (#672): a plain child would be killed with the
+ * unit, so claiming then spawning would only burn the wake.
  */
-async function spawnWakeChild(
+export async function spawnWakeChild(
   task: Task,
-  opts: { err: WriteSink; taskStore: TaskStore },
+  opts: {
+    err: WriteSink;
+    taskStore: TaskStore;
+    /** Test seams — default to the real spawn and bus probe. */
+    spawnFn?: WakeSpawn;
+    userBus?: boolean;
+  },
 ): Promise<void> {
   const self = tickSelfCommand();
   const args = [...self.args, "--run-task", String(task.id)];
   const env = wakeChildEnv(task.persona);
+  const doSpawn = opts.spawnFn ?? spawn;
+  const busOk = opts.userBus ?? userBusAvailable();
+
+  // Async dispatch-failure handlers fire AFTER runTick's finally has closed
+  // the task store (#671) — every store touch below must check isClosed
+  // first. A skipped adoption just leaves the claim pointing at the (now
+  // dead) dispatcher's pid; the next tick's stale sweep releases it.
+  const storeOpen = (): boolean => !opts.taskStore.isClosed;
 
   // stdio inherit: the child's structured logs (wake lifecycle, task throws)
   // land wherever the tick unit's stdout/stderr goes — the journal on
@@ -1037,14 +1070,14 @@ async function spawnWakeChild(
   let retriedPlain = false;
   const spawnPlain = (): void => {
     retriedPlain = true;
-    const plain = spawn(self.cmd, args, spawnOpts);
-    plain.on("error", (e2) => {
+    const plain = doSpawn(self.cmd, args, spawnOpts);
+    plain.on("error", (e2: unknown) => {
       // The claim stays held by THIS (now exiting) process's pid — the
       // next tick's stale-claim sweep releases it and re-dispatches.
       log.error("tick: wake child spawn failed — will retry next tick", {
         taskId: task.id,
         persona: task.persona,
-        error: e2.message,
+        error: (e2 as Error).message,
       });
     });
     adopt(plain.pid);
@@ -1063,7 +1096,26 @@ async function spawnWakeChild(
     return;
   }
 
-  const child = spawn(
+  // #672 preflight: with no user bus, `systemd-run --user` is guaranteed to
+  // fail and the old plain-child fallback was guaranteed to be killed with
+  // the tick unit (KillMode=control-group) — dispatching would only burn
+  // the claim and lose the wake in a silent loop. Refuse loudly instead:
+  // the task stays due and active, and the tick reports why it held back.
+  if (!busOk) {
+    log.error("tick: no systemd user bus — agent wake NOT dispatched", {
+      taskId: task.id,
+      persona: task.persona,
+      hint: "run `loginctl enable-linger <user>` so `systemd-run --user` has a bus",
+    });
+    opts.err.write(
+      `tick: task ${task.id} (${task.persona}) NOT dispatched — no systemd user bus for this account; ` +
+        "run `loginctl enable-linger <user>` (doctor surfaces this too)\n",
+    );
+    if (storeOpen()) opts.taskStore.releaseClaim(task.id);
+    return;
+  }
+
+  const child = doSpawn(
     "systemd-run",
     [
       "--user",
@@ -1075,33 +1127,41 @@ async function spawnWakeChild(
     ],
     spawnOpts,
   );
-  child.on("error", (e) => {
+  child.on("error", (e: unknown) => {
     // systemd-run itself failed to start (missing binary). Retry once as a
-    // plain detached child: on a systemd host it at least runs until the
-    // tick unit deactivates instead of never running at all.
+    // plain detached child: without systemd-run there is no tick unit to be
+    // killed with, so a plain spawn at least runs until the parent exits.
     if (retriedPlain) return;
     log.warn("tick: scoped wake spawn failed — retrying as plain child", {
       taskId: task.id,
       persona: task.persona,
-      error: e.message,
+      error: (e as Error).message,
     });
     spawnPlain();
   });
   child.on("exit", (code) => {
     // systemd-run SPAWNED but the scope never materialised (no user bus,
-    // transient unit refused): it exits non-zero within about a second,
-    // which is not an "error" event. Catch it here and fall back while this
-    // parent is still alive to do so; a later exit either means the wake
-    // finished (claim released by the runner) or the runner died (claim's
-    // pid is dead → the next tick sweeps and re-dispatches). Only the
-    // quick non-zero exit needs the fallback.
+    // transient unit refused): it exits non-zero within about a second.
+    // Do NOT fall back to a plain child here — under the tick oneshot it
+    // would be killed with the unit's control group before it can bootstrap
+    // (#672), losing the wake in a silent re-dispatch loop. Refuse loudly
+    // instead: the claim is released and the task stays due so the next
+    // tick (or the operator, via doctor) sees the same condition.
     if (retriedPlain || code === 0 || code === null) return;
-    log.warn("tick: systemd-run scope exited early — retrying as plain child", {
-      taskId: task.id,
-      persona: task.persona,
-      exitCode: code,
-    });
-    spawnPlain();
+    log.error(
+      "tick: systemd-run scope exited early — agent wake NOT dispatched",
+      {
+        taskId: task.id,
+        persona: task.persona,
+        exitCode: code,
+        hint: "run `loginctl enable-linger <user>` so `systemd-run --user` has a bus",
+      },
+    );
+    opts.err.write(
+      `tick: task ${task.id} (${task.persona}) NOT dispatched — systemd-run scope exited early (code ${code}); ` +
+        "run `loginctl enable-linger <user>`\n",
+    );
+    if (storeOpen()) opts.taskStore.releaseClaim(task.id);
   });
   adopt(child.pid);
   child.unref();
