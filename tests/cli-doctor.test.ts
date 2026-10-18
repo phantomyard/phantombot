@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { heartbeatStatusCommand } from "../src/lib/platform.ts";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1303,7 +1304,8 @@ describe("runDoctor per-persona maintenance coverage (#486)", () => {
     expect(out.text).toContain("phantom: ok");
     expect(out.text).toContain("kai: WARN — heartbeat never fired");
     expect(out.text).toContain("nightly 3 date(s) pending (oldest 2026-08-26)");
-    expect(out.text).toContain("phantombot-heartbeat@<persona>.timer");
+    // Host-dependent on purpose: the hint names this platform's scheduler.
+    expect(out.text).toContain(heartbeatStatusCommand("<persona>"));
   });
 
   test("a stale non-default persona drives a force-re-arm of ITS instance", async () => {

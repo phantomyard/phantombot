@@ -47,6 +47,11 @@ import type { DoctorReport } from "../cli/doctor.ts";
 import { missingHarnesses } from "../lib/harnessAvailability.ts";
 import { editorConnectorBroken } from "../connectors/acp/autoInstall.ts";
 import { humanBytes } from "./theme.ts";
+import {
+  currentPlatform,
+  heartbeatStatusCommand,
+  type Platform,
+} from "../lib/platform.ts";
 
 export type CheckState = "ok" | "warn" | "bad";
 
@@ -69,7 +74,7 @@ function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-function coreItems(r: DoctorReport): ChecklistItem[] {
+function coreItems(r: DoctorReport, platform: Platform): ChecklistItem[] {
   const items: ChecklistItem[] = [];
 
   items.push({
@@ -173,7 +178,12 @@ function coreItems(r: DoctorReport): ChecklistItem[] {
             : `fired ${t.age_minutes}m ago`,
         ...(t.stale
           ? {
-              hint: `no marker newer than ${t.threshold_minutes}m — doctor re-arms it; systemd can report a timer active while it has stopped firing`,
+              hint:
+                platform === "linux"
+                  ? `no marker newer than ${t.threshold_minutes}m — doctor re-arms it; systemd can report a timer active while it has stopped firing`
+                  : // Re-arming is the systemd repair path only (#674 follow-up):
+                    // promising it on launchd / Task Scheduler is untrue.
+                    `no marker newer than ${t.threshold_minutes}m — doctor only re-arms systemd timers; check the scheduler job (a sleeping machine also delays it)`,
             }
           : {}),
       });
@@ -226,7 +236,7 @@ function coreItems(r: DoctorReport): ChecklistItem[] {
               ? "heartbeat never fired"
               : `heartbeat ${m.heartbeat_age_minutes}m ago`
             : `nightly ${plural(m.nightly_backlog, "date")} pending`,
-          hint: `check \`systemctl --user status phantombot-heartbeat@${m.persona}.timer\``,
+          hint: `check \`${heartbeatStatusCommand(m.persona, { platform })}\``,
         });
   }
 
@@ -456,9 +466,12 @@ function integrationItems(r: DoctorReport): ChecklistItem[] {
  * box has no systemd, a headless box no editors, and a heading over nothing
  * reads as a check that failed to run.
  */
-export function doctorChecklist(r: DoctorReport): ChecklistSection[] {
+export function doctorChecklist(
+  r: DoctorReport,
+  platform: Platform = currentPlatform(),
+): ChecklistSection[] {
   return [
-    { title: "CORE", items: coreItems(r) },
+    { title: "CORE", items: coreItems(r, platform) },
     { title: "CHANNELS", items: channelItems(r) },
     { title: "INTEGRATIONS", items: integrationItems(r) },
   ].filter((s) => s.items.length > 0);

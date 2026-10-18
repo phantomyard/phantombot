@@ -25,6 +25,7 @@ import {
   restartCommand,
   sandboxServiceControl,
   selfRestart,
+  heartbeatStatusCommand,
   startCommand,
   statusCommand,
   stopCommand,
@@ -511,5 +512,25 @@ describe("syncHeartbeatInstances dispatcher (#486/#491)", () => {
     // gated identically inside defaultSyncLaunchdHeartbeatInstances.
     const result = await syncHeartbeatInstances(["lena"]);
     expect(result).toBeNull();
+  });
+});
+
+describe("heartbeatStatusCommand per platform", () => {
+  test("linux names the per-persona systemd timer", () => {
+    expect(heartbeatStatusCommand("bob", { platform: "linux" })).toBe(
+      "systemctl --user status phantombot-heartbeat@bob.timer",
+    );
+  });
+
+  test("darwin names the per-persona LaunchAgent label", () => {
+    expect(heartbeatStatusCommand("bob", { platform: "darwin" })).toBe(
+      "launchctl print gui/$(id -u)/dev.phantombot.heartbeat.bob",
+    );
+  });
+
+  test("windows names the per-persona scheduled task", () => {
+    expect(heartbeatStatusCommand("bob", { platform: "windows" })).toBe(
+      'schtasks /Query /TN "\\Phantombot\\heartbeat-bob" /V /FO LIST',
+    );
   });
 });

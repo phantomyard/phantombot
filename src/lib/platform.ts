@@ -16,6 +16,7 @@
  *   restartCommand()              — copy-pasteable command string for hint
  *                                    output ("restart with: …").
  *   statusCommand()               — same, for `status:` lines.
+ *   heartbeatStatusCommand()      — same, for one persona's heartbeat job.
  *   logsCommand()                 — same, for `view logs:` lines.
  *   currentPlatform()             — narrowed enum so callers can branch
  *                                    without touching process.platform
@@ -30,12 +31,14 @@ import {
   defaultLaunchdServiceControl,
   defaultSyncLaunchdHeartbeatInstances,
   launchdLogPaths,
+  heartbeatPlistLabelFor,
   launchdLogsDir,
 } from "./launchd.ts";
 import { log } from "./logger.ts";
 import {
   defaultSyncHeartbeatInstances as syncSystemdHeartbeatInstances,
   defaultSystemdServiceControl,
+  heartbeatInstanceTimer,
   type ServiceControl,
 } from "./systemd.ts";
 import {
@@ -351,6 +354,27 @@ export async function statusCommand(over?: HintOverrides): Promise<string> {
     case "linux":
     default:
       return "systemctl --user status phantombot";
+  }
+}
+
+/**
+ * Copy-pasteable command string for "show me this persona's heartbeat job".
+ * Doctor prints it when a heartbeat is stale; naming the systemd timer on a
+ * launchd or Task Scheduler host hands the user a command that cannot work.
+ * Synchronous: the persona is explicit, so no lookup is needed.
+ */
+export function heartbeatStatusCommand(
+  persona: string,
+  over?: Pick<HintOverrides, "platform">,
+): string {
+  switch (over?.platform ?? currentPlatform()) {
+    case "darwin":
+      return `launchctl print gui/$(id -u)/${heartbeatPlistLabelFor(persona)}`;
+    case "windows":
+      return `schtasks /Query /TN "${taskNames(persona).heartbeat}" /V /FO LIST`;
+    case "linux":
+    default:
+      return `systemctl --user status ${heartbeatInstanceTimer(persona)}`;
   }
 }
 

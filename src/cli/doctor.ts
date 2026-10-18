@@ -88,7 +88,11 @@ import {
   inspectLogDir,
   type LogDirStats,
 } from "../lib/logRotate.ts";
-import { currentPlatform, serviceLogDir } from "../lib/platform.ts";
+import {
+  currentPlatform,
+  heartbeatStatusCommand,
+  serviceLogDir,
+} from "../lib/platform.ts";
 import {
   editorConnectorBroken,
   reconcileEditorConnectors,
@@ -2060,7 +2064,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     if (stale.length > 0) {
       out.write(
         `  → ${stale.map((m) => m.persona).join(", ")}: heartbeat maintenance is behind — ` +
-          "check `systemctl --user status phantombot-heartbeat@<persona>.timer`\n",
+          `check \`${heartbeatStatusCommand("<persona>")}\`\n`,
       );
     }
   }
