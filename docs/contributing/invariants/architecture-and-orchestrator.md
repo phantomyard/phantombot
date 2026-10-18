@@ -1,6 +1,6 @@
 # Architecture and the orchestrator — contributor invariants
 
-Part of the phantombot contributor guide: the turn pipeline, prompt assembly and prompt-cache epochs, the embeddable engine. The index of every invariant is in [`/AGENTS.md`](../../../AGENTS.md). Numbers are stable identifiers — code comments and tests cite them — so a new rule takes the next free number and nothing is renumbered or reused (the one-time renumbering into 71–73 and 77 is recorded in AGENTS.md). Each rule records a real incident; a deliberate, documented trade-off is not a defect.
+Part of the phantombot contributor guide: the turn pipeline, prompt assembly and prompt-cache epochs, the embeddable engine. The index of every invariant is in [`/AGENTS.md`](../../../AGENTS.md). Numbers are stable identifiers — code comments and tests cite them — so a new rule takes the next free number and nothing is renumbered or reused (the one-time renumbering into 71–73 and 77 is recorded in AGENTS.md). Only the `### N.` headings below, each with its `inv-N` anchor, are numbered invariants; a numbered list in an intro section is prose, so never cite its item numbers. Each rule records a real incident; a deliberate, documented trade-off is not a defect.
 
 ## Architecture at a glance
 
