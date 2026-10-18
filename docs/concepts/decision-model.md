@@ -53,5 +53,6 @@ because that could send a credential to the wrong host. Provider switches do
 not carry a previous provider's model, URL, or key name forward.
 
 The decisions API is a typed contract, not a chat-completions endpoint. Exact
-wire details and regression invariants live in [AGENTS.md](../../AGENTS.md) and
-the public engine types.
+wire details and regression invariants live in the
+[security-perimeter invariants](../contributing/invariants/security-perimeter.md)
+and the public engine types.

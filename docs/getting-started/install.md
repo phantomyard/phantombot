@@ -44,7 +44,8 @@ bun run build
 ```
 
 The Linux x64 release target is deliberately `bun-linux-x64-baseline` so it
-runs on hosts without AVX2. Contributors should read [AGENTS.md](../../AGENTS.md)
+runs on hosts without AVX2. Contributors should read the
+[release invariants](../contributing/invariants/release-and-install.md)
 before changing build or release behavior.
 
 Next: [complete the first run](first-run.md).

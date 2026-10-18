@@ -64,4 +64,6 @@ controls lifecycle on every platform. The turn registry and advisory workspace
 locks coordinate separate processes without turning a stale lock into a
 permanent outage.
 
-For contributor-level module maps and invariants, read [AGENTS.md](../../AGENTS.md).
+For contributor-level module maps and invariants, read [AGENTS.md](../../AGENTS.md),
+the [repo layout](../contributing/repo-layout.md) and the
+[architecture invariants](../contributing/invariants/architecture-and-orchestrator.md).

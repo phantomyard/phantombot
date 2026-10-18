@@ -349,8 +349,9 @@ state, explicit trust, memory, harness fallback, and validated decisions. See
 
 - [`docs/README.md`](docs/README.md) — indexed guides for setup, daily use,
   operations, concepts, and the engine API.
-- [`AGENTS.md`](AGENTS.md) — contributor invariants, repository architecture,
-  and lessons written in blood.
+- [`AGENTS.md`](AGENTS.md) — the contributor guide and the index of invariants;
+  the lessons written in blood live under
+  [`docs/contributing/invariants/`](docs/contributing/invariants/README.md).
 - `phantombot <command> --help` — authoritative flags, defaults, and command
   syntax for the installed version.
 

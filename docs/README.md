@@ -66,8 +66,11 @@ New here? Start with [Install Phantombot](getting-started/install.md), then
   ranking, exports, imports, and third-party filing.
 - [Add a harness](contributing/adding-a-harness.md) — implement and register a
   new harness.
-- [AGENTS.md](../AGENTS.md) — repository invariants, testing rules, and
-  contributor workflow.
+- [AGENTS.md](../AGENTS.md) — the contributor guide: workflow, testing rules,
+  and the index of invariants.
+- [Contributor invariants](contributing/invariants/README.md) — the numbered
+  rules, one file per area; the [repo layout](contributing/repo-layout.md) is
+  the annotated source tree.
 
 For exact command syntax, use the installed version:
 

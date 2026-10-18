@@ -1,7 +1,8 @@
 # Add a harness
 
 A harness adapts a model CLI or embedded engine to Phantombot's streaming turn
-contract. Read [AGENTS.md](../../AGENTS.md) first; the watchdog, completion,
+contract. Read [AGENTS.md](../../AGENTS.md) and the
+[harness invariants](invariants/harnesses.md) first; the watchdog, completion,
 trust, environment, and failover invariants are part of the API.
 
 ## Implement the adapter
