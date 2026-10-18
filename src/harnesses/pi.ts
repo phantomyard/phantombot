@@ -44,7 +44,7 @@
 
 import { existsSync } from "node:fs";
 import { access, constants, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type {
   Harness,
   HarnessChunk,
@@ -269,24 +269,6 @@ export class PiHarness implements Harness {
       "--offline",
       "--no-session",
     ];
-    // Managed capability-routing extension (PR #606 review): the agent dir is
-    // PERSONA-scoped (nativeAgentEnv above), but the extension is stamped ONCE
-    // at the host level (lib/piExtensionProvision.ts) — so hand it to pi
-    // explicitly via `--extension` instead of stamping a copy into every
-    // persona's dir. Without this the persona child would discover no
-    // extensions at all and look_at_image would silently vanish. Only when the
-    // stamp exists: an unstamped install (no image model) has nothing to load,
-    // matching the old discovery semantics. `-e` a DIRECTORY: pi discovers the
-    // package (index.ts) inside it.
-    if (this.config.mode === "native") {
-      const managedExtDir = join(
-        nativeExtensionsDir(xdgDataHome()),
-        "capability-routing",
-      );
-      if (existsSync(managedExtDir)) {
-        baseArgs.push("--extension", managedExtDir);
-      }
-    }
     // Capability routing: pin the orchestrator model. Without this `--model`
     // the saved primary is never honored — Pi falls back to its own default
     // and the routing config is silently inert. The delegate models reach the
@@ -670,6 +652,33 @@ export class PiHarness implements Harness {
       }
     } else {
       childEnv[ENV_PHANTOMBOT_PI_COMMAND] = "";
+    }
+
+    // Managed capability-routing extension (PR #606 review, issue #674): the
+    // stamp lives once in the host-level native agent dir. Persona-scoped and
+    // ephemeral children cannot auto-discover it, so pass it explicitly via
+    // `--extension`. A persona-less local-config child DOES use that host-level
+    // agent dir, however, and Pi auto-discovers agentDir/extensions itself;
+    // passing the same directory explicitly registers look_at_image twice and
+    // aborts startup with a tool conflict. Compare against the FINAL child env
+    // rather than inferring from req.persona: relayed persona-less turns use an
+    // ephemeral dir while tier-2/local-config turns use the host-level dir.
+    if (this.config.mode === "native") {
+      const managedExtDir = join(
+        nativeExtensionsDir(xdgDataHome()),
+        "capability-routing",
+      );
+      const childAgentDir = childEnv[ENV_PI_AGENT_DIR];
+      const autoDiscoveredExtDir = childAgentDir
+        ? join(childAgentDir, "extensions", "capability-routing")
+        : undefined;
+      if (
+        existsSync(managedExtDir) &&
+        (!autoDiscoveredExtDir ||
+          resolve(managedExtDir) !== resolve(autoDiscoveredExtDir))
+      ) {
+        baseArgs.push("--extension", managedExtDir);
+      }
     }
 
     // STRIP (PR #606 review): on a RELAYED turn, remove the provider's api_key
