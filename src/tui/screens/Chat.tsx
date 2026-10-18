@@ -577,13 +577,15 @@ export function ChatScreen(props: {
   const overflowing = lines.length > rows;
   const view = transcriptWindow(lines, overflowing ? rows - 1 : rows, scroll);
   // Clamp: the conversation grows and the window resizes underneath us, so an
-  // offset that was valid a moment ago may now be past the top.
+  // offset that was valid a moment ago may now be past the top. It must also
+  // run on `scroll`: PgUp/Home at the top overshoot WITHOUT moving the visible
+  // offset, and an unclamped overshoot silently eats the next keys back down.
   useEffect(() => {
     if (view.offset !== scrollRef.current) {
       scrollRef.current = view.offset;
       setScroll(view.offset);
     }
-  }, [view.offset]);
+  }, [view.offset, scroll]);
 
   return (
     <Frame

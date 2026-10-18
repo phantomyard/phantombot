@@ -170,6 +170,46 @@ describe("chat scrollback", () => {
     }
   });
 
+  // Overscroll at the top used to be stored, not clamped: the clamp only ran
+  // when the visible offset changed, and at the top it cannot. Every key back
+  // down then just paid off the overshoot while the screen sat still — after
+  // Home (an offset of MAX_SAFE_INTEGER) the transcript was effectively stuck.
+  test("Home pressed again at the top: a single ↓ still scrolls down at once", async () => {
+    const { stdin, stdout, instance } = await mount();
+    try {
+      stdin.write(HOME);
+      await sleep(80);
+      stdin.write(HOME);
+      await sleep(80);
+      const atTop = lastFrame(stdout.frames);
+      expect(atTop).toContain("turn-00");
+      stdin.write(`${ESC}[B`);
+      await sleep(80);
+      expect(lastFrame(stdout.frames)).not.toBe(atTop);
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  test("PgUp past the top does not cost extra PgDn presses", async () => {
+    const { stdin, stdout, instance } = await mount();
+    try {
+      // Separate renders on purpose: each press lands on a screen that is
+      // already at the top, so the visible offset cannot change.
+      for (let i = 0; i < 8; i++) {
+        stdin.write(PAGE_UP);
+        await sleep(60);
+      }
+      const atTop = lastFrame(stdout.frames);
+      expect(atTop).toContain("turn-00");
+      stdin.write(PAGE_DOWN);
+      await sleep(80);
+      expect(lastFrame(stdout.frames)).not.toBe(atTop);
+    } finally {
+      instance.unmount();
+    }
+  });
+
   test("typing still works after scrolling — the keys are not swallowed", async () => {
     const { stdin, stdout, instance } = await mount();
     try {
