@@ -1,5 +1,5 @@
 /**
- * `phantombot tick` — fired every minute by phantombot-tick.timer.
+ * `phantombot tick` — fired every minute by the platform scheduler.
  *
  * Two phases, connected by per-task CLAIMS (issue #631):
  *
@@ -1439,7 +1439,7 @@ export default defineCommand({
   meta: {
     name: "tick",
     description:
-      "Fire any scheduled tasks that are due. Called every minute by phantombot-tick.timer; safe to run by hand for debugging.",
+      "Fire any scheduled tasks that are due. Called every minute by the platform scheduler (systemd timer, launchd or Task Scheduler); safe to run by hand for debugging.",
   },
   args: {
     "run-task": {

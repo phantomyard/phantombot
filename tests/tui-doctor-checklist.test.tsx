@@ -24,6 +24,7 @@ import {
   checklistVerdict,
   doctorChecklist,
 } from "../src/tui/doctorChecklist.ts";
+import type { Platform } from "../src/lib/platform.ts";
 import type { DoctorReport } from "../src/cli/doctor.ts";
 
 /** A fully healthy report for a Linux box with every optional section present. */
@@ -134,9 +135,12 @@ function healthyReport(): DoctorReport {
   };
 }
 
-const flat = (r: DoctorReport) => doctorChecklist(r).flatMap((s) => s.items);
-const item = (r: DoctorReport, label: string) =>
-  flat(r).find((i) => i.label === label);
+// Pinned to linux so the platform-specific hints are host-independent; the
+// darwin/windows shapes are asserted explicitly below.
+const flat = (r: DoctorReport, platform: Platform = "linux") =>
+  doctorChecklist(r, platform).flatMap((s) => s.items);
+const item = (r: DoctorReport, label: string, platform: Platform = "linux") =>
+  flat(r, platform).find((i) => i.label === label);
 
 describe("doctorChecklist", () => {
   test("a healthy box is all green and every check is one line", () => {
@@ -376,6 +380,28 @@ describe("doctorChecklist", () => {
     const bob = item(r, "maintenance: bob")!;
     expect(bob.state).toBe("warn");
     expect(bob.hint).toContain("phantombot-heartbeat@bob.timer");
+  });
+
+  test("stale-heartbeat hint names the job of the host's own scheduler", () => {
+    const r = healthyReport();
+    r.maintenance![1] = { persona: "bob", heartbeat_stale: true, nightly_backlog: 0 };
+    const mac = item(r, "maintenance: bob", "darwin")!.hint!;
+    expect(mac).toContain("launchctl print gui/$(id -u)/dev.phantombot.heartbeat.bob");
+    expect(mac).not.toContain("systemctl");
+    const win = item(r, "maintenance: bob", "windows")!.hint!;
+    expect(win).toContain('schtasks /Query /TN "\\Phantombot\\heartbeat-bob"');
+    expect(win).not.toContain("systemctl");
+  });
+
+  test("stale timer only promises a re-arm where doctor actually does one", () => {
+    const r = healthyReport();
+    r.timers!.heartbeat = { last_fired: "t", age_minutes: 112, stale: true, threshold_minutes: 75 };
+    expect(item(r, "heartbeat timer")!.hint).toContain("doctor re-arms it");
+    for (const p of ["darwin", "windows"] as const) {
+      const hint = item(r, "heartbeat timer", p)!.hint!;
+      expect(hint).not.toContain("doctor re-arms it");
+      expect(hint).toContain("only re-arms systemd timers");
+    }
   });
 
   test("an MCP registry that does not load is red; an empty one is only odd next to a full one", () => {

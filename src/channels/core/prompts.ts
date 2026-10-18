@@ -179,5 +179,5 @@ export function voiceUnavailableMessage(
     return "Azure Edge TTS was removed — run `phantombot voice` and choose ElevenLabs or OpenAI Compatible";
   }
   // key_missing
-  return `voice key not loaded into the service environment — run \`phantombot install\` to upgrade the systemd unit, then try again. (provider '${s.provider}', expected env var ${s.envVar})`;
+  return `voice key not loaded into the service environment — run \`phantombot install\` to refresh the service definition, then try again. (provider '${s.provider}', expected env var ${s.envVar})`;
 }
