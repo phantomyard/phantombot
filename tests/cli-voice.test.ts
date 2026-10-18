@@ -80,6 +80,53 @@ describe("applyVoiceConfig — elevenlabs", () => {
   });
 });
 
+describe("applyVoiceConfig — robot reply voice", () => {
+  const oa = {
+    baseUrl: "https://api.openai.com/v1",
+    keyEnv: "PHANTOMBOT_OPENAI_API_KEY",
+    sttModel: "whisper-1",
+    ttsModel: "tts-1",
+    voice: "nova",
+    speed: 1,
+  };
+
+  test("writes tts = robot and the robot voice", async () => {
+    await applyVoiceConfig({
+      configPath,
+      config: hostConfig,
+      voice: { provider: "openai-compatible", openaiCompatible: oa, tts: "robot", robot: { voice: "male" } },
+    });
+    const cfg = await readFile(configPath, "utf8");
+    expect(cfg).toContain('tts = "robot"');
+    expect(cfg).toContain("[voice.robot]");
+    expect(cfg).toContain('voice = "male"');
+  });
+
+  test("saving the provider voice removes a previous robot override", async () => {
+    await writeFile(
+      configPath,
+      '[voice]\nprovider = "openai-compatible"\ntts = "robot"\n\n[voice.robot]\nvoice = "female"\n',
+    );
+    await applyVoiceConfig({
+      configPath,
+      config: hostConfig,
+      voice: { provider: "openai-compatible", openaiCompatible: oa },
+    });
+    const cfg = await readFile(configPath, "utf8");
+    expect(cfg).not.toContain("tts =");
+    expect(cfg).not.toContain("[voice.robot]");
+  });
+
+  test("provider none never writes the robot override", async () => {
+    await applyVoiceConfig({
+      configPath,
+      config: hostConfig,
+      voice: { provider: "none", tts: "robot", robot: { voice: "female" } },
+    });
+    expect(await readFile(configPath, "utf8")).not.toContain("robot");
+  });
+});
+
 describe("applyVoiceConfig — OpenAI-compatible", () => {
   test("writes the endpoint block and removes the legacy OpenAI block", async () => {
     await writeFile(

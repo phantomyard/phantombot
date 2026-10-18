@@ -360,6 +360,9 @@ function describeAudioFailure(
   if (s.reason === "provider_removed") {
     return "Azure Edge TTS was removed; run `phantombot voice` to migrate";
   }
+  if (s.reason === "robot_missing") {
+    return `robot voice needs ${s.binary} on PATH`;
+  }
   return `key missing for ${s.provider} (vault key ${s.envVar})`;
 }
 

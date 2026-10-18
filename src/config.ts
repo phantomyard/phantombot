@@ -2276,6 +2276,21 @@ function asRecord(v: unknown): Record<string, unknown> {
 function buildVoiceConfig(
   tomlVoice: Record<string, unknown>,
 ): import("./lib/voice.ts").VoiceConfig {
+  const base = buildProviderVoiceConfig(tomlVoice);
+  // `[voice] tts = "robot"` swaps only the reply engine; anything else
+  // (absent, "provider", a typo) keeps the provider's own voice.
+  if (asString(tomlVoice.tts) !== "robot") return base;
+  const robot = asRecord(tomlVoice.robot);
+  return {
+    ...base,
+    tts: "robot",
+    robot: { voice: asString(robot.voice) === "male" ? "male" : "female" },
+  };
+}
+
+function buildProviderVoiceConfig(
+  tomlVoice: Record<string, unknown>,
+): import("./lib/voice.ts").VoiceConfig {
   const provider =
     (asString(tomlVoice.provider) as
       | "elevenlabs"

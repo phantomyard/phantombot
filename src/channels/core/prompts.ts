@@ -178,6 +178,9 @@ export function voiceUnavailableMessage(
   if (s.reason === "provider_removed") {
     return "Azure Edge TTS was removed — run `phantombot voice` and choose ElevenLabs or OpenAI Compatible";
   }
+  if (s.reason === "robot_missing") {
+    return `the robot voice needs \`${s.binary}\` on PATH — install it (e.g. \`sudo apt install ${s.binary}\`) or switch the reply voice back via \`phantombot voice\``;
+  }
   // key_missing
   return `voice key not loaded into the service environment — run \`phantombot install\` to upgrade the systemd unit, then try again. (provider '${s.provider}', expected env var ${s.envVar})`;
 }

@@ -41,3 +41,19 @@ If all scheduled jobs are removed, nothing remains to self-heal. Log in and run
 Windows uses the same home-relative XDG data layout as other platforms. The
 persona identity receives an owner-only ACL because it is also the root of the
 vault encryption key.
+
+## Robot voice on Windows
+
+The free robot reply voice (`[voice] tts = "robot"`, see
+[Configure voice](../how-to/voice.md)) needs eSpeak NG and ffmpeg:
+
+- **eSpeak NG**: install the `.msi` from the
+  [eSpeak NG releases](https://github.com/espeak-ng/espeak-ng/releases).
+  Installers since 1.51 (2022) add `C:\Program Files\eSpeak NG` to the system
+  `PATH`; older ones do not, so Phantombot also looks for
+  `%ProgramFiles%\eSpeak NG\espeak-ng.exe` directly.
+- **ffmpeg** with libopus must be on `PATH`; it is not searched for elsewhere.
+
+Run `phantombot restart` after installing either one: a running phantom keeps
+the `PATH` it started with.
+

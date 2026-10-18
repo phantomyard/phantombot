@@ -136,7 +136,7 @@ flowchart TD
 | `phantombot harness` | Configure native or host harnesses and fallbacks. |
 | `phantombot telegram` | Configure Telegram and its owner allowlist. |
 | `phantombot phantomchat` | Configure encrypted PhantomChat messaging. |
-| `phantombot voice` | Configure speech-to-text and text-to-speech. |
+| `phantombot voice` | Configure speech-to-text and text-to-speech, optionally with free local robot replies (espeak-ng). |
 | `phantombot ask "…"` | Run a one-shot local prompt. |
 | `phantombot acp install …` | Add Phantombot to a supported editor. |
 | `phantombot memory …` | Search, capture, inspect, back up, or restore memory. |

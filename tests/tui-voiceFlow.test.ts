@@ -266,7 +266,9 @@ function menuQuestions(
     },
     confirm: async () => true,
   } as never;
-  return { q, offered, titles };
+  // The reply-voice menu (asked after every provider) is not a voice menu.
+  const voiceMenus = () => offered.filter((o) => !o.includes("robot-female"));
+  return { q, offered, titles, voiceMenus };
 }
 
 const BASE = ["https://api.openai.com/v1", "sk-test", "whisper-1", "tts-1"];
@@ -310,7 +312,7 @@ describe("configureVoice — voice availability", () => {
   test("offers the model's live voices and spends no synthesis on them", async () => {
     let probedWith: { baseUrl: string; model: string } | undefined;
     let checks = 0;
-    const { q, offered } = menuQuestions([...BASE], (options) => options[1]);
+    const { q, voiceMenus } = menuQuestions([...BASE], (options) => options[1]);
 
     const result = await configureVoice(
       "phantom",
@@ -335,7 +337,7 @@ describe("configureVoice — voice availability", () => {
       model: "tts-1",
     });
     // Live list drives the menu, with the type-it-yourself escape last.
-    expect(offered.at(-1)).toEqual(["echo", "nova", "__other__"]);
+    expect(voiceMenus().at(-1)).toEqual(["echo", "nova", "__other__"]);
     expect(result && "voice" in result && result.voice.openaiCompatible?.voice)
       .toBe("nova");
     // Enumerated by the endpoint one moment ago: proving it again would bill
@@ -346,7 +348,7 @@ describe("configureVoice — voice availability", () => {
   test("prefers voices published on the selected model catalogue row", async () => {
     let probes = 0;
     let checks = 0;
-    const { q, offered } = menuQuestions(
+    const { q, voiceMenus } = menuQuestions(
       ["https://openrouter.ai/api/v1", "or-key"],
       (options) => {
         if (options.includes("openai/whisper-1")) return "openai/whisper-1";
@@ -378,7 +380,7 @@ describe("configureVoice — voice availability", () => {
       }),
     );
 
-    expect(offered.at(-1)).toEqual([
+    expect(voiceMenus().at(-1)).toEqual([
       "ara", "eve", "leo", "rex", "sal", "__other__",
     ]);
     expect(probes).toBe(0);
@@ -389,7 +391,7 @@ describe("configureVoice — voice availability", () => {
 
   test("falls back to the known list and PROVES the pick when the endpoint will not enumerate", async () => {
     const seen: string[] = [];
-    const { q, offered, titles } = menuQuestions([...BASE], (o) => o[0]);
+    const { q, titles, voiceMenus } = menuQuestions([...BASE], (o) => o[0]);
 
     const result = await configureVoice(
       "phantom",
@@ -406,7 +408,7 @@ describe("configureVoice — voice availability", () => {
 
     // tts-1 rejects the four gpt-4o-mini-tts-only voices, so they must not
     // be offered for it even in the offline fallback.
-    const menu = offered.at(-1) ?? [];
+    const menu = voiceMenus().at(-1) ?? [];
     for (const v of ["ballad", "cedar", "marin", "verse"])
       expect(menu).not.toContain(v);
     expect(titles.some((t) => t.includes("unverified"))).toBe(true);
@@ -474,5 +476,49 @@ describe("configureVoice — voice availability", () => {
         deps({ probeVoices: async () => ["nova"] }),
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("configureVoice — reply voice", () => {
+  function picking(reply: string | undefined) {
+    const titles: string[] = [];
+    const q: ChannelsQuestions = {
+      choose: async (input: { title: string; options: readonly { value: string }[] }) => {
+        titles.push(input.title);
+        return input.title.startsWith("Reply voice") ? reply : input.options[0]?.value;
+      },
+      value: async () => "",
+      confirm: async () => true,
+    } as never;
+    return { q, titles };
+  }
+  const elevenlabs = (q: ChannelsQuestions) =>
+    configureVoice("phantom", "elevenlabs", q, deps({
+      findCredential: async () => ({ name: "PHANTOMBOT_ELEVENLABS_API_KEY", value: "k", needsWrite: false }),
+    }));
+
+  test("robot — male sets the reply override and keeps the provider", async () => {
+    const r = await elevenlabs(picking("robot-male").q);
+    expect(r && "voice" in r && r.voice).toMatchObject({
+      provider: "elevenlabs",
+      tts: "robot",
+      robot: { voice: "male" },
+    });
+  });
+
+  test("provider voice leaves the provider's own TTS", async () => {
+    const r = await elevenlabs(picking("provider").q);
+    expect(r && "voice" in r && r.voice.tts).toBeUndefined();
+  });
+
+  test("backing out of the reply question writes nothing", async () => {
+    expect(await elevenlabs(picking(undefined).q)).toBeUndefined();
+  });
+
+  test("provider none is never offered the robot", async () => {
+    const { q, titles } = picking("robot-female");
+    const r = await configureVoice("phantom", "none", q, deps());
+    expect(r && "voice" in r && r.voice).toEqual({ provider: "none" });
+    expect(titles.some((t) => t.startsWith("Reply voice"))).toBe(false);
   });
 });

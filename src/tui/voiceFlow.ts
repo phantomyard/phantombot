@@ -25,6 +25,7 @@ import {
   OTHER_VOICE,
   type OpenAIVoiceCheck,
   type OpenAIAudioModelOption,
+  ROBOT_VOICE_DEFAULT,
   type VoiceConfig,
   type VoiceProvider,
 } from "../lib/voice.ts";
@@ -90,6 +91,51 @@ export interface VoiceFlowRejected {
  * `{ rejected }` means a live check failed and nothing was written.
  */
 export async function configureVoice(
+  persona: string,
+  provider: VoiceProvider,
+  q: ChannelsQuestions,
+  deps: VoiceFlowDeps,
+): Promise<VoiceFlowResult | VoiceFlowRejected | undefined> {
+  const result = await configureProviderVoice(persona, provider, q, deps);
+  if (!result || "rejected" in result || result.voice.provider === "none") return result;
+  return askReplyVoice(persona, result, q, deps.existing);
+}
+
+/**
+ * Who speaks the replies: the provider just configured, or the local robot
+ * (espeak-ng). Asked only after a provider that hears was set up, so the
+ * robot can never be picked as a half voice loop (#618).
+ */
+export async function askReplyVoice(
+  persona: string,
+  result: VoiceFlowResult,
+  q: ChannelsQuestions,
+  existing?: VoiceConfig,
+): Promise<VoiceFlowResult | undefined> {
+  const current = existing?.tts === "robot"
+    ? `robot-${existing.robot?.voice ?? ROBOT_VOICE_DEFAULT}`
+    : "provider";
+  const pick = await q.choose({
+    title: `Reply voice for ${persona}`,
+    description: "voice notes are still transcribed by the provider above",
+    options: [
+      { value: "provider", label: "Provider voice", hint: "the voice configured above" },
+      { value: "robot-female", label: "Robot — female", hint: "free · local espeak-ng" },
+      { value: "robot-male", label: "Robot — male", hint: "free · local espeak-ng" },
+    ],
+    initial: current,
+  });
+  if (pick === undefined) return undefined;
+  if (pick === "provider") return result;
+  const voice = pick === "robot-male" ? "male" : "female";
+  return {
+    ...result,
+    voice: { ...result.voice, tts: "robot", robot: { voice } },
+    summary: `${result.summary} · replies: robot ${voice}`,
+  };
+}
+
+async function configureProviderVoice(
   persona: string,
   provider: VoiceProvider,
   q: ChannelsQuestions,

@@ -54,6 +54,32 @@ export interface AzureEdgeVoice {
 }
 
 /**
+ * Which engine speaks replies. `provider` (the default) is the configured
+ * voice provider; `robot` synthesises locally with espeak-ng — free and
+ * offline. Robot is a REPLY override only: it never hears, so incoming voice
+ * notes still need a provider that transcribes (see `providerHearsVoice`),
+ * and with provider `none` the override is inert rather than a half loop.
+ */
+export type ReplyVoiceEngine = "provider" | "robot";
+
+export type RobotVoiceName = "female" | "male";
+
+export interface RobotVoice {
+  voice: RobotVoiceName;
+}
+
+/** espeak-ng variant, words per minute and pitch (0..99) per robot voice. */
+export const ROBOT_VOICE_PRESETS: Record<
+  RobotVoiceName,
+  { variant: string; wpm: number; pitch: number }
+> = {
+  female: { variant: "f3", wpm: 145, pitch: 55 },
+  male: { variant: "m3", wpm: 130, pitch: 30 },
+};
+
+export const ROBOT_VOICE_DEFAULT: RobotVoiceName = "female";
+
+/**
  * Default bound on the voice download + transcribe step. A voice note is
  * short, so the round trip should complete well within this. The cap exists
  * so a hung STT request can't stall the per-chat queue forever (GitHub #135).
@@ -65,6 +91,10 @@ export interface VoiceConfig {
   elevenlabs?: ElevenLabsVoice;
   openaiCompatible?: OpenAICompatibleVoice;
   azure_edge?: AzureEdgeVoice;
+  /** Reply engine; absent means `provider`. */
+  tts?: ReplyVoiceEngine;
+  /** Robot voice settings; read only when `tts` is `robot`. */
+  robot?: RobotVoice;
   /**
    * Upper bound (ms) on the combined download+transcribe step before it is
    * abandoned so the per-chat queue can advance. When unset, callers fall

@@ -49,6 +49,7 @@ import {
   validateElevenLabsKey,
   validateOpenAICompatibleKey,
   validateOpenAIVoice,
+  ROBOT_VOICE_DEFAULT,
 } from "../lib/voice.ts";
 import { maybePromptRestart } from "./harness.ts";
 
@@ -77,6 +78,14 @@ export async function applyVoiceConfig(input: ApplyVoiceInput): Promise<void> {
       // save must not carry them forward indefinitely.
       delete (voiceToml as Record<string, unknown>).openai;
       delete (voiceToml as Record<string, unknown>).azure_edge;
+      // The reply override is rewritten on every save: dropped unless this
+      // save picked the robot, so switching back never leaves it behind.
+      delete (voiceToml as Record<string, unknown>).tts;
+      delete (voiceToml as Record<string, unknown>).robot;
+    }
+    if (input.voice.tts === "robot" && input.voice.provider !== "none") {
+      setIn(toml, ["voice", "tts"], "robot");
+      setIn(toml, ["voice", "robot", "voice"], input.voice.robot?.voice ?? ROBOT_VOICE_DEFAULT);
     }
     if (input.voice.provider === "elevenlabs" && input.voice.elevenlabs) {
       const e = input.voice.elevenlabs;
@@ -400,12 +409,19 @@ async function runElevenLabsFlow(
     return 0;
   }
 
+  const reply = await askReplyVoicePrompt(existing);
+  if (!reply) {
+    p.cancel("cancelled");
+    return 0;
+  }
+
   await applyVoiceConfig({
     configPath: voiceConfigPath,
     config,
     persona,
     apiKey: key as string,
     voice: {
+      ...reply,
       provider: "elevenlabs",
       elevenlabs: {
         voiceId: (voiceId as string) || cur.voiceId,
@@ -613,6 +629,12 @@ async function runOpenAICompatibleFlow(
     checkSpinner.stop(`${voice} accepted by ${ttsModelName}`);
   }
 
+  const reply = await askReplyVoicePrompt(existing);
+  if (!reply) {
+    p.cancel("cancelled");
+    return 0;
+  }
+
   await applyVoiceConfig({
     configPath: voiceConfigPath,
     config,
@@ -622,6 +644,7 @@ async function runOpenAICompatibleFlow(
         ? undefined
         : key,
     voice: {
+      ...reply,
       provider: "openai-compatible",
       openaiCompatible: {
         baseUrl,
@@ -683,7 +706,37 @@ async function askOpenAIAudioModel(
   return p.isCancel(typed) ? undefined : String(typed).trim();
 }
 
+/**
+ * Prompt-path twin of the TUI's askReplyVoice: provider voice or the local
+ * robot. `undefined` means cancelled.
+ */
+async function askReplyVoicePrompt(
+  existing: VoiceConfig,
+): Promise<Pick<VoiceConfig, "tts" | "robot"> | undefined> {
+  const pick = await p.select<"provider" | "robot-female" | "robot-male">({
+    message: "Reply voice",
+    options: [
+      { value: "provider", label: "Provider voice", hint: "the voice configured above" },
+      { value: "robot-female", label: "Robot — female", hint: "free · local espeak-ng" },
+      { value: "robot-male", label: "Robot — male", hint: "free · local espeak-ng" },
+    ],
+    initialValue: existing.tts === "robot"
+      ? existing.robot?.voice === "male" ? "robot-male" : "robot-female"
+      : "provider",
+  });
+  if (p.isCancel(pick)) return undefined;
+  if (pick === "provider") return {};
+  return { tts: "robot", robot: { voice: pick === "robot-male" ? "male" : "female" } };
+}
+
 function formatExistingDetails(v: VoiceConfig): string {
+  const details = formatProviderDetails(v);
+  return v.tts === "robot"
+    ? `${details}\nreplies:   robot (${v.robot?.voice ?? ROBOT_VOICE_DEFAULT}, local espeak-ng)`
+    : details;
+}
+
+function formatProviderDetails(v: VoiceConfig): string {
   if (v.provider === "elevenlabs" && v.elevenlabs) {
     return `voice id:  ${v.elevenlabs.voiceId}\nmodel:     ${v.elevenlabs.modelId}`;
   }
@@ -705,7 +758,7 @@ export default defineCommand({
   meta: {
     name: "voice",
     description:
-      "Configure TTS / STT provider (ElevenLabs / OpenAI Compatible). Validates the API key before saving.",
+      "Configure TTS / STT provider (ElevenLabs / OpenAI Compatible), optionally with free local robot replies (espeak-ng). Validates the API key before saving.",
   },
   args: {
     persona: {

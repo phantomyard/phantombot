@@ -207,6 +207,34 @@ describe("loadConfig — defaults (no file)", () => {
   });
 });
 
+describe("loadConfig — robot reply voice", () => {
+  async function load(toml: string) {
+    const dir = join(workdir, "config", "phantombot");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "config.toml"), toml);
+    return (await loadConfig()).voice;
+  }
+  const provider =
+    '[voice]\nprovider = "openai-compatible"\n%TTS%\n' +
+    '[voice.openai_compatible]\nbase_url = "https://api.openai.com/v1"\n';
+
+  test("tts = robot with a male voice", async () => {
+    const v = await load(provider.replace("%TTS%", 'tts = "robot"\n') + '\n[voice.robot]\nvoice = "male"\n');
+    expect(v.tts).toBe("robot");
+    expect(v.robot).toEqual({ voice: "male" });
+  });
+
+  test("robot voice defaults to female", async () => {
+    const v = await load(provider.replace("%TTS%", 'tts = "robot"\n'));
+    expect(v.robot).toEqual({ voice: "female" });
+  });
+
+  test("absent or unknown tts keeps the provider's voice", async () => {
+    expect((await load(provider.replace("%TTS%", ""))).tts).toBeUndefined();
+    expect((await load(provider.replace("%TTS%", 'tts = "robott"\n'))).tts).toBeUndefined();
+  });
+});
+
 describe("loadConfig — OpenAI-compatible voice migration", () => {
   test("reads the new endpoint-based block with independent models", async () => {
     const dir = join(workdir, "config", "phantombot");
