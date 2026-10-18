@@ -2107,6 +2107,43 @@ describe("PiHarness native vs pi-host (subprocess)", () => {
     }
   });
 
+  test("relayed persona-less native turn explicitly loads the managed extension", async () => {
+    // Relayed turns use an ephemeral agent dir even without a persona. Pi
+    // cannot auto-discover the host-level stamp from there, so the extension
+    // must still be passed explicitly.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-managed-ext-relay-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const managed = join(
+      workdir,
+      "xdg",
+      "pi-native",
+      "agent",
+      "extensions",
+      "capability-routing",
+    );
+    await mkdir(managed, { recursive: true });
+    await writeFile(join(managed, "index.ts"), "// managed stub\n");
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test";
+    try {
+      const chunks = await collect(
+        new PiHarness({
+          bin: FAKE_PI,
+          mode: "native",
+          command: [FAKE_PI],
+          routing: { provider: "openrouter", primaryModel: "model-a" },
+        }).invoke(newRequest()),
+      );
+      expect(argvOf(chunks)).toContain(`--extension ${managed}`);
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
   test("native with NO stamped managed extension passes no --extension flag", async () => {
     // An unstamped install (no image model) has nothing to load — matching
     // the old discovery semantics, and never an error for a missing path.
