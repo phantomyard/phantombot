@@ -212,7 +212,8 @@ For the storage model and lifecycle details, see
 - **Telegram** — text, voice, groups, attachments, and notifications.
 - **VS Code, Zed, and JetBrains** — the same persona through ACP, with editor
   workspace context.
-- **Terminal** — interactive TUI, plain REPL, or one-shot `ask` calls.
+- **Terminal** — interactive TUI with Emacs-style editing
+  ([keys](docs/reference/tui-keys.md)), plain REPL, or one-shot `ask` calls.
 
 Multiple personas can run inside one daemon. Each has isolated identity,
 memory, channels, harness settings, and credentials.

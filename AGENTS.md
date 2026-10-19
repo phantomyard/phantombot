@@ -201,6 +201,7 @@ One line per rule: its stable number, then its title. Click through for the full
 - [75](docs/contributing/invariants/cli-tui-and-wizards.md#inv-75) The TUI creation wizard is transactional from the user's perspective.
 - [76](docs/contributing/invariants/cli-tui-and-wizards.md#inv-76) Settings snapshots must preserve config-layer provenance.
 - [77](docs/contributing/invariants/cli-tui-and-wizards.md#inv-77) ↑↓ in the chat prompt walk the rows AS DRAWN, and only the edge rows scroll (issue #667).
+- [78](docs/contributing/invariants/cli-tui-and-wizards.md#inv-78) The chat prompt's Emacs keys are matched on what Ink reports, never on the characters macOS types for Option (issue #677).
 
 ### Testing — [testing.md](docs/contributing/invariants/testing.md)
 
