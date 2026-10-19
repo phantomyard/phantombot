@@ -72,6 +72,31 @@ export const PHANTOMBOT_SERVICE_PATH =
   "%h/.local/bin:" +
   "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/**
+ * Whether the calling account's systemd USER manager is reachable — the bus
+ * `systemd-run --user` talks to. Its private socket exists only while a user
+ * manager runs for this uid (via linger or an active session); without it
+ * `systemd-run --user` fails within about a second (issues #671/#672).
+ * Cheap and side-effect-free: a file-existence probe, no process spawn.
+ */
+export function userBusAvailable(fallbackDir?: string): boolean {
+  if (process.platform !== "linux") return false;
+  const uid =
+    typeof process.getuid === "function" ? process.getuid() : undefined;
+  // A stale or foreign XDG_RUNTIME_DIR (e.g. after `su`) must not mask a
+  // healthy bus at /run/user/<uid> — try both before answering no. The
+  // parameter is a test seam; production always probes /run/user/<uid>.
+  const realFallback =
+    fallbackDir ?? (uid !== undefined ? join("/run/user", String(uid)) : undefined);
+  const candidates = new Set<string>();
+  if (process.env.XDG_RUNTIME_DIR) candidates.add(process.env.XDG_RUNTIME_DIR);
+  if (realFallback) candidates.add(realFallback);
+  for (const dir of candidates) {
+    if (existsSync(join(dir, "systemd", "private"))) return true;
+  }
+  return false;
+}
+
 export function defaultUnitPath(): string {
   return join(homedir(), ".config", "systemd", "user", PHANTOMBOT_UNIT_NAME);
 }
