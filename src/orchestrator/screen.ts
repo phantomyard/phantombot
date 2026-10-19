@@ -45,6 +45,11 @@
  *        - `phantombot notify` opens a CONVERSATION on Telegram (in CODE):
  *          what arrived, why it tripped, and the concern to weigh —
  *          phrased to be talked through, not answered yes/no.
+ *        - A hold from a screen NOBODY ANSWERED is notification-batched
+ *          (issue #665): at most one such alert per window per persona,
+ *          carrying the count of holds it stands for. The holds themselves
+ *          are still recorded and grounded, one per turn — only the ping is
+ *          batched. See lib/holdNotifyWindow.ts.
  *        - GROUNDING WRITE (the crux fix, concern D+E): the held episode is
  *          written into the PRINCIPAL'S telegram conversation(s) — NOT the
  *          untrusted entry point's. See recordHeld below for why.
@@ -147,6 +152,11 @@ import {
   decisionModelJudgeThreat,
 } from "../lib/decisionModelJudge.ts";
 import { recordDecisionModelOutcome } from "../lib/decisionModelHealth.ts";
+import {
+  noteScreeningReachable,
+  recordOutageHold,
+  type OutageHoldDecision,
+} from "../lib/holdNotifyWindow.ts";
 import { runNotify } from "../cli/notify.ts";
 import type { DrawerKind } from "../memory/drawers.ts";
 import { drawerPath } from "../memory/drawerIngest.ts";
@@ -435,6 +445,16 @@ export function makeScreener(
       });
     });
 
+  // The outage-hold notification ledger's home (issue #665). An unresolvable
+  // persona dir (degenerate config) ⇒ batching off and every hold notifies,
+  // the pre-#665 behaviour — fail toward pinging.
+  let holdLedgerDir: string | undefined;
+  try {
+    holdLedgerDir = personaDir(config, persona);
+  } catch {
+    holdLedgerDir = undefined;
+  }
+
   // The optional Jev screener (issue #597). Engaged only when the operator
   // configured [jev], enabled the JUDGE consumer, and a key resolved — an
   // unconfigured user takes the harness-judge path below untouched. Never
@@ -682,6 +702,14 @@ export function makeScreener(
       };
     }
 
+    // Screening ANSWERED — a real verdict or a judge that responded without
+    // a scoreable one. Close an open outage streak so the first hold of the
+    // next outage alerts immediately again (issue #665). A cancelled screen
+    // returned above and never touches the ledger.
+    if (!screeningUnavailable && holdLedgerDir) {
+      await noteScreeningReachable(holdLedgerDir);
+    }
+
     const v = result.verdict;
     if (v.score < holdThreshold) {
       return { action: "pass", score: v.score, reason: v.reason };
@@ -702,12 +730,18 @@ export function makeScreener(
         ? v.question.trim()
         : "I'm not sure this is safe to act on — can we talk it through?";
     const preview = content.replace(/\s+/g, " ").trim().slice(0, 280);
-    const notifyMessage =
+    // The notification for this hold. `count` is the batch size an outage
+    // alert stands for (issue #665); an ordinary hold always goes out alone.
+    const buildNotifyMessage = (count: number): string =>
       (screeningUnavailable
-        ? "🔒 I held an untrusted request because I could not screen it — nothing was done.\n"
-        : `🔒 I held an untrusted request (threat ${v.score}/100) — nothing was done.\n`) +
+        ? count > 1
+          ? `🔒 Screening was unavailable: I held ${count} untrusted requests since my last alert. Nothing was done.\n`
+          : "🔒 I held an untrusted request because I could not screen it. Nothing was done.\n"
+        : `🔒 I held an untrusted request (threat ${v.score}/100). Nothing was done.\n`) +
       `Why: ${v.reason}\n` +
-      `What it asked: "${preview}"\n` +
+      (count > 1
+        ? `What the latest one asked: "${preview}"\n`
+        : `What it asked: "${preview}"\n`) +
       `${concern}`;
 
     try {
@@ -731,11 +765,50 @@ export function makeScreener(
     //    row in the principal's conversation. runNotify persists the notify
     //    message into the same conversation (single writer, #381), closing
     //    the episode with safe, truncated text rather than raw payload.
-    try {
-      const code = await notify(notifyMessage);
-      if (code !== 0) log.warn(`screen: notify exited ${code} for held request`);
-    } catch (e) {
-      log.warn(`screen: notify failed for held request: ${(e as Error).message}`);
+    //
+    //    OUTAGE HOLDS ARE BATCHED (issue #665): at most one notification per
+    //    window per persona, its header carrying the count of holds it stands
+    //    for. Every hold was still grounded above and stays recoverable —
+    //    only the ping is batched. A suppressed hold still closes its episode
+    //    with a short assistant row (same ordering contract as runNotify's
+    //    row, quarantined so it is never indexed), so the raw payload is never
+    //    the closing row before the principal's reply. Ledger trouble fails
+    //    TOWARD notifying.
+    const batch: OutageHoldDecision =
+      screeningUnavailable && holdLedgerDir
+        ? await recordOutageHold(holdLedgerDir).catch(
+            (): OutageHoldDecision => ({ notify: true, count: 1 }),
+          )
+        : { notify: true, count: 1 };
+    if (batch.notify) {
+      try {
+        const code = await notify(buildNotifyMessage(batch.count));
+        if (code !== 0) log.warn(`screen: notify exited ${code} for held request`);
+      } catch (e) {
+        log.warn(`screen: notify failed for held request: ${(e as Error).message}`);
+      }
+    } else {
+      log.info("screen: outage-hold notification suppressed (batched)", {
+        standsFor: batch.count,
+      });
+      try {
+        for (const conversation of principalConversations(config, persona)) {
+          await memory.appendTurn({
+            persona,
+            conversation,
+            role: "assistant",
+            text:
+              "🔒 Held without screening (judge outage): counted into the " +
+              "next summary alert. Nothing was done.",
+            embeddable: false,
+            origin: "notification",
+          });
+        }
+      } catch (e) {
+        log.warn(
+          `screen: batched-hold closing row failed: ${(e as Error).message}`,
+        );
+      }
     }
 
     return {
