@@ -27,9 +27,11 @@
  * other persona's turns: a relayed turn's strip deleted a sibling's tier-2
  * fallback, one persona's oauth login aborted every other persona's relayed
  * turns, and last-onboarded silently won billing. Each persona now resolves
- * (and strips) only its own store; the managed extension is handed to the
- * child explicitly via pi's `--extension` flag, so it stays stamped ONCE at
- * the host level (piExtensionProvision) instead of per persona.
+ * (and strips) only its own store; the managed extension is handed to isolated
+ * children explicitly via pi's `--extension` flag, so it stays stamped ONCE at
+ * the host level (piExtensionProvision) instead of per persona. A persona-less
+ * child using the host-level agent dir auto-discovers that same stamp, so the
+ * explicit flag is omitted there (issue #674).
  *
  * The LEGACY host-level dir (`<root>/agent`) is now the migration source
  * (plus the agent dir for a bare persona-less NON-relayed `phantombot __pi`
@@ -541,10 +543,10 @@ export function nativeAuthPath(
 }
 
 /** Managed extension dir. Deliberately HOST-level even for persona dirs: the
- * extension is stamped once (piExtensionProvision) and handed to each persona
- * child explicitly via pi's `--extension` flag (harnesses/pi.ts) — the child's
- * persona-scoped agent dir carries only its OWN auth, never a copy of the
- * managed stamp. */
+ * extension is stamped once (piExtensionProvision) and handed to isolated
+ * children explicitly via pi's `--extension` flag (harnesses/pi.ts) — the
+ * child's persona-scoped agent dir carries only its OWN auth, never a copy of
+ * the managed stamp. A child already rooted here auto-discovers it instead. */
 export function nativeExtensionsDir(dataHome: string = xdgDataHome()): string {
   return join(nativeAgentDir(dataHome), "extensions");
 }
