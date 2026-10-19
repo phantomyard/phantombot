@@ -29,6 +29,10 @@
  *     hold plus everything counted since the last successful delivery. Carried
  *     across an outage boundary so a batch's tail is never dropped silently;
  *     the next delivered alert reports it.
+ *   - `coveredHolds`: high-water mark of holds covered by DELIVERED alerts
+ *     (monotonic). Settlement advances it to the decision's cumulative
+ *     `covers` and subtracts only the advance, so overlapping deliveries
+ *     can never double-count a hold in EITHER settle order.
  *   - `alertSeq` — the last alert generation handed out. Every notify
  *     decision bumps it and gets its seq back; settlement names the seq it
  *     settles, so a late success can never erase a NEWER failure (see below).
@@ -42,13 +46,15 @@
  *
  *   1. `recordOutageHold` decides, anchors the window and hands out the seq.
  *   2. AFTER delivery the caller settles with that seq:
- *      `confirmAlertDelivered(seq, count)` covers `count` holds and clears a
- *      failure marker no newer than seq; `noteAlertDeliveryFailed(seq)`
- *      keeps the count pending and marks the retry. Settles land out of
- *      order under overlapping deliveries, which is exactly what the seq
- *      accounting is for: an older success subtracts its count but cannot
- *      clear a newer failure, and a failure a newer delivered alert already
- *      covered is ignored.
+ *      `confirmAlertDelivered(seq, covers)` covers the holds through the
+ *      decision's cumulative `covers` and clears a failure marker no newer
+ *      than seq; `noteAlertDeliveryFailed(seq)` keeps the count pending and
+ *      marks the retry. Settles land out of order under overlapping
+ *      deliveries, which is exactly what the seq and coveredHolds accounting
+ *      is for: an older success covers only what no delivered alert covered
+ *      yet (it cannot clear a newer failure, nor erase holds counted since a
+ *      newer alert's decision), and a failure a newer delivered alert
+ *      already covered is ignored.
  *
  * Deliberate properties:
  *   - FAIL TOWARD NOTIFYING. Reads are best-effort: a corrupt or unreadable
@@ -84,6 +90,12 @@ export interface HoldNotifyState {
   lastNotifiedAt?: string;
   /** Outage holds not yet covered by a delivered alert. */
   suppressed: number;
+  /**
+   * High-water mark of holds covered by delivered alerts (monotonic).
+   * A successful settle subtracts only `covers - coveredHolds` from
+   * `suppressed`, so an overlapping settle can never double-count.
+   */
+  coveredHolds?: number;
   /** Last alert generation handed out (bumped on every notify decision). */
   alertSeq?: number;
   /** Highest generation whose delivery failed, not yet covered. */
@@ -104,6 +116,13 @@ export interface OutageHoldDecision {
    * notifies without settling, since nothing was recorded to settle).
    */
   seq?: number;
+  /**
+   * Cumulative count of outage holds covered once this alert delivers
+   * (present with `seq`). Settle with THIS, not `count`: under overlapping
+   * deliveries `count` also stands for holds an older in-flight alert
+   * covers, and settlement must only cover what is not already covered.
+   */
+  covers?: number;
 }
 
 export function holdNotifyPath(personaDir: string): string {
@@ -127,6 +146,7 @@ export async function loadHoldNotifyState(
   try {
     const parsed = JSON.parse(await readFile(p, "utf8")) as HoldNotifyState;
     if (!parsed || typeof parsed !== "object") return { ...EMPTY };
+    const coveredHolds = positiveInt(parsed.coveredHolds);
     const alertSeq = positiveInt(parsed.alertSeq);
     const failedSeq = positiveInt(parsed.failedSeq);
     const settledSeq = positiveInt(parsed.settledSeq);
@@ -137,6 +157,7 @@ export async function loadHoldNotifyState(
           ? Math.max(0, Math.floor(parsed.suppressed))
           : 0,
       ...(parsed.lastNotifiedAt ? { lastNotifiedAt: parsed.lastNotifiedAt } : {}),
+      ...(coveredHolds !== undefined ? { coveredHolds } : {}),
       ...(alertSeq !== undefined ? { alertSeq } : {}),
       ...(failedSeq !== undefined ? { failedSeq } : {}),
       ...(settledSeq !== undefined ? { settledSeq } : {}),
@@ -203,9 +224,9 @@ async function writeState(
  *
  * The window anchor is written WITH the decision, so a hold racing an
  * in-flight delivery batches instead of double-pinging. A notify decision
- * bumps `alertSeq` and returns it; the caller settles with that seq after
- * delivery (confirmAlertDelivered / noteAlertDeliveryFailed). A decided
- * retry consumes the failure marker: the in-flight alert IS the retry, and a
+ * bumps `alertSeq` and returns it plus its cumulative `covers`; the caller
+ * settles with that pair after delivery (confirmAlertDelivered /
+ * noteAlertDeliveryFailed). A decided retry consumes the failure marker: the in-flight alert IS the retry, and a
  * failed retry re-marks it with its own (higher) seq.
  *
  * Write failures reject: uncertainty returns control to a caller that fails
@@ -234,39 +255,56 @@ export async function recordOutageHold(
     }
 
     const seq = (state.alertSeq ?? 0) + 1;
+    const coveredHolds = state.coveredHolds ?? 0;
     await writeState(personaDir, {
       outageOngoing: true,
       suppressed: count,
       lastNotifiedAt: now.toISOString(),
       alertSeq: seq,
+      ...(coveredHolds > 0 ? { coveredHolds } : {}),
       ...(state.settledSeq !== undefined ? { settledSeq: state.settledSeq } : {}),
     });
-    return { notify: true, count, seq };
+    return { notify: true, count, seq, covers: coveredHolds + count };
   });
 }
 
 /**
- * The alert with generation `seq` went out (exit code 0): cover the `count`
- * holds it stood for. Only then does the window commit; until this call the
- * count stays pending, so a delivery that failed is retried by the next hold.
+ * The alert with generation `seq` went out (exit code 0): cover the holds it
+ * stood for. Only then does the window commit; until this call the count
+ * stays pending, so a delivery that failed is retried by the next hold.
  *
- * Settlement is seq-aware because settles can land out of order under
- * overlapping deliveries: an OLDER success subtracts its count but must not
- * clear a NEWER failure's retry marker.
+ * `covers` is the DECISION's cumulative total (OutageHoldDecision.covers),
+ * not its `count`. Settlement is a high-water mark: it advances `coveredHolds`
+ * to `covers` and subtracts only the advance from `suppressed`, so overlapping
+ * deliveries settle safely in EITHER order: an older late success never
+ * double-subtracts a count a newer alert folded in (which would erase holds
+ * counted since), and a newer settle never re-subtracts what an older settle
+ * already covered. A settle for an older generation than one already settled
+ * is moot (its holds went out inside the newer alert's count) and does not
+ * write at all.
  */
 export async function confirmAlertDelivered(
   personaDir: string,
   seq: number,
-  count: number,
+  covers: number,
 ): Promise<void> {
   return runExclusive(personaDir, async () => {
     const state = await loadHoldNotifyState(personaDir);
+    if (seq <= (state.settledSeq ?? 0)) return;
+    const covered = Math.max(
+      state.coveredHolds ?? 0,
+      Math.max(0, Math.floor(covers)),
+    );
     const next: HoldNotifyState = {
       outageOngoing: state.outageOngoing,
-      suppressed: Math.max(0, state.suppressed - Math.max(0, Math.floor(count))),
+      suppressed: Math.max(
+        0,
+        state.suppressed - (covered - (state.coveredHolds ?? 0)),
+      ),
       ...(state.lastNotifiedAt ? { lastNotifiedAt: state.lastNotifiedAt } : {}),
       alertSeq: Math.max(state.alertSeq ?? 0, seq),
       settledSeq: Math.max(state.settledSeq ?? 0, seq),
+      ...(covered > 0 ? { coveredHolds: covered } : {}),
     };
     if (state.failedSeq !== undefined && seq < state.failedSeq) {
       next.failedSeq = state.failedSeq;

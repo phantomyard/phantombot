@@ -798,13 +798,19 @@ export function makeScreener(
       // commits once the alert actually reached the principal. A failed
       // delivery keeps its count pending and is retried by the next outage
       // hold, instead of suppressing pings for a window nobody was told
-      // about. Settlement names this decision's seq, so a late success of an
-      // older alert can never clear a newer failure's retry marker. No seq
-      // (the record above failed) means nothing was recorded to settle.
-      if (screeningUnavailable && holdLedgerDir && batch.seq !== undefined) {
+      // about. Settlement names this decision's seq and cumulative covers, so
+      // a late success of an older alert can never clear a newer failure's
+      // retry marker nor double-subtract a count the newer alert folded in.
+      // No seq (the record above failed) means nothing was recorded to settle.
+      if (
+        screeningUnavailable &&
+        holdLedgerDir &&
+        batch.seq !== undefined &&
+        batch.covers !== undefined
+      ) {
         try {
           if (delivered) {
-            await confirmAlertDelivered(holdLedgerDir, batch.seq, batch.count);
+            await confirmAlertDelivered(holdLedgerDir, batch.seq, batch.covers);
           } else {
             await noteAlertDeliveryFailed(holdLedgerDir, batch.seq);
           }
