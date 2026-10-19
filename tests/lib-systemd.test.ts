@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +25,7 @@ import {
   runSelfRestart,
   SELF_RESTART_ARGS,
   uninstallPhantombotUnit,
+  userBusAvailable,
   type SystemctlResult,
   type SystemctlRunner,
 } from "../src/lib/systemd.ts";
@@ -1357,5 +1358,63 @@ describe("uninstallPhantombotUnit", () => {
     });
     expect(result.removed).toBe(true);
     expect(out.text).toContain("(no unit file at");
+  });
+});
+
+describe("userBusAvailable (issues #671/#672)", () => {
+  const savedPlatform = process.platform;
+  const savedDir = process.env.XDG_RUNTIME_DIR;
+  const savedDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+
+  afterEach(() => {
+    Object.defineProperty(process, "platform", savedDescriptor);
+    if (savedDir === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = savedDir;
+  });
+
+  test("true only when the user manager's private socket exists", async () => {
+    if (savedPlatform !== "linux") return;
+    const dir = await mkdtemp(join(tmpdir(), "user-bus-"));
+    try {
+      process.env.XDG_RUNTIME_DIR = dir;
+      expect(userBusAvailable("/nonexistent-bus-fallback")).toBe(false); // scratch dir has no systemd/private
+      mkdirSync(join(dir, "systemd"), { recursive: true });
+      writeFileSync(join(dir, "systemd", "private"), "");
+      expect(userBusAvailable("/nonexistent-bus-fallback")).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test(
+    "stale XDG_RUNTIME_DIR falls back to /run/user/<uid> (issues #671/#672 review)",
+    async () => {
+      if (savedPlatform !== "linux") return;
+      const dir = await mkdtemp(join(tmpdir(), "user-bus-stale-"));
+      try {
+        // env points at a dir with no bus; the seam stands in for a healthy
+        // /run/user/<uid> — the fallback must rescue the answer.
+        process.env.XDG_RUNTIME_DIR = dir;
+        mkdirSync(join(dir, "real", "systemd"), { recursive: true });
+        writeFileSync(join(dir, "real", "systemd", "private"), "");
+        expect(userBusAvailable(join(dir, "real"))).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("no XDG_RUNTIME_DIR and no /run/user/<uid> → false (no crash off-linux either)", () => {
+    delete process.env.XDG_RUNTIME_DIR;
+    if (savedPlatform !== "linux") {
+      Object.defineProperty(process, "platform", {
+        ...savedDescriptor,
+        value: "darwin",
+      });
+    }
+    // Either the host has a real user manager socket at /run/user/<uid>
+    // (then true) or it doesn't (then false) — the contract is only that
+    // it never throws and never consults the bus by spawning.
+    expect(typeof userBusAvailable()).toBe("boolean");
   });
 });

@@ -128,6 +128,7 @@ import {
   TICK_TIMER_NAME,
   tickServicePath,
   tickTimerPath,
+  userBusAvailable,
 } from "../lib/systemd.ts";
 import {
   HEARTBEAT_STALE_MINUTES,
@@ -2043,6 +2044,23 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
         );
       }
     }
+  }
+
+  // Wake dispatch capability (#672) — warn-only, silent when healthy, and
+  // gated to the real binary like the systemd/harness checks so dev hosts
+  // and `bun test` never trip on a missing user bus. Also gated on a systemd
+  // BOOT: without one there is no tick unit, the plain wake spawn is used
+  // and the bus is irrelevant (issue #672 review).
+  if (
+    isPhantombotBinary() &&
+    currentPlatform() === "linux" &&
+    existsSync("/run/systemd/system") &&
+    !userBusAvailable()
+  ) {
+    out.write(
+      "  scheduled tasks: ✗ — no systemd user bus for this account; agent wakes are NOT dispatched\n" +
+        "    (run `loginctl enable-linger <user>` so `systemd-run --user` has a bus)\n",
+    );
   }
 
   // Per-persona maintenance coverage (#486) — warn-only, never exit-code.
