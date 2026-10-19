@@ -16,13 +16,14 @@
 
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import {
   absorbLegacyNativeAgent,
   ensureNativeAgentDir,
   ensureWindowsShellTools,
   LEGACY_ABSORBED_MARKER,
+  managedExtensionDiscoveredBy,
   nativeAgentDir,
   nativeAgentEnv,
   nativeAuthPath,
@@ -650,5 +651,22 @@ describe("nativeAgentDir issue #614 — win32 seeds pi's opt-in powershell tool"
       "edit",
       "write",
     ]);
+  });
+});
+
+describe("nativeAgentDir issue #674 — pi discovers the managed stamp on the legacy dir only", () => {
+  test("legacy host-level dir → true (resolved); persona, ephemeral and unset dirs → false", () => {
+    const dataHome = mkdtempSync(join(tmpdir(), "pb-native-674-"));
+    try {
+      const legacy = nativeAgentDir(dataHome);
+      expect(managedExtensionDiscoveredBy(legacy, dataHome)).toBe(true);
+      // Same dir spelled with a trailing separator: compared on resolved paths.
+      expect(managedExtensionDiscoveredBy(`${legacy}${sep}`, dataHome)).toBe(true);
+      expect(managedExtensionDiscoveredBy(nativeAgentDir(dataHome, "persona-a"), dataHome)).toBe(false);
+      expect(managedExtensionDiscoveredBy(join(dataHome, "turn-tmp", "pi-agent"), dataHome)).toBe(false);
+      expect(managedExtensionDiscoveredBy(undefined, dataHome)).toBe(false);
+    } finally {
+      rmSync(dataHome, { recursive: true, force: true });
+    }
   });
 });

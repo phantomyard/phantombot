@@ -20,6 +20,7 @@ import {
   withMaxOldSpaceSize,
   warnLowPiHeapAtStartup,
 } from "../src/harnesses/pi.ts";
+import { nativeExtensionsDir } from "../src/lib/nativeAgentDir.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
 import * as vault from "../src/lib/vault.ts";
@@ -2089,6 +2090,105 @@ describe("PiHarness native vs pi-host (subprocess)", () => {
         .map((c) => (c as { text: string }).text)
         .join("");
       expect(argv).not.toContain("--extension");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("issue #674: a persona-less NON-relayed native turn runs on the legacy agent dir, which pi discovers itself — no --extension", async () => {
+    // The threat judge (and durable-fact extraction) run with NO persona. With
+    // a useLocalConfig routing no key is relayed, so the child runs on the
+    // LEGACY host-level dir — the very dir the managed extension is stamped
+    // under. pi auto-discovers `<agentDir>/extensions/*` on its own; handing
+    // the stamp over AGAIN via `--extension` loaded it twice (`-e <dir>` is
+    // the directory, discovery is `<dir>/index.ts` — pi's path dedupe never
+    // collapses them), `look_at_image` registered twice, and pi exited 1 on
+    // the startup conflict (`Tool "look_at_image" conflicts with …`): every
+    // such judge call failed and cooled native.
+    const workdir = await mkdtemp(join(tmpdir(), "pi-legacy-ext-674-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    const savedKey = process.env.PHANTOMBOT_PI_API_KEY;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const legacyAgentDir = join(workdir, "xdg", "pi-native", "agent");
+    const managed = join(legacyAgentDir, "extensions", "capability-routing");
+    await mkdir(managed, { recursive: true });
+    await writeFile(join(managed, "index.ts"), "// managed stub\n");
+    process.env.FAKE_PI_MODE = "argv";
+    delete process.env.PHANTOMBOT_PI_API_KEY;
+    try {
+      const chunks = await collect(
+        new PiHarness({
+          bin: FAKE_PI,
+          mode: "native",
+          command: [FAKE_PI],
+          routing: { provider: "openrouter", useLocalConfig: true },
+        }).invoke(newRequest()),
+      );
+      const argv = chunks
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(argv).not.toContain("--extension");
+      // Premise: no persona and no relayed key ⇒ no persona dir was carved out
+      // and no ephemeral dir replaced the legacy one.
+      expect(existsSync(join(workdir, "xdg", "pi-native", "personas"))).toBe(false);
+      // Premise: the stub sits exactly where the harness probes for the stamp,
+      // so the flag was WITHHELD, not merely never offered.
+      expect(join(nativeExtensionsDir(join(workdir, "xdg")), "capability-routing")).toBe(managed);
+      // Same stamp, same routing, same absent key — only the agent dir
+      // differs. A persona-scoped child does not discover the stamp and is
+      // handed it: the decision is keyed on the dir, not on "no persona".
+      const personaChunks = await collect(
+        new PiHarness({
+          bin: FAKE_PI,
+          mode: "native",
+          command: [FAKE_PI],
+          routing: { provider: "openrouter", useLocalConfig: true },
+        }).invoke(newRequest({ persona: "persona-a" })),
+      );
+      const personaArgv = personaChunks
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(personaArgv).toContain(`--extension ${managed}`);
+    } finally {
+      if (savedKey === undefined) delete process.env.PHANTOMBOT_PI_API_KEY;
+      else process.env.PHANTOMBOT_PI_API_KEY = savedKey;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("issue #674 counterpart: a persona-less RELAYED native turn runs on an ephemeral dir and still gets --extension", async () => {
+    // The per-turn ephemeral dir carries no stamp, so the hand-off is what
+    // keeps look_at_image loaded there. Withholding the flag is keyed on the
+    // agent dir actually chosen — never on "no persona".
+    const workdir = await mkdtemp(join(tmpdir(), "pi-ephemeral-ext-674-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    const managed = join(workdir, "xdg", "pi-native", "agent", "extensions", "capability-routing");
+    await mkdir(managed, { recursive: true });
+    await writeFile(join(managed, "index.ts"), "// managed stub\n");
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test";
+    try {
+      const chunks = await collect(
+        new PiHarness({
+          bin: FAKE_PI,
+          mode: "native",
+          command: [FAKE_PI],
+          routing: { provider: "openrouter", primaryModel: "model-a" },
+        }).invoke(newRequest()),
+      );
+      const argv = chunks
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(argv).toContain(`--extension ${managed}`);
     } finally {
       delete process.env.PHANTOMBOT_PI_API_KEY;
       if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;

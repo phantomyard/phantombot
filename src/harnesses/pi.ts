@@ -90,6 +90,7 @@ import {
 import {
   ensureNativeAgentDir,
   ENV_PI_AGENT_DIR,
+  managedExtensionDiscoveredBy,
   nativeAgentEnv,
   nativeExtensionsDir,
   seedEphemeralAgentConfig,
@@ -270,22 +271,21 @@ export class PiHarness implements Harness {
       "--no-session",
     ];
     // Managed capability-routing extension (PR #606 review): the agent dir is
-    // PERSONA-scoped (nativeAgentEnv above), but the extension is stamped ONCE
-    // at the host level (lib/piExtensionProvision.ts) — so hand it to pi
+    // PERSONA-scoped (nativeAgentEnv below), but the extension is stamped ONCE
+    // at the host level (lib/piExtensionProvision.ts) — so it is handed to pi
     // explicitly via `--extension` instead of stamping a copy into every
     // persona's dir. Without this the persona child would discover no
     // extensions at all and look_at_image would silently vanish. Only when the
     // stamp exists: an unstamped install (no image model) has nothing to load,
     // matching the old discovery semantics. `-e` a DIRECTORY: pi discovers the
     // package (index.ts) inside it.
+    // The flag itself is pushed further down, once the child's agent dir is
+    // known (issue #674): a child that runs ON the stamp's own agent dir
+    // already discovers it and must not be handed it a second time.
+    let managedExtDir: string | undefined;
     if (this.config.mode === "native") {
-      const managedExtDir = join(
-        nativeExtensionsDir(xdgDataHome()),
-        "capability-routing",
-      );
-      if (existsSync(managedExtDir)) {
-        baseArgs.push("--extension", managedExtDir);
-      }
+      const stamp = join(nativeExtensionsDir(xdgDataHome()), "capability-routing");
+      if (existsSync(stamp)) managedExtDir = stamp;
     }
     // Capability routing: pin the orchestrator model. Without this `--model`
     // the saved primary is never honored — Pi falls back to its own default
@@ -664,6 +664,27 @@ export class PiHarness implements Harness {
             absorbAuth: !relayingKey,
           }),
         );
+      }
+      // Managed-extension hand-off, decided HERE because it depends on the
+      // agent dir just chosen (issue #674): pi auto-discovers
+      // `<agentDir>/extensions/*`, and the stamp lives under the LEGACY
+      // host-level dir. The child runs ON that dir exactly when it has no
+      // persona and no env-relayed key (relayingKey false: a useLocalConfig
+      // routing, or no catalogued provider — unset, or outside
+      // PI_PROVIDER_CATALOG — in which case any key rides the legacy
+      // --api-key argv) — the persona-less callers are the threat judge and
+      // durable-fact extraction. pi dedupes extension paths by realpath, but
+      // `-e <dir>` registers the DIRECTORY while discovery registers
+      // `<dir>/index.ts`, so both loaded: `look_at_image` registered twice
+      // and pi exited 1 on the startup conflict (`Tool "look_at_image"
+      // conflicts with …`) before any turn, so every such judge call failed
+      // and cooled native. Persona-scoped and ephemeral dirs carry no stamp
+      // and still get the flag.
+      if (
+        managedExtDir &&
+        !managedExtensionDiscoveredBy(childEnv[ENV_PI_AGENT_DIR], xdgDataHome())
+      ) {
+        baseArgs.push("--extension", managedExtDir);
       }
       if (this.config.command) {
         childEnv[ENV_PHANTOMBOT_PI_COMMAND] = JSON.stringify(this.config.command);

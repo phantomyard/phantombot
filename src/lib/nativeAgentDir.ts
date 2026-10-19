@@ -90,7 +90,7 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { xdgDataHome } from "../config.ts";
 
 /** Pi's own env var for relocating its agent dir (pi config.js ENV_AGENT_DIR). */
@@ -547,4 +547,34 @@ export function nativeAuthPath(
  * managed stamp. */
 export function nativeExtensionsDir(dataHome: string = xdgDataHome()): string {
   return join(nativeAgentDir(dataHome), "extensions");
+}
+
+/** Whether a child running on `agentDir` already loads the managed stamp
+ * through pi's OWN discovery. pi auto-discovers `<agentDir>/extensions/*`
+ * (core/package-manager, called by the resource loader), and the stamp
+ * lives under the LEGACY host-level dir's `extensions/` (nativeExtensionsDir)
+ * — so this is true exactly when `agentDir` HOLDS the stamp (its
+ * `extensions/` is nativeExtensionsDir), today that legacy dir: a persona-less
+ * native turn with no env-relayed key (harnesses/pi.ts `relayingKey` false:
+ * a `useLocalConfig` routing, or no catalogued provider — unset, or outside
+ * PI_PROVIDER_CATALOG — in which case any key rides the legacy --api-key
+ * argv; the persona-less callers are the threat judge and durable-fact
+ * extraction). harnesses/pi.ts must NOT also hand the stamp over via
+ * `--extension` then: pi dedupes extension paths by realpath, but `-e <dir>`
+ * registers the directory while discovery registers `<dir>/index.ts`, so
+ * both loaded, `look_at_image` registered twice, and pi exited 1 on the
+ * startup conflict (`Tool "look_at_image" conflicts with …`) — every such
+ * judge call failed and cooled native; the chain judge fell through to the
+ * next harness, and a native-only chain with no decision-model judge held
+ * every screened turn (no verdict ⇒ fail-closed) (issue #674).
+ * Persona-scoped and ephemeral dirs carry no stamp and still need the flag.
+ * Derived from the stamp's location, not from the legacy dir by name, so a
+ * relocated stamp moves the rule with it. Compared on resolved paths; an
+ * unset dir (host mode) is never a match. */
+export function managedExtensionDiscoveredBy(
+  agentDir: string | undefined,
+  dataHome: string = xdgDataHome(),
+): boolean {
+  if (!agentDir) return false;
+  return resolve(agentDir) === resolve(dirname(nativeExtensionsDir(dataHome)));
 }
