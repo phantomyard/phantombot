@@ -12,23 +12,20 @@
  *     wrap it. Ink measures the text node WITHOUT the prefix (and the caret),
  *     while the terminal wraps what was actually drawn — the two disagree by
  *     the prefix width, and the border shears exactly when a line fills the
- *     box. Here we do the wrapping OURSELF, with the same grapheme-safe
- *     primitives the transcript uses (`markdown.ts`), so what is measured is
- *     what is drawn — and the caret is part of the wrap stream, so it can
- *     never overflow a row either.
+ *     box. Here we do the wrapping OURSELF, grapheme by grapheme with the
+ *     transcript's width measure (`markdown.ts`), so what is measured is
+ *     what is drawn.
+ *
+ * The cursor is drawn ON a cell in inverse video, never as a cell of its own
+ * (issue #677), so the layout does not depend on where the cursor is: moving
+ * it never shifts or re-wraps the text.
  *
  * Rows come back pre-wrapped and capped (`MAX_PROMPT_ROWS`), with the window
  * following the cursor: a long paste grows the box to the cap, not the screen.
  */
 
-import {
-  textWidth,
-  wrapSpans,
-  type Span,
-} from "./markdown.ts";
+import { textWidth, type Span } from "./markdown.ts";
 
-/** The caret glyph. Width 1 by `string-width`, so it wraps like a character. */
-const CARET = "▌";
 /** The prompt prefix, drawn on the first row only. Two columns wide. */
 const PREFIX = "› ";
 /** Continuation rows indent to align under the prefix. */
@@ -88,83 +85,82 @@ export function deleteAtCursor(state: PromptState): PromptState {
   return clamp({ text: next.join(""), cursor: state.cursor });
 }
 
-/** Move the cursor one grapheme left. Clamps at the start. */
+/** Move the cursor one grapheme left (← / ^b). Clamps at the start. */
 export function cursorLeft(state: PromptState): PromptState {
   return clamp({ ...state, cursor: state.cursor - 1 });
 }
 
-/** Move the cursor one grapheme right. Clamps at the end. */
+/** Move the cursor one grapheme right (→ / ^f). Clamps at the end. */
 export function cursorRight(state: PromptState): PromptState {
   return clamp({ ...state, cursor: state.cursor + 1 });
 }
 
-/** Cursor to the start of the text (^a). */
+/** Cursor to the start of the whole text (a second ^a). */
 export function cursorHome(state: PromptState): PromptState {
   return { ...state, cursor: 0 };
 }
 
-/** Cursor to the end of the text (^e). */
+/** Cursor to the end of the whole text (a second ^e). */
 export function cursorEnd(state: PromptState): PromptState {
   return { ...state, cursor: graphemeCount(state.text) };
+}
+
+/**
+ * A word character, readline-style: letters, digits and their combining
+ * marks. Everything else — whitespace, punctuation, "\n", emoji — separates
+ * words, so word moves cross line boundaries on their own.
+ */
+const WORD_CHAR = /^[\p{L}\p{N}\p{M}]+$/u;
+const isWord = (g: string) => WORD_CHAR.test(g);
+
+/** Cursor to the start of the previous word (Alt-b / Alt-←), across lines. */
+export function cursorWordLeft(state: PromptState): PromptState {
+  const gs = graphemes(state.text);
+  let i = Math.max(0, Math.min(state.cursor, gs.length));
+  while (i > 0 && !isWord(gs[i - 1]!)) i--;
+  while (i > 0 && isWord(gs[i - 1]!)) i--;
+  return { text: state.text, cursor: i };
+}
+
+/** Cursor to the end of the next word (Alt-f / Alt-→), across lines. */
+export function cursorWordRight(state: PromptState): PromptState {
+  const gs = graphemes(state.text);
+  let i = Math.max(0, Math.min(state.cursor, gs.length));
+  while (i < gs.length && !isWord(gs[i]!)) i++;
+  while (i < gs.length && isWord(gs[i]!)) i++;
+  return { text: state.text, cursor: i };
+}
+
+/**
+ * Cursor to the start of the current LOGICAL line (^a). Already there, it
+ * goes to the start of the whole input — the old ^a, one press further.
+ */
+export function cursorLineStart(state: PromptState): PromptState {
+  const gs = graphemes(state.text);
+  const cur = Math.max(0, Math.min(state.cursor, gs.length));
+  let i = cur;
+  while (i > 0 && gs[i - 1] !== "\n") i--;
+  return { text: state.text, cursor: i === cur ? 0 : i };
+}
+
+/**
+ * Cursor to the end of the current LOGICAL line (^e). Already there, it goes
+ * to the end of the whole input.
+ */
+export function cursorLineEnd(state: PromptState): PromptState {
+  const gs = graphemes(state.text);
+  const cur = Math.max(0, Math.min(state.cursor, gs.length));
+  let i = cur;
+  while (i < gs.length && gs[i] !== "\n") i++;
+  return { text: state.text, cursor: i === cur ? gs.length : i };
 }
 
 /** One drawn segment of a prompt row. */
 export interface PromptSeg {
   text: string;
-  /** The caret cell. */
+  /** The cursor cell: drawn in inverse video. */
   caret?: boolean;
   tone?: Span["tone"];
-}
-
-/** Spans for one logical line: runs of whitespace / non-whitespace, with the
- *  caret span dropped in at grapheme offset `caret` (-1 = no caret). */
-function buildLine(line: string, caret: number): { spans: Span[]; caretAt: number } {
-  const lgs = graphemes(line);
-  const spans: Span[] = [];
-  let caretAt = -1;
-  let run = "";
-  let runSpace = false;
-  const flush = () => {
-    if (run) spans.push({ text: run });
-    run = "";
-  };
-  for (let i = 0; i <= lgs.length; i++) {
-    if (i === caret) {
-      flush();
-      caretAt = spans.length;
-    }
-    if (i === lgs.length) break;
-    const g = lgs[i]!;
-    const isSpace = /\s/.test(g);
-    if (run && isSpace !== runSpace) flush();
-    runSpace = isSpace;
-    run += g;
-  }
-  flush();
-  return { spans, caretAt };
-}
-
-/**
- * One logical line wrapped to `budget` columns, WITHOUT the prefix/indent.
- *
- * This is the single wrap both the renderer and vertical cursor movement use,
- * so ↑↓ land on the rows exactly as drawn. Each logical line wraps on its own:
- * the caret only ever shifts the layout of the line it sits in.
- */
-function wrapLine(line: string, caret: number, budget: number): PromptSeg[][] {
-  const { spans, caretAt } = buildLine(line, caret);
-  const withCaret: Span[] =
-    caretAt >= 0
-      ? [...spans.slice(0, caretAt), { text: CARET, tone: "accent" }, ...spans.slice(caretAt)]
-      : spans;
-  // wrapSpans rebuilds spans and drops unknown props, so the caret is
-  // recognised by glyph + tone rather than a carried flag. A user-typed ▌
-  // would at worst confuse the windowing row-detection — cosmetic.
-  return wrapSpans(withCaret, budget).map((row) =>
-    row.map((span) =>
-      span.text === CARET && span.tone === "accent" ? { text: span.text, caret: true } : span,
-    ),
-  );
 }
 
 /** Columns available for text on the rows of logical line `index`. */
@@ -185,14 +181,121 @@ function logicalLines(gs: readonly string[]): { start: number; end: number }[] {
   return lines;
 }
 
+const isSpace = (g: string) => /^\s+$/.test(g);
+
+/**
+ * One logical line laid out on rows of `budget` columns — independent of the
+ * cursor, which is the whole point: the cursor is drawn ON a cell, never as a
+ * cell of its own, so moving it can never shift or re-wrap the text.
+ *
+ * Greedy word wrap. The text gets `budget - 1` columns; the last column is
+ * kept free for the cursor cell when it sits past the text (end of the line,
+ * or on whitespace that hangs past the edge). Whitespace never starts a
+ * wrapped row: at a break it HANGS on the row before it, undrawn beyond the
+ * text columns. A word longer than a row is split between graphemes.
+ *
+ * `rowOf[o]` / `colOf[o]` give the row and display column of a cursor at
+ * grapheme offset `o` (0 ≤ o ≤ length), so drawing and ↑↓ read the same map.
+ */
+interface LineLayout {
+  gs: string[];
+  /** Grapheme offset where each row starts. */
+  starts: number[];
+  rowOf: number[];
+  colOf: number[];
+  /** Columns for text (the cursor may use one more). */
+  textCols: number;
+}
+
+function layoutLine(gs: string[], budget: number): LineLayout {
+  const textCols = Math.max(1, budget - 1);
+  const starts = [0];
+  const rowOf: number[] = [];
+  const colOf: number[] = [];
+  let row = 0;
+  let used = 0;
+  const newRow = (at: number) => {
+    row++;
+    used = 0;
+    starts.push(at);
+  };
+  let i = 0;
+  while (i < gs.length) {
+    if (isSpace(gs[i]!)) {
+      rowOf[i] = row;
+      colOf[i] = Math.min(used, textCols);
+      used += textWidth(gs[i]!);
+      i++;
+      continue;
+    }
+    let j = i;
+    let wordW = 0;
+    while (j < gs.length && !isSpace(gs[j]!)) wordW += textWidth(gs[j++]!);
+    if (used > 0 && used + wordW > textCols) newRow(i);
+    for (let k = i; k < j; k++) {
+      const w = textWidth(gs[k]!);
+      // Hard split; a lone cluster wider than a whole row is taken anyway.
+      if (used > 0 && used + w > textCols) newRow(k);
+      rowOf[k] = row;
+      colOf[k] = used;
+      used += w;
+    }
+    i = j;
+  }
+  rowOf[gs.length] = row;
+  colOf[gs.length] = Math.min(used, textCols);
+  return { gs, starts, rowOf, colOf, textCols };
+}
+
+/** Offsets a cursor can take on row `r`: [first, last]. */
+function rowSpan(layout: LineLayout, r: number): [number, number] {
+  const first = layout.starts[r]!;
+  const last = r + 1 < layout.starts.length ? layout.starts[r + 1]! - 1 : layout.gs.length;
+  return [first, last];
+}
+
+/** Draw row `r` of a line; `caret` is a grapheme offset in the line, or -1. */
+function drawRow(layout: LineLayout, r: number, caret: number): PromptSeg[] {
+  const [first, last] = rowSpan(layout, r);
+  const end = r + 1 < layout.starts.length ? last + 1 : last;
+  let drawnEnd = first;
+  let used = 0;
+  while (drawnEnd < end) {
+    const w = textWidth(layout.gs[drawnEnd]!);
+    if (used > 0 && used + w > layout.textCols) break;
+    used += w;
+    drawnEnd++;
+  }
+  const text = (a: number, b: number) => layout.gs.slice(a, b).join("");
+  const segs: PromptSeg[] = [];
+  const push = (seg: PromptSeg) => {
+    if (seg.text) segs.push(seg);
+  };
+  if (caret < first || caret > last) {
+    push({ text: text(first, drawnEnd) });
+  } else if (caret < drawnEnd) {
+    // On a drawn grapheme: invert it. Whitespace (a tab, say) shows as one
+    // plain cell so the cursor never changes a row's width.
+    const g = layout.gs[caret]!;
+    push({ text: text(first, caret) });
+    segs.push({ text: isSpace(g) ? " " : g, caret: true });
+    push({ text: text(caret + 1, drawnEnd) });
+  } else {
+    // Past the drawn text (end of line, or hanging whitespace): a solid cell
+    // in the column reserved for it.
+    push({ text: text(first, drawnEnd) });
+    segs.push({ text: " ", caret: true });
+  }
+  return segs;
+}
+
 /**
  * The rows to draw for the input box, pre-wrapped to `width` columns.
  *
  * The prefix sits on the first row only; continuation rows align under the
- * text. The caret is part of the wrap stream, so a row never overflows —
- * when the cursor sits past a full row's end, the caret opens the next row.
- * More rows than `MAX_PROMPT_ROWS` are windowed so the row holding the caret
- * (or, when idle, the last row) stays visible.
+ * text. The layout ignores the cursor; the cursor inverts the cell it sits on.
+ * More rows than `MAX_PROMPT_ROWS` are windowed so the cursor's row (or, when
+ * idle, the last row) stays visible.
  */
 export function promptRows(
   text: string,
@@ -200,129 +303,29 @@ export function promptRows(
   width: number,
   opts: { busy?: boolean } = {},
 ): PromptSeg[][] {
-  const count = graphemeCount(text);
-  const cur = Math.max(0, Math.min(cursor, count));
   const gs = graphemes(text);
+  const cur = Math.max(0, Math.min(cursor, gs.length));
   const rows: PromptSeg[][] = [];
+  let caretRow = -1;
 
-  // Walk the text one logical line at a time; the caret offset is per line.
   logicalLines(gs).forEach(({ start, end }, index) => {
-    const line = gs.slice(start, end).join("");
-    const caretInLine = !opts.busy && cur >= start && cur <= end ? cur - start : -1;
-    for (const row of wrapLine(line, caretInLine, lineBudget(width, index))) {
+    const layout = layoutLine(gs.slice(start, end), lineBudget(width, index));
+    const caret = !opts.busy && cur >= start && cur <= end ? cur - start : -1;
+    for (let r = 0; r < layout.starts.length; r++) {
+      if (caret >= 0 && layout.rowOf[caret] === r) caretRow = rows.length;
       // Only the FIRST row overall carries the prefix; later rows indent.
       const lead: PromptSeg =
         rows.length === 0 ? { text: PREFIX, tone: "accent" } : { text: CONTINUATION_INDENT };
-      rows.push([lead, ...row]);
+      rows.push([lead, ...drawRow(layout, r, layout.rowOf[caret] === r ? caret : -1)]);
     }
   });
 
-  // A busy box with empty input still draws one row — the box never collapses
-  // to a bare border pair.
-  if (rows.length === 0) rows.push([{ text: PREFIX, tone: "accent" }]);
-
-  // Cap: window so the caret's row (or the last row) stays visible.
   if (rows.length > MAX_PROMPT_ROWS) {
-    let caretRow = rows.length - 1;
-    if (!opts.busy) {
-      outer: for (let r = 0; r < rows.length; r++) {
-        for (const seg of rows[r]!) {
-          if (seg.caret) {
-            caretRow = r;
-            break outer;
-          }
-        }
-      }
-    }
-    const start = Math.max(0, Math.min(caretRow - (MAX_PROMPT_ROWS - 1), rows.length - MAX_PROMPT_ROWS));
+    const focus = caretRow >= 0 ? caretRow : rows.length - 1;
+    const start = Math.max(0, Math.min(focus - (MAX_PROMPT_ROWS - 1), rows.length - MAX_PROMPT_ROWS));
     return rows.slice(start, start + MAX_PROMPT_ROWS);
   }
   return rows;
-}
-
-/**
- * Caret positions within ONE logical line, computed cheaply.
- *
- * Placing the caret and re-wrapping the whole line per candidate is exact but
- * O(line) each — a pasted paragraph made every ↑↓ cost half a second. The
- * wrap is GREEDY, so everything before the caret lays out the same wherever
- * the caret goes, as long as no word before it is cut short: a row of the
- * caret-less layout that starts strictly before the caret's own word starts
- * the same row with the caret in place. So each candidate is wrapped only
- * from the nearest such row start — a couple of rows of work, not the line.
- */
-class LineCarets {
-  private readonly gs: string[];
-  /** Grapheme offset where each row of the caret-less layout starts. */
-  private readonly starts: number[];
-
-  constructor(
-    line: string,
-    private readonly budget: number,
-  ) {
-    this.gs = graphemes(line);
-    this.starts = rowStarts(this.gs, wrapLine(line, -1, budget));
-  }
-
-  get length(): number {
-    return this.gs.length;
-  }
-
-  /** Visual row (within the line) and display column of a caret at `offset`. */
-  spot(offset: number): { row: number; col: number } {
-    const k = this.restartFor(offset);
-    const from = k < 0 ? 0 : this.starts[k]!;
-    const head = this.gs.slice(from, offset).join("");
-    const rows = wrapLine(head, offset - from, this.budget);
-    const last = rows.length - 1;
-    let col = 0;
-    for (const seg of rows[last]!) {
-      if (seg.caret) break;
-      col += textWidth(seg.text);
-    }
-    // The caret is the last thing laid out, so it sits on the last row.
-    return { row: Math.max(0, k) + last, col };
-  }
-
-  /** Total visual rows of the line with the caret at `offset`. */
-  rowCount(offset: number): number {
-    const k = this.restartFor(offset);
-    const from = k < 0 ? 0 : this.starts[k]!;
-    const rest = this.gs.slice(from).join("");
-    return Math.max(0, k) + wrapLine(rest, offset - from, this.budget).length;
-  }
-
-  /** Index of the latest caret-less row start safely before `offset`'s word. */
-  private restartFor(offset: number): number {
-    let word = offset;
-    while (word > 0 && !/\s/.test(this.gs[word - 1]!)) word--;
-    let k = -1;
-    for (let i = 1; i < this.starts.length && this.starts[i]! < word; i++) k = i;
-    return k;
-  }
-}
-
-/**
- * Recover where each wrapped row starts in the line. `wrapSpans` drops the
- * whitespace at a break (and never starts a row with it) but keeps a row's
- * interior verbatim, so each row is the next run of graphemes after skipping
- * whitespace. Row 0 always starts at 0. Should a row ever not match — a wrap
- * rule this does not model — only row 0 is returned, which is still exact,
- * just slower.
- */
-function rowStarts(gs: readonly string[], rows: PromptSeg[][]): number[] {
-  const starts = [0];
-  let at = 0;
-  for (let r = 0; r < rows.length; r++) {
-    while (at < gs.length && /\s/.test(gs[at]!)) at++;
-    if (r > 0) starts.push(at);
-    const text = graphemes(rows[r]!.map((seg) => seg.text).join(""));
-    for (const g of text) {
-      if (gs[at] !== g) return [0];
-      at++;
-    }
-  }
-  return starts;
 }
 
 /** A vertical move: the new state plus the goal column to carry into the next ↑↓. */
@@ -354,59 +357,52 @@ export function cursorVertical(
   const cur = Math.max(0, Math.min(state.cursor, gs.length));
   const lines = logicalLines(gs);
   const li = lines.findIndex(({ start, end }) => cur >= start && cur <= end);
-  const { start } = lines[li]!;
-  const lineText = (i: number) => gs.slice(lines[i]!.start, lines[i]!.end).join("");
+  const layoutOf = (i: number) =>
+    layoutLine(gs.slice(lines[i]!.start, lines[i]!.end), lineBudget(width, i));
 
-  const curLine = new LineCarets(lineText(li), lineBudget(width, li));
-  const here = curLine.spot(cur - start);
-  const want = goal ?? here.col;
+  const here = layoutOf(li);
+  const off = cur - lines[li]!.start;
+  const row = here.rowOf[off]!;
+  const want = goal ?? here.colOf[off]!;
 
-  // Which logical line holds the target row, and which row of it.
   let ti: number;
-  let targetRow: number | "last";
+  let target: LineLayout;
+  let targetRow: number;
   if (dir < 0) {
-    if (here.row > 0) [ti, targetRow] = [li, here.row - 1];
-    else if (li > 0) [ti, targetRow] = [li - 1, "last"];
-    else return undefined;
+    if (row > 0) [ti, target, targetRow] = [li, here, row - 1];
+    else if (li > 0) {
+      ti = li - 1;
+      target = layoutOf(ti);
+      targetRow = target.starts.length - 1;
+    } else return undefined;
   } else {
-    if (here.row < curLine.rowCount(cur - start) - 1) [ti, targetRow] = [li, here.row + 1];
-    else if (li < lines.length - 1) [ti, targetRow] = [li + 1, 0];
+    if (row < here.starts.length - 1) [ti, target, targetRow] = [li, here, row + 1];
+    else if (li < lines.length - 1) [ti, target, targetRow] = [li + 1, layoutOf(li + 1), 0];
     else return undefined;
   }
 
-  // Scan caret positions outward from where we are (nearest first), placing
-  // the caret at each so its OWN width shifts the wrap exactly as it will be
-  // drawn. A caret further along never lands on an earlier row, so the scan
-  // stops as soon as it has passed the target row.
-  const line = ti === li ? curLine : new LineCarets(lineText(ti), lineBudget(width, ti));
-  const len = line.length;
-  const from = ti === li ? cur - start + dir : dir < 0 ? len : 0;
-  if (targetRow === "last") targetRow = line.spot(len).row;
-
+  // Nearest offset first (↑ walks the row right-to-left, ↓ left-to-right);
+  // prefer the rightmost column not past the goal, else — the whole row
+  // starts past it, a wide glyph — the leftmost. Ties keep the nearest.
+  const [first, last] = rowSpan(target, targetRow);
   let best: { offset: number; col: number } | undefined;
-  for (let o = from; o >= 0 && o <= len; o += dir) {
-    const spot = line.spot(o);
-    if (dir < 0 ? spot.row < targetRow : spot.row > targetRow) break;
-    if (spot.row !== targetRow) continue;
-    // Prefer the rightmost column not past the goal; if the whole row starts
-    // past it (a wide glyph), the leftmost. Ties keep the nearest offset.
+  for (let o = dir < 0 ? last : first; o >= first && o <= last; o -= dir < 0 ? 1 : -1) {
+    const col = target.colOf[o]!;
     const better =
       !best ||
-      (spot.col <= want && (best.col > want || spot.col > best.col)) ||
-      (spot.col > want && best.col > want && spot.col < best.col);
-    if (better) best = { offset: o, col: spot.col };
+      (col <= want && (best.col > want || col > best.col)) ||
+      (col > want && best.col > want && col < best.col);
+    if (better) best = { offset: o, col };
   }
-  if (!best) return undefined; // defensive: a target row always has a caret slot
-
-  return { state: { text: state.text, cursor: lines[ti]!.start + best.offset }, goal: want };
+  return { state: { text: state.text, cursor: lines[ti]!.start + best!.offset }, goal: want };
 }
 
-/** One visual row up (↑). `undefined` = already on the first row. */
+/** One visual row up (↑ / ^p). `undefined` = already on the first row. */
 export function cursorUp(state: PromptState, width: number, goal?: number): VerticalMove | undefined {
   return cursorVertical(state, width, -1, goal);
 }
 
-/** One visual row down (↓). `undefined` = already on the last row. */
+/** One visual row down (↓ / ^n). `undefined` = already on the last row. */
 export function cursorDown(state: PromptState, width: number, goal?: number): VerticalMove | undefined {
   return cursorVertical(state, width, 1, goal);
 }

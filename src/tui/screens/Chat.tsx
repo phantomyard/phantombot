@@ -51,11 +51,13 @@ import { commandHints, commandName, completeCommand } from "../slash.ts";
 import {
   backspaceAtCursor,
   cursorDown,
-  cursorEnd,
-  cursorHome,
   cursorLeft,
+  cursorLineEnd,
+  cursorLineStart,
   cursorRight,
   cursorUp,
+  cursorWordLeft,
+  cursorWordRight,
   graphemeCount,
   insertAtCursor,
   promptRows,
@@ -449,8 +451,11 @@ export function ChatScreen(props: {
     // While the transcript is scrolled away from the live end, ↑↓ keep
     // scrolling it until it is back at the bottom, so ↓ undoes ↑ instead of
     // jumping into the box and leaving the transcript stranded.
-    if (key.upArrow || key.downArrow) {
-      const dir = key.upArrow ? -1 : 1;
+    // ^p/^n are the same keys, Emacs-style (issue #677).
+    const ctrlP = key.ctrl && char === "p";
+    const ctrlN = key.ctrl && char === "n";
+    if (key.upArrow || key.downArrow || ctrlP || ctrlN) {
+      const dir = key.upArrow || ctrlP ? -1 : 1;
       if (scrollRef.current > 0) {
         goalRef.current = undefined;
         return scrollBy(-dir);
@@ -466,18 +471,34 @@ export function ChatScreen(props: {
       goalRef.current = { text: moved.state.text, cursor: moved.state.cursor, goal: moved.goal };
       return void setInputValue(moved.state);
     }
-    // ←→ move the cursor inside the box — the editing primitive that was
-    // missing: without it a typo could only be fixed by deleting back to it.
-    if (key.leftArrow) return void setInputValue(cursorLeft(inputRef.current));
-    if (key.rightArrow) return void setInputValue(cursorRight(inputRef.current));
-    // Line editing: ^a/^e move to start/end (readline muscle memory; the
-    // Home/End KEYS are taken by transcript scrolling above).
+    // Word moves (issue #677): Alt-b/f where Option/Alt is sent as Esc,
+    // Alt-←/→ where it arrives as a modified arrow. Above plain ←→, which
+    // would otherwise take the modified arrows as single steps.
+    const word = !key.ctrl && key.meta ? char.toLowerCase() : "";
+    if ((key.meta && key.leftArrow) || word === "b") {
+      return void setInputValue(cursorWordLeft(inputRef.current));
+    }
+    if ((key.meta && key.rightArrow) || word === "f") {
+      return void setInputValue(cursorWordRight(inputRef.current));
+    }
+    // ←→ and ^b/^f move the cursor one character inside the box — the
+    // editing primitive that was missing: without it a typo could only be
+    // fixed by deleting back to it.
+    if (key.leftArrow || (key.ctrl && char === "b")) {
+      return void setInputValue(cursorLeft(inputRef.current));
+    }
+    if (key.rightArrow || (key.ctrl && char === "f")) {
+      return void setInputValue(cursorRight(inputRef.current));
+    }
+    // ^a/^e: start/end of the current line; pressed again, of the whole
+    // input (readline muscle memory; the Home/End KEYS are taken by
+    // transcript scrolling above).
     if (key.ctrl && char === "a") {
-      setInputValue(cursorHome(inputRef.current));
+      setInputValue(cursorLineStart(inputRef.current));
       return;
     }
     if (key.ctrl && char === "e") {
-      setInputValue(cursorEnd(inputRef.current));
+      setInputValue(cursorLineEnd(inputRef.current));
       return;
     }
     if (key.backspace || key.delete) {
@@ -673,13 +694,14 @@ export function ChatScreen(props: {
       />
       <Box paddingX={1} flexDirection="column">
         {/* The rows are pre-wrapped to the inner width by promptBox.ts — what
-            is measured is what is drawn. The caret is a span IN the wrap
-            stream, so it never overflows a row. */}
+            is measured is what is drawn. The cursor inverts the cell it sits on
+            (a reserved last column when past the text), so it never moves or
+            overflows the text. */}
         {inputRows.map((row, i) => (
           <Text key={i}>
             {row.map((seg, j) =>
               seg.caret ? (
-                <Text key={j} color={theme.accent}>
+                <Text key={j} inverse>
                   {seg.text}
                 </Text>
               ) : (

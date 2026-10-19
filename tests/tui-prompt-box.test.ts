@@ -117,13 +117,14 @@ describe("promptBox rendering", () => {
     expect(rows.length).toBe(MAX_PROMPT_ROWS); // capped, windowed
   });
 
-  it("caret is part of the wrap stream: past a full row it opens the next", () => {
-    // 17 chars + caret fit after the 2-col prefix at width 20.
+  it("the last column is reserved for the cursor cell past the text", () => {
+    // 18 columns after the 2-col prefix at width 20: 17 for text + 1 cursor.
     const text = "x".repeat(17);
     const rows = promptRows(text, text.length, W);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.some((s) => s.caret)).toBe(true);
-    // an 18th char pushes the caret to its own second row.
+    // an 18th char wraps — wherever the cursor is.
+    expect(promptRows(text + "x", 0, W).length).toBe(2);
     const rows2 = promptRows(text + "x", text.length + 1, W);
     expect(rows2.length).toBe(2);
     expect(rows2[1]!.some((s) => s.caret)).toBe(true);
