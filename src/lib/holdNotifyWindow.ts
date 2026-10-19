@@ -21,23 +21,43 @@
  *     change earns one ping), even inside the window of a previous outage's
  *     last alert; a screen that ANSWERED closes the streak (noteScreeningReachable),
  *     so the next outage starts with an immediate alert again.
- *   - `lastNotifiedAt` — when the last outage alert went out. Window expiry
- *     is measured from here.
- *   - `suppressed` — outage holds recorded since that alert and not yet
- *     reported in any header count. Carried across an outage boundary so a
- *     batch's tail is never dropped silently; the next alert reports it.
+ *   - `lastNotifiedAt` — when the last outage alert was DECIDED (the window
+ *     anchor; written at decision time so concurrent holds inside one window
+ *     batch instead of racing the delivery). Window expiry is measured from
+ *     here.
+ *   - `suppressed` — outage holds not yet covered by a DELIVERED alert: this
+ *     hold plus everything counted since the last successful delivery. Carried
+ *     across an outage boundary so a batch's tail is never dropped silently;
+ *     the next delivered alert reports it.
+ *   - `deliveryFailed` — the last decided alert failed to deliver (or exited
+ *     non-zero). The next hold RETRIES the notification instead of staying
+ *     silent for a whole window, folding the pending count into its header.
+ *     Cleared when a retry is decided (and again when one is confirmed).
  *
- * Deliberate properties (mirroring decisionModelHealth.ts):
- *   - BEST EFFORT. Errors are swallowed and logged at debug; a failure to
- *     consult or update the ledger must never fail the screen. On any
- *     uncertainty the caller falls back to NOTIFYING — bounded volume is a
- *     nicety, a lost ping is not.
+ * The alert window is committed in two phases (see #665 review):
+ *
+ *   1. `recordOutageHold` decides and anchors the window (above).
+ *   2. AFTER delivery the caller settles: `confirmAlertDelivered(count)`
+ *      covers `count` holds, or `noteAlertDeliveryFailed()` keeps the count
+ *      pending and marks the retry. A caller that dies mid-delivery leaves
+ *      the anchor in place — bounded volume degrades to batching only.
+ *
+ * Deliberate properties:
+ *   - FAIL TOWARD NOTIFYING. Reads are best-effort: a corrupt or unreadable
+ *     ledger reads as empty state, which means "fresh outage" and an alert.
+ *     WRITE failures PROPAGATE to the caller (logged at debug as well), so
+ *     the screener's catch turns uncertainty into a notification. A failure
+ *     to consult or update the ledger must never fail the screen — only the
+ *     volume bound.
  *   - OUTCOMES ONLY. No untrusted payload, reason or preview is ever written
  *     here (the ledger is plaintext on disk); counts and timestamps only.
- *   - ATOMIC WRITES (tmp + rename) and a per-file in-process queue so
- *     concurrent holds of one persona serialize their read-modify-write.
- *     A cross-process race can lose one increment (daemon vs one-off CLI);
+ *   - SERIALIZED READ-MODIFY-WRITE. Every decision runs inside one per-file
+ *     in-process queue (load, decide and write as one queued step, the
+ *     decisionModelHealth.ts mould), so concurrent holds of one persona can
+ *     never read the same pre-write state and clobber each other. A
+ *     cross-process race can lose one increment (daemon vs one-off CLI);
  *     accepted — this is a notification window, not an accounting ledger.
+ *   - ATOMIC WRITES (tmp + rename).
  */
 
 import { existsSync } from "node:fs";
@@ -52,10 +72,12 @@ export const HOLD_NOTIFY_WINDOW_MS = 60 * 60 * 1000;
 export interface HoldNotifyState {
   /** True while the current "nobody answered" streak is open. */
   outageOngoing: boolean;
-  /** ISO time of the last outage-hold notification. */
+  /** ISO time the last outage alert was decided (window anchor). */
   lastNotifiedAt?: string;
-  /** Outage holds since that notification, not yet reported in a count. */
+  /** Outage holds not yet covered by a delivered alert. */
   suppressed: number;
+  /** The last decided alert failed to deliver; the next hold retries it. */
+  deliveryFailed?: boolean;
 }
 
 /** The batch decision for ONE outage hold. */
@@ -88,6 +110,7 @@ export async function loadHoldNotifyState(
           ? Math.max(0, Math.floor(parsed.suppressed))
           : 0,
       ...(parsed.lastNotifiedAt ? { lastNotifiedAt: parsed.lastNotifiedAt } : {}),
+      ...(parsed.deliveryFailed === true ? { deliveryFailed: true } : {}),
     };
   } catch {
     return { ...EMPTY };
@@ -95,33 +118,47 @@ export async function loadHoldNotifyState(
 }
 
 /**
- * One in-flight write chain per ledger file, so concurrent holds serialize
- * their read-modify-write (see decisionModelHealth.ts for the same pattern).
+ * One in-flight chain per ledger file. EVERY read-modify-write runs inside
+ * it (see decisionModelHealth.ts for the same pattern), so concurrent holds
+ * of one persona serialize the whole decision, not just the file swap.
+ * Errors propagate to the caller but never break the chain for the next one.
  */
 const ledgerQueues = new Map<string, Promise<void>>();
+
+function runExclusive<T>(personaDir: string, fn: () => Promise<T>): Promise<T> {
+  const target = holdNotifyPath(personaDir);
+  const tail = ledgerQueues.get(target) ?? Promise.resolve();
+  const run = tail.catch(() => {}).then(fn);
+  const keeper: Promise<void> = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  ledgerQueues.set(target, keeper);
+  return run.finally(() => {
+    if (ledgerQueues.get(target) === keeper) ledgerQueues.delete(target);
+  });
+}
+
 /** Disambiguates tmp names for writers in the same process. */
 let tmpCounter = 0;
 
+/**
+ * Atomic write (tmp + rename). Only ever called inside runExclusive.
+ * Errors PROPAGATE: the caller must know the ledger did not move, so it can
+ * fail toward notifying instead of trusting a state nobody persisted.
+ */
 async function writeState(
   personaDir: string,
   next: HoldNotifyState,
 ): Promise<void> {
   const target = holdNotifyPath(personaDir);
-  const tail = ledgerQueues.get(target) ?? Promise.resolve();
-  const run = tail
-    .catch(() => {})
-    .then(async () => {
-      const tmp = `${target}.${process.pid}.${tmpCounter++}.tmp`;
-      await writeFile(tmp, JSON.stringify(next, null, 2) + "\n", "utf8");
-      await rename(tmp, target);
-    });
-  ledgerQueues.set(target, run);
+  const tmp = `${target}.${process.pid}.${tmpCounter++}.tmp`;
   try {
-    await run;
+    await writeFile(tmp, JSON.stringify(next, null, 2) + "\n", "utf8");
+    await rename(tmp, target);
   } catch (e) {
     log.debug(`hold-notify: could not write ledger: ${(e as Error).message}`);
-  } finally {
-    if (ledgerQueues.get(target) === run) ledgerQueues.delete(target);
+    throw e;
   }
 }
 
@@ -129,46 +166,90 @@ async function writeState(
  * Record one outage hold ("screening was unavailable") and decide whether
  * THIS hold's notification goes out.
  *
- * Notify when the outage streak is new (first hold after a reachable screen)
- * or the window has expired since the last alert; the returned `count` is
- * this hold plus every hold suppressed since that alert. Otherwise suppress:
- * the hold is counted and the caller closes the episode locally.
+ * Notify when the outage streak is new (first hold after a reachable screen),
+ * the window has expired since the last alert, or the last alert failed to
+ * deliver (retry). The returned `count` is this hold plus every hold not yet
+ * covered by a delivered alert. Otherwise suppress: the hold is counted and
+ * the caller closes the episode locally.
+ *
+ * The window anchor is written WITH the decision, so a hold racing an
+ * in-flight delivery batches instead of double-pinging. The caller settles
+ * the alert afterwards: confirmAlertDelivered(count) on delivery,
+ * noteAlertDeliveryFailed() when the notify path failed.
+ *
+ * Write failures reject: uncertainty returns control to a caller that fails
+ * toward notifying.
  */
 export async function recordOutageHold(
   personaDir: string,
   now: Date = new Date(),
 ): Promise<OutageHoldDecision> {
-  const state = await loadHoldNotifyState(personaDir);
-  const last = state.lastNotifiedAt ? Date.parse(state.lastNotifiedAt) : NaN;
-  const freshOutage = !state.outageOngoing;
-  const windowExpired =
-    !Number.isFinite(last) || now.getTime() - last >= HOLD_NOTIFY_WINDOW_MS;
+  return runExclusive(personaDir, async () => {
+    const state = await loadHoldNotifyState(personaDir);
+    const last = state.lastNotifiedAt ? Date.parse(state.lastNotifiedAt) : NaN;
+    const freshOutage = !state.outageOngoing;
+    const windowExpired =
+      !Number.isFinite(last) || now.getTime() - last >= HOLD_NOTIFY_WINDOW_MS;
+    const notify =
+      freshOutage || windowExpired || state.deliveryFailed === true;
 
-  if (freshOutage || windowExpired) {
-    const count = state.suppressed + 1;
     await writeState(personaDir, {
       outageOngoing: true,
-      lastNotifiedAt: now.toISOString(),
-      suppressed: 0,
+      suppressed: state.suppressed + 1,
+      ...(notify
+        ? { lastNotifiedAt: now.toISOString() }
+        : state.lastNotifiedAt
+          ? { lastNotifiedAt: state.lastNotifiedAt }
+          : {}),
+      // A decided retry consumes the failure marker; a fresh one is set
+      // again by noteAlertDeliveryFailed if this delivery also fails.
     });
-    return { notify: true, count };
-  }
-
-  await writeState(personaDir, {
-    ...state,
-    outageOngoing: true,
-    suppressed: state.suppressed + 1,
+    return { notify, count: state.suppressed + 1 };
   });
-  return { notify: false, count: state.suppressed + 1 };
+}
+
+/**
+ * The alert went out (exit code 0): cover the `count` holds it stood for.
+ * Only then does the window commit — until this call the count stays
+ * pending, so a delivery that failed is retried by the next hold.
+ */
+export async function confirmAlertDelivered(
+  personaDir: string,
+  count: number,
+): Promise<void> {
+  return runExclusive(personaDir, async () => {
+    const state = await loadHoldNotifyState(personaDir);
+    await writeState(personaDir, {
+      ...state,
+      suppressed: Math.max(0, state.suppressed - Math.max(0, Math.floor(count))),
+      deliveryFailed: false,
+    });
+  });
+}
+
+/**
+ * The decided alert did NOT reach the principal (notify threw or exited
+ * non-zero). Keep its count pending and make the next hold retry it.
+ */
+export async function noteAlertDeliveryFailed(
+  personaDir: string,
+): Promise<void> {
+  return runExclusive(personaDir, async () => {
+    const state = await loadHoldNotifyState(personaDir);
+    await writeState(personaDir, { ...state, deliveryFailed: true });
+  });
 }
 
 /**
  * A screen ANSWERED (a verdict, or a judge that responded without a
  * scoreable verdict) — close an open outage streak so the first hold of the
  * next outage notifies immediately. No-op (no write) when nothing is open.
+ * The unreported tail and any pending retry carry over.
  */
 export async function noteScreeningReachable(personaDir: string): Promise<void> {
-  const state = await loadHoldNotifyState(personaDir);
-  if (!state.outageOngoing) return;
-  await writeState(personaDir, { ...state, outageOngoing: false });
+  return runExclusive(personaDir, async () => {
+    const state = await loadHoldNotifyState(personaDir);
+    if (!state.outageOngoing) return;
+    await writeState(personaDir, { ...state, outageOngoing: false });
+  });
 }

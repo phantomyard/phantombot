@@ -153,6 +153,8 @@ import {
 } from "../lib/decisionModelJudge.ts";
 import { recordDecisionModelOutcome } from "../lib/decisionModelHealth.ts";
 import {
+  confirmAlertDelivered,
+  noteAlertDeliveryFailed,
   noteScreeningReachable,
   recordOutageHold,
   type OutageHoldDecision,
@@ -781,11 +783,34 @@ export function makeScreener(
           )
         : { notify: true, count: 1 };
     if (batch.notify) {
+      let delivered = true;
       try {
         const code = await notify(buildNotifyMessage(batch.count));
-        if (code !== 0) log.warn(`screen: notify exited ${code} for held request`);
+        if (code !== 0) {
+          delivered = false;
+          log.warn(`screen: notify exited ${code} for held request`);
+        }
       } catch (e) {
+        delivered = false;
         log.warn(`screen: notify failed for held request: ${(e as Error).message}`);
+      }
+      // Settle the ledger AFTER delivery (issue #665 review): the window only
+      // commits once the alert actually reached the principal. A failed
+      // delivery keeps its count pending and is retried by the next outage
+      // hold, instead of suppressing pings for a window nobody was told
+      // about.
+      if (screeningUnavailable && holdLedgerDir) {
+        try {
+          if (delivered) {
+            await confirmAlertDelivered(holdLedgerDir, batch.count);
+          } else {
+            await noteAlertDeliveryFailed(holdLedgerDir);
+          }
+        } catch (e) {
+          log.warn(
+            `screen: hold-notify ledger settle failed: ${(e as Error).message}`,
+          );
+        }
       }
     } else {
       log.info("screen: outage-hold notification suppressed (batched)", {
