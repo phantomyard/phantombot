@@ -29,18 +29,26 @@
  *     hold plus everything counted since the last successful delivery. Carried
  *     across an outage boundary so a batch's tail is never dropped silently;
  *     the next delivered alert reports it.
- *   - `deliveryFailed` — the last decided alert failed to deliver (or exited
- *     non-zero). The next hold RETRIES the notification instead of staying
- *     silent for a whole window, folding the pending count into its header.
- *     Cleared when a retry is decided (and again when one is confirmed).
+ *   - `alertSeq` — the last alert generation handed out. Every notify
+ *     decision bumps it and gets its seq back; settlement names the seq it
+ *     settles, so a late success can never erase a NEWER failure (see below).
+ *   - `failedSeq` — the highest alert generation whose delivery failed
+ *     without a later success covering it. Its presence makes the next hold
+ *     RETRY the notification, folding the pending count into the header.
+ *   - `settledSeq` — the highest alert generation confirmed delivered. A
+ *     failure note for a generation it already covers is moot.
  *
  * The alert window is committed in two phases (see #665 review):
  *
- *   1. `recordOutageHold` decides and anchors the window (above).
- *   2. AFTER delivery the caller settles: `confirmAlertDelivered(count)`
- *      covers `count` holds, or `noteAlertDeliveryFailed()` keeps the count
- *      pending and marks the retry. A caller that dies mid-delivery leaves
- *      the anchor in place — bounded volume degrades to batching only.
+ *   1. `recordOutageHold` decides, anchors the window and hands out the seq.
+ *   2. AFTER delivery the caller settles with that seq:
+ *      `confirmAlertDelivered(seq, count)` covers `count` holds and clears a
+ *      failure marker no newer than seq; `noteAlertDeliveryFailed(seq)`
+ *      keeps the count pending and marks the retry. Settles land out of
+ *      order under overlapping deliveries, which is exactly what the seq
+ *      accounting is for: an older success subtracts its count but cannot
+ *      clear a newer failure, and a failure a newer delivered alert already
+ *      covered is ignored.
  *
  * Deliberate properties:
  *   - FAIL TOWARD NOTIFYING. Reads are best-effort: a corrupt or unreadable
@@ -76,8 +84,12 @@ export interface HoldNotifyState {
   lastNotifiedAt?: string;
   /** Outage holds not yet covered by a delivered alert. */
   suppressed: number;
-  /** The last decided alert failed to deliver; the next hold retries it. */
-  deliveryFailed?: boolean;
+  /** Last alert generation handed out (bumped on every notify decision). */
+  alertSeq?: number;
+  /** Highest generation whose delivery failed, not yet covered. */
+  failedSeq?: number;
+  /** Highest generation confirmed delivered. */
+  settledSeq?: number;
 }
 
 /** The batch decision for ONE outage hold. */
@@ -86,6 +98,12 @@ export interface OutageHoldDecision {
   notify: boolean;
   /** How many outage holds the notification stands for (>= 1 when notify). */
   count: number;
+  /**
+   * The alert generation to settle with (present only when notify, and only
+   * when the decision was actually recorded; on ledger trouble the caller
+   * notifies without settling, since nothing was recorded to settle).
+   */
+  seq?: number;
 }
 
 export function holdNotifyPath(personaDir: string): string {
@@ -93,6 +111,12 @@ export function holdNotifyPath(personaDir: string): string {
 }
 
 const EMPTY: HoldNotifyState = { outageOngoing: false, suppressed: 0 };
+
+function positiveInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
+}
 
 /** Read the ledger. Empty state when absent or unreadable — never throws. */
 export async function loadHoldNotifyState(
@@ -103,6 +127,9 @@ export async function loadHoldNotifyState(
   try {
     const parsed = JSON.parse(await readFile(p, "utf8")) as HoldNotifyState;
     if (!parsed || typeof parsed !== "object") return { ...EMPTY };
+    const alertSeq = positiveInt(parsed.alertSeq);
+    const failedSeq = positiveInt(parsed.failedSeq);
+    const settledSeq = positiveInt(parsed.settledSeq);
     return {
       outageOngoing: parsed.outageOngoing === true,
       suppressed:
@@ -110,7 +137,9 @@ export async function loadHoldNotifyState(
           ? Math.max(0, Math.floor(parsed.suppressed))
           : 0,
       ...(parsed.lastNotifiedAt ? { lastNotifiedAt: parsed.lastNotifiedAt } : {}),
-      ...(parsed.deliveryFailed === true ? { deliveryFailed: true } : {}),
+      ...(alertSeq !== undefined ? { alertSeq } : {}),
+      ...(failedSeq !== undefined ? { failedSeq } : {}),
+      ...(settledSeq !== undefined ? { settledSeq } : {}),
     };
   } catch {
     return { ...EMPTY };
@@ -167,15 +196,17 @@ async function writeState(
  * THIS hold's notification goes out.
  *
  * Notify when the outage streak is new (first hold after a reachable screen),
- * the window has expired since the last alert, or the last alert failed to
+ * the window has expired since the last alert, or a decided alert failed to
  * deliver (retry). The returned `count` is this hold plus every hold not yet
  * covered by a delivered alert. Otherwise suppress: the hold is counted and
  * the caller closes the episode locally.
  *
  * The window anchor is written WITH the decision, so a hold racing an
- * in-flight delivery batches instead of double-pinging. The caller settles
- * the alert afterwards: confirmAlertDelivered(count) on delivery,
- * noteAlertDeliveryFailed() when the notify path failed.
+ * in-flight delivery batches instead of double-pinging. A notify decision
+ * bumps `alertSeq` and returns it; the caller settles with that seq after
+ * delivery (confirmAlertDelivered / noteAlertDeliveryFailed). A decided
+ * retry consumes the failure marker: the in-flight alert IS the retry, and a
+ * failed retry re-marks it with its own (higher) seq.
  *
  * Write failures reject: uncertainty returns control to a caller that fails
  * toward notifying.
@@ -191,52 +222,76 @@ export async function recordOutageHold(
     const windowExpired =
       !Number.isFinite(last) || now.getTime() - last >= HOLD_NOTIFY_WINDOW_MS;
     const notify =
-      freshOutage || windowExpired || state.deliveryFailed === true;
+      freshOutage || windowExpired || state.failedSeq !== undefined;
+    const count = state.suppressed + 1;
 
+    if (!notify) {
+      await writeState(personaDir, {
+        ...state,
+        suppressed: count,
+      });
+      return { notify: false, count };
+    }
+
+    const seq = (state.alertSeq ?? 0) + 1;
     await writeState(personaDir, {
       outageOngoing: true,
-      suppressed: state.suppressed + 1,
-      ...(notify
-        ? { lastNotifiedAt: now.toISOString() }
-        : state.lastNotifiedAt
-          ? { lastNotifiedAt: state.lastNotifiedAt }
-          : {}),
-      // A decided retry consumes the failure marker; a fresh one is set
-      // again by noteAlertDeliveryFailed if this delivery also fails.
+      suppressed: count,
+      lastNotifiedAt: now.toISOString(),
+      alertSeq: seq,
+      ...(state.settledSeq !== undefined ? { settledSeq: state.settledSeq } : {}),
     });
-    return { notify, count: state.suppressed + 1 };
+    return { notify: true, count, seq };
   });
 }
 
 /**
- * The alert went out (exit code 0): cover the `count` holds it stood for.
- * Only then does the window commit — until this call the count stays
- * pending, so a delivery that failed is retried by the next hold.
+ * The alert with generation `seq` went out (exit code 0): cover the `count`
+ * holds it stood for. Only then does the window commit; until this call the
+ * count stays pending, so a delivery that failed is retried by the next hold.
+ *
+ * Settlement is seq-aware because settles can land out of order under
+ * overlapping deliveries: an OLDER success subtracts its count but must not
+ * clear a NEWER failure's retry marker.
  */
 export async function confirmAlertDelivered(
   personaDir: string,
+  seq: number,
   count: number,
 ): Promise<void> {
   return runExclusive(personaDir, async () => {
     const state = await loadHoldNotifyState(personaDir);
-    await writeState(personaDir, {
-      ...state,
+    const next: HoldNotifyState = {
+      outageOngoing: state.outageOngoing,
       suppressed: Math.max(0, state.suppressed - Math.max(0, Math.floor(count))),
-      deliveryFailed: false,
-    });
+      ...(state.lastNotifiedAt ? { lastNotifiedAt: state.lastNotifiedAt } : {}),
+      alertSeq: Math.max(state.alertSeq ?? 0, seq),
+      settledSeq: Math.max(state.settledSeq ?? 0, seq),
+    };
+    if (state.failedSeq !== undefined && seq < state.failedSeq) {
+      next.failedSeq = state.failedSeq;
+    }
+    await writeState(personaDir, next);
   });
 }
 
 /**
- * The decided alert did NOT reach the principal (notify threw or exited
- * non-zero). Keep its count pending and make the next hold retry it.
+ * The decided alert `seq` did NOT reach the principal (notify threw or exited
+ * non-zero). Keep its count pending and make the next hold retry it. A
+ * failure a later delivered alert already covered is moot: its holds went
+ * out inside that alert's count, so re-marking would only spam.
  */
 export async function noteAlertDeliveryFailed(
   personaDir: string,
+  seq: number,
 ): Promise<void> {
   return runExclusive(personaDir, async () => {
     const state = await loadHoldNotifyState(personaDir);
-    await writeState(personaDir, { ...state, deliveryFailed: true });
+    if (seq <= (state.settledSeq ?? 0)) return;
+    await writeState(personaDir, {
+      ...state,
+      failedSeq: Math.max(state.failedSeq ?? 0, seq),
+    });
   });
 }
 

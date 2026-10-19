@@ -243,22 +243,21 @@ describe("outage hold-notification batching (issue #665)", () => {
     expect(sent).toHaveLength(0);
     // Nothing lost: the hold is counted and marked for retry, the window
     // NOT committed.
-    expect(await loadHoldNotifyState(dir)).toEqual({
+    expect(await loadHoldNotifyState(dir)).toMatchObject({
       outageOngoing: true,
-      lastNotifiedAt: expect.any(String) as unknown as string,
       suppressed: 1,
-      deliveryFailed: true,
+      failedSeq: 1,
     });
 
     failing = false;
     await screen("two");
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain("I held 2 untrusted requests since my last alert");
-    expect(await loadHoldNotifyState(dir)).toEqual({
+    expect(await loadHoldNotifyState(dir)).toMatchObject({
       outageOngoing: true,
-      lastNotifiedAt: expect.any(String) as unknown as string,
       suppressed: 0,
     });
+    expect((await loadHoldNotifyState(dir)).failedSeq).toBeUndefined();
   });
 
   it("a delivery that exits NON-ZERO keeps the count pending; the next hold retries", async () => {
@@ -275,7 +274,7 @@ describe("outage hold-notification batching (issue #665)", () => {
     await screen("one");
     expect(await loadHoldNotifyState(dir)).toMatchObject({
       suppressed: 1,
-      deliveryFailed: true,
+      failedSeq: 1,
     });
 
     code = 0;
@@ -284,7 +283,59 @@ describe("outage hold-notification batching (issue #665)", () => {
     expect(sent[1]).toContain("I held 2 untrusted requests since my last alert");
     const state = await loadHoldNotifyState(dir);
     expect(state.suppressed).toBe(0);
-    expect(state.deliveryFailed).toBeUndefined();
+    expect(state.failedSeq).toBeUndefined();
+  });
+
+  it("out-of-order settlement: a late success cannot silence a newer failed alert", async () => {
+    const sent: string[] = [];
+    let resolveA!: (code: number) => void;
+    let markASent!: () => void;
+    const aSent = new Promise<void>((r) => (markASent = r));
+    const dA = new Promise<number>((r) => (resolveA = r));
+    // Hold A: decided immediately, delivery DEFERRED.
+    const screenA = mk(cfg(), {
+      judge: outageJudge,
+      notify: async (m: string) => {
+        sent.push(m);
+        markASent();
+        return dA;
+      },
+    }).screen;
+    const pA = screenA("A");
+    await aSent;
+
+    // A reachable screen closes the streak mid-flight.
+    expect(
+      (await mk(cfg(), { judge: judgeOk(5) }).screen("benign")).action,
+    ).toBe("pass");
+
+    // Hold B: new outage's first hold (count covers A's uncovered hold too);
+    // its delivery FAILS.
+    const screenB = mk(cfg(), {
+      judge: outageJudge,
+      notify: async (m: string) => {
+        sent.push(m);
+        throw new Error("notify channel down");
+      },
+    }).screen;
+    await screenB("B");
+
+    // A's delivery succeeds LATE: older settle, newer failure already marked.
+    resolveA(0);
+    await pA;
+
+    // The next hold must RETRY with both holds folded in, not batch silently.
+    const screenC = mk(cfg(), {
+      judge: outageJudge,
+      notify: async (m: string) => {
+        sent.push(m);
+        return 0;
+      },
+    }).screen;
+    await screenC("C");
+    expect(sent).toHaveLength(3);
+    expect(sent[2]).toContain("I held 2 untrusted requests since my last alert");
+    expect((await loadHoldNotifyState(join(personasDir, "robbie"))).suppressed).toBe(0);
   });
 });
 
@@ -293,8 +344,12 @@ describe("hold-notify ledger (holdNotifyWindow.ts)", () => {
 
   it("notifies on a fresh outage and suppresses within the window", async () => {
     const t0 = new Date();
-    expect(await recordOutageHold(dir(), t0)).toEqual({ notify: true, count: 1 });
-    await confirmAlertDelivered(dir(), 1);
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 1,
+      seq: 1,
+    });
+    await confirmAlertDelivered(dir(), 1, 1);
     const later = new Date(t0.getTime() + 5 * 60_000);
     // Suppressed holds report the running unreported total, this one included.
     expect(await recordOutageHold(dir(), later)).toEqual({
@@ -309,28 +364,40 @@ describe("hold-notify ledger (holdNotifyWindow.ts)", () => {
 
   it("window expiry notifies again with the suppressed count folded in", async () => {
     const t0 = new Date();
-    expect(await recordOutageHold(dir(), t0)).toEqual({ notify: true, count: 1 });
-    await confirmAlertDelivered(dir(), 1);
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 1,
+      seq: 1,
+    });
+    await confirmAlertDelivered(dir(), 1, 1);
     await recordOutageHold(dir(), t0); // suppressed (1 unreported)
     await recordOutageHold(dir(), t0); // suppressed (2 unreported)
     const past = new Date(t0.getTime() + HOLD_NOTIFY_WINDOW_MS + 1);
-    expect(await recordOutageHold(dir(), past)).toEqual({ notify: true, count: 3 });
+    expect(await recordOutageHold(dir(), past)).toEqual({
+      notify: true,
+      count: 3,
+      seq: 2,
+    });
     // The count stays PENDING until delivery confirms it.
     expect((await loadHoldNotifyState(dir())).suppressed).toBe(3);
-    await confirmAlertDelivered(dir(), 3);
+    await confirmAlertDelivered(dir(), 2, 3);
     expect((await loadHoldNotifyState(dir())).suppressed).toBe(0);
   });
 
   it("a reachable screen closes the streak but carries the unreported tail", async () => {
     const t0 = new Date();
-    await recordOutageHold(dir(), t0); // notifies
-    await confirmAlertDelivered(dir(), 1);
+    await recordOutageHold(dir(), t0); // notifies (seq 1)
+    await confirmAlertDelivered(dir(), 1, 1);
     await recordOutageHold(dir(), t0); // suppressed
     await noteScreeningReachable(dir());
     const state = await loadHoldNotifyState(dir());
     expect(state.outageOngoing).toBe(false);
     // Next outage: immediate alert, and the tail is reported, not dropped.
-    expect(await recordOutageHold(dir(), t0)).toEqual({ notify: true, count: 2 });
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 2,
+      seq: 2,
+    });
   });
 
   it("noteScreeningReachable is a no-op when nothing is open", async () => {
@@ -347,7 +414,7 @@ describe("hold-notify ledger (holdNotifyWindow.ts)", () => {
       outageOngoing: false,
       suppressed: 0,
     });
-    expect(await recordOutageHold(dir())).toEqual({ notify: true, count: 1 });
+    expect(await recordOutageHold(dir())).toEqual({ notify: true, count: 1, seq: 1 });
   });
 
   it("concurrent holds serialize: one notification, no lost increments", async () => {
@@ -359,10 +426,10 @@ describe("hold-notify ledger (holdNotifyWindow.ts)", () => {
     );
     const notifies = results.filter((r) => r.notify);
     expect(notifies).toHaveLength(1);
-    expect(notifies[0]).toEqual({ notify: true, count: 1 });
+    expect(notifies[0]).toEqual({ notify: true, count: 1, seq: 1 });
     // Every hold is counted; the delivered alert covers exactly its own.
     expect((await loadHoldNotifyState(dir())).suppressed).toBe(20);
-    await confirmAlertDelivered(dir(), 1);
+    await confirmAlertDelivered(dir(), 1, 1);
     expect((await loadHoldNotifyState(dir())).suppressed).toBe(19);
   });
 
@@ -381,8 +448,12 @@ describe("hold-notify ledger (holdNotifyWindow.ts)", () => {
     // the next in-window call must reject toward notifying, not return a
     // suppression nobody persisted.
     const t0 = new Date();
-    expect(await recordOutageHold(dir(), t0)).toEqual({ notify: true, count: 1 });
-    await confirmAlertDelivered(dir(), 1);
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 1,
+      seq: 1,
+    });
+    await confirmAlertDelivered(dir(), 1, 1);
     await chmod(dir(), 0o555);
     try {
       await expect(recordOutageHold(dir(), t0)).rejects.toThrow();
@@ -395,17 +466,73 @@ describe("hold-notify ledger (holdNotifyWindow.ts)", () => {
 
   it("a failed delivery keeps the count pending and is retried", async () => {
     const t0 = new Date();
-    expect(await recordOutageHold(dir(), t0)).toEqual({ notify: true, count: 1 });
-    await noteAlertDeliveryFailed(dir());
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 1,
+      seq: 1,
+    });
+    await noteAlertDeliveryFailed(dir(), 1);
     // Retry on the next hold: same window, but the alert never landed.
-    expect(await recordOutageHold(dir(), t0)).toEqual({ notify: true, count: 2 });
-    await confirmAlertDelivered(dir(), 2);
-    expect(await loadHoldNotifyState(dir())).toEqual({
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 2,
+      seq: 2,
+    });
+    await confirmAlertDelivered(dir(), 2, 2);
+    expect(await loadHoldNotifyState(dir())).toMatchObject({
       outageOngoing: true,
       lastNotifiedAt: t0.toISOString(),
       suppressed: 0,
     });
     // And after a confirmed retry the window batches again.
+    expect(await recordOutageHold(dir(), t0)).toEqual({ notify: false, count: 1 });
+  });
+
+  it("an older late success cannot erase a newer failed retry", async () => {
+    const t0 = new Date();
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 1,
+      seq: 1,
+    });
+    // A reachable screen closes the streak mid-flight.
+    await noteScreeningReachable(dir());
+    // B: the new outage's first hold, standing for A's uncovered hold too.
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 2,
+      seq: 2,
+    });
+    // Out-of-order settlement: B fails first, A succeeds LATE.
+    await noteAlertDeliveryFailed(dir(), 2);
+    await confirmAlertDelivered(dir(), 1, 1);
+    // B's failure marker survives the older success: the next hold retries
+    // with B's uncovered hold folded into the count.
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 2,
+      seq: 3,
+    });
+    await confirmAlertDelivered(dir(), 3, 2);
+    expect((await loadHoldNotifyState(dir())).suppressed).toBe(0);
+  });
+
+  it("a stale failure after a newer delivered alert is moot", async () => {
+    const t0 = new Date();
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 1,
+      seq: 1,
+    });
+    await noteScreeningReachable(dir());
+    expect(await recordOutageHold(dir(), t0)).toEqual({
+      notify: true,
+      count: 2,
+      seq: 2,
+    });
+    await confirmAlertDelivered(dir(), 2, 2); // B delivered: covers both holds
+    await noteAlertDeliveryFailed(dir(), 1); // A's failure arrives late
+    // No spurious retry: its hold already went out inside B's count.
     expect(await recordOutageHold(dir(), t0)).toEqual({ notify: false, count: 1 });
   });
 });
