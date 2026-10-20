@@ -23,6 +23,8 @@ New here? Start with [Install Phantombot](getting-started/install.md), then
 - [Memory](how-to/memory.md) — search, capture, inspect, back up, and restore.
 - [MCP integrations](how-to/mcp.md) — connect external tools and accounts.
 - [Secrets](how-to/secrets.md) — store persona-scoped credentials safely.
+- [TUI keys](reference/tui-keys.md) — editing, scrolling, and Option as Meta
+  on macOS.
 - [Shell completion](how-to/shell-completion.md) — enable command completion.
 - [Import from OpenClaw](how-to/import-openclaw.md) — migrate an existing persona.
 

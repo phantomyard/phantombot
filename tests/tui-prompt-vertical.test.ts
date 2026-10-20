@@ -200,9 +200,8 @@ describe("oracle: ↑↓ agree with an exhaustive search over drawn carets", () 
   function oracle(all: ReturnType<typeof layoutAll>, cursor: number, dir: -1 | 1): number | undefined {
     const here = all[cursor]!;
     const target = here.row + dir;
-    // The edge is judged on the rows drawn NOW. (The ▌ caret can split a word
-    // and change the row count, so another cursor position may well have a
-    // row this one does not show — ↓ must not jump to a row you can't see.)
+    // The edge is judged on the rows drawn NOW (the row count no longer
+    // depends on the cursor since #677, but the oracle need not assume it).
     if (target < 0 || target >= here.rows) return undefined;
     let best: { c: number; col: number } | undefined;
     const order = [...all.keys()].sort((a, b) => Math.abs(a - cursor) - Math.abs(b - cursor) || a - b);
