@@ -16,7 +16,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runUpdate } from "../src/cli/update.ts";
+import { defaultResignEnabled, runUpdate } from "../src/cli/update.ts";
 import type { ServiceControl } from "../src/lib/systemd.ts";
 
 let workdir: string;
@@ -410,6 +410,80 @@ describe("runUpdate on darwin-arm64", () => {
     expect(err.text).toContain("could not apply stable code signature");
     expect(err.text).toContain("fix-signing");
   });
+
+  test("no seam under bun test → the REAL re-sign never runs", async () => {
+    // Without a seam, runUpdate used to fall back to defaultResignBinary even
+    // inside the suite: real vault, real `security`/`codesign`, and on a Mac
+    // with a drifted signing keychain a password dialog mid-run. Under
+    // the test preload the default is off, so neither the success line nor the
+    // failure warning may appear.
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const code = await runUpdate({
+      binPath,
+      procPlatform: "darwin",
+      procArch: "arm64",
+      currentVersion: "1.0.42",
+      fetchImpl: darwinFetch(),
+      out,
+      err,
+      force: true,
+      healSystemdUnits: false,
+      refreshCompletions: false,
+      installEditorExtensions: false,
+    });
+    expect(code).toBe(0);
+    expect(out.text).not.toContain("code signature");
+    expect(err.text).not.toContain("code signature");
+    expect(err.text).not.toContain("stable-signing");
+  });
+});
+
+describe("defaultResignEnabled", () => {
+  const saved = process.env.PHANTOMBOT_UPDATE_RESIGN;
+  const savedNodeEnv = process.env.NODE_ENV;
+  const savedRoot = process.env.PHANTOMBOT_TEST_ISOLATION_ROOT;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.PHANTOMBOT_UPDATE_RESIGN;
+    else process.env.PHANTOMBOT_UPDATE_RESIGN = saved;
+    process.env.NODE_ENV = savedNodeEnv;
+    process.env.PHANTOMBOT_TEST_ISOLATION_ROOT = savedRoot;
+  });
+
+  test("off by default under bun test", () => {
+    delete process.env.PHANTOMBOT_UPDATE_RESIGN;
+    expect(process.env.PHANTOMBOT_TEST_ISOLATION_ROOT).toBeTruthy();
+    expect(defaultResignEnabled()).toBe(false);
+  });
+
+  test("off under the test preload even with an ambient NODE_ENV=production", () => {
+    // bun inherits NODE_ENV, so `NODE_ENV=production bun test` must not reach
+    // the real keychain. The preload marker is the signal, not NODE_ENV.
+    expect(savedRoot).toBeTruthy();
+    process.env.NODE_ENV = "production";
+    delete process.env.PHANTOMBOT_UPDATE_RESIGN;
+    expect(defaultResignEnabled()).toBe(false);
+    process.env.PHANTOMBOT_UPDATE_RESIGN = "1";
+    expect(defaultResignEnabled()).toBe(false);
+  });
+
+  test("on by default outside tests (production behaviour unchanged)", () => {
+    delete process.env.PHANTOMBOT_TEST_ISOLATION_ROOT;
+    delete process.env.PHANTOMBOT_UPDATE_RESIGN;
+    process.env.NODE_ENV = "production";
+    expect(defaultResignEnabled()).toBe(true);
+  });
+
+  test("PHANTOMBOT_UPDATE_RESIGN overrides NODE_ENV outside the preload", () => {
+    delete process.env.PHANTOMBOT_TEST_ISOLATION_ROOT;
+    process.env.PHANTOMBOT_UPDATE_RESIGN = "1";
+    expect(defaultResignEnabled()).toBe(true);
+    process.env.NODE_ENV = "production";
+    for (const off of ["0", "off", "false", "no", " NO "]) {
+      process.env.PHANTOMBOT_UPDATE_RESIGN = off;
+      expect(defaultResignEnabled()).toBe(false);
+    }
+  });
 });
 
 describe("runUpdate on windows-x64", () => {
@@ -712,6 +786,7 @@ describe("runUpdate post-swap systemd heal", () => {
       err: new CaptureStream(),
       force: true,
       refreshCompletions: false,
+      resignBinary: false,
       healSystemdUnits: async () => {
         healCalled = true;
         return null;
