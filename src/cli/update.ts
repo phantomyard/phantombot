@@ -396,6 +396,32 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
 }
 
 /**
+ * May runUpdate fall back to the REAL re-sign step when no seam is injected?
+ * On unless explicitly turned off — except under `bun test`.
+ *
+ * The test signal is PHANTOMBOT_TEST_ISOLATION_ROOT, which the bunfig preload
+ * (tests/testEnvIsolation.ts) sets unconditionally and no shipped binary ever
+ * sets. NODE_ENV alone is not enough: bun inherits an ambient NODE_ENV, so
+ * `NODE_ENV=production bun test` would otherwise reach the real re-sign. The
+ * marker wins over PHANTOMBOT_UPDATE_RESIGN too — a test never re-signs for
+ * real; tests that exercise signing inject the seam.
+ *
+ * defaultResignBinary opens the live persona vault under the real HOME and
+ * runs real `security`/`codesign` against the user's signing keychain. A test
+ * that drives runUpdate with procPlatform "darwin" (or omits it on a Mac) and
+ * forgets `resignBinary: false` would otherwise touch that keychain from a
+ * test run — and when the vault's keychain password has drifted, macOS pops a
+ * password dialog mid-suite. CI on Linux never sees it, so the leak stays
+ * invisible there. Tests that exercise signing inject the seam explicitly.
+ */
+export function defaultResignEnabled(): boolean {
+  if (process.env.PHANTOMBOT_TEST_ISOLATION_ROOT) return false;
+  const v = process.env.PHANTOMBOT_UPDATE_RESIGN;
+  if (v !== undefined) return !/^(0|off|false|no)$/i.test(v.trim());
+  return process.env.NODE_ENV !== "test";
+}
+
+/**
  * Production wiring for the post-swap editor-extension install: run the
  * NEWLY-INSTALLED binary's own `acp install vscode`.
  *
@@ -436,24 +462,6 @@ async function defaultInstallEditorExtensions(
  * and reported as a `failed` (not a crash) so a swap can never be undone by a
  * signing hiccup; the update path only warns.
  */
-/**
- * May runUpdate fall back to the REAL re-sign step when no seam is injected?
- * On unless explicitly turned off — except under `bun test`.
- *
- * defaultResignBinary opens the live persona vault under the real HOME and
- * runs real `security`/`codesign` against the user's signing keychain. A test
- * that drives runUpdate with procPlatform "darwin" (or omits it on a Mac) and
- * forgets `resignBinary: false` would otherwise touch that keychain from a
- * test run — and when the vault's keychain password has drifted, macOS pops a
- * password dialog mid-suite. CI on Linux never sees it, so the leak stays
- * invisible there. Tests that exercise signing inject the seam explicitly.
- */
-export function defaultResignEnabled(): boolean {
-  const v = process.env.PHANTOMBOT_UPDATE_RESIGN;
-  if (v !== undefined) return !/^(0|off|false|no)$/i.test(v.trim());
-  return process.env.NODE_ENV !== "test";
-}
-
 async function defaultResignBinary(
   binPath: string,
 ): Promise<ResignAfterUpdateResult> {

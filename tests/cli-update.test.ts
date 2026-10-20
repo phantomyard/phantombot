@@ -415,7 +415,7 @@ describe("runUpdate on darwin-arm64", () => {
     // Without a seam, runUpdate used to fall back to defaultResignBinary even
     // inside the suite: real vault, real `security`/`codesign`, and on a Mac
     // with a drifted signing keychain a password dialog mid-run. Under
-    // NODE_ENV=test the default is off, so neither the success line nor the
+    // the test preload the default is off, so neither the success line nor the
     // failure warning may appear.
     const out = new CaptureStream();
     const err = new CaptureStream();
@@ -442,25 +442,40 @@ describe("runUpdate on darwin-arm64", () => {
 describe("defaultResignEnabled", () => {
   const saved = process.env.PHANTOMBOT_UPDATE_RESIGN;
   const savedNodeEnv = process.env.NODE_ENV;
+  const savedRoot = process.env.PHANTOMBOT_TEST_ISOLATION_ROOT;
   afterEach(() => {
     if (saved === undefined) delete process.env.PHANTOMBOT_UPDATE_RESIGN;
     else process.env.PHANTOMBOT_UPDATE_RESIGN = saved;
     process.env.NODE_ENV = savedNodeEnv;
+    process.env.PHANTOMBOT_TEST_ISOLATION_ROOT = savedRoot;
   });
 
   test("off by default under bun test", () => {
     delete process.env.PHANTOMBOT_UPDATE_RESIGN;
-    expect(process.env.NODE_ENV).toBe("test");
+    expect(process.env.PHANTOMBOT_TEST_ISOLATION_ROOT).toBeTruthy();
+    expect(defaultResignEnabled()).toBe(false);
+  });
+
+  test("off under the test preload even with an ambient NODE_ENV=production", () => {
+    // bun inherits NODE_ENV, so `NODE_ENV=production bun test` must not reach
+    // the real keychain. The preload marker is the signal, not NODE_ENV.
+    expect(savedRoot).toBeTruthy();
+    process.env.NODE_ENV = "production";
+    delete process.env.PHANTOMBOT_UPDATE_RESIGN;
+    expect(defaultResignEnabled()).toBe(false);
+    process.env.PHANTOMBOT_UPDATE_RESIGN = "1";
     expect(defaultResignEnabled()).toBe(false);
   });
 
   test("on by default outside tests (production behaviour unchanged)", () => {
+    delete process.env.PHANTOMBOT_TEST_ISOLATION_ROOT;
     delete process.env.PHANTOMBOT_UPDATE_RESIGN;
     process.env.NODE_ENV = "production";
     expect(defaultResignEnabled()).toBe(true);
   });
 
-  test("PHANTOMBOT_UPDATE_RESIGN overrides either way", () => {
+  test("PHANTOMBOT_UPDATE_RESIGN overrides NODE_ENV outside the preload", () => {
+    delete process.env.PHANTOMBOT_TEST_ISOLATION_ROOT;
     process.env.PHANTOMBOT_UPDATE_RESIGN = "1";
     expect(defaultResignEnabled()).toBe(true);
     process.env.NODE_ENV = "production";
