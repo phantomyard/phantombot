@@ -69,6 +69,7 @@ import {
 import {
   createNarrationController,
   resolveOutgoingSuffix,
+  resolveSpokenReply,
   segmenterOptionsFor,
 } from "../core/streaming.ts";
 import type { ServiceControl } from "../../lib/systemd.ts";
@@ -807,6 +808,9 @@ export async function runPhantomchatServer(
     // markdown-aware live splitter.
     let streamedReply = "";
     let consumedReplyChars = 0;
+    // streamedReply.length at each tool boundary, so a voice-out turn speaks
+    // only the answer and not the pre-tool narration (resolveSpokenReply).
+    const toolBoundaries: number[] = [];
     let finalSegmenter = new StreamSegmenter(segmenterOptions);
     let finalCandidateText = "";
     let finalCandidateSentChars = 0;
@@ -1114,6 +1118,9 @@ export async function runPhantomchatServer(
           const unsent = finalCandidateText.slice(finalCandidateSentChars);
           if (unsent.trim().length > 0) narration.append(unsent);
           consumedReplyChars = streamedReply.length;
+          if (toolBoundaries.at(-1) !== streamedReply.length) {
+            toolBoundaries.push(streamedReply.length);
+          }
           resetFinalCandidate();
           await narration.flush();
         }
@@ -1286,12 +1293,16 @@ export async function runPhantomchatServer(
       }
     }
 
-    // Voice-out: synthesize the full reply (split into short clips so a long
-    // answer doesn't hit the TTS size limit) and send each as a voice note. On
-    // any synth failure, fall back to text for the remainder. Text streaming is
-    // disabled in voice mode, so there's nothing to dedupe — send fullReply.
+    // Voice-out: speak only the answer — the text after the last tool, not the
+    // pre-tool narration the model wrote anyway (resolveSpokenReply) — split
+    // into short clips so a long answer doesn't hit the TTS size limit, each
+    // sent as a voice note. On any synth failure, fall back to text. Text
+    // streaming is disabled in voice mode, so nothing was sent before this.
     if (willReplyWithVoice && fullReply.trim().length > 0) {
-      const voiceSegments = splitIntoSegments(fullReply, {
+      const spokenReply =
+        recoveryText ??
+        resolveSpokenReply(fullReply, streamedReply, toolBoundaries);
+      const voiceSegments = splitIntoSegments(spokenReply, {
         maxSentences: streaming.voiceMaxSentences,
         maxChars: streaming.bubbleMaxChars,
       });
@@ -1304,14 +1315,14 @@ export async function runPhantomchatServer(
             log.warn("phantomchat: sendVoice failed; falling back to text", {
               error: (e as Error).message,
             });
-            await sendBubble(fullReply);
+            await sendBubble(spokenReply);
             break;
           }
         } else {
           log.warn("phantomchat: TTS failed; falling back to text", {
             error: r.error,
           });
-          await sendBubble(fullReply);
+          await sendBubble(spokenReply);
           break;
         }
       }

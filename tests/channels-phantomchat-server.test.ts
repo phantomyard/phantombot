@@ -2852,6 +2852,8 @@ describe("phantomchat reply modality: voice in → voice out", () => {
     replies: Array<{ type: string; content: string }>;
     sttCalls: number;
     ttsCalls: number;
+    /** The text each TTS call was asked to speak, in order. */
+    ttsInputs: string[];
   }> {
     const senderSk = generateSecretKey();
     const botSk = generateSecretKey();
@@ -2861,6 +2863,7 @@ describe("phantomchat reply modality: voice in → voice out", () => {
     const note = encryptFileBytes(Buffer.from("fake opus voice note bytes"));
     let sttCalls = 0;
     let ttsCalls = 0;
+    const ttsInputs: string[] = [];
     (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
       url: string | URL | Request,
       init?: RequestInit,
@@ -2876,6 +2879,9 @@ describe("phantomchat reply modality: voice in → voice out", () => {
       }
       if (u.includes("audio/speech")) {
         ttsCalls++;
+        ttsInputs.push(
+          String((JSON.parse(String(init?.body ?? "{}")) as { input?: unknown }).input ?? ""),
+        );
         return new Response(Buffer.from([1, 2, 3]), {
           status: 200,
           headers: { "content-type": "audio/ogg" },
@@ -2993,7 +2999,7 @@ describe("phantomchat reply modality: voice in → voice out", () => {
       }
       replies.push({ type: "text", content: rumor.content });
     }
-    return { replies, sttCalls, ttsCalls };
+    return { replies, sttCalls, ttsCalls, ttsInputs };
   }
 
   test("a voice note whose answer narrates before a tool call still gets a VOICE reply", async () => {
@@ -3018,6 +3024,29 @@ describe("phantomchat reply modality: voice in → voice out", () => {
     expect(r.replies.filter((x) => x.type === "voice").length).toBeGreaterThan(0);
     // …and nothing went out as text. Nothing HAD gone out as text before the
     // tool either, which is exactly why the reply must not be downgraded.
+    expect(r.replies.filter((x) => x.type !== "voice")).toEqual([]);
+  });
+
+  test("a voice-out reply speaks only the answer, never the pre-tool narration", async () => {
+    // Live shape (Lena, 2026-10-21): the model narrates before every tool even
+    // though toolNarration is off for voice turns, and the whole reply —
+    // narration included — used to be synthesized.
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "Checking Home Assistant. " },
+      { type: "progress", note: "running home assistant tool" },
+      { type: "text", text: "Now the boiler log. " },
+      { type: "progress", note: "running log tool" },
+      { type: "text", text: "It dropped at nine." },
+      {
+        type: "done",
+        finalText:
+          "Checking Home Assistant. Now the boiler log. It dropped at nine.",
+      },
+    ]);
+
+    const r = await runVoiceCapable({ harness, inbound: "voice" });
+
+    expect(r.ttsInputs.join(" ")).toBe("It dropped at nine.");
     expect(r.replies.filter((x) => x.type !== "voice")).toEqual([]);
   });
 
