@@ -48,6 +48,11 @@ import {
   setReplyModeOverride,
 } from "../src/lib/replyMode.ts";
 
+/** A tool-backed progress chunk payload (#688: only these are tool calls). */
+function toolCall(title: string) {
+  return { title, kind: "other" as const, locations: [] };
+}
+
 class FakeTransport implements TelegramTransport {
   pendingUpdates: TelegramMessage[] = [];
   /** Reactions to return on the next getUpdates (drained each poll). */
@@ -1148,7 +1153,7 @@ describe("runTelegramServer dispatch", () => {
     // it into narration rather than a published final bubble.
     const harness = new ScriptedHarness("fake", [
       { type: "text", text: "Restarting the service now" },
-      { type: "progress", note: "systemctl restart" },
+      { type: "progress", note: "systemctl restart", tool: toolCall("systemctl restart") },
       { type: "done", finalText: "👍" },
     ]);
     await runTelegramServer({
@@ -1982,9 +1987,9 @@ describe("runTelegramServer voice round-trip", () => {
       });
       const harness = new ScriptedHarness("fake", [
         { type: "text", text: "Checking Home Assistant. " },
-        { type: "progress", note: "tool: ha" },
+        { type: "progress", note: "tool: ha", tool: toolCall("tool: ha") },
         { type: "text", text: "Now the boiler log. " },
-        { type: "progress", note: "tool: logs" },
+        { type: "progress", note: "tool: logs", tool: toolCall("tool: logs") },
         { type: "text", text: "It dropped at nine." },
         {
           type: "done",
@@ -2002,6 +2007,72 @@ describe("runTelegramServer voice round-trip", () => {
         oneShot: true,
       });
       expect(ttsInputs.join(" ")).toBe("It dropped at nine.");
+      expect(transport.voiceSent.length).toBeGreaterThan(0);
+      expect(transport.sent).toEqual([]);
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
+  test("tool-less progress (raw stdout line) mid-answer is NOT a tool boundary: the whole answer is spoken (#688)", async () => {
+    // harnessRunner emits `progress` with no `tool` for any non-JSON stdout
+    // line; recorded as a boundary it split the answer and voice spoke only
+    // the tail.
+    const originalFetch = globalThis.fetch;
+    const ttsInputs: string[] = [];
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const u = String(url);
+      if (u.includes("audio/transcriptions")) {
+        return new Response(JSON.stringify({ text: "why is it cold" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (u.includes("audio/speech")) {
+        ttsInputs.push(
+          String((JSON.parse(String(init?.body ?? "{}")) as { input?: unknown }).input ?? ""),
+        );
+        return new Response(Buffer.from([1, 2, 3]), {
+          status: 200,
+          headers: { "content-type": "audio/ogg" },
+        });
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    }) as unknown as typeof fetch;
+
+    try {
+      const transport = new FakeTransport();
+      transport.pendingUpdates.push({
+        updateId: 1,
+        conversationId: "1001",
+        senderId: "42",
+        text: "",
+        voice: { fileId: "abc-file", mimeType: "audio/ogg", durationS: 3 },
+      });
+      const harness = new ScriptedHarness("fake", [
+        { type: "text", text: "The boiler dropped at nine. " },
+        { type: "progress", note: "provider debug: retrying socket" },
+        { type: "text", text: "It recovered by ten." },
+        {
+          type: "done",
+          finalText: "The boiler dropped at nine. It recovered by ten.",
+        },
+      ]);
+      await runTelegramServer({
+        config: withVoiceConfig(),
+        memory,
+        harnesses: [harness],
+        agentDir,
+        persona: "phantom",
+        transport,
+        oneShot: true,
+      });
+      expect(ttsInputs.join(" ")).toBe(
+        "The boiler dropped at nine. It recovered by ten.",
+      );
       expect(transport.voiceSent.length).toBeGreaterThan(0);
       expect(transport.sent).toEqual([]);
     } finally {
@@ -2737,7 +2808,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
       }
       async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
         yield { type: "text", text: "Checking your inboxes…" };
-        yield { type: "progress", note: "tool: gog mail-search" };
+        yield { type: "progress", note: "tool: gog mail-search", tool: toolCall("tool: gog mail-search") };
         yield { type: "text", text: "Found 3 threads from Turtle Crossing." };
         yield {
           type: "done",
@@ -2778,9 +2849,9 @@ describe("runTelegramServer narration flush (text-out)", () => {
       }
       async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
         yield { type: "text", text: "Checking your calendar…" };
-        yield { type: "progress", note: "tool: gog calendar-list" };
+        yield { type: "progress", note: "tool: gog calendar-list", tool: toolCall("tool: gog calendar-list") };
         yield { type: "text", text: "Now scanning your inboxes…" };
-        yield { type: "progress", note: "tool: gog mail-search" };
+        yield { type: "progress", note: "tool: gog mail-search", tool: toolCall("tool: gog mail-search") };
         yield {
           type: "text",
           text: "Calendar is clear; you have 2 unread emails.",
@@ -2823,7 +2894,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
       }
       async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
         yield { type: "text", text: "Checking your calendar…" };
-        yield { type: "progress", note: "tool: gog calendar-list" };
+        yield { type: "progress", note: "tool: gog calendar-list", tool: toolCall("tool: gog calendar-list") };
         await new Promise((resolve) => setTimeout(resolve, 25));
         yield { type: "done", finalText: "Checking your calendar…" };
       }
@@ -2943,7 +3014,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
       }
       async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
         yield { type: "text", text: "  \n " };
-        yield { type: "progress", note: "tool: noop" };
+        yield { type: "progress", note: "tool: noop", tool: toolCall("tool: noop") };
         yield { type: "text", text: "real answer" };
         yield { type: "done", finalText: "  \n real answer" };
       }
@@ -2983,7 +3054,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
       }
       async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
         yield { type: "text", text: "Looking that up…\n" };
-        yield { type: "progress", note: "tool: web-search" };
+        yield { type: "progress", note: "tool: web-search", tool: toolCall("tool: web-search") };
         yield { type: "text", text: "It's 42." };
         // finalText exactly equals the concatenation of text chunks.
         yield { type: "done", finalText: "Looking that up…\nIt's 42." };
@@ -3022,7 +3093,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
       }
       async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
         yield { type: "text", text: "Checking…" };
-        yield { type: "progress", note: "tool: search" };
+        yield { type: "progress", note: "tool: search", tool: toolCall("tool: search") };
         yield { type: "text", text: "Result is X." };
         // Harness reformatted — finalText doesn't start with "Checking…"
         yield { type: "done", finalText: "Result: X (after a check)." };
@@ -3062,7 +3133,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
       }
       async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
         yield { type: "text", text: "Checking…" };
-        yield { type: "progress", note: "tool: search" };
+        yield { type: "progress", note: "tool: search", tool: toolCall("tool: search") };
         yield { type: "done", finalText: "Checking…" };
       }
     }
@@ -3100,7 +3171,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
       }
       async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
         yield { type: "text", text: "Checking…" };
-        yield { type: "progress", note: "tool: search" };
+        yield { type: "progress", note: "tool: search", tool: toolCall("tool: search") };
         yield { type: "error", error: "boom", recoverable: false };
       }
     }
@@ -3187,7 +3258,7 @@ describe("runTelegramServer narration flush (voice-out)", () => {
         }
         async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
           yield { type: "text", text: "Checking…" };
-          yield { type: "progress", note: "tool: search" };
+          yield { type: "progress", note: "tool: search", tool: toolCall("tool: search") };
           yield { type: "text", text: "Done." };
           yield { type: "done", finalText: "Checking…Done." };
         }
@@ -3290,7 +3361,7 @@ describe("runTelegramServer typing indicator", () => {
         await new Promise((r) => setTimeout(r, 10));
         yield { type: "text", text: "hi " };
         await new Promise((r) => setTimeout(r, 10));
-        yield { type: "progress", note: "tool: BashTool" };
+        yield { type: "progress", note: "tool: BashTool", tool: toolCall("tool: BashTool") };
         await new Promise((r) => setTimeout(r, 10));
         yield { type: "text", text: "there" };
         yield { type: "done", finalText: "hi there", meta: { harnessId: this.id } };
