@@ -75,6 +75,7 @@ import {
 import {
   createNarrationController,
   resolveOutgoingSuffix,
+  resolveSpokenReply,
   segmenterOptionsFor,
 } from "./streaming.ts";
 import {
@@ -1186,6 +1187,9 @@ async function processChatMessage(
   // clips after the full reply is known.
   let streamedReply = "";
   let consumedReplyChars = 0;
+  // streamedReply.length at each tool boundary, so a voice-out turn can speak
+  // only the answer and not the pre-tool narration (resolveSpokenReply).
+  const toolBoundaries: number[] = [];
   let narrationBubblesSent = 0;
   let finalSegmenter = new StreamSegmenter(segmenterOptions);
   let finalCandidateText = "";
@@ -1451,6 +1455,9 @@ async function processChatMessage(
           narration.append(unsentCandidate);
         }
         consumedReplyChars = streamedReply.length;
+        if (toolBoundaries.at(-1) !== streamedReply.length) {
+          toolBoundaries.push(streamedReply.length);
+        }
         resetFinalCandidate();
         await narration.flush();
         // Re-arm the background keepalive for the tool run. Without this,
@@ -1626,12 +1633,17 @@ async function processChatMessage(
   // reply lands as a fresh message, so Telegram pushes a notification —
   // important when the user kicked off a long job and walked away.
   //
-  // Voice-out synthesizes the full reply, split into short clips. Text
-  // streaming is disabled for voice, so there is nothing to dedupe.
+  // Voice-out speaks only the answer — the text after the last tool, not the
+  // pre-tool narration the model wrote anyway (resolveSpokenReply) — split
+  // into short clips. Text streaming is disabled for voice, so nothing was
+  // sent before this point.
   let sentAsVoice = false;
   try {
     if (willReplyWithVoice && !unrecoverable && fullReply.length > 0) {
-      const voiceSegments = splitIntoSegments(fullReply, {
+      const spokenReply =
+        recoveryText ??
+        resolveSpokenReply(fullReply, streamedReply, toolBoundaries);
+      const voiceSegments = splitIntoSegments(spokenReply, {
         maxSentences: streaming.voiceMaxSentences,
         maxChars: streaming.bubbleMaxChars,
       });
@@ -1648,7 +1660,7 @@ async function processChatMessage(
           log.warn("telegram: TTS failed; falling back to text", {
             error: r.error,
           });
-          await sendFinalSegments(fullReply);
+          await sendFinalSegments(spokenReply);
           sentAsVoice = false;
           break;
         }

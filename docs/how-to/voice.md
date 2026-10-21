@@ -12,8 +12,10 @@ Provider credentials are stored in the persona's encrypted vault and validated
 before the configuration is saved.
 
 Reply format mirrors the latest user message by default: voice in receives
-voice out, and text in receives text out. A conversation can temporarily
-override that behavior:
+voice out, and text in receives text out. A voice reply speaks only the
+answer: no progress bubbles are sent while tools run, and any "checking your
+calendar…" line the model writes before a tool call is dropped rather than read
+aloud. A conversation can temporarily override that behavior:
 
 ```bash
 phantombot reply-mode text

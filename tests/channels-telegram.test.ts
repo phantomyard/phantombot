@@ -1943,6 +1943,72 @@ describe("runTelegramServer voice round-trip", () => {
     }
   });
 
+  test("voice out speaks only the answer, never the pre-tool narration", async () => {
+    // Models narrate before tools even with toolNarration off; the whole
+    // reply used to be synthesized, so every "checking…" line was spoken.
+    const originalFetch = globalThis.fetch;
+    const ttsInputs: string[] = [];
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const u = String(url);
+      if (u.includes("audio/transcriptions")) {
+        return new Response(JSON.stringify({ text: "why is it cold" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (u.includes("audio/speech")) {
+        ttsInputs.push(
+          String((JSON.parse(String(init?.body ?? "{}")) as { input?: unknown }).input ?? ""),
+        );
+        return new Response(Buffer.from([1, 2, 3]), {
+          status: 200,
+          headers: { "content-type": "audio/ogg" },
+        });
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    }) as unknown as typeof fetch;
+
+    try {
+      const transport = new FakeTransport();
+      transport.pendingUpdates.push({
+        updateId: 1,
+        conversationId: "1001",
+        senderId: "42",
+        text: "",
+        voice: { fileId: "abc-file", mimeType: "audio/ogg", durationS: 3 },
+      });
+      const harness = new ScriptedHarness("fake", [
+        { type: "text", text: "Checking Home Assistant. " },
+        { type: "progress", note: "tool: ha" },
+        { type: "text", text: "Now the boiler log. " },
+        { type: "progress", note: "tool: logs" },
+        { type: "text", text: "It dropped at nine." },
+        {
+          type: "done",
+          finalText:
+            "Checking Home Assistant. Now the boiler log. It dropped at nine.",
+        },
+      ]);
+      await runTelegramServer({
+        config: withVoiceConfig(),
+        memory,
+        harnesses: [harness],
+        agentDir,
+        persona: "phantom",
+        transport,
+        oneShot: true,
+      });
+      expect(ttsInputs.join(" ")).toBe("It dropped at nine.");
+      expect(transport.voiceSent.length).toBeGreaterThan(0);
+      expect(transport.sent).toEqual([]);
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
   test("text in: still sends as text even when voice provider is configured", async () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
@@ -3099,8 +3165,8 @@ describe("runTelegramServer narration flush (voice-out)", () => {
         });
       }
       if (u.includes("audio/speech")) {
-        // Capture the text we sent to TTS so the assertion can verify
-        // we synthesized the FULL reply, not just the post-tool suffix.
+        // Capture the text we sent to TTS so the assertion can verify we
+        // spoke only the post-tool ANSWER, not the pre-tool narration.
         const body = init?.body && typeof init.body === "string"
           ? (JSON.parse(init.body) as { input?: string })
           : {};
@@ -3147,9 +3213,10 @@ describe("runTelegramServer narration flush (voice-out)", () => {
 
       // No text bubbles emitted — voice-out path stays silent on text.
       expect(transport.sent).toEqual([]);
-      // One voice clip went out with the FULL reply (not just the suffix).
+      // One voice clip went out with only the ANSWER — the pre-tool
+      // narration ("Checking…") is not spoken.
       expect(transport.voiceSent).toHaveLength(1);
-      expect(ttsBodyText).toBe("Checking…Done.");
+      expect(ttsBodyText).toBe("Done.");
     } finally {
       (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
     }

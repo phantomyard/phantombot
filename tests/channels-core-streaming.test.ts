@@ -4,6 +4,7 @@ import { DEFAULT_TELEGRAM_STREAMING } from "../src/config.ts";
 import {
   createNarrationController,
   resolveOutgoingSuffix,
+  resolveSpokenReply,
   segmenterOptionsFor,
 } from "../src/channels/core/streaming.ts";
 
@@ -138,5 +139,47 @@ describe("createNarrationController", () => {
     // force bypasses the throttle window.
     await narration.flush(true);
     expect(sent).toEqual(["too soon"]);
+  });
+});
+
+describe("resolveSpokenReply (voice-out speaks the answer, not the narration)", () => {
+  test("no tool ran: speaks the whole reply", () => {
+    expect(resolveSpokenReply("It is nine.", "It is nine.", [])).toBe(
+      "It is nine.",
+    );
+  });
+
+  test("narration before tools is dropped; only the text after the last tool is spoken", () => {
+    const streamed =
+      "Checking the logs. " + "Now the config. " + "It was the proxy.";
+    const b1 = "Checking the logs. ".length;
+    const b2 = b1 + "Now the config. ".length;
+    expect(resolveSpokenReply(streamed, streamed, [b1, b2])).toBe(
+      "It was the proxy.",
+    );
+  });
+
+  test("answer written BEFORE a trailing tool (e.g. a memory capture) is still spoken", () => {
+    const streamed = "Checking. " + "It was the proxy.";
+    const b1 = "Checking. ".length;
+    const b2 = streamed.length;
+    expect(resolveSpokenReply(streamed, streamed, [b1, b2])).toBe(
+      "It was the proxy.",
+    );
+  });
+
+  test("tools ran but the model only spoke at the very end: speaks that", () => {
+    expect(resolveSpokenReply("Done.", "Done.", [0])).toBe("Done.");
+  });
+
+  test("harness reformatted the final text (prefix mismatch): speaks the whole reply", () => {
+    const streamed = "Checking. It was the proxy.";
+    expect(
+      resolveSpokenReply("**It was the proxy.**", streamed, ["Checking. ".length]),
+    ).toBe("**It was the proxy.**");
+  });
+
+  test("nothing but whitespace anywhere: falls back to the full reply", () => {
+    expect(resolveSpokenReply("  ", "  ", [1, 2])).toBe("  ");
   });
 });

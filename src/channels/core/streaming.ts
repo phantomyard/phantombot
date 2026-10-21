@@ -61,6 +61,47 @@ export function resolveOutgoingSuffix(
   return fullReply;
 }
 
+/**
+ * What a voice-out turn should SPEAK.
+ *
+ * Voice-out turns stream no text, so every pre-tool line ("checking your
+ * calendar…") is still sitting in the reply when the turn ends. Pre-tool
+ * narration is switched off in the prompt for voice turns (`toolNarration:
+ * false`), but models narrate anyway, and synthesizing the whole reply read
+ * every one of those lines aloud. Speak only the answer instead:
+ *
+ *   - no tool ran: the whole reply.
+ *   - text after the last tool: that text (the answer).
+ *   - nothing after the last tool (the model answered, THEN ran a last tool
+ *     such as a memory capture): the last stretch between tools that said
+ *     something — the answer, not the opening narration.
+ *   - the authoritative reply no longer starts with what streamed (the harness
+ *     reformatted it): the whole reply. Duplication beats silence.
+ *
+ * `toolBoundaries` are `streamedReply.length` at each `progress` chunk, in
+ * order. Recovery replies are not routed through here: they replace the
+ * streamed text entirely and are spoken whole.
+ */
+export function resolveSpokenReply(
+  fullReply: string,
+  streamedReply: string,
+  toolBoundaries: readonly number[],
+): string {
+  if (toolBoundaries.length === 0) return fullReply;
+  const last = toolBoundaries[toolBoundaries.length - 1]!;
+  if (last <= 0 || !fullReply.startsWith(streamedReply.slice(0, last))) {
+    return fullReply;
+  }
+  const after = fullReply.slice(last);
+  if (after.trim().length > 0) return after;
+  for (let i = toolBoundaries.length - 1; i >= 0; i--) {
+    const start = i === 0 ? 0 : toolBoundaries[i - 1]!;
+    const stretch = streamedReply.slice(start, toolBoundaries[i]!);
+    if (stretch.trim().length > 0) return stretch;
+  }
+  return fullReply;
+}
+
 export interface NarrationControllerOptions {
   /** Streaming config; only `narrationFlushMs` (the flush cadence) is read. */
   streaming: TelegramStreamingSettings;
