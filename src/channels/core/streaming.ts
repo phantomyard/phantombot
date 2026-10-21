@@ -78,7 +78,8 @@ export function resolveOutgoingSuffix(
  *   - the authoritative reply no longer starts with what streamed (the harness
  *     reformatted it): the whole reply. Duplication beats silence.
  *
- * `toolBoundaries` are `streamedReply.length` at each `progress` chunk, in
+ * `toolBoundaries` are `streamedReply.length` at each TOOL-BACKED `progress`
+ * chunk (one carrying `tool`; tool-less progress is liveness, #688), in
  * order. Recovery replies are not routed through here: they replace the
  * streamed text entirely and are spoken whole.
  */

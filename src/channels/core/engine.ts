@@ -1443,23 +1443,31 @@ async function processChatMessage(
           chatId: msg.conversationId,
           note: chunk.note.slice(0, 200),
         });
-        // A tool is about to run. The text emitted since the previous
-        // boundary was progress narration unless it already crossed the
-        // markdown-aware final-answer splitter and got sent as a readable
-        // final bubble. Buffer the unsent remainder for the timed progress
-        // flush, then consume it so it is not duplicated in finalText.
-        const unsentCandidate = finalCandidateText.slice(
-          finalCandidateSentChars,
-        );
-        if (unsentCandidate.trim().length > 0) {
-          narration.append(unsentCandidate);
+        // Only a progress chunk that CARRIES a tool is a tool call (#688).
+        // The runner also emits tool-less `progress` for raw non-JSON stdout
+        // lines — liveness, like a heartbeat. Treating one as a boundary
+        // would split the answer mid-stream and, on voice-out turns,
+        // resolveSpokenReply would drop the text before it. Same contract
+        // as narrationStreamGate and resume.ts.
+        if (chunk.tool) {
+          // A tool is about to run. The text emitted since the previous
+          // boundary was progress narration unless it already crossed the
+          // markdown-aware final-answer splitter and got sent as a readable
+          // final bubble. Buffer the unsent remainder for the timed progress
+          // flush, then consume it so it is not duplicated in finalText.
+          const unsentCandidate = finalCandidateText.slice(
+            finalCandidateSentChars,
+          );
+          if (unsentCandidate.trim().length > 0) {
+            narration.append(unsentCandidate);
+          }
+          consumedReplyChars = streamedReply.length;
+          if (toolBoundaries.at(-1) !== streamedReply.length) {
+            toolBoundaries.push(streamedReply.length);
+          }
+          resetFinalCandidate();
+          await narration.flush();
         }
-        consumedReplyChars = streamedReply.length;
-        if (toolBoundaries.at(-1) !== streamedReply.length) {
-          toolBoundaries.push(streamedReply.length);
-        }
-        resetFinalCandidate();
-        await narration.flush();
         // Re-arm the background keepalive for the tool run. Without this,
         // Multi-minute tool runs cause Telegram's indicator
         // to expire after ~5s, making it look like the bot has frozen.

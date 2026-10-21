@@ -1111,18 +1111,25 @@ export async function runPhantomchatServer(
           // Surface the latest progress note on the turn handle so /status can
           // show "running: <tool>" in real time.
           turnHandle.lastProgressNote = chunk.note.slice(0, 500);
-          // A tool is about to run. Text emitted since the last boundary that
-          // the splitter hasn't already sent as a final bubble is progress
-          // narration ("checking your calendar…"): buffer it for the timed
-          // flush, then consume it so it is not duplicated in the final answer.
-          const unsent = finalCandidateText.slice(finalCandidateSentChars);
-          if (unsent.trim().length > 0) narration.append(unsent);
-          consumedReplyChars = streamedReply.length;
-          if (toolBoundaries.at(-1) !== streamedReply.length) {
-            toolBoundaries.push(streamedReply.length);
+          // Only a progress chunk that CARRIES a tool is a tool call (#688).
+          // Tool-less `progress` (raw non-JSON stdout lines from the runner)
+          // is liveness: as a boundary it would split the answer and drop
+          // the text before it from the spoken reply. Twin of core/engine.ts.
+          if (chunk.tool) {
+            // A tool is about to run. Text emitted since the last boundary
+            // that the splitter hasn't already sent as a final bubble is
+            // progress narration ("checking your calendar…"): buffer it for
+            // the timed flush, then consume it so it is not duplicated in
+            // the final answer.
+            const unsent = finalCandidateText.slice(finalCandidateSentChars);
+            if (unsent.trim().length > 0) narration.append(unsent);
+            consumedReplyChars = streamedReply.length;
+            if (toolBoundaries.at(-1) !== streamedReply.length) {
+              toolBoundaries.push(streamedReply.length);
+            }
+            resetFinalCandidate();
+            await narration.flush();
           }
-          resetFinalCandidate();
-          await narration.flush();
         }
         if (chunk.type === "replay") {
           // Narration-decay liveness (issue #551): model-written reasoning

@@ -37,6 +37,11 @@ import {
 } from "../src/lib/nostrCrypto.ts";
 import { npubEncode } from "../src/lib/nostrIdentity.ts";
 
+/** A tool-backed progress chunk payload (#688: only these are tool calls). */
+function toolCall(title: string) {
+  return { title, kind: "other" as const, locations: [] };
+}
+
 /** A harness that always replies with a fixed final text. */
 class ScriptedHarness implements Harness {
   invocations = 0;
@@ -1030,7 +1035,7 @@ describe("phantomchat streaming bubbles", () => {
     // narration and the (unthrottled) flush sends it as its own bubble.
     const harness = new ScriptedHarness("fake", [
       { type: "text", text: "Checking your calendar" },
-      { type: "progress", note: "running calendar tool" },
+      { type: "progress", note: "running calendar tool", tool: toolCall("running calendar tool") },
       { type: "text", text: "You are free at 3pm." },
       {
         type: "done",
@@ -1178,7 +1183,7 @@ describe("phantomchat streaming bubbles", () => {
     // final bubble.
     const harness = new ScriptedHarness("fake", [
       { type: "text", text: "Restarting the service now" },
-      { type: "progress", note: "systemctl restart" },
+      { type: "progress", note: "systemctl restart", tool: toolCall("systemctl restart") },
       { type: "done", finalText: "👍" },
     ]);
 
@@ -3006,7 +3011,7 @@ describe("phantomchat reply modality: voice in → voice out", () => {
     // The live shape of the bug: a line, a tool, then the answer.
     const harness = new ScriptedHarness("fake", [
       { type: "text", text: "Checking Home Assistant. " },
-      { type: "progress", note: "running home assistant tool" },
+      { type: "progress", note: "running home assistant tool", tool: toolCall("running home assistant tool") },
       { type: "text", text: "It dropped at nine." },
       {
         type: "done",
@@ -3033,9 +3038,9 @@ describe("phantomchat reply modality: voice in → voice out", () => {
     // narration included — used to be synthesized.
     const harness = new ScriptedHarness("fake", [
       { type: "text", text: "Checking Home Assistant. " },
-      { type: "progress", note: "running home assistant tool" },
+      { type: "progress", note: "running home assistant tool", tool: toolCall("running home assistant tool") },
       { type: "text", text: "Now the boiler log. " },
-      { type: "progress", note: "running log tool" },
+      { type: "progress", note: "running log tool", tool: toolCall("running log tool") },
       { type: "text", text: "It dropped at nine." },
       {
         type: "done",
@@ -3047,6 +3052,28 @@ describe("phantomchat reply modality: voice in → voice out", () => {
     const r = await runVoiceCapable({ harness, inbound: "voice" });
 
     expect(r.ttsInputs.join(" ")).toBe("It dropped at nine.");
+    expect(r.replies.filter((x) => x.type !== "voice")).toEqual([]);
+  });
+
+  test("tool-less progress (raw stdout line) mid-answer is NOT a tool boundary: the whole answer is spoken (#688)", async () => {
+    // harnessRunner emits `progress` with no `tool` for any non-JSON stdout
+    // line. Recorded as a boundary, it split the answer and voice spoke only
+    // the tail.
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "The boiler dropped at nine. " },
+      { type: "progress", note: "provider debug: retrying socket" },
+      { type: "text", text: "It recovered by ten." },
+      {
+        type: "done",
+        finalText: "The boiler dropped at nine. It recovered by ten.",
+      },
+    ]);
+
+    const r = await runVoiceCapable({ harness, inbound: "voice" });
+
+    expect(r.ttsInputs.join(" ")).toBe(
+      "The boiler dropped at nine. It recovered by ten.",
+    );
     expect(r.replies.filter((x) => x.type !== "voice")).toEqual([]);
   });
 
@@ -3069,7 +3096,7 @@ describe("phantomchat reply modality: voice in → voice out", () => {
     // would mix wire formats for one answer — the reply must stay text.
     const harness = new ScriptedHarness("fake", [
       { type: "text", text: "Checking your calendar" },
-      { type: "progress", note: "running calendar tool" },
+      { type: "progress", note: "running calendar tool", tool: toolCall("running calendar tool") },
       { type: "text", text: "You are free at 3pm." },
       {
         type: "done",
