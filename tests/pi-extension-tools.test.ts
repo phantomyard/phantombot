@@ -20,6 +20,7 @@ import {
 import {
   buildDelegateBaseArgs,
   delegateFailureText,
+  delegateOutcome,
   isDelegateFailure,
   lastProgressText,
   type DelegateResult,
@@ -122,6 +123,27 @@ describe("isDelegateFailure — tool-boundary failure detection", () => {
   });
 });
 
+describe("delegateOutcome — retry policy tri-state (issue #690)", () => {
+  test("clean exit with assistant text is success", () => {
+    expect(delegateOutcome(result({ exitCode: 0, messages: [assistantText("here")] }))).toBe(
+      "success",
+    );
+  });
+
+  test("clean exit with NO assistant text is empty (not success)", () => {
+    expect(delegateOutcome(result({ exitCode: 0 }))).toBe("empty");
+    expect(delegateOutcome(result({ exitCode: 0, messages: [assistantText("   ")] }))).toBe(
+      "empty",
+    );
+  });
+
+  test("a failure is failure regardless of text", () => {
+    expect(delegateOutcome(result({ exitCode: 1 }))).toBe("failure");
+    expect(delegateOutcome(result({ stopReason: "timeout" }))).toBe("failure");
+    expect(delegateOutcome(result({ stopReason: "aborted" }))).toBe("failure");
+  });
+});
+
 describe("lastProgressText — partial work for a timeout report", () => {
   test("returns the most recent non-empty assistant text", () => {
     const msgs: Message[] = [
@@ -160,6 +182,12 @@ describe("delegateFailureText — tested-failure result the primary can iterate 
   test("timeout with no partial output says so plainly", () => {
     const text = delegateFailureText("look_at_image", result({ stopReason: "timeout" }));
     expect(text).toContain("no usable output before it was stopped");
+  });
+
+  test("an EMPTY completion reads as no-answer, not 'failed (stop)' (#690)", () => {
+    const text = delegateFailureText("look_at_image", result({ exitCode: 0 }));
+    expect(text).toContain("look_at_image returned no answer");
+    expect(text).not.toContain("failed (stop)");
   });
 });
 

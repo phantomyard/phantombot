@@ -39,9 +39,10 @@ import {
 import {
   delegate,
   delegateFailureText,
+  delegateOutcome,
   finalText,
-  isDelegateFailure,
   usageLine,
+  type DelegateResult,
 } from "./spawnPi.ts";
 
 /**
@@ -56,6 +57,16 @@ import {
  * tool to return, the primary to emit its next turn, and iterate.
  */
 const DELEGATE_IDLE_TIMEOUT_MS = 240_000;
+
+/**
+ * Attempts per vision delegation: two = ONE retry (issue #690). A vision
+ * delegate that fails OR returns an empty answer is retried once on the same
+ * model, and if that also fails the tool returns its tested failure to the
+ * PRIMARY (the model that called it) — the vision delegate's analogue of
+ * "return to the primary". A retry is safe here because the delegate runs
+ * read-only (`tools: ["read"]`) and has no side effects to replay.
+ */
+const DELEGATE_MAX_ATTEMPTS = 2;
 
 /**
  * The active harness's Pi provider + api-key, relayed from the parent pi via
@@ -145,7 +156,7 @@ export default function (pi: ExtensionAPI) {
       parameters: LookAtImageParams,
       async execute(_id, params, signal) {
         const { provider, apiKey } = piAuthFromEnv();
-        const r = await delegate({
+        const delegateOpts = {
           model: imageModel,
           provider,
           apiKey,
@@ -156,18 +167,28 @@ export default function (pi: ExtensionAPI) {
           // Bound the delegate so a wedged vision call returns a tested failure
           // instead of hanging until the primary's own watchdog kills the turn.
           idleTimeoutMs: DELEGATE_IDLE_TIMEOUT_MS,
-        });
-        if (isDelegateFailure(r)) {
-          return {
-            content: [{ type: "text", text: delegateFailureText("look_at_image", r) }],
-            details: { model: imageModel, usage: r.usage },
-            isError: true,
-          };
+        };
+        // Retry once on a failure OR an empty answer (#690), then hand the
+        // tested failure back to the PRIMARY. No retry when the turn was
+        // cancelled — signal.aborted means the whole turn is stopping.
+        let last: DelegateResult | undefined;
+        for (let attempt = 1; attempt <= DELEGATE_MAX_ATTEMPTS; attempt++) {
+          const r = await delegate(delegateOpts);
+          if (delegateOutcome(r) === "success") {
+            const answer = finalText(r.messages);
+            return {
+              content: [{ type: "text", text: `${answer}\n\n[image model: ${usageLine(r)}]` }],
+              details: { model: imageModel, usage: r.usage },
+            };
+          }
+          last = r;
+          if (signal?.aborted) break;
         }
-        const answer = finalText(r.messages) || "(no answer)";
+        const r = last as DelegateResult;
         return {
-          content: [{ type: "text", text: `${answer}\n\n[image model: ${usageLine(r)}]` }],
+          content: [{ type: "text", text: delegateFailureText("look_at_image", r) }],
           details: { model: imageModel, usage: r.usage },
+          isError: true,
         };
       },
     });

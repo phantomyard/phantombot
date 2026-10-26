@@ -22,6 +22,11 @@ turn), not by any tool this extension registers.
 |------|-----------------|--------------|
 | `look_at_image(path, question)` | `routing.json` has `imageModel` | Spawns the image model to answer a **specific question** about an image (question-driven, not a one-shot describe). Returns the answer + usage. |
 
+`look_at_image` retries a failed **or empty** delegation once on the same image
+model (issue #690); if that also fails it returns the tested failure to the
+primary. The delegate runs read-only (`tools: ["read"]`), so a retry can never
+replay a side effect.
+
 ### Always-on image delegate (the key behavior)
 
 phantombot's `harness` wizard keeps an `imageModel` set whenever routing is

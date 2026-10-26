@@ -1685,7 +1685,7 @@ describe("PiHarness coder-swap retry ladder", () => {
     }
   };
 
-  test("swapped model fails 3x → falls back to the primary and answers", async () => {
+  test("swapped model fails twice → falls back to the primary and answers", async () => {
     process.env.FAKE_PI_MODE = "modelgate";
     process.env.FAKE_PI_FAIL_MODEL = "z-ai/glm-5.2";
     const chunks = await collect(
@@ -1696,16 +1696,17 @@ describe("PiHarness coder-swap retry ladder", () => {
         routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
       }).invoke(newRequest({ userMessage: PR_MSG })),
     );
-    // The turn is ANSWERED — by the primary, after 3 coder attempts.
+    // The turn is ANSWERED — by the primary, after two coder attempts (one
+    // retry, per #690).
     const done = chunks.find((c) => c.type === "done") as
       | { type: "done"; finalText: string }
       | undefined;
     expect(done?.finalText).toBe("hello world");
     expect(chunks.some((c) => c.type === "error")).toBe(false);
     const argvs = await loggedArgv();
-    expect(argvs).toHaveLength(4);
-    expect(argvs.slice(0, 3).every((a) => a.includes("--model z-ai/glm-5.2"))).toBe(true);
-    expect(argvs[3]).toContain("--model mimo-v2.5");
+    expect(argvs).toHaveLength(3);
+    expect(argvs.slice(0, 2).every((a) => a.includes("--model z-ai/glm-5.2"))).toBe(true);
+    expect(argvs[2]).toContain("--model mimo-v2.5");
   });
 
   test("primary fallback failing too → error surfaces (orchestrator chain applies)", async () => {
@@ -1723,8 +1724,77 @@ describe("PiHarness coder-swap retry ladder", () => {
       | { type: "error"; error: string; recoverable?: boolean }
       | undefined;
     expect(error?.recoverable).toBe(true);
-    // 3 coder attempts + 1 primary attempt, then the error is yielded.
-    expect(await loggedArgv()).toHaveLength(4);
+    // 2 coder attempts + 1 primary attempt, then the error is yielded.
+    expect(await loggedArgv()).toHaveLength(3);
+  });
+
+  test("swapped model returns EMPTY → retried once, then primary answers (#690)", async () => {
+    // The Robbie incident: the swapped coder model fired turn_end with no
+    // assistant text, the engine accepted it as a done, and the user got
+    // nothing. Now the empty completion is retried once and the primary (a
+    // known-good brain) serves the turn.
+    process.env.FAKE_PI_MODE = "emptygate";
+    process.env.FAKE_PI_FAIL_MODEL = "z-ai/glm-5.2";
+    const chunks = await collect(
+      new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+      }).invoke(newRequest({ userMessage: PR_MSG })),
+    );
+    const done = chunks.find((c) => c.type === "done") as
+      | { type: "done"; finalText: string }
+      | undefined;
+    expect(done?.finalText).toBe("hello world");
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+    const argvs = await loggedArgv();
+    // Two EMPTY coder attempts (one retry), then one primary attempt.
+    expect(argvs).toHaveLength(3);
+    expect(argvs.slice(0, 2).every((a) => a.includes("--model z-ai/glm-5.2"))).toBe(true);
+    expect(argvs[2]).toContain("--model mimo-v2.5");
+  });
+
+  test("swapped model empty on attempt 1, answers on the retry → no primary fallback (#690)", async () => {
+    // The retry itself recovers: an empty first attempt is re-run on the SAME
+    // model, which answers. No primary run, and the held-back `done` surfaces.
+    process.env.FAKE_PI_MODE = "emptythenok";
+    const chunks = await collect(
+      new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+      }).invoke(newRequest({ userMessage: PR_MSG })),
+    );
+    const done = chunks.find((c) => c.type === "done") as
+      | { type: "done"; finalText: string }
+      | undefined;
+    expect(done?.finalText).toBe("hello world");
+    const argvs = await loggedArgv();
+    // Exactly two attempts, BOTH on the swapped coder model — no primary.
+    expect(argvs).toHaveLength(2);
+    expect(argvs.every((a) => a.includes("--model z-ai/glm-5.2"))).toBe(true);
+  });
+
+  test("empty completion does NOT surface a premature done to the orchestrator (#690)", async () => {
+    // An empty swapped turn must not look complete: the retry ladder holds
+    // back the `done` marker until a usable answer exists, so the consumer
+    // never sees a done-then-more-chunks sequence.
+    process.env.FAKE_PI_MODE = "emptygate";
+    process.env.FAKE_PI_FAIL_MODEL = "z-ai/glm-5.2";
+    const chunks = await collect(
+      new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+      }).invoke(newRequest({ userMessage: PR_MSG })),
+    );
+    // Exactly one done, and it is last (the primary's). No earlier empty done.
+    const doneIdx = chunks.map((c) => c.type).lastIndexOf("done");
+    expect(chunks.filter((c) => c.type === "done")).toHaveLength(1);
+    expect(doneIdx).toBe(chunks.length - 1);
   });
 
   test("coding model EQUAL to primary → swap subsystem skipped: single attempt, no ladder", async () => {

@@ -286,6 +286,22 @@ export function isDelegateFailure(r: DelegateResult): boolean {
 }
 
 /**
+ * The tri-state result of one delegate attempt, for the recovery policy
+ * (issue #690). A delegate that finished CLEANLY but emitted no non-whitespace
+ * assistant text is `empty` — the same silent-loss shape as the harness-level
+ * empty completion, and it is recovered the same way (one retry). `failure` is
+ * a non-zero exit or a failure stopReason; `success` is a clean attempt that
+ * actually produced an answer.
+ */
+export type DelegateOutcome = "success" | "empty" | "failure";
+
+export function delegateOutcome(r: DelegateResult): DelegateOutcome {
+  if (isDelegateFailure(r)) return "failure";
+  if (finalText(r.messages).trim() === "") return "empty";
+  return "success";
+}
+
+/**
  * Build the tool-result failure string for a failed/timed-out delegation.
  * Never throws.
  *
@@ -297,6 +313,14 @@ export function isDelegateFailure(r: DelegateResult): boolean {
  * primary treats it as a recoverable tool failure rather than a dead end.
  */
 export function delegateFailureText(kind: string, r: DelegateResult): string {
+  // Empty completion (#690): a clean exit that produced no answer at all. Say
+  // so plainly rather than the misleading "failed (stop): no output".
+  if (delegateOutcome(r) === "empty") {
+    return (
+      `${kind} returned no answer (the vision model completed its turn without ` +
+      `producing any text, twice). The turn continues on the primary model.`
+    );
+  }
   const reason = r.stopReason ?? `exit ${r.exitCode}`;
   const detail = r.errorMessage || r.stderr.trim() || "no output";
   let text = `${kind} failed (${reason}): ${detail}`;

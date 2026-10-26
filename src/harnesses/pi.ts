@@ -781,28 +781,24 @@ export class PiHarness implements Harness {
       yield* runAttempt(swapModel);
     } else {
       // ─────────────────────────────────────────────────────────────────
-      // Coder-swap retry ladder (the "brain swap" fix).
+      // Coder-swap retry ladder (the "brain swap" fix; issue #690).
       //
-      // A swapped turn rides a DIFFERENT provider model than the primary —
-      // and an intermittent provider hang (stream never starts, zero output
-      // for the whole idle window) used to cost the turn outright: pi is
-      // usually the LAST harness in the chain, so an idle kill had no
-      // fallback and the user's message was silently lost. Now a swapped
-      // turn gets up to CODER_SWAP_MAX_ATTEMPTS attempts on the coding
-      // model, and when they're all exhausted the turn is re-run once on
-      // the PRIMARY — a possibly-slower but known-good brain beats a lost
-      // turn.
+      // A swapped turn rides a DIFFERENT provider model than the primary, and
+      // two failure shapes used to lose the turn outright: an intermittent
+      // provider hang/error (stream never starts, or dies before it starts),
+      // and — the #690 incident — an EMPTY completion (turn_end with no
+      // assistant text and no tool run) that the shared engine accepted as a
+      // successful done. Both now recover the same way: retry the SAME swapped
+      // model ONCE (CODER_SWAP_MAX_ATTEMPTS = 2), and when that also fails
+      // re-run the turn once on the PRIMARY within this harness — a
+      // possibly-slower but known-good brain beats a lost turn.
       //
       // Retry discipline (each rule exists for a reason):
-      //   - Only when NOTHING happened yet this attempt — no text streamed AND
-      //     no tool run. Text is not the only non-idempotent thing here: pi's
-      //     tool executions surface as progress chunks, not text, and a retry
-      //     after a bash/notify/vault tool ran would replay those side effects
-      //     wholesale. `producedOutput` flips on any non-heartbeat chunk
-      //     (heartbeat is payload-less by contract), which keeps the genuine
-      //     "provider never started streaming" case — the one this ladder
-      //     exists for — fully retryable while everything that got anywhere
-      //     stays single-shot. Retrying after visible text would ALSO duplicate
+      //   - Only when NOTHING usable happened yet this attempt — no visible
+      //     text AND no tool run. Text is not the only non-idempotent thing:
+      //     pi's tool executions surface as progress chunks, not text, and a
+      //     retry after a bash/notify/vault tool ran would replay those side
+      //     effects wholesale. Retrying after visible text would ALSO duplicate
       //     bubbles on screen (the streaming-first trade-off documented in
       //     fallback.ts).
       //   - Only recoverable, non-terminal errors — a policy violation or
@@ -811,6 +807,9 @@ export class PiHarness implements Harness {
       //     that is supposed to be FINAL: a turn that legitimately kept the
       //     idle timer fed but never converged is exactly what it exists to
       //     kill. The ladder would multiply one 60-min cap into four hours.
+      //   - #559: never retry a rate-limited provider (the next attempt hits
+      //     the same cooldown); abort the ladder on the FIRST rate-limit
+      //     signal so the orchestrator can advance the chain immediately.
       //   - Errors from the final PRIMARY attempt are yielded as-is so the
       //     orchestrator's normal harness chain still applies afterwards.
       // ─────────────────────────────────────────────────────────────────
@@ -822,12 +821,24 @@ export class PiHarness implements Harness {
         attempt <= CODER_SWAP_MAX_ATTEMPTS && !req.signal?.aborted;
         attempt++
       ) {
-        // Tracks whether this attempt produced output of ANY kind (text,
-        // progress from a tool run, done). heartbeat is payload-less by
-        // contract and is excluded, so a provider that never starts streaming
-        // stays retryable — but an attempt that got as far as running a tool
-        // is NOT, because tools have side effects and a re-run is a re-do.
+        const startedAt = Date.now();
+        // `sawUsableText` = non-whitespace assistant text actually streamed.
+        // `sawTool` = any progress chunk (pi's tool executions and titled
+        // toolcall deltas — a side effect, or the model composing one).
+        // Reasoning-only output, lifecycle markers and the terminal `done`
+        // are NOT usable output: a swapped turn that returns only those is the
+        // empty completion #690 must recover.
+        let sawUsableText = false;
+        let sawTool = false;
+        // Any non-heartbeat chunk (text/tool/progress); heartbeat is
+        // payload-less by contract. Kept for the error path's "did anything
+        // happen before it died" gate, unchanged.
         let producedOutput = false;
+        // The terminal completion marker, held back until we know this attempt
+        // was not an empty completion — yielding it now would tell the
+        // orchestrator the turn finished with no answer, and no retry could
+        // then happen.
+        let pendingDone: (HarnessChunk & { type: "done" }) | undefined;
         let failure:
           | (HarnessChunk & { type: "error"; error: string })
           | undefined;
@@ -838,62 +849,133 @@ export class PiHarness implements Harness {
             failure = chunk;
             break;
           }
+          if (chunk.type === "done") {
+            pendingDone = chunk;
+            continue;
+          }
+          if (chunk.type === "text" && chunk.text.trim().length > 0) {
+            sawUsableText = true;
+          }
+          if (chunk.type === "progress") sawTool = true;
           if (chunk.type !== "heartbeat") producedOutput = true;
           yield chunk;
         }
-        if (!failure) return; // completed (or the consumer stopped us)
-        lastFailure = failure;
-        const retryable =
-          failure.recoverable !== false &&
-          !failure.terminal &&
-          !producedOutput &&
-          !isHardCapError(failure.error) &&
-          !req.signal?.aborted &&
-          // Issue #559: a rate-limited provider is not going to accept work
-          // on the next swap attempt either. Retrying the ladder against a
-          // 429 just burns the coder-swap budget (and the wall clock) before
-          // the orchestrator ever gets the chance to fall through to the
-          // next harness — abort the internal ladder on the FIRST rate-limit
-          // signal and let the chain advance immediately. Provider deaths
-          // surface as a bare exit-code error plus a stderr tail, so the
-          // classification reads both (stderr carries the provider's
-          // "429 / rate limit / quota" prose).
-          classifyFailure(
-            [failure.error, ...(failure.stderrTail ?? [])].join("\n"),
-            failure.httpStatus,
-          ) !== "rate_limit";
-        // Not retryable — surface the error exactly as the single-attempt
-        // path always did: a policy violation, a /stop, a hard-cap kill (the
-        // final timer must stay final), or a failure AFTER the attempt got
-        // somewhere (streamed text OR ran a tool — a re-run would duplicate
-        // bubbles and replay side-effecting tools, the very trade-off
-        // fallback.ts warns against re-litigating).
-        if (!retryable) {
-          yield failure;
-          return;
-        }
-        if (attempt < CODER_SWAP_MAX_ATTEMPTS) {
-          log.warn("pi.invoke coder-swap attempt failed — retrying", {
+
+        // ── Error path ─────────────────────────────────────────────────
+        if (failure) {
+          lastFailure = failure;
+          const retryable =
+            failure.recoverable !== false &&
+            !failure.terminal &&
+            !producedOutput &&
+            !isHardCapError(failure.error) &&
+            !req.signal?.aborted &&
+            // Issue #559: a rate-limited provider is not going to accept work
+            // on the next swap attempt either. Retrying the ladder against a
+            // 429 just burns the coder-swap budget (and the wall clock) before
+            // the orchestrator ever gets the chance to fall through to the
+            // next harness — abort the internal ladder on the FIRST rate-limit
+            // signal and let the chain advance immediately. Provider deaths
+            // surface as a bare exit-code error plus a stderr tail, so the
+            // classification reads both (stderr carries the provider's
+            // "429 / rate limit / quota" prose).
+            classifyFailure(
+              [failure.error, ...(failure.stderrTail ?? [])].join("\n"),
+              failure.httpStatus,
+            ) !== "rate_limit";
+          // Not retryable — surface the error exactly as the single-attempt
+          // path always did: a policy violation, a /stop, a hard-cap kill (the
+          // final timer must stay final), or a failure AFTER the attempt got
+          // somewhere (streamed text OR ran a tool — a re-run would duplicate
+          // bubbles and replay side-effecting tools, the very trade-off
+          // fallback.ts warns against re-litigating).
+          if (!retryable) {
+            yield failure;
+            return;
+          }
+          log.warn("pi.invoke coder-swap attempt failed", {
             persona: req.persona,
             conversation: req.conversation,
+            turnId: req.turnId,
+            harness: this.id,
+            role: "coder",
+            provider,
             model: swapModel,
             attempt,
             of: CODER_SWAP_MAX_ATTEMPTS,
+            reason: "error",
+            willRetry: attempt < CODER_SWAP_MAX_ATTEMPTS,
             error: failure.error,
+            elapsedMs: Date.now() - startedAt,
+            emittedText: sawUsableText,
+            ranTool: sawTool,
+          });
+          continue;
+        }
+
+        // ── Empty-completion path (issue #690) ─────────────────────────
+        // No error, no visible text, no tool run: the swapped model finished
+        // its turn without producing an answer. Retry the same model once;
+        // on the final attempt this falls through to the primary below.
+        if (pendingDone && !sawUsableText && !sawTool) {
+          lastFailure = { error: "empty completion (no assistant text or tool run)" };
+          log.warn("pi.invoke coder-swap empty response", {
+            persona: req.persona,
+            conversation: req.conversation,
+            turnId: req.turnId,
+            harness: this.id,
+            role: "coder",
+            provider,
+            model: swapModel,
+            attempt,
+            of: CODER_SWAP_MAX_ATTEMPTS,
+            reason: "empty",
+            willRetry: attempt < CODER_SWAP_MAX_ATTEMPTS,
+            elapsedMs: Date.now() - startedAt,
+            emittedText: false,
+            ranTool: false,
+          });
+          continue;
+        }
+
+        // ── Success ────────────────────────────────────────────────────
+        // A usable answer, or a tool run the engine already accepted. If we
+        // only got here on a retry, record the recovery for the incident
+        // trail; then surface the held-back completion marker and finish.
+        if (attempt > 1) {
+          log.info("pi.invoke coder-swap recovered on retry", {
+            persona: req.persona,
+            conversation: req.conversation,
+            turnId: req.turnId,
+            harness: this.id,
+            role: "coder",
+            provider,
+            model: swapModel,
+            attempt,
+            elapsedMs: Date.now() - startedAt,
           });
         }
+        if (pendingDone) yield pendingDone;
+        return;
       }
-      // All swapped attempts failed CLEANLY (nothing ever happened — no text,
-      // no tools), so the primary attempt starts from a blank slate: no
+      // All swapped attempts exhausted (nothing usable ever happened — no
+      // text, no tools), so the primary attempt starts from a blank slate: no
       // duplicated bubbles, no replayed tool side effects.
       // (If the loop exited early because the user aborted, stop here too.)
       if (req.signal?.aborted) return;
       log.warn("pi.invoke coder-swap exhausted — falling back to primary", {
         persona: req.persona,
         conversation: req.conversation,
+        turnId: req.turnId,
+        harness: this.id,
+        role: "coder",
+        provider,
         model: swapModel,
-        fallbackModel: primaryModel ?? "(pi default)",
+        attempts: CODER_SWAP_MAX_ATTEMPTS,
+        reason: lastFailure?.error.startsWith("empty") ? "empty" : "error",
         error: lastFailure?.error,
+        nextModel: primaryModel ?? "(pi default)",
+        fallbackModel: primaryModel ?? "(pi default)",
       });
       yield* runAttempt(primaryModel);
     }

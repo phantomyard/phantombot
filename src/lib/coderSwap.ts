@@ -56,12 +56,16 @@ import { writeFileAtomic } from "./io.ts";
 export const CODER_SWAP_THRESHOLD = 3;
 
 /**
- * How many times the Pi harness will attempt a turn on the SWAPPED coding
- * model before giving up on the swap and re-running the turn on the primary
- * (issue: intermittent provider hangs on the swapped model produced a silent
- * 5-minute idle kill with the turn lost). Three attempts, then primary.
+ * How many attempts the Pi harness makes on the SWAPPED coding model before
+ * giving up on the swap and re-running the turn on the primary.
+ *
+ * Two = exactly ONE retry (issue #690): an intermittent provider hang/error on
+ * the swapped model OR an empty completion from it is retried once, and if that
+ * retry also fails the turn returns to the primary within the same harness.
+ * (The original fix used three attempts for the provider-hang case alone; the
+ * narrowed #690 scope is one retry per swapped model.)
  */
-export const CODER_SWAP_MAX_ATTEMPTS = 3;
+export const CODER_SWAP_MAX_ATTEMPTS = 2;
 
 /**
  * Weight that, on its own, meets any reasonable threshold. Used for HARD

@@ -33,6 +33,14 @@
 #              else behave like `normal`. Lets a test make ONE configured
 #              model fail while the other succeeds — the coder-swap retry
 #              ladder / primary-fallback tests.
+#   emptygate — like modelgate but the FAIL_MODEL emits an EMPTY completion
+#              (turn_end with no assistant text) and exits 0 instead of exit 1.
+#              Drives the #690 empty-completion recovery: retry the swapped
+#              model once, then fall back to the primary.
+#   emptythenok — the FIRST invocation emits an empty completion, later ones
+#              behave like `normal` (counts prior lines in $FAKE_PI_ARGV_LOG).
+#              Drives the #690 retry-RECOVERS case (empty on attempt 1,
+#              answered on attempt 2, no primary fallback).
 #   ratelimit — exit 1 with provider rate-limit prose on stderr (the #559
 #              first-signal abort: the coder-swap ladder must NOT retry).
 
@@ -43,6 +51,17 @@ mode="${FAKE_PI_MODE:-normal}"
 if [ -n "${FAKE_PI_ARGV_LOG-}" ]; then
   printf '%s\n' "$*" >>"$FAKE_PI_ARGV_LOG"
 fi
+
+emit_empty_done() {
+    # A clean turn that produced NO assistant text: pi fires turn_end anyway,
+    # the shared engine maps it to a `done` with empty finalText, and the
+    # swapped turn is the silent-loss case from issue #690.
+    printf '%s\n' '{"type":"session","version":3,"id":"abc"}'
+    printf '%s\n' '{"type":"agent_start"}'
+    printf '%s\n' '{"type":"turn_start"}'
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
+    exit 0
+}
 
 emit_normal() {
     printf '%s\n' '{"type":"session","version":3,"id":"abc"}'
@@ -146,6 +165,26 @@ case "$mode" in
       fi
     done
     emit_normal
+    ;;
+  emptygate)
+    for arg in "$@"; do
+      if [ "${FAKE_PI_FAIL_MODEL-}" = "*" ] ||
+         { [ -n "${FAKE_PI_FAIL_MODEL-}" ] && [ "$arg" = "$FAKE_PI_FAIL_MODEL" ]; }; then
+        emit_empty_done
+      fi
+    done
+    emit_normal
+    ;;
+  emptythenok)
+    count=0
+    if [ -n "${FAKE_PI_ARGV_LOG-}" ] && [ -f "${FAKE_PI_ARGV_LOG}" ]; then
+      count=$(wc -l < "${FAKE_PI_ARGV_LOG}")
+    fi
+    if [ "$count" -le 1 ]; then
+      emit_empty_done
+    else
+      emit_normal
+    fi
     ;;
   nofinish)
     printf '%s\n' '{"type":"session","version":3,"id":"abc"}'
