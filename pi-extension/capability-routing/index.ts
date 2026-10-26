@@ -39,10 +39,8 @@ import {
 import {
   delegate,
   delegateFailureText,
-  delegateOutcome,
-  finalText,
+  runDelegateWithRetry,
   usageLine,
-  type DelegateResult,
 } from "./spawnPi.ts";
 
 /**
@@ -50,23 +48,19 @@ import {
  * it's treated as wedged, killed, and returned to the primary as a tested
  * failure (see spawnPi.ts DelegateOptions.idleTimeoutMs).
  *
- * MUST sit comfortably under phantombot's PRIMARY idle watchdog (default 300s),
+ * MUST sit comfortably under phantombot's PRIMARY idle watchdog (default 300s)
  * so a wedged delegate returns a tool result BEFORE the primary's own watchdog
  * trips and kills the whole turn — which would (wrongly) look like a primary
  * failure and trigger a harness fallback. 240s leaves ~60s of headroom for the
  * tool to return, the primary to emit its next turn, and iterate.
+ *
+ * The parent suspends its idle timer while a tool is in flight (toolStart /
+ * toolEnd on the tool's toolCallId, invariant 74), so this bound is about the
+ * delegate's OWN wedge detection, not the parent's watchdog. It stays under the
+ * primary's window as defence in depth: it caps how long the tool can go silent
+ * even if that tool-boundary bookkeeping is ever bypassed.
  */
 const DELEGATE_IDLE_TIMEOUT_MS = 240_000;
-
-/**
- * Attempts per vision delegation: two = ONE retry (issue #690). A vision
- * delegate that fails OR returns an empty answer is retried once on the same
- * model, and if that also fails the tool returns its tested failure to the
- * PRIMARY (the model that called it) — the vision delegate's analogue of
- * "return to the primary". A retry is safe here because the delegate runs
- * read-only (`tools: ["read"]`) and has no side effects to replay.
- */
-const DELEGATE_MAX_ATTEMPTS = 2;
 
 /**
  * The active harness's Pi provider + api-key, relayed from the parent pi via
@@ -168,23 +162,22 @@ export default function (pi: ExtensionAPI) {
           // instead of hanging until the primary's own watchdog kills the turn.
           idleTimeoutMs: DELEGATE_IDLE_TIMEOUT_MS,
         };
-        // Retry once on a failure OR an empty answer (#690), then hand the
-        // tested failure back to the PRIMARY. No retry when the turn was
-        // cancelled — signal.aborted means the whole turn is stopping.
-        let last: DelegateResult | undefined;
-        for (let attempt = 1; attempt <= DELEGATE_MAX_ATTEMPTS; attempt++) {
-          const r = await delegate(delegateOpts);
-          if (delegateOutcome(r) === "success") {
-            const answer = finalText(r.messages);
-            return {
-              content: [{ type: "text", text: `${answer}\n\n[image model: ${usageLine(r)}]` }],
-              details: { model: imageModel, usage: r.usage },
-            };
-          }
-          last = r;
-          if (signal?.aborted) break;
+        // Retry once on a FAST failure OR an empty answer (#690), then hand the
+        // tested failure back to the PRIMARY. A TIMEOUT is not retried (a wedged
+        // model is unlikely to answer promptly; doubling worst-case tool silence
+        // is not worth it). No retry when the turn was cancelled — signal.aborted
+        // means the whole turn is stopping.
+        const run = await runDelegateWithRetry(delegateOpts, delegate);
+        if (run.ok) {
+          return {
+            content: [{
+              type: "text",
+              text: `${run.answer}\n\n[image model: ${usageLine(run.result)}]`,
+            }],
+            details: { model: imageModel, usage: run.result.usage },
+          };
         }
-        const r = last as DelegateResult;
+        const r = run.result;
         return {
           content: [{ type: "text", text: delegateFailureText("look_at_image", r) }],
           details: { model: imageModel, usage: r.usage },

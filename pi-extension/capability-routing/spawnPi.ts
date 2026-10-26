@@ -302,6 +302,74 @@ export function delegateOutcome(r: DelegateResult): DelegateOutcome {
 }
 
 /**
+ * Attempts per delegated subtask: two = ONE retry (issue #690). A delegate
+ * that fails FAST or returns an EMPTY answer is retried once on the same model;
+ * if that also fails, the tool returns its tested failure to the caller (the
+ * primary model). A retry is safe because delegates run read-only. A TIMEOUT is
+ * deliberately NOT retried — see `shouldRetryDelegate`.
+ */
+export const DELEGATE_MAX_ATTEMPTS = 2;
+
+/**
+ * Recovery policy for ONE delegate attempt (issue #690): retry an EMPTY
+ * completion or a FAST failure once, but NOT a timeout.
+ *
+ * A timeout means the delegate consumed its full idle window without producing
+ * output — the model wedged. Retrying the same wedged model is unlikely to
+ * answer promptly, and it doubles the worst-case tool silence (2 x idle window)
+ * for little gain. We therefore return the tested failure to the primary
+ * immediately so IT can tighten the task and call the tool again (#690 review,
+ * lenaparkhodges P1). This also caps worst-case silence at ONE idle window even
+ * if the parent's tool-boundary bookkeeping ever fails to suspend its own idle
+ * timer while the tool is in flight. The primary's abort signal is handled
+ * separately by the loop, not here.
+ */
+export function shouldRetryDelegate(r: DelegateResult): boolean {
+  if (delegateOutcome(r) === "success") return false;
+  if (r.stopReason === "timeout") return false;
+  return true;
+}
+
+export interface DelegateRunResult {
+  /** True when a clean attempt produced an answer. */
+  ok: boolean;
+  /** The answer text when `ok`, else empty. */
+  answer: string;
+  /** The MOST RECENT attempt's result — for failure surfacing (never throws). */
+  result: DelegateResult;
+}
+
+/**
+ * Run a delegate with the #690 recovery policy, up to `maxAttempts` times:
+ * retry an empty completion or a fast failure once on the same model, do NOT
+ * retry a timeout, and stop immediately when the turn is aborted. Returns the
+ * answer on success, or the last attempt's result for failure surfacing.
+ *
+ * `delegateFn` is injected so the retry contract is unit-testable without
+ * spawning a real pi child (the loop was previously inline in index.ts and
+ * untested; see #690 review).
+ */
+export async function runDelegateWithRetry(
+  opts: DelegateOptions,
+  delegateFn: (o: DelegateOptions) => Promise<DelegateResult> = delegate,
+  maxAttempts: number = DELEGATE_MAX_ATTEMPTS,
+): Promise<DelegateRunResult> {
+  let last: DelegateResult | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const r = await delegateFn(opts);
+    if (delegateOutcome(r) === "success") {
+      return { ok: true, answer: finalText(r.messages), result: r };
+    }
+    last = r;
+    // A cancelled turn stops the whole thing — signal.aborted means we should
+    // not spawn another child.
+    if (opts.signal?.aborted) break;
+    if (!shouldRetryDelegate(r)) break;
+  }
+  return { ok: false, answer: "", result: last as DelegateResult };
+}
+
+/**
  * Build the tool-result failure string for a failed/timed-out delegation.
  * Never throws.
  *
@@ -316,9 +384,11 @@ export function delegateFailureText(kind: string, r: DelegateResult): string {
   // Empty completion (#690): a clean exit that produced no answer at all. Say
   // so plainly rather than the misleading "failed (stop): no output".
   if (delegateOutcome(r) === "empty") {
+    // No attempt COUNT here: this path is also reached after the abort-break,
+    // where only one attempt ran, so "twice" would be wrong (#690 review nit).
     return (
       `${kind} returned no answer (the vision model completed its turn without ` +
-      `producing any text, twice). The turn continues on the primary model.`
+      `producing any text). The turn continues on the primary model.`
     );
   }
   const reason = r.stopReason ?? `exit ${r.exitCode}`;

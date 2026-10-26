@@ -19,10 +19,13 @@ import {
 } from "../pi-extension/capability-routing/tools.ts";
 import {
   buildDelegateBaseArgs,
+  DELEGATE_MAX_ATTEMPTS,
   delegateFailureText,
   delegateOutcome,
   isDelegateFailure,
   lastProgressText,
+  runDelegateWithRetry,
+  shouldRetryDelegate,
   type DelegateResult,
   type Message,
 } from "../pi-extension/capability-routing/spawnPi.ts";
@@ -141,6 +144,85 @@ describe("delegateOutcome — retry policy tri-state (issue #690)", () => {
     expect(delegateOutcome(result({ exitCode: 1 }))).toBe("failure");
     expect(delegateOutcome(result({ stopReason: "timeout" }))).toBe("failure");
     expect(delegateOutcome(result({ stopReason: "aborted" }))).toBe("failure");
+  });
+});
+
+describe("shouldRetryDelegate — #690 recovery policy (timeout is NOT retried)", () => {
+  test("success is not retried", () => {
+    expect(shouldRetryDelegate(result({ exitCode: 0, messages: [assistantText("ok")] }))).toBe(
+      false,
+    );
+  });
+
+  test("an empty completion IS retried", () => {
+    expect(shouldRetryDelegate(result({ exitCode: 0 }))).toBe(true);
+    expect(shouldRetryDelegate(result({ exitCode: 0, messages: [assistantText("  ")] }))).toBe(
+      true,
+    );
+  });
+
+  test("a fast failure IS retried", () => {
+    expect(shouldRetryDelegate(result({ exitCode: 1 }))).toBe(true);
+    expect(shouldRetryDelegate(result({ stopReason: "error" }))).toBe(true);
+  });
+
+  test("a TIMEOUT is NOT retried (P1: a wedged model won't answer promptly)", () => {
+    expect(shouldRetryDelegate(result({ stopReason: "timeout" }))).toBe(false);
+  });
+});
+
+describe("runDelegateWithRetry — retry-once-then-fail contract (fake-delegate seam)", () => {
+  const opts = { model: "m", task: "t" };
+
+  test("retries an empty completion exactly once, then surfaces the failure", async () => {
+    let calls = 0;
+    const fake = async () => {
+      calls++;
+      return result({ exitCode: 0 });
+    };
+    const run = await runDelegateWithRetry(opts, fake);
+    expect(calls).toBe(DELEGATE_MAX_ATTEMPTS);
+    expect(run.ok).toBe(false);
+    expect(delegateFailureText("look_at_image", run.result)).toContain("returned no answer");
+  });
+
+  test("retries a fast failure once and succeeds on the second attempt", async () => {
+    let calls = 0;
+    const fake = async () => {
+      calls++;
+      return calls === 1
+        ? result({ exitCode: 1 })
+        : result({ exitCode: 0, messages: [assistantText("the answer")] });
+    };
+    const run = await runDelegateWithRetry(opts, fake);
+    expect(calls).toBe(2);
+    expect(run.ok).toBe(true);
+    expect(run.answer).toBe("the answer");
+  });
+
+  test("does NOT retry a timeout — ONE attempt only", async () => {
+    let calls = 0;
+    const fake = async () => {
+      calls++;
+      return result({ stopReason: "timeout" });
+    };
+    const run = await runDelegateWithRetry(opts, fake);
+    expect(calls).toBe(1);
+    expect(run.ok).toBe(false);
+    expect(run.result.stopReason).toBe("timeout");
+  });
+
+  test("a cancelled turn stops the loop after a single attempt", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    let calls = 0;
+    const fake = async () => {
+      calls++;
+      return result({ exitCode: 1 });
+    };
+    const run = await runDelegateWithRetry({ ...opts, signal: ac.signal }, fake);
+    expect(calls).toBe(1);
+    expect(run.ok).toBe(false);
   });
 });
 
