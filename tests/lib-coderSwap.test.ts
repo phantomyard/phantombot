@@ -283,6 +283,52 @@ describe("resolveSwapModel", () => {
     expect(d.model).toBe(CODING);
   });
 
+  test("override:on swaps the model but is NOT automatic (no ladder)", () => {
+    // #690 ruling: a manual override is not an automatic swap, so it must not
+    // trigger the retry ladder. `swapped` stays true (the model is changed),
+    // `automatic` is false.
+    const d = resolveSwapModel({
+      text: "refactor the auth code in src",
+      override: "on",
+      primaryModel: PRIMARY,
+      codingModel: CODING,
+    });
+    expect(d.swapped).toBe(true);
+    expect(d.automatic).toBe(false);
+  });
+
+  test("score/context swap is automatic (ladder-eligible)", () => {
+    const d = resolveSwapModel({
+      text: "refactor the auth code in src",
+      primaryModel: PRIMARY,
+      codingModel: CODING,
+    });
+    expect(d.swapped).toBe(true);
+    expect(d.automatic).toBe(true);
+  });
+
+  test("context-path swap is automatic (ladder-eligible)", () => {
+    const d = resolveSwapModel({
+      text: "review this pull request https://github.com/x/y/pull/1",
+      primaryModel: PRIMARY,
+      codingModel: CODING,
+      history: [],
+    });
+    expect(d.swapped).toBe(true);
+    expect(d.automatic).toBe(true);
+  });
+
+  test("override:off is not a swap and not automatic", () => {
+    const d = resolveSwapModel({
+      text: "refactor the whole codebase in src",
+      override: "off",
+      primaryModel: PRIMARY,
+      codingModel: CODING,
+    });
+    expect(d.swapped).toBe(false);
+    expect(d.automatic).toBe(false);
+  });
+
   test("override:off wins over a high score", () => {
     const d = resolveSwapModel({
       text: "refactor the whole codebase in src",

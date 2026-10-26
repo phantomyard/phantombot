@@ -24,6 +24,7 @@ import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { isReasoningCapture } from "../src/harnesses/reasoningReplay.ts";
 import * as vault from "../src/lib/vault.ts";
 import { loadDecisionModelHealth } from "../src/lib/decisionModelHealth.ts";
+import { setCoderSwapOverride } from "../src/lib/coderSwap.ts";
 
 const FAKE_PI = resolve(__dirname, "fixtures/fake-pi.sh");
 
@@ -1674,6 +1675,8 @@ describe("PiHarness coder-swap retry ladder", () => {
     delete process.env.FAKE_PI_ARGV_LOG;
     delete process.env.FAKE_PI_FAIL_MODEL;
     delete process.env.FAKE_PI_RATELIMIT_TEXT;
+    delete process.env.FAKE_PI_EMPTY_DELAY_MS;
+    delete process.env.PHANTOMBOT_CODER_SWAP_STATE;
     await rm(logDir, { recursive: true, force: true });
   });
 
@@ -1944,6 +1947,78 @@ describe("PiHarness coder-swap retry ladder", () => {
     expect(error?.recoverable).toBe(true);
     // Exactly ONE invocation — no retries, no primary fallback.
     expect(await loggedArgv()).toHaveLength(1);
+  });
+
+  test("manual /coder override is NOT a swap: single attempt, no retry, no primary fallback (#690)", async () => {
+    // #690 ruling: a manual override swaps the MODEL (the operator asked for
+    // it) but is not an AUTOMATIC swap, so the retry ladder must not engage.
+    // A persisted /coder override used to invoke coder twice, then the primary.
+    const statePath = join(logDir, "coder-swap.json");
+    process.env.PHANTOMBOT_CODER_SWAP_STATE = statePath;
+    await setCoderSwapOverride({
+      persona: "personaA",
+      conversation: "conv1",
+      mode: "on",
+    });
+    process.env.FAKE_PI_MODE = "emptygate";
+    process.env.FAKE_PI_FAIL_MODEL = "z-ai/glm-5.2";
+    const chunks = await collect(
+      new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+      }).invoke(
+        newRequest({
+          userMessage: "hi there",
+          persona: "personaA",
+          conversation: "conv1",
+        }),
+      ),
+    );
+    const argvs = await loggedArgv();
+    // Exactly ONE invocation, on the selected coder model. No retry, and the
+    // primary is never re-run: a manual-override turn is ordinary.
+    expect(argvs).toHaveLength(1);
+    expect(argvs[0]).toContain("--model z-ai/glm-5.2");
+    expect(argvs.some((a) => a.includes("mimo-v2.5"))).toBe(false);
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+  });
+
+  test("retry ladder shares ONE turn budget, not one cap per model switch (#690)", async () => {
+    // Two 200 ms empty coder completions plus a primary would finish at ~420 ms,
+    // exceeding hardTimeoutMs=300. The hard cap belongs to the TURN: attempt 1
+    // gets the full 300 ms, the retry only the remainder (~100 ms), so the
+    // second attempt is killed by the cap and the primary is never reached.
+    process.env.FAKE_PI_MODE = "emptygatedelay";
+    process.env.FAKE_PI_FAIL_MODEL = "z-ai/glm-5.2";
+    process.env.FAKE_PI_EMPTY_DELAY_MS = "200";
+    const started = Date.now();
+    const chunks = await collect(
+      new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+      }).invoke(
+        newRequest({ userMessage: PR_MSG, idleTimeoutMs: 10_000, hardTimeoutMs: 300 }),
+      ),
+    );
+    const elapsed = Date.now() - started;
+    const error = chunks.find((c) => c.type === "error") as
+      | { type: "error"; error: string; recoverable?: boolean }
+      | undefined;
+    // The shared turn cap fired: the second attempt was killed, not retried.
+    expect(error?.error).toContain("hard wall-clock cap");
+    expect(error?.recoverable).toBe(true);
+    // No successful answer, and the primary model was NEVER invoked — the very
+    // failure ("plus primary finish successfully after 420 ms") #690 forbids.
+    expect(chunks.some((c) => c.type === "done")).toBe(false);
+    const argvs = await loggedArgv();
+    expect(argvs.every((a) => a.includes("--model z-ai/glm-5.2"))).toBe(true);
+    expect(argvs.some((a) => a.includes("mimo-v2.5"))).toBe(false);
+    // And the whole turn honoured the ONE cap (generous CI slack).
+    expect(elapsed).toBeLessThan(1_000);
   });
 
   test("successful swapped turn → single attempt, no ladder", async () => {

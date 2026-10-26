@@ -70,6 +70,7 @@ import { withPersonaEnv } from "../lib/envBootstrap.ts";
 import { harnessSpawnEnv } from "../lib/vault.ts";
 import {
   type HarnessActivity,
+  HARD_CAP_ERROR_SUFFIX,
   isHardCapError,
   runHarnessProcess,
 } from "../lib/harnessRunner.ts";
@@ -307,6 +308,7 @@ export class PiHarness implements Harness {
       !!codingModel &&
       codingModel !== primaryModel;
     let swapped = false;
+    let automaticSwap = false;
     let swapModel = primaryModel;
     if (coderSwapEligible) {
       const override =
@@ -382,9 +384,12 @@ export class PiHarness implements Harness {
             ...(r.ok ? {} : { error: r.error }),
           });
           if (r.ok) {
+            const toCoder = r.route === "coder";
             decision = {
-              model: r.route === "coder" ? codingModel : primaryModel,
-              swapped: r.route === "coder",
+              model: toCoder ? codingModel : primaryModel,
+              swapped: toCoder,
+              // Jev is AUTOMATIC routing, so a swap it selects IS ladder-eligible.
+              automatic: toCoder,
               reason: `jev:${r.route}@${r.confidence.toFixed(2)}`,
               score: 0,
             };
@@ -399,6 +404,7 @@ export class PiHarness implements Harness {
         decision = scoreRoute();
       }
       swapped = decision.swapped;
+      automaticSwap = decision.automatic;
       swapModel = decision.model;
       if (decision.swapped) {
         log.info("pi.invoke coder-swap active", {
@@ -743,10 +749,17 @@ export class PiHarness implements Harness {
      * Spawn ONE pi attempt on the given model and stream its chunks. Fresh
      * subprocess per attempt (the shared engine arms its own kill coordinator
      * per spawn), same temp payload files (model-independent) and child env.
+     *
+     * `hardBudgetMs`, when given, is the REMAINING turn wall-clock budget this
+     * attempt may spend — the shared-engine hard cap is then that slice, not a
+     * fresh full `req.hardTimeoutMs`. The retry ladder passes it so recovery
+     * shares ONE turn budget instead of resetting the cap per model switch
+     * (issue #690). Omitted ⇒ the attempt gets `req` verbatim (non-ladder turns).
      */
     const runAttempt = async function* (
       this: PiHarness,
       model: string | undefined,
+      hardBudgetMs?: number,
     ): AsyncGenerator<HarnessChunk> {
       const proc = spawnInNewSession([...this.command(), ...buildArgs(model)], {
         cwd: req.workingDir,
@@ -756,11 +769,24 @@ export class PiHarness implements Harness {
         stderr: "pipe",
       });
 
+      // The turn-wide hard cap becomes THIS attempt's hard cap. Clamp the soft
+      // deadline too, so an inherited soft timer can never outlive the slice.
+      const attemptReq: HarnessRequest =
+        hardBudgetMs === undefined
+          ? req
+          : {
+              ...req,
+              hardTimeoutMs: hardBudgetMs,
+              ...(req.softTimeoutMs !== undefined
+                ? { softTimeoutMs: Math.min(req.softTimeoutMs, hardBudgetMs) }
+                : {}),
+            };
+
       // Shared engine. Pi delivers its payload via argv (stdin ignored, so no
       // stdinPayload), and the terminal `done` meta records the argv byte count.
       yield* runHarnessProcess({
         proc,
-        req,
+        req: attemptReq,
         harnessId: this.id,
         parseEvent: parsePiEvent,
         toolBoundary: piToolBoundary,
@@ -777,7 +803,7 @@ export class PiHarness implements Harness {
       });
     }.bind(this);
 
-    if (!swapped) {
+    if (!swapped || !automaticSwap) {
       yield* runAttempt(swapModel);
     } else {
       // ─────────────────────────────────────────────────────────────────
@@ -816,12 +842,38 @@ export class PiHarness implements Harness {
       let lastFailure:
         | { error: string; recoverable?: boolean; httpStatus?: number }
         | undefined;
+      // Shared turn budget (issue #690): the hard wall-clock cap belongs to the
+      // TURN, not to one model attempt. Arm ONE deadline up front and slice it
+      // across every ladder attempt (coder, coder retry, primary) so recovery
+      // cannot multiply the cap — otherwise one 60-min cap becomes 3 × 60 min.
+      const turnDeadline =
+        req.hardTimeoutMs !== undefined ? Date.now() + req.hardTimeoutMs : undefined;
+      const remainingBudgetMs = (): number | undefined =>
+        turnDeadline === undefined
+          ? undefined
+          : Math.max(0, turnDeadline - Date.now());
+      // The turn's budget is spent before an attempt could run: the hard cap is
+      // FINAL, so surface the same kill-cause error the shared engine raises
+      // (recoverable → the orchestrator's harness chain still applies).
+      const budgetExhaustedError = (): HarnessChunk & { type: "error" } => ({
+        type: "error",
+        error: `${this.id} timed out after ${req.hardTimeoutMs ?? "unknown"}ms ${HARD_CAP_ERROR_SUFFIX}`,
+        recoverable: true,
+        killCause: "timeout",
+      });
+      let budgetExhausted = false;
       for (
         let attempt = 1;
         attempt <= CODER_SWAP_MAX_ATTEMPTS && !req.signal?.aborted;
         attempt++
       ) {
         const startedAt = Date.now();
+        // Each attempt may only spend what is LEFT of the turn budget.
+        const attemptBudget = remainingBudgetMs();
+        if (attemptBudget !== undefined && attemptBudget <= 0) {
+          budgetExhausted = true;
+          break;
+        }
         // `sawUsableText` = non-whitespace assistant text actually streamed.
         // `sawTool` = any progress chunk (pi's tool executions and titled
         // toolcall deltas — a side effect, or the model composing one).
@@ -842,7 +894,7 @@ export class PiHarness implements Harness {
         let failure:
           | (HarnessChunk & { type: "error"; error: string })
           | undefined;
-        for await (const chunk of runAttempt(swapModel)) {
+        for await (const chunk of runAttempt(swapModel, attemptBudget)) {
           if (chunk.type === "error") {
             // Terminal in the shared engine: yielded last, generator returns
             // right after. Hold it back while a retry is still possible.
@@ -963,6 +1015,22 @@ export class PiHarness implements Harness {
       // duplicated bubbles, no replayed tool side effects.
       // (If the loop exited early because the user aborted, stop here too.)
       if (req.signal?.aborted) return;
+      if (budgetExhausted) {
+        log.warn("pi.invoke coder-swap turn budget exhausted", {
+          persona: req.persona,
+          conversation: req.conversation,
+          turnId: req.turnId,
+          harness: this.id,
+          role: "coder",
+          provider,
+          model: swapModel,
+          attempts: CODER_SWAP_MAX_ATTEMPTS,
+          hardTimeoutMs: req.hardTimeoutMs ?? "disabled",
+          error: lastFailure?.error,
+        });
+        yield budgetExhaustedError();
+        return;
+      }
       log.warn("pi.invoke coder-swap exhausted — falling back to primary", {
         persona: req.persona,
         conversation: req.conversation,
@@ -977,7 +1045,23 @@ export class PiHarness implements Harness {
         nextModel: primaryModel ?? "(pi default)",
         fallbackModel: primaryModel ?? "(pi default)",
       });
-      yield* runAttempt(primaryModel);
+      const primaryBudget = remainingBudgetMs();
+      if (primaryBudget !== undefined && primaryBudget <= 0) {
+        log.warn("pi.invoke coder-swap turn budget exhausted before primary fallback", {
+          persona: req.persona,
+          conversation: req.conversation,
+          turnId: req.turnId,
+          harness: this.id,
+          role: "coder",
+          provider,
+          model: swapModel,
+          hardTimeoutMs: req.hardTimeoutMs ?? "disabled",
+          nextModel: primaryModel ?? "(pi default)",
+        });
+        yield budgetExhaustedError();
+        return;
+      }
+      yield* runAttempt(primaryModel, primaryBudget);
     }
 
     } finally {

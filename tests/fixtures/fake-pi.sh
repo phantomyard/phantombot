@@ -37,6 +37,11 @@
 #              (turn_end with no assistant text) and exits 0 instead of exit 1.
 #              Drives the #690 empty-completion recovery: retry the swapped
 #              model once, then fall back to the primary.
+#   emptygatedelay - like emptygate, but the FAIL_MODEL first sleeps
+#              $FAKE_PI_EMPTY_DELAY_MS (default 200) before its empty
+#              completion. Drives the #690 SHARED-TURN-BUDGET test: the ladder
+#              must draw every attempt from ONE wall-clock cap, not re-arm a
+#              fresh full cap per spawn.
 #   emptythenok — the FIRST invocation emits an empty completion, later ones
 #              behave like `normal` (counts prior lines in $FAKE_PI_ARGV_LOG).
 #              Drives the #690 retry-RECOVERS case (empty on attempt 1,
@@ -170,6 +175,16 @@ case "$mode" in
     for arg in "$@"; do
       if [ "${FAKE_PI_FAIL_MODEL-}" = "*" ] ||
          { [ -n "${FAKE_PI_FAIL_MODEL-}" ] && [ "$arg" = "$FAKE_PI_FAIL_MODEL" ]; }; then
+        emit_empty_done
+      fi
+    done
+    emit_normal
+    ;;
+  emptygatedelay)
+    for arg in "$@"; do
+      if [ "${FAKE_PI_FAIL_MODEL-}" = "*" ] ||
+         { [ -n "${FAKE_PI_FAIL_MODEL-}" ] && [ "$arg" = "$FAKE_PI_FAIL_MODEL" ]; }; then
+        sleep "$(awk "BEGIN{printf \"%.3f\", ${FAKE_PI_EMPTY_DELAY_MS:-200}/1000}")"
         emit_empty_done
       fi
     done

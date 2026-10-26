@@ -392,6 +392,15 @@ export interface SwapDecision {
   model?: string;
   /** True when the coding brain was selected for this turn. */
   swapped: boolean;
+  /**
+   * True only when the swap arose from AUTOMATIC routing — the Jev decider or
+   * the keyword/context scorer. A manual `/coder` override DOES swap the model
+   * (the operator asked for it) but is NOT automatic: per the #690 ruling a
+   * manual-override turn is an ordinary turn under its selected model, so it
+   * never triggers the one-retry-then-return-to-primary ladder. Always false
+   * when `swapped` is false.
+   */
+  automatic: boolean;
   /** Why we decided as we did (override:on/off, score, no-coding-model). */
   reason: string;
   /** The computed score (0 when an override or missing coding model short-circuits). */
@@ -445,15 +454,30 @@ export function resolveSwapModel(input: {
     return {
       model: primaryModel,
       swapped: false,
+      automatic: false,
       reason: codingModel ? "coder-equals-primary" : "no-coding-model",
       score: 0,
     };
   }
   if (override === "off") {
-    return { model: primaryModel, swapped: false, reason: "override:off", score: 0 };
+    return {
+      model: primaryModel,
+      swapped: false,
+      automatic: false,
+      reason: "override:off",
+      score: 0,
+    };
   }
   if (override === "on") {
-    return { model: codingModel, swapped: true, reason: "override:on", score: 0 };
+    // Manual override: swap the model, but NOT an automatic swap — the ladder
+    // (and its retry) must not engage (issue #690).
+    return {
+      model: codingModel,
+      swapped: true,
+      automatic: false,
+      reason: "override:on",
+      score: 0,
+    };
   }
 
   // Legacy flat-sum path: no history available.
@@ -464,6 +488,7 @@ export function resolveSwapModel(input: {
     return {
       model: swapped ? codingModel : primaryModel,
       swapped,
+      automatic: swapped,
       reason: `score:${score}/${threshold}`,
       score,
     };
@@ -479,6 +504,7 @@ export function resolveSwapModel(input: {
   return {
     model: ctx.swap ? codingModel : primaryModel,
     swapped: ctx.swap,
+    automatic: ctx.swap,
     reason: ctx.reason,
     score: scoreCodingIntent(text).score,
   };
