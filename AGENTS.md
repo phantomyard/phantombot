@@ -150,6 +150,7 @@ guards; see the [recovery contract](docs/contributing/invariants/harnesses.md#co
 - [66](docs/contributing/invariants/harnesses.md#inv-66) The hard cap is a backstop, not the deadline — and outage alerts speak for the persona that died (issues #639, #638).
 - [74](docs/contributing/invariants/harnesses.md#inv-74) Tool watchdog (issue #552): tool execution is a parser-owned lifecycle, not an idle activity hint.
 - [79](docs/contributing/invariants/harnesses.md#inv-79) A bring-your-own-endpoint provider is a `models.json` ENTRY phantombot owns — never a vendor entry, never a guess (issue #694).
+- [80](docs/contributing/invariants/harnesses.md#inv-80) PhantomOps asks for a token and a test — never a model selector (issue #696).
 
 ### Memory — [memory.md](docs/contributing/invariants/memory.md)
 

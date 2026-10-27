@@ -282,6 +282,82 @@ describe("runHarness native → native", () => {
     expect(code).toBe(1); // cancelled at the first question
     expect(firstOptions.map((o) => o.value)).toEqual(["native", "claude"]);
   });
+
+  test("phantomops primary: NO model picker — every slot resolves to phantomops/auto (issue #696)", async () => {
+    const selects: Array<{ message: string }> = [];
+    const selectAnswers: Array<string | undefined> = [
+      "native", // primary
+      "", // fallback: (none)
+      "phantomops", // provider
+    ];
+    const q: HarnessPrompts = {
+      select: async (input) => {
+        selects.push(input);
+        return selectAnswers.shift() as never;
+      },
+      text: async () => "",
+      password: async () => "pok_live_token",
+      confirm: async () => true,
+      note: () => {},
+      intro: () => {},
+      outro: () => {},
+      cancel: () => {},
+      canRunInteractiveInstaller: false,
+    };
+
+    const configPath = join(workdir, "config.toml");
+    const config = {
+      configPath,
+      personasDir: join(workdir, "personas"),
+      defaultPersona: "robbie",
+      harnesses: {
+        chain: ["claude"],
+        pi: { bin: "/usr/bin/pi" },
+        codex: { bin: undefined, model: "" },
+        claude: { bin: undefined },
+      },
+    } as unknown as Config;
+
+    // Isolate the native agent dir (auth.json / models.json) the wizard writes
+    // alongside the routing: otherwise it would land in the real XDG data home.
+    const savedDataHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg-data");
+    try {
+      const status = await runHarness({
+        config,
+        availability: { native: process.execPath, claude: undefined, codex: undefined, "pi-host": undefined },
+        prompts: q,
+        piCommand: [join(workdir, "no-such-engine")],
+        serviceControl: {
+          isActive: async () => false,
+          restart: async () => ({ ok: true }),
+          start: async () => ({ ok: true }),
+          stop: async () => ({ ok: true }),
+          rerenderUnitIfStale: async () => ({ ok: true, rerendered: false }),
+        },
+      });
+      expect(status).toBe(0);
+    } finally {
+      if (savedDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedDataHome;
+    }
+
+    // The wizard went provider → key → done: no PRIMARY / IMAGE / CODING
+    // picker was ever shown — `phantomops/auto` is the answer to a question
+    // the wizard no longer asks.
+    expect(
+      selects.some((s) => /Primary model|Image model|Coding model/.test(s.message)),
+    ).toBe(false);
+    const toml = parse(await readFile(configPath, "utf8")) as {
+      harnesses: { chain: string[]; pi: { routing: Record<string, string> } };
+    };
+    expect(toml.harnesses.chain).toEqual(["native"]);
+    expect(toml.harnesses.pi.routing.provider).toBe("phantomops");
+    expect(toml.harnesses.pi.routing.base_url).toBe("https://phantomops.app/api/v1");
+    expect(toml.harnesses.pi.routing.primary_model).toBe("phantomops/auto");
+    expect(toml.harnesses.pi.routing.image_model).toBe("phantomops/auto");
+    expect(toml.harnesses.pi.routing.coding_model).toBe("phantomops/auto");
+  });
 });
 
 describe("runHarnessCheck", () => {

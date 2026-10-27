@@ -46,9 +46,12 @@ import {
   customProviderAllowsKeyless,
   customProviderSpec,
   normalizeBaseUrl,
+  PHANTOOPS_AUTO_MODEL,
+  PHANTOOPS_PROVIDER,
   plaintextKeyWarning,
   resolveCustomProviderBaseUrl,
   storedBaseUrlForProvider,
+  usesAutoRouting,
 } from "../lib/piCustomProvider.ts";
 import { probeProviderKey, type KeyProbeResult } from "../lib/providerKeyProbe.ts";
 import { fetchProviderModels } from "../lib/providerModelCatalog.ts";
@@ -621,6 +624,46 @@ export async function configureNative(
       const cleared = await deps.clearProviderEntry(spec.id);
       if (!cleared.ok) q.note("Custom provider", cleared.error);
     }
+  }
+
+  // Issue #696: PhantomOps gets NO model selector. `phantomops/auto` runs the
+  // full phantom server-side and is the reason the provider exists — the
+  // operator asked for a key and a working brain, not a picker whose only
+  // meaningful answer is the preselected default. All three slots resolve to
+  // `auto` silently; the connection test at the end is the only further step.
+  // The entry/routing discipline from #694 still applies (below).
+  if (usesAutoRouting(provider)) {
+    await deps.applyRouting({
+      provider,
+      baseUrl,
+      primaryModel: PHANTOOPS_AUTO_MODEL,
+      imageModel: PHANTOOPS_AUTO_MODEL,
+      codingModel: PHANTOOPS_AUTO_MODEL,
+    }, instanceId);
+    // Keep the entry in step with the picks (same rule as the picker path):
+    // unioned, never shrunk — buildProviderEntry puts the provider default
+    // first, so `auto` is always resolvable at spawn.
+    if (baseUrl) {
+      const write = await deps.writeProviderEntry!(PHANTOOPS_PROVIDER, {
+        baseUrl,
+        models: [PHANTOOPS_AUTO_MODEL],
+        keyAvailable: Boolean(effectiveKey),
+      });
+      if (!write.ok) q.note("Custom provider", write.error);
+    }
+    q.note(
+      "Model routing saved",
+      [
+        `provider: ${provider}`,
+        ...(baseUrl ? [`endpoint: ${baseUrl}`] : []),
+        `primary: ${PHANTOOPS_AUTO_MODEL}`,
+        `vision:  ${PHANTOOPS_AUTO_MODEL}`,
+        `coder:   ${PHANTOOPS_AUTO_MODEL}`,
+        "",
+        `saved to ${deps.targetPath}`,
+      ].join("\n"),
+    );
+    return false;
   }
 
   // LAST RESORT before the pickers: if Pi still lists nothing for this

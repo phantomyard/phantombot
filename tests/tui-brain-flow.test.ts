@@ -769,6 +769,45 @@ describe("native custom providers (openai-compatible / phantomops)", () => {
     expect(h.applied.chains).toEqual([]);
   });
 
+  test("phantomops: NO model selector — key then straight through, all three slots resolve to phantomops/auto (issue #696)", async () => {
+    const h = harness({
+      models: CUSTOM_MODELS,
+      choose: ["native", ""], // primary native, no fallback
+      search: ["phantomops"], // ONLY the provider picker — no slot searches
+      value: ["pok_live_token"],
+    });
+
+    const notice = await configureBrain(h.q, h.deps);
+
+    expect(notice).toBe("brain saved: native");
+    // Exactly one search screen: the provider picker. No PRIMARY / VISION /
+    // CODER banner is ever shown — `phantomops/auto` is the answer to a
+    // question the wizard no longer asks.
+    expect(h.applied.searches).toHaveLength(1);
+    expect(h.applied.searches[0]!.banner).toBeUndefined();
+    // The token was the only value question (the endpoint is never asked for
+    // PhantomOps — the gateway default IS the configuration).
+    expect(h.applied.values.map((v) => v.title)).toEqual([
+      "PhantomOps personal API token (pok_…)",
+    ]);
+    // All three slots silently resolve to the full-phantom model.
+    expect(h.applied.routings).toHaveLength(1);
+    expect(h.applied.routings[0]!.choices).toEqual({
+      provider: "phantomops",
+      baseUrl: "https://phantomops.app/api/v1",
+      primaryModel: "phantomops/auto",
+      imageModel: "phantomops/auto",
+      codingModel: "phantomops/auto",
+    });
+    // The entry the spawn path reads still names the endpoint and the key.
+    expect(h.applied.entries.at(-1)).toMatchObject({
+      providerId: "phantomops",
+      baseUrl: "https://phantomops.app/api/v1",
+      keyAvailable: true,
+    });
+    expect(h.applied.entries.at(-1)!.models).toContain("phantomops/auto");
+  });
+
   test("switching to a catalogue provider DROPS the endpoint entries", async () => {
     const h = harness({
       routing: { provider: "openai-compatible", baseUrl: "http://old:1234/v1" },

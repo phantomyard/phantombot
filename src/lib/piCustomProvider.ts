@@ -168,6 +168,23 @@ export function customProviderAllowsKeyless(id: string | undefined): boolean {
 }
 
 /**
+ * Issue #696: providers whose wizard asks for NO model selector at all.
+ *
+ * PhantomOps is the case: `phantomops/auto` runs the full phantom server-side
+ * and IS the reason the provider exists, so a picker whose only meaningful
+ * answer is the preselected default is friction, not choice. Both wizards
+ * check THIS one predicate (the CLI and the TUI flow must not drift apart —
+ * the #694 review history is the lesson: two wizards, one rule). The wizard
+ * path becomes key → test, and every routing slot resolves to
+ * {@link PHANTOOPS_AUTO_MODEL} silently.
+ */
+export function usesAutoRouting(
+  id: string | undefined,
+): id is typeof PHANTOOPS_PROVIDER {
+  return customProviderSpec(id)?.id === PHANTOOPS_PROVIDER;
+}
+
+/**
  * Normalise an operator-entered base URL.
  *
  * Operators paste what their server prints — often with a trailing slash, and
