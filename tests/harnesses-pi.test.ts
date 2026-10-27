@@ -2252,3 +2252,114 @@ describe("PiHarness native vs pi-host (subprocess)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bring-your-own-endpoint providers at SPAWN (issue #694, review Kai).
+//
+// Two failures lived here and only here, so neither the unit tests nor the
+// wizard covered them:
+//   - the native pre-spawn guard threw for a KEYLESS openai-compatible brain,
+//     killing the first turn of a configuration the wizard had just accepted;
+//   - the spawn-time `models.json` re-assertion passed no models, so in a FRESH
+//     agent dir (a new persona, or the ephemeral dir every persona-less relayed
+//     turn gets) pi answered `Unknown provider "openai-compatible"` even though
+//     the routing was valid.
+// ---------------------------------------------------------------------------
+
+describe("PiHarness — custom provider at spawn (#694)", () => {
+  const withScratchXdg = async (fn: (xdg: string) => Promise<void>) => {
+    const workdir = await mkdtemp(join(tmpdir(), "pi-custom-spawn-"));
+    const savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    try {
+      await fn(join(workdir, "xdg"));
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      await rm(workdir, { recursive: true, force: true });
+    }
+  };
+
+  const argvOf = async (harness: PiHarness, request = newRequest()) =>
+    (await collect(harness.invoke(request)))
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+
+  test("a KEYLESS openai-compatible brain spawns instead of failing the guard", async () => {
+    await withScratchXdg(async () => {
+      process.env.FAKE_PI_MODE = "argv";
+      const harness = new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+        routing: {
+          provider: "openai-compatible",
+          baseUrl: "http://127.0.0.1:11434/v1",
+          primaryModel: "llama3.1",
+        },
+      });
+      const argv = await argvOf(harness, newRequest({ persona: "persona-keyless" }));
+      expect(argv).toContain("--provider openai-compatible");
+      expect(argv).toContain("--model llama3.1");
+      expect(argv).not.toContain("no API key found");
+    });
+  });
+
+  test("the entry written in a FRESH agent dir carries the configured models", async () => {
+    await withScratchXdg(async (xdg) => {
+      process.env.FAKE_PI_MODE = "argv";
+      const harness = new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+        routing: {
+          provider: "openai-compatible",
+          baseUrl: "http://127.0.0.1:11434/v1",
+          primaryModel: "llama3.1",
+          codingModel: "qwen2.5-coder",
+        },
+      });
+      await argvOf(harness, newRequest({ persona: "persona-fresh" }));
+
+      const doc = JSON.parse(
+        await readFile(
+          join(xdg, "pi-native", "personas", "persona-fresh", "agent", "models.json"),
+          "utf8",
+        ),
+      ) as { providers: Record<string, { baseUrl?: string; apiKey?: string; models?: Array<{ id: string }> }> };
+      const entry = doc.providers["openai-compatible"]!;
+      expect(entry.baseUrl).toBe("http://127.0.0.1:11434/v1");
+      // No key stored ⇒ the literal placeholder, which is what makes a keyless
+      // provider RESOLVABLE for pi at all.
+      expect(entry.apiKey).toBe("no-key-required");
+      // Without this union pi reports `Unknown provider "openai-compatible"`
+      // in a directory the wizard never touched.
+      expect(entry.models!.map((m) => m.id).sort()).toEqual(["llama3.1", "qwen2.5-coder"]);
+    });
+  });
+
+  test("PhantomOps with NO token still fails loudly — the exemption is OpenAI-compatible only", async () => {
+    await withScratchXdg(async () => {
+      process.env.FAKE_PI_MODE = "argv";
+      const harness = new PiHarness({
+        bin: FAKE_PI,
+        mode: "native",
+        command: [FAKE_PI],
+        routing: {
+          provider: "phantomops",
+          baseUrl: "https://phantomops.app/api/v1",
+          primaryModel: "phantomops/auto",
+        },
+      });
+      let message = "";
+      try {
+        const chunks = await collect(harness.invoke(newRequest({ persona: "persona-phantomops" })));
+        message = chunks.filter((c) => c.type === "error").map((c) => JSON.stringify(c)).join("");
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toContain("no API key found for provider 'phantomops'");
+    });
+  });
+});

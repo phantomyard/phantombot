@@ -311,6 +311,21 @@ under that provider's privacy and retention terms.
 Phantombot never installs an optional host harness for you. Missing fallbacks
 do not stop the daemon; `phantombot doctor` reports what is available.
 
+### Bring your own endpoint
+
+The native harness can point Pi at an endpoint that is not in Pi's own provider
+catalogue — no extension, no hand-edited config file:
+
+| Provider | What it is for |
+|---|---|
+| **openai-compatible** | Any server speaking the OpenAI Chat Completions API — vLLM, Ollama, llama.cpp, LM Studio, LocalAI, a proxy. You supply the base URL; an unauthenticated server is a valid setup. |
+| **phantomops** | A [PhantomOps](https://phantomops.app) personal API token (`pok_…`). One credential and nothing else: `phantomops/auto` runs your full phantom server-side. The model list comes from the gateway, and the raw catalogue models are selectable too. |
+
+Both are offered in `phantombot harness` (and Brain in the TUI) with or without
+a key. Phantombot writes the provider's entry into the native agent dir, keeps
+the key in the vault and relays it per turn like any other provider — the
+credential is never written into that entry.
+
 Native coding-model swaps retry empty replies alongside eligible provider errors: up
 to three coder attempts, then the existing primary-model fallback. An attempt that
 already streamed usable text or tool progress is never replayed.

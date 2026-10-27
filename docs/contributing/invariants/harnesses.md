@@ -87,3 +87,42 @@ harness. Claude pairs `tool_use.id` with `tool_result.tool_use_id`, Pi pairs
 `tool_execution_start`/`tool_execution_end` by `toolCallId`, and Codex pairs
 tool `item.started`/`item.completed` by `item.id`; anonymous names and progress
 text are not identifiers because parallel calls make them ambiguous.
+
+<a id="inv-79"></a>
+### 79. A bring-your-own-endpoint provider is a `models.json` ENTRY phantombot owns — never a vendor entry, never a guess (issue #694).
+
+Pi resolves every catalogue provider's endpoint itself; the two providers added
+for self-hosters (`openai-compatible`) and PhantomOps users (`phantomops`) have
+no such entry, so `lib/piCustomProvider.ts` writes one into the child's agent
+dir (`providers.<id>` with `baseUrl`, `api: "openai-completions"`, `apiKey` and
+`models`). Load-bearing, each with the failure it prevents: **the key is a
+`$VAR` reference, never a value** — the per-turn relay stays on the existing
+`PI_PROVIDER_CATALOG` env-var contract (#602), so a credential never reaches a
+world-readable agent dir; **an unauthenticated endpoint gets a literal
+placeholder, not an unresolvable reference** — verified against pi 1.0.4, a
+provider whose `apiKey` cannot be resolved is not merely unauthenticated, it is
+INVISIBLE (`pi --list-models` omits it and the turn dies with "Use /login to log
+into a provider"), which is why "no key" is spelled `no-key-required`; **the
+merge REFUSES an unparseable or non-object document instead of clobbering it** —
+the agent dir is shared with whatever the operator or a host pi put there, and
+`removeProviderEntry` deletes only phantombot's own id; **models are UNIONED,
+never replaced** — the wizard seeds them from the live `/models` list and adds
+the operator's picks, and the spawn-time refresh adds the configured
+primary/vision/coder ids (passing none only worked when the wizard's entry was
+already in that exact agent dir — a fresh dir produced an empty list and
+`Unknown provider`, review, Kai), so no write can ever shrink the list under
+the operator; **nothing is ever guessed** —
+`openai-compatible` has no default endpoint (that is the whole point of the
+provider), PhantomOps defaults to the gateway so its personal token is the only
+input, and a base URL is normalised at the prompt (trailing slash, pasted
+`/chat/completions` or `/models`) rather than at request time; **the entry is
+re-asserted at SPAWN**, because a turn must not depend on a wizard write from an
+upgrade ago, and it is written only when it has drifted (`entryMatches`);
+**`base_url` is TOML-only and belongs to the provider** — `computeRoutingWrites`
+drops it for a catalogue provider and `computeRoutingClears` erases it, so a
+leftover endpoint can never read like a live setting; and `phantomops/auto`
+stays FIRST in the picker (a product decision, restated in code so a server-side
+reorder cannot silently demote the full phantom to a raw model). Tests:
+`tests/lib-piCustomProvider.test.ts`, `tests/lib-providerModelCatalog.test.ts`,
+`tests/lib-providerKeyProbe-custom.test.ts`, `tests/lib-piRouting.test.ts`,
+`tests/cli-harness-routing.test.ts`.

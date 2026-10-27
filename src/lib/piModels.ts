@@ -21,6 +21,7 @@
  */
 
 import { withCommandDirOnPath } from "./processGroup.ts";
+import { CUSTOM_PROVIDERS } from "./piCustomProvider.ts";
 
 /** One row from `pi --list-models`, reduced to what the wizard needs. */
 export interface PiModel {
@@ -173,6 +174,10 @@ export interface PiProvider {
    * undefined for providers we don't have a documented var for (live-only /
    * post-catalogue providers) ⇒ the refresh is skipped and the pickers fall back
    * to free-text entry.
+   *
+   * For the bring-your-own-endpoint providers (`openai-compatible`,
+   * `phantomops`) this is the var Pi interpolates from the `models.json` entry
+   * phantombot writes for them — see `lib/piCustomProvider.ts`.
    */
   envVar?: string;
   /**
@@ -258,6 +263,13 @@ export const PI_PROVIDER_CATALOG: readonly Omit<PiProvider, "hasModels">[] = [
     label: "Xiaomi MiMo Token Plan (Singapore)",
     envVar: "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
   },
+  // BRING-YOUR-OWN-ENDPOINT providers (issue #694), last because they are the
+  // only entries whose ENDPOINT is not known to Pi up front: they exist because
+  // a `models.json` entry supplies the base URL (`lib/piCustomProvider.ts` owns
+  // writing it). Everything else about them is ordinary catalog behaviour —
+  // `--provider <id>` scopes the turn, and the key relays through `envVar`,
+  // which for these two is the var pi interpolates in that same entry.
+  ...CUSTOM_PROVIDERS.map((p) => ({ id: p.id, label: p.label, envVar: p.keyEnv })),
 ];
 
 /**

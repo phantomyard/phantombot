@@ -49,6 +49,9 @@ describe("clearPiRouting (the 'Use Pi's own config' path)", () => {
     expect(routing.primary_model).toBeUndefined();
     expect(routing.image_model).toBeUndefined();
     expect(routing.coding_model).toBeUndefined();
+    // The custom-provider endpoint (issue #694) is one of ours too: leaving it
+    // behind would re-point a provider the operator just stopped using.
+    expect(routing.base_url).toBeUndefined();
   });
 
   test("leaves unrelated config alone", async () => {
@@ -75,6 +78,7 @@ describe("clearPiRouting (the 'Use Pi's own config' path)", () => {
     // until computeRoutingClears erases it too.
     const clears = computeRoutingClears();
     expect([...clears.tomlKeys].sort()).toEqual([
+      "base_url",
       "coding_model",
       "image_model",
       "primary_model",
@@ -441,5 +445,83 @@ describe("snapshotPiRouting / restorePiRouting (brain-wizard rollback)", () => {
     const toml = (await readConfigToml(configPath)).harnesses as any;
     expect(toml.instances["pi-primary"].routing.provider).toBe("groq");
     expect(toml.instances["pi-fallback"].routing.provider).toBe("openrouter");
+  });
+});
+
+/**
+ * `base_url` on disk (issue #694) — the endpoint a bring-your-own-endpoint
+ * provider is only runnable through. It must appear with the provider, be
+ * DELETED when the operator moves to a catalog provider (a leftover would read
+ * like a live setting), and be erased by the "use Pi's own config" path.
+ */
+describe("applyRouting — custom provider endpoint (#694)", () => {
+  const routingOf = async () =>
+    ((await readConfigToml(configPath)).harnesses as Record<string, any>).pi.routing;
+
+  test("writes base_url alongside a custom provider", async () => {
+    await applyRouting(configPath, {
+      provider: "phantomops",
+      baseUrl: "https://phantomops.app/api/v1",
+      primaryModel: "phantomops/auto",
+    });
+
+    expect(await routingOf()).toMatchObject({
+      provider: "phantomops",
+      base_url: "https://phantomops.app/api/v1",
+      primary_model: "phantomops/auto",
+    });
+  });
+
+  test("switching back to a catalog provider DELETES the endpoint", async () => {
+    await applyRouting(configPath, {
+      provider: "phantomops",
+      baseUrl: "https://phantomops.app/api/v1",
+      primaryModel: "phantomops/auto",
+    });
+    await applyRouting(configPath, {
+      provider: "openrouter",
+      primaryModel: "anthropic/claude-sonnet-4.6",
+    });
+
+    const routing = await routingOf();
+    expect(routing.provider).toBe("openrouter");
+    expect("base_url" in routing).toBe(false);
+  });
+
+  test("switching to no provider also deletes it", async () => {
+    await applyRouting(configPath, {
+      provider: "openai-compatible",
+      baseUrl: "http://localhost:11434/v1",
+      primaryModel: "llama3",
+    });
+    await applyRouting(configPath, { primaryModel: "gpt-5.2" });
+
+    expect("base_url" in (await routingOf())).toBe(false);
+  });
+
+  test("a re-run with a moved endpoint REPLACES it rather than appending", async () => {
+    await applyRouting(configPath, {
+      provider: "openai-compatible",
+      baseUrl: "http://localhost:11434/v1",
+      primaryModel: "llama3",
+    });
+    await applyRouting(configPath, {
+      provider: "openai-compatible",
+      baseUrl: "http://192.168.1.9:8000/v1",
+      primaryModel: "llama3",
+    });
+
+    expect((await routingOf()).base_url).toBe("http://192.168.1.9:8000/v1");
+  });
+
+  test("the 'use Pi's own config' path erases it", async () => {
+    await applyRouting(configPath, {
+      provider: "phantomops",
+      baseUrl: "https://phantomops.app/api/v1",
+      primaryModel: "phantomops/auto",
+    });
+    await clearPiRouting(configPath);
+
+    expect("base_url" in (await routingOf())).toBe(false);
   });
 });

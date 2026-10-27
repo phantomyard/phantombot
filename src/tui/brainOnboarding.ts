@@ -84,6 +84,13 @@ export async function createBrainOnboardingDeps(
   const { nativeAgentDir, nativeAgentEnv } = await import(
     "../lib/nativeAgentDir.ts"
   );
+  const {
+    buildProviderEntry,
+    clearCustomProviderEntry,
+    restoreModelsJson,
+    snapshotModelsJson,
+    writeCustomProviderEntry,
+  } = await import("../lib/piCustomProvider.ts");
   const { probeProviderKey } = await import("../lib/providerKeyProbe.ts");
 
   const config = await loadConfig(persona);
@@ -96,6 +103,12 @@ export async function createBrainOnboardingDeps(
     chain: harnessChainIds(config, persona),
     routing: {
       provider: routing.provider,
+      // The STORED endpoint of a bring-your-own-endpoint provider (#694).
+      // Dropping it here left storedBaseUrlForProvider() always undefined in
+      // the real flow: an openai-compatible re-run could not keep its working
+      // endpoint with one Enter, and a phantomops re-run silently rewrote a
+      // dev-ring base_url to the gateway default (review, Lena).
+      baseUrl: routing.baseUrl,
       primaryModel: routing.primaryModel,
       imageModel: routing.imageModel,
       codingModel: routing.codingModel,
@@ -157,6 +170,22 @@ export async function createBrainOnboardingDeps(
       ),
     applyRouting: (choices, instanceId) =>
       applyRouting(writeTarget.path, choices, instanceId),
+    // Bring-your-own-endpoint providers (issue #694) live in the native agent
+    // dir's `models.json` — the SAME dir the spawn path re-asserts, so the entry
+    // the interview writes is the one the first turn reads.
+    writeProviderEntry: (providerId, entry) =>
+      writeCustomProviderEntry(
+        nativeAgentDir(undefined, persona),
+        providerId,
+        buildProviderEntry({
+          id: providerId,
+          baseUrl: entry.baseUrl,
+          models: entry.models,
+          keyAvailable: entry.keyAvailable,
+        }),
+      ),
+    clearProviderEntry: (providerId) =>
+      clearCustomProviderEntry(nativeAgentDir(undefined, persona), providerId),
     snapshotWrites: () =>
       snapshotBrainWrites(
         BRAIN_WRITE_SLOT_IDS.map((instanceId) => ({
@@ -174,8 +203,10 @@ export async function createBrainOnboardingDeps(
         // (PR #539 review, Kai/Lena).
         readVaultSecret: (name) =>
           getPersonaSecretStrict(config, name, persona),
-          snapshotAuth: () =>
-            snapshotPiAuth({ agentDir: nativeAgentDir(undefined, persona) }),
+        snapshotAuth: () =>
+          snapshotPiAuth({ agentDir: nativeAgentDir(undefined, persona) }),
+        snapshotModelsJson: () =>
+          snapshotModelsJson(nativeAgentDir(undefined, persona)),
         },
       ),
     restoreWrites: (snapshot) =>
@@ -187,12 +218,15 @@ export async function createBrainOnboardingDeps(
         unsetVaultSecret: (name) => unsetPersonaSecret(config, name, persona),
         restoreAuth: (auth) =>
           restorePiAuth(auth, { agentDir: nativeAgentDir(undefined, persona) }),
+        restoreModelsJson: (text) =>
+          restoreModelsJson(nativeAgentDir(undefined, persona), text),
       }),
     probe: async (id) => {
       const { probeHarness } = await import("../lib/harnessProbe.ts");
       return probeHarness({ config: await loadConfig(persona), id });
     },
-    probeProviderKey: (providerId, key) => probeProviderKey(providerId, key),
+    probeProviderKey: (providerId, key, opts) =>
+      probeProviderKey(providerId, key, opts),
     maybePromptRestart: async () => {
       const { maybePromptRestart } = await import("../cli/harness.ts");
       const { defaultServiceControl } = await import("../lib/platform.ts");
@@ -231,6 +265,12 @@ export interface BrainOnboardingDeps {
   /** The EFFECTIVE Pi routing (provider + three model slots). */
   routing: {
     provider?: string;
+    /**
+     * Stored endpoint of a bring-your-own-endpoint provider (issue #694).
+     * Optional on BrainDeps.routing, so omitting it here typechecks while
+     * silently starving the flow's endpoint reuse — keep it mapped.
+     */
+    baseUrl?: string;
     primaryModel?: string;
     imageModel?: string;
     codingModel?: string;
@@ -243,7 +283,24 @@ export interface BrainOnboardingDeps {
   targetPath: string;
   personaScope: boolean;
   listModels(extraEnv?: Record<string, string>): Promise<PiModel[]>;
-  probeProviderKey?(providerId: string, key: string): Promise<KeyProbeResult>;
+  probeProviderKey?(
+    providerId: string,
+    key: string,
+    opts?: { baseUrl?: string },
+  ): Promise<KeyProbeResult>;
+  /**
+   * Register a bring-your-own-endpoint provider (issue #694) in the native
+   * engine's `models.json`, and drop one when the operator switches away.
+   * Without these the interview cannot configure `openai-compatible` /
+   * `phantomops` at all — pi resolves those two ONLY through that entry.
+   */
+  writeProviderEntry?(
+    providerId: string,
+    entry: { baseUrl: string; models?: readonly string[]; keyAvailable?: boolean },
+  ): Promise<{ ok: true; path: string; changed: boolean } | { ok: false; error: string }>;
+  clearProviderEntry?(
+    providerId: string,
+  ): Promise<{ ok: true; path?: string; changed?: boolean } | { ok: false; error: string }>;
   setSecret(value: string, instanceId?: string): Promise<{ ok: boolean; persona?: string; error?: string }>;
   unsetSecret(instanceId?: string): Promise<unknown>;
   writeAuth(provider: string, value: string): Promise<PiAuthWriteResult>;
@@ -278,6 +335,14 @@ export interface BrainWriteSnapshot {
   routing: Record<string, Record<string, unknown> | undefined>;
   secrets: Record<string, { vault: string | undefined; env: string | undefined }>;
   auth: string | undefined;
+  /**
+   * The native engine's `models.json` image. WRAPPED rather than bare: a bare
+   * `undefined` cannot say whether the file did not exist or was simply not
+   * captured, and those need different rollbacks (delete vs. leave alone).
+   * Absent = the caller wired no models.json store (older fixtures), so the
+   * rollback cannot know — and says so.
+   */
+  modelsJson?: { text: string | undefined };
 }
 
 /** A Pi routing slot the interview may write, and its vault secret name. */
@@ -299,6 +364,8 @@ export interface BrainSnapshotStores {
   /** Persona vault row only — NEVER an ambient fallback. */
   readVaultSecret(name: string): Promise<string | undefined>;
   snapshotAuth(): Promise<string | undefined>;
+  /** The native agent dir's `models.json` verbatim (undefined = no file). */
+  snapshotModelsJson?(): Promise<string | undefined>;
 }
 
 export interface BrainRestoreStores {
@@ -309,6 +376,8 @@ export interface BrainRestoreStores {
   setVaultSecret(name: string, value: string): Promise<{ ok: boolean }>;
   unsetVaultSecret(name: string): Promise<{ ok: boolean }>;
   restoreAuth(auth: string | undefined): Promise<{ ok: boolean }>;
+  /** Put the `models.json` image back (undefined text ⇒ remove the file). */
+  restoreModelsJson?(text: string | undefined): Promise<unknown>;
 }
 
 /** Capture every store the brain interview is about to write. */
@@ -325,7 +394,17 @@ export async function snapshotBrainWrites(
       env: process.env[secretName],
     };
   }
-  return { routing, secrets, auth: await stores.snapshotAuth() };
+  return {
+    routing,
+    secrets,
+    auth: await stores.snapshotAuth(),
+    // A custom provider's `models.json` entry is part of the brain now: the
+    // interview writes it, so "brain unchanged" has to be able to take it back
+    // (review, Kai: this was the one store with no rollback).
+    modelsJson: stores.snapshotModelsJson
+      ? { text: await stores.snapshotModelsJson() }
+      : undefined,
+  };
 }
 
 /**
@@ -373,6 +452,16 @@ export async function restoreBrainWrites(
     else process.env[name] = prior.env;
   }
   await attempt(() => stores.restoreAuth(snapshot.auth));
+  if (snapshot.modelsJson) {
+    const image = snapshot.modelsJson;
+    if (stores.restoreModelsJson) {
+      await attempt(() => stores.restoreModelsJson!(image.text));
+    } else {
+      // Captured but nobody can put it back: the rollback is incomplete, and
+      // saying "brain unchanged" would be a lie.
+      ok = false;
+    }
+  }
   return ok;
 }
 
@@ -515,6 +604,8 @@ async function runOnce(
     writeAuth: deps.writeAuth,
     applyChain: deps.applyChain,
     applyRouting: deps.applyRouting,
+    writeProviderEntry: deps.writeProviderEntry,
+    clearProviderEntry: deps.clearProviderEntry,
   };
   // Everything below this line WRITES as it goes: each model slot, the API
   // key and Pi's auth store are persisted the moment they are answered, long

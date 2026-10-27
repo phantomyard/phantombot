@@ -23,6 +23,10 @@
  */
 
 import type { PiModel } from "./piModels.ts";
+import {
+  customProviderSpec,
+  resolveCustomProviderBaseUrl,
+} from "./piCustomProvider.ts";
 import { BROWSER_UA, OPENAI_COMPATIBLE_BASES } from "./providerKeyProbe.ts";
 
 /**
@@ -50,15 +54,42 @@ const CATALOG_ENDPOINTS: Record<
   openrouter: () => ({ url: "https://openrouter.ai/api/v1/models", headers: {} }),
 };
 
-/** Where to GET a full model list, and how to authenticate it. */
+/**
+ * Where to GET a full model list, and how to authenticate it.
+ *
+ * `baseUrl` is the operator's endpoint and only matters for the
+ * bring-your-own-endpoint providers (issue #694): their `/models` lives wherever
+ * they say it does. For PhantomOps it defaults to the gateway, so a personal
+ * token alone is enough.
+ */
 function endpointFor(
   providerId: string,
   key: string,
-): { url: string; headers: Record<string, string> } | undefined {
+  baseUrl?: string,
+): { url: string; headers: Record<string, string>; authRequired: boolean } | undefined {
+  const custom = customProviderSpec(providerId);
+  if (custom) {
+    const base = resolveCustomProviderBaseUrl(providerId, baseUrl);
+    if (!base) return undefined;
+    return {
+      url: `${base}/models`,
+      // A self-hosted OpenAI-compatible server may be unauthenticated (Ollama,
+      // LM Studio, llama.cpp) — an empty Bearer is worse than no header at all,
+      // and PhantomOps genuinely requires the token.
+      headers: key ? { Authorization: `Bearer ${key}` } : {},
+      authRequired: providerId === "phantomops",
+    };
+  }
   const special = CATALOG_ENDPOINTS[providerId];
-  if (special) return special(key);
+  if (special) return { ...special(key), authRequired: true };
   const base = OPENAI_COMPATIBLE_BASES[providerId];
-  if (base) return { url: `${base}/models`, headers: { Authorization: `Bearer ${key}` } };
+  if (base) {
+    return {
+      url: `${base}/models`,
+      headers: { Authorization: `Bearer ${key}` },
+      authRequired: true,
+    };
+  }
   return undefined;
 }
 
@@ -111,6 +142,23 @@ function parseModels(providerId: string, body: unknown): PiModel[] {
 }
 
 /**
+ * Put a provider's DEFAULT model first.
+ *
+ * The PhantomOps gateway already publishes `phantomops/auto` first
+ * (`backend/openai_gateway.py`), but the pickers pre-select index 0, and the
+ * default is a product decision rather than an incidental ordering: the whole
+ * point of the provider is that the token runs the user's full phantom. Stated
+ * here so it survives a server-side reordering.
+ */
+function orderDefaults(providerId: string, models: PiModel[]): PiModel[] {
+  const preferred = customProviderSpec(providerId)?.defaultModel;
+  if (!preferred) return models;
+  const first = models.filter((m) => m.model === preferred);
+  if (first.length === 0) return models;
+  return [...first, ...models.filter((m) => m.model !== preferred)];
+}
+
+/**
  * Live model catalogue for one provider, or [] if it can't be fetched.
  *
  * `key` may be empty for providers whose catalogue is public (OpenRouter) —
@@ -121,19 +169,21 @@ export async function fetchProviderModels(
   providerId: string,
   key = "",
   fetchImpl: typeof fetch = fetch,
+  opts: { baseUrl?: string } = {},
 ): Promise<PiModel[]> {
   const trimmed = key.trim();
-  const endpoint = endpointFor(providerId, trimmed);
+  const endpoint = endpointFor(providerId, trimmed, opts.baseUrl);
   if (!endpoint) return [];
-  // OpenRouter's /models is public; everything else authenticates.
-  if (!trimmed && providerId !== "openrouter") return [];
+  // OpenRouter's /models is public, and a self-hosted OpenAI-compatible server
+  // may be too; everything else authenticates.
+  if (!trimmed && providerId !== "openrouter" && endpoint.authRequired) return [];
   try {
     const res = await fetchImpl(endpoint.url, {
       headers: { "User-Agent": BROWSER_UA, ...endpoint.headers },
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return [];
-    return parseModels(providerId, await res.json());
+    return orderDefaults(providerId, parseModels(providerId, await res.json()));
   } catch {
     return [];
   }
