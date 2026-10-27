@@ -319,7 +319,7 @@ catalogue — no extension, no hand-edited config file:
 | Provider | What it is for |
 |---|---|
 | **openai-compatible** | Any server speaking the OpenAI Chat Completions API — vLLM, Ollama, llama.cpp, LM Studio, LocalAI, a proxy. You supply the base URL; an unauthenticated server is a valid setup. |
-| **phantomops** | A [PhantomOps](https://phantomops.app) personal API token (`pok_…`). One credential and nothing else: `phantomops/auto` runs your full phantom server-side. The model list comes from the gateway, and the raw catalogue models are selectable too. |
+| **phantomops** | A [PhantomOps](https://phantomops.app) personal API token (`pok_…`). One credential and nothing else: `phantomops/auto` runs your full phantom server-side, and the wizard asks for the token then goes straight to the connection test — no model picker. The raw catalogue models stay reachable through the normal model pickers afterwards. |
 
 Both are offered in `phantombot harness` (and Brain in the TUI) with or without
 a key. Phantombot writes the provider's entry into the native agent dir, keeps

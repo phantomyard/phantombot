@@ -12,9 +12,11 @@ import {
   customProviderSpec,
   ensureCustomProviderEntry,
   normalizeBaseUrl,
+  PHANTOOPS_AUTO_MODEL,
   plaintextKeyWarning,
   resolveCustomProviderBaseUrl,
   storedBaseUrlForProvider,
+  usesAutoRouting,
   CUSTOM_PROVIDERS,
   OPENAI_COMPATIBLE_PROVIDER,
 } from "../lib/piCustomProvider.ts";
@@ -959,6 +961,59 @@ async function runRoutingWizard(
   const customBaseUrl = custom
     ? resolveCustomProviderBaseUrl(custom.id, opts.baseUrl ?? reusableBaseUrl)
     : undefined;
+  // Issue #696: PhantomOps gets NO model selector. `phantomops/auto` runs the
+  // full phantom server-side and is the reason the provider exists — the
+  // operator asked for a key and a working brain, not a picker whose only
+  // meaningful answer is the preselected default. All three slots resolve to
+  // `auto` silently; the same entry/routing discipline as the picker path
+  // still applies. ONE predicate with the TUI flow (see piCustomProvider).
+  if (custom && usesAutoRouting(custom.id)) {
+    const writes = await applyRouting(target.path, {
+      provider,
+      baseUrl: customBaseUrl,
+      primaryModel: PHANTOOPS_AUTO_MODEL,
+      imageModel: PHANTOOPS_AUTO_MODEL,
+      codingModel: PHANTOOPS_AUTO_MODEL,
+    }, opts.instanceId);
+    const agentDir = nativeAgentDir(undefined, target.persona);
+    if (customBaseUrl) {
+      // Same "is a key stored?" lookup as the picker path: the entry decides
+      // between the `$VAR` reference and the unauthenticated placeholder.
+      const keyAvailable =
+        opts.keyAvailable ??
+        Boolean(
+          await getPersonaSecret(
+            config,
+            opts.instanceId ? piInstanceSecretName(opts.instanceId) : ENV_PI_API_KEY,
+            target.persona,
+          ),
+        );
+      const write = await ensureCustomProviderEntry(agentDir, custom.id, {
+        baseUrl: customBaseUrl,
+        models: [PHANTOOPS_AUTO_MODEL],
+        keyAvailable,
+      });
+      if (!write.ok) q.note(write.error, "Custom provider");
+    } else {
+      for (const spec of CUSTOM_PROVIDERS) {
+        const cleared = await clearCustomProviderEntry(agentDir, spec.id);
+        if (!cleared.ok) q.note(cleared.error, "Custom provider");
+      }
+    }
+    q.note(
+      [
+        `provider: ${writes.toml.provider ?? "(none — Pi's default)"}`,
+        ...(writes.toml.base_url ? [`endpoint: ${writes.toml.base_url}`] : []),
+        `primary: ${writes.toml.primary_model}`,
+        `image:   ${writes.toml.image_model ?? "(none — primary is multimodal)"}`,
+        `coding:  ${writes.toml.coding_model ?? "(none)"}`,
+        "",
+        `saved to ${target.path}`,
+      ].join("\n"),
+      "Capability routing",
+    );
+    return false;
+  }
   let models = modelsForProvider(provider, allModels);
   // Same last resort as the TUI flow: when Pi lists nothing for this provider,
   // ask the provider's own models endpoint rather than making the user type a

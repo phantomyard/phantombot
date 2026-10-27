@@ -126,3 +126,19 @@ reorder cannot silently demote the full phantom to a raw model). Tests:
 `tests/lib-piCustomProvider.test.ts`, `tests/lib-providerModelCatalog.test.ts`,
 `tests/lib-providerKeyProbe-custom.test.ts`, `tests/lib-piRouting.test.ts`,
 `tests/cli-harness-routing.test.ts`.
+
+<a id="inv-80"></a>
+### 80. PhantomOps asks for a token and a test — never a model selector (issue #696).
+
+`phantomops/auto` runs the full phantom server-side and IS the reason the
+provider exists, so a picker whose only meaningful answer is the preselected
+default is friction, not choice. Both wizards (the interactive TUI flow and the
+CLI `harness` wizard) check ONE predicate — `usesAutoRouting` in
+`lib/piCustomProvider.ts` — and for PhantomOps skip the primary/vision/coder
+pickers entirely, resolving every slot to `phantomops/auto` silently. The
+operator path is: provider → personal token → test. The entry/routing
+discipline of invariant 79 still applies on this path (endpoint persisted,
+entry unioned and never shrunk, no credential on disk). A future provider that
+wants the same treatment opts in there explicitly; `openai-compatible` never
+does, because there a model choice is a real decision. Tests:
+`tests/tui-brain-flow.test.ts`, `tests/cli-harness.test.ts`.
