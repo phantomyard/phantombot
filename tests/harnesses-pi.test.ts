@@ -1674,6 +1674,7 @@ describe("PiHarness coder-swap retry ladder", () => {
     delete process.env.FAKE_PI_ARGV_LOG;
     delete process.env.FAKE_PI_FAIL_MODEL;
     delete process.env.FAKE_PI_RATELIMIT_TEXT;
+    delete process.env.FAKE_PI_SEQUENCE;
     await rm(logDir, { recursive: true, force: true });
   });
 
@@ -1684,6 +1685,86 @@ describe("PiHarness coder-swap retry ladder", () => {
       return [];
     }
   };
+
+  const sequenceHarness = () => new PiHarness({
+    bin: FAKE_PI,
+    mode: "native",
+    command: [FAKE_PI],
+    routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+  });
+
+  test.each([
+    ["empty,answer", 2],
+    ["whitespace,answer", 2],
+    ["reasoning,answer", 2],
+    ["empty,empty,empty,answer", 4],
+    ["empty,error,empty,answer", 4],
+    ["error,empty,error,answer", 4],
+    ["answer", 1],
+  ] as const)("%s uses the shared budget (%i attempts)", async (sequence, attempts) => {
+    process.env.FAKE_PI_MODE = "sequence";
+    process.env.FAKE_PI_SEQUENCE = sequence;
+    const chunks = await collect(sequenceHarness().invoke(newRequest({ userMessage: PR_MSG })));
+    // Exactly one terminal success, after the answer, never an empty done.
+    expect(chunks.filter(c => c.type === "done")).toHaveLength(1);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "hello world" });
+    expect(chunks.filter(c => c.type === "text").map(c => c.text).join("")).toBe("hello world");
+    expect(chunks.some(c => c.type === "error")).toBe(false);
+    const argvs = await loggedArgv();
+    expect(argvs).toHaveLength(attempts);
+    expect(argvs.slice(0, Math.min(attempts, 3)).every(a => a.includes("--model z-ai/glm-5.2"))).toBe(true);
+    if (attempts === 4) expect(argvs[3]).toContain("--model mimo-v2.5");
+  });
+
+  test.each(["terminal", "rate"])("empty then %s stops the ladder", async failure => {
+    process.env.FAKE_PI_MODE = "sequence";
+    process.env.FAKE_PI_SEQUENCE = `empty,${failure},answer`;
+    const chunks = await collect(sequenceHarness().invoke(newRequest({ userMessage: PR_MSG })));
+    expect(chunks.at(-1)?.type).toBe("error");
+    expect(chunks.some(c => c.type === "done")).toBe(false);
+    expect(await loggedArgv()).toHaveLength(2);
+  });
+
+  test("cancellation during an empty attempt never starts another model", async () => {
+    process.env.FAKE_PI_MODE = "sequence";
+    process.env.FAKE_PI_SEQUENCE = "reasoning,answer";
+    const controller = new AbortController();
+    const chunks: HarnessChunk[] = [];
+    for await (const chunk of sequenceHarness().invoke(newRequest({ userMessage: PR_MSG, signal: controller.signal }))) {
+      chunks.push(chunk);
+      if (chunk.type === "heartbeat") controller.abort();
+    }
+    expect(chunks.some(c => c.type === "done")).toBe(false);
+    expect(await loggedArgv()).toHaveLength(1);
+  });
+
+  test("empty primary fallback is surfaced once for the outer harness chain", async () => {
+    process.env.FAKE_PI_MODE = "sequence";
+    process.env.FAKE_PI_SEQUENCE = "empty,empty,empty,empty,answer";
+    const chunks = await collect(sequenceHarness().invoke(newRequest({ userMessage: PR_MSG })));
+    expect(chunks.filter(c => c.type === "done")).toHaveLength(1);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "" });
+    expect(await loggedArgv()).toHaveLength(4);
+  });
+
+  test("leading whitespace survives a valid answer without changing its stream", async () => {
+    process.env.FAKE_PI_MODE = "sequence";
+    process.env.FAKE_PI_SEQUENCE = "leading";
+    const chunks = await collect(sequenceHarness().invoke(newRequest({ userMessage: PR_MSG })));
+    expect(chunks.filter(c => c.type === "text").map(c => c.text).join("")).toBe(" \nhello world");
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: " \nhello world" });
+    expect(await loggedArgv()).toHaveLength(1);
+  });
+
+  test("tool execution without an answer never replays side effects", async () => {
+    process.env.FAKE_PI_MODE = "sequence";
+    process.env.FAKE_PI_SEQUENCE = "tool-empty,answer";
+    const chunks = await collect(sequenceHarness().invoke(newRequest({ userMessage: PR_MSG })));
+    expect(chunks.some(c => c.type === "progress")).toBe(true);
+    // The shared runner may reject a tool-only completion; either outcome
+    // remains single-shot and the existing outer fallback policy applies.
+    expect(await loggedArgv()).toHaveLength(1);
+  });
 
   test("swapped model fails 3x → falls back to the primary and answers", async () => {
     process.env.FAKE_PI_MODE = "modelgate";

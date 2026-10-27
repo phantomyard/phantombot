@@ -798,8 +798,8 @@ export class PiHarness implements Harness {
       //     no tool run. Text is not the only non-idempotent thing here: pi's
       //     tool executions surface as progress chunks, not text, and a retry
       //     after a bash/notify/vault tool ran would replay those side effects
-      //     wholesale. `producedOutput` flips on any non-heartbeat chunk
-      //     (heartbeat is payload-less by contract), which keeps the genuine
+      //     wholesale. `producedOutput` flips on usable text or progress,
+      //     excluding heartbeat/reasoning/completion markers, keeping the genuine
       //     "provider never started streaming" case — the one this ladder
       //     exists for — fully retryable while everything that got anywhere
       //     stays single-shot. Retrying after visible text would ALSO duplicate
@@ -822,12 +822,12 @@ export class PiHarness implements Harness {
         attempt <= CODER_SWAP_MAX_ATTEMPTS && !req.signal?.aborted;
         attempt++
       ) {
-        // Tracks whether this attempt produced output of ANY kind (text,
-        // progress from a tool run, done). heartbeat is payload-less by
-        // contract and is excluded, so a provider that never starts streaming
-        // stays retryable — but an attempt that got as far as running a tool
-        // is NOT, because tools have side effects and a re-run is a re-do.
+        // Completion and reasoning are not answers. Hold leading whitespace
+        // until real output so discarded empty attempts leave no reply text.
+        // Progress remains conservative: a tool may already have side effects.
         let producedOutput = false;
+        let whitespace = "";
+        let completion: Extract<HarnessChunk, { type: "done" }> | undefined;
         let failure:
           | (HarnessChunk & { type: "error"; error: string })
           | undefined;
@@ -838,10 +838,35 @@ export class PiHarness implements Harness {
             failure = chunk;
             break;
           }
-          if (chunk.type !== "heartbeat") producedOutput = true;
+          if (chunk.type === "done") {
+            completion = chunk;
+            continue;
+          }
+          if (chunk.type === "text" && !producedOutput && !chunk.text.trim()) {
+            whitespace += chunk.text;
+            continue;
+          }
+          if (chunk.type === "text" || chunk.type === "progress") {
+            producedOutput = true;
+            if (whitespace) {
+              yield { type: "text", text: whitespace };
+              whitespace = "";
+            }
+          }
           yield chunk;
         }
-        if (!failure) return; // completed (or the consumer stopped us)
+        if (!failure) {
+          if (!completion) return; // cancelled or stopped without completion
+          if (producedOutput || completion.finalText.trim()) {
+            yield completion;
+            return;
+          }
+          failure = {
+            type: "error",
+            error: "pi coder-swap completed without assistant text or tool execution",
+            recoverable: true,
+          };
+        }
         lastFailure = failure;
         const retryable =
           failure.recoverable !== false &&
