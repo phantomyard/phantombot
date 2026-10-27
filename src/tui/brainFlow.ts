@@ -46,6 +46,7 @@ import {
   customProviderAllowsKeyless,
   customProviderSpec,
   normalizeBaseUrl,
+  plaintextKeyWarning,
   resolveCustomProviderBaseUrl,
   storedBaseUrlForProvider,
 } from "../lib/piCustomProvider.ts";
@@ -754,7 +755,13 @@ async function askBaseUrl(
     });
     if (answer === undefined) return undefined;
     const norm = normalizeBaseUrl((answer ?? "").trim() || initial);
-    if (norm.ok) return norm.value;
+    if (norm.ok) {
+      // Prompt-copy only (review, Lena): a keyed request to a plain-http,
+      // non-loopback host sends the token unencrypted.
+      const warn = plaintextKeyWarning(norm.value);
+      if (warn) q.note("Base URL", warn);
+      return norm.value;
+    }
     q.note("Base URL", `${norm.error}. Nothing was saved.`);
     if (attempt >= MAX_NATIVE_KEY_ATTEMPTS) {
       q.note(

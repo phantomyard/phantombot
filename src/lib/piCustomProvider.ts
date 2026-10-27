@@ -202,6 +202,35 @@ export function normalizeBaseUrl(
 }
 
 /**
+ * Prompt-copy warning for a plain-`http` endpoint (review, Lena).
+ *
+ * `http://` is rightly accepted — LM Studio / Ollama / llama.cpp on loopback
+ * speak it — but once a key is configured the wizard sends it as a Bearer
+ * header, and beyond loopback that puts the token (an endpoint key, or a
+ * `pok_…` when a PhantomOps base_url override points at a dev ring) on the
+ * wire unencrypted. One warning line at the prompt; this never blocks and
+ * never rewrites the URL.
+ */
+export function plaintextKeyWarning(baseUrl: string): string | undefined {
+  if (!/^http:\/\//i.test(baseUrl)) return undefined;
+  let host: string;
+  try {
+    // WHATWG URL keeps IPv6 brackets in `hostname` (`[::1]`), so strip them
+    // before the loopback check.
+    host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  } catch {
+    return undefined;
+  }
+  const loopback =
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    host.startsWith("127.");
+  if (loopback) return undefined;
+  return `${baseUrl} is plain http — an API key sent to it travels unencrypted. Prefer https:// unless this link is trusted.`;
+}
+
+/**
  * The base URL a custom provider should use, given the operator's stored value.
  *
  * `stored` is `[harnesses.pi.routing].base_url`. An operator value always wins

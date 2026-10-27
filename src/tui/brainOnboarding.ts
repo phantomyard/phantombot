@@ -103,6 +103,12 @@ export async function createBrainOnboardingDeps(
     chain: harnessChainIds(config, persona),
     routing: {
       provider: routing.provider,
+      // The STORED endpoint of a bring-your-own-endpoint provider (#694).
+      // Dropping it here left storedBaseUrlForProvider() always undefined in
+      // the real flow: an openai-compatible re-run could not keep its working
+      // endpoint with one Enter, and a phantomops re-run silently rewrote a
+      // dev-ring base_url to the gateway default (review, Lena).
+      baseUrl: routing.baseUrl,
       primaryModel: routing.primaryModel,
       imageModel: routing.imageModel,
       codingModel: routing.codingModel,
@@ -259,6 +265,12 @@ export interface BrainOnboardingDeps {
   /** The EFFECTIVE Pi routing (provider + three model slots). */
   routing: {
     provider?: string;
+    /**
+     * Stored endpoint of a bring-your-own-endpoint provider (issue #694).
+     * Optional on BrainDeps.routing, so omitting it here typechecks while
+     * silently starving the flow's endpoint reuse — keep it mapped.
+     */
+    baseUrl?: string;
     primaryModel?: string;
     imageModel?: string;
     codingModel?: string;

@@ -107,8 +107,11 @@ merge REFUSES an unparseable or non-object document instead of clobbering it** �
 the agent dir is shared with whatever the operator or a host pi put there, and
 `removeProviderEntry` deletes only phantombot's own id; **models are UNIONED,
 never replaced** — the wizard seeds them from the live `/models` list and adds
-the operator's picks, and the spawn-time refresh deliberately passes none so a
-turn can never shrink the list under the operator; **nothing is ever guessed** —
+the operator's picks, and the spawn-time refresh adds the configured
+primary/vision/coder ids (passing none only worked when the wizard's entry was
+already in that exact agent dir — a fresh dir produced an empty list and
+`Unknown provider`, review, Kai), so no write can ever shrink the list under
+the operator; **nothing is ever guessed** —
 `openai-compatible` has no default endpoint (that is the whole point of the
 provider), PhantomOps defaults to the gateway so its personal token is the only
 input, and a base URL is normalised at the prompt (trailing slash, pasted

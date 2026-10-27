@@ -59,6 +59,8 @@ interface Harness {
       keyAvailable?: boolean;
     }>;
     cleared: string[];
+    /** Progress notes shown in the notice bar (title + body). */
+    notes: Array<{ title: string; body: string }>;
   };
 }
 
@@ -87,6 +89,7 @@ function harness(over: {
     values: [],
     entries: [],
     cleared: [],
+    notes: [],
   };
   const c = [...(over.choose ?? [])];
   const s = [...(over.search ?? [])];
@@ -116,7 +119,9 @@ function harness(over: {
       const answer = v.shift();
       return answer === "CURRENT" ? "" : answer;
     },
-    note: () => {},
+    note: (title, body) => {
+      applied.notes.push({ title, body });
+    },
   };
   const models = over.models ?? MODELS;
   const deps: BrainDeps = {
@@ -673,6 +678,34 @@ describe("native custom providers (openai-compatible / phantomops)", () => {
       baseUrl: "http://localhost:11434/v1",
       primaryModel: "llama3.1",
     });
+  });
+
+  test("a plain-http endpoint BEYOND loopback warns the key travels unencrypted", async () => {
+    const h = harness({
+      models: CUSTOM_MODELS,
+      choose: ["native", ""],
+      search: ["openai-compatible", "llama3.1", "", ""],
+      value: ["http://10.0.0.5:8000/v1", "sk-local"],
+    });
+
+    await configureBrain(h.q, h.deps);
+
+    expect(h.applied.notes.some((n) => /unencrypted/.test(n.body))).toBe(true);
+
+    // …and loopback stays quiet: plain http to localhost is the NORMAL case
+    // for a self-hosted server, never a warning (review, Lena — prompt copy).
+    const loop = harness({
+      models: CUSTOM_MODELS,
+      choose: ["native", ""],
+      search: ["openai-compatible", "llama3.1", "", ""],
+      value: ["http://localhost:11434/v1", ""],
+    });
+
+    await configureBrain(loop.q, loop.deps);
+
+    expect(loop.applied.notes.some((n) => /unencrypted/.test(n.body))).toBe(
+      false,
+    );
   });
 
   test("switching to PhantomOps does NOT inherit the previous provider's endpoint", async () => {

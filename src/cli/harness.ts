@@ -12,6 +12,7 @@ import {
   customProviderSpec,
   ensureCustomProviderEntry,
   normalizeBaseUrl,
+  plaintextKeyWarning,
   resolveCustomProviderBaseUrl,
   storedBaseUrlForProvider,
   CUSTOM_PROVIDERS,
@@ -1109,7 +1110,13 @@ async function askCustomProviderBaseUrl(
     });
     if (answer === undefined) return undefined;
     const norm = normalizeBaseUrl(answer.trim() || initial);
-    if (norm.ok) return norm.value;
+    if (norm.ok) {
+      // Prompt-copy only (review, Lena): a keyed request to a plain-http,
+      // non-loopback host sends the token unencrypted.
+      const warn = plaintextKeyWarning(norm.value);
+      if (warn) q.note(warn, "Base URL");
+      return norm.value;
+    }
     q.note(`${norm.error}. Nothing was saved.`, "Base URL");
   }
 }

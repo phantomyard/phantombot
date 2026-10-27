@@ -31,6 +31,7 @@ import {
   PHANTOOPS_DEFAULT_BASE_URL,
   PHANTOOPS_KEY_ENV,
   PHANTOOPS_PROVIDER,
+  plaintextKeyWarning,
   readCustomProviderEntry,
   removeProviderEntry,
   resolveCustomProviderBaseUrl,
@@ -116,6 +117,30 @@ describe("normalizeBaseUrl", () => {
     expect(normalizeBaseUrl(undefined).ok).toBe(false);
     expect(normalizeBaseUrl("   ").ok).toBe(false);
     expect(normalizeBaseUrl("https://").ok).toBe(false);
+  });
+});
+
+describe("plaintextKeyWarning (review, Lena — prompt-copy only)", () => {
+  test("https never warns", () => {
+    expect(plaintextKeyWarning("https://box.lan/v1")).toBeUndefined();
+  });
+
+  test("plain http on loopback is fine — LM Studio / Ollama speak it", () => {
+    expect(plaintextKeyWarning("http://localhost:11434/v1")).toBeUndefined();
+    expect(plaintextKeyWarning("http://127.0.0.1:8080/v1")).toBeUndefined();
+    expect(plaintextKeyWarning("http://[::1]:8080/v1")).toBeUndefined();
+  });
+
+  test("plain http BEYOND loopback warns the key travels unencrypted", () => {
+    const warn = plaintextKeyWarning("http://10.0.0.5:8000/v1");
+    expect(warn).toContain("unencrypted");
+    expect(plaintextKeyWarning("http://inference.example/v1")).toContain(
+      "unencrypted",
+    );
+  });
+
+  test("an unparseable URL warns nothing — normalizeBaseUrl owns that error", () => {
+    expect(plaintextKeyWarning("not a url")).toBeUndefined();
   });
 });
 
