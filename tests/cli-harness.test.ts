@@ -287,7 +287,7 @@ describe("runHarness native → native", () => {
     const selects: Array<{ message: string }> = [];
     const selectAnswers: Array<string | undefined> = [
       "native", // primary
-      "", // fallback: (none)
+      "none", // fallback: (none) — the CLI select's sentinel, unlike the TUI's ""
       "phantomops", // provider
     ];
     const q: HarnessPrompts = {
