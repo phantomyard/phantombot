@@ -13,6 +13,7 @@ import {
   ensureCustomProviderEntry,
   normalizeBaseUrl,
   resolveCustomProviderBaseUrl,
+  storedBaseUrlForProvider,
   CUSTOM_PROVIDERS,
   OPENAI_COMPATIBLE_PROVIDER,
 } from "../lib/piCustomProvider.ts";
@@ -604,13 +605,24 @@ async function configureNative(
   // question at all — its gateway is the provider's own default, and a personal
   // token is the whole configuration.
   const custom = customProviderSpec(provider);
+  // The STORED endpoint belongs to the stored provider, so it is only reusable
+  // when the operator kept that provider (review, Kai): feeding a previous
+  // self-hosted URL into PhantomOps made the wizard announce (and then persist)
+  // `PhantomOps runs on http://old-inference.example/v1`, sending the personal
+  // token to the operator's old server. A provider switch starts from the new
+  // provider's own default — or collects a fresh endpoint.
+  const storedBaseUrl = storedBaseUrlForProvider(
+    provider,
+    currentRouting.provider,
+    currentRouting.baseUrl,
+  );
   let baseUrl: string | undefined;
   if (custom?.needsBaseUrl) {
-    const asked = await askCustomProviderBaseUrl(q, provider, currentRouting.baseUrl);
+    const asked = await askCustomProviderBaseUrl(q, provider, storedBaseUrl);
     if (asked === undefined) return true;
     baseUrl = asked;
   } else if (custom) {
-    baseUrl = resolveCustomProviderBaseUrl(provider, currentRouting.baseUrl);
+    baseUrl = resolveCustomProviderBaseUrl(provider, storedBaseUrl);
     q.note(
       `${custom.label} runs on ${baseUrl ?? "(no endpoint!)"} — the personal token is the only credential it needs.`,
       "Custom provider",
@@ -934,9 +946,17 @@ async function runRoutingWizard(
   // A bring-your-own-endpoint provider (issue #694) is invisible to Pi unless a
   // `models.json` entry names its base URL. Resolve it ONCE here so the live
   // model fetch, the persisted routing and that entry all agree on the endpoint.
+  // A stored endpoint is only reused while the provider is the SAME one it was
+  // stored for (review, Kai): carrying a previous server's URL across a provider
+  // switch would aim the new credential at the old host.
   const custom = customProviderSpec(provider);
+  const reusableBaseUrl = storedBaseUrlForProvider(
+    provider,
+    current.provider,
+    current.baseUrl,
+  );
   const customBaseUrl = custom
-    ? resolveCustomProviderBaseUrl(custom.id, opts.baseUrl ?? current.baseUrl)
+    ? resolveCustomProviderBaseUrl(custom.id, opts.baseUrl ?? reusableBaseUrl)
     : undefined;
   let models = modelsForProvider(provider, allModels);
   // Same last resort as the TUI flow: when Pi lists nothing for this provider,

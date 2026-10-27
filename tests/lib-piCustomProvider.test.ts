@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   buildProviderEntry,
   clearCustomProviderEntry,
+  customProviderAllowsKeyless,
   customProviderModels,
   customProviderSpec,
   ensureCustomProviderEntry,
@@ -33,6 +34,9 @@ import {
   readCustomProviderEntry,
   removeProviderEntry,
   resolveCustomProviderBaseUrl,
+  restoreModelsJson,
+  snapshotModelsJson,
+  storedBaseUrlForProvider,
   writeCustomProviderEntry,
 } from "../src/lib/piCustomProvider.ts";
 
@@ -445,5 +449,98 @@ describe("writing the entry", () => {
 
     const again = await clearCustomProviderEntry(dir, PHANTOOPS_PROVIDER);
     expect(again.ok && again.changed).toBe(false);
+  });
+});
+
+
+/**
+ * Which stored endpoint a wizard may reuse (review, Kai). Both wizards fed
+ * `[harnesses.pi.routing].base_url` to whichever custom provider was chosen, so
+ * selecting PhantomOps after a self-hosted box announced and PERSISTED the old
+ * inference URL — and then sent the new personal token there.
+ */
+describe("storedBaseUrlForProvider", () => {
+  const STORED = "http://old-inference.example/v1";
+
+  test("the endpoint is reused while the provider is unchanged", () => {
+    expect(storedBaseUrlForProvider(OPENAI_COMPATIBLE_PROVIDER, OPENAI_COMPATIBLE_PROVIDER, STORED))
+      .toBe(STORED);
+  });
+
+  test("a provider SWITCH drops it — the new provider starts from its own default", () => {
+    expect(storedBaseUrlForProvider(PHANTOOPS_PROVIDER, OPENAI_COMPATIBLE_PROVIDER, STORED))
+      .toBeUndefined();
+    expect(
+      resolveCustomProviderBaseUrl(
+        PHANTOOPS_PROVIDER,
+        storedBaseUrlForProvider(PHANTOOPS_PROVIDER, OPENAI_COMPATIBLE_PROVIDER, STORED),
+      ),
+    ).toBe(PHANTOOPS_DEFAULT_BASE_URL);
+  });
+
+  test("switching away to no provider, or to a catalogue provider, drops it too", () => {
+    expect(storedBaseUrlForProvider("", OPENAI_COMPATIBLE_PROVIDER, STORED)).toBeUndefined();
+    expect(storedBaseUrlForProvider("openrouter", OPENAI_COMPATIBLE_PROVIDER, STORED)).toBeUndefined();
+  });
+
+  test("'no provider' before and after counts as unchanged", () => {
+    expect(storedBaseUrlForProvider(undefined, undefined, undefined)).toBeUndefined();
+    expect(storedBaseUrlForProvider("", undefined, undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * One definition of "may run with no credential", shared by the wizard (which
+ * decides whether the key prompt can be left empty) and the native pre-spawn
+ * guard (which decides whether a missing key is fatal). The two disagreeing is
+ * exactly how a keyless brain saved cleanly and failed its first turn.
+ */
+describe("customProviderAllowsKeyless", () => {
+  test("only the self-hosted OpenAI-compatible provider may run keyless", () => {
+    expect(customProviderAllowsKeyless(OPENAI_COMPATIBLE_PROVIDER)).toBe(true);
+    expect(customProviderAllowsKeyless(PHANTOOPS_PROVIDER)).toBe(false);
+  });
+
+  test("catalogue providers and 'no provider' are never keyless", () => {
+    expect(customProviderAllowsKeyless("openrouter")).toBe(false);
+    expect(customProviderAllowsKeyless(undefined)).toBe(false);
+    expect(customProviderAllowsKeyless("")).toBe(false);
+  });
+});
+
+/**
+ * The `models.json` rollback image (review, Kai): the brain interview writes
+ * provider entries, so "brain unchanged" has to be able to take them back —
+ * including DELETING a file that did not exist before the interview.
+ */
+describe("snapshotModelsJson / restoreModelsJson", () => {
+  test("an absent file snapshots as undefined and restoring REMOVES what was added", async () => {
+    const dir = await scratchAgentDir();
+    expect(await snapshotModelsJson(dir)).toBeUndefined();
+
+    await writeCustomProviderEntry(dir, PHANTOOPS_PROVIDER, buildProviderEntry({
+      id: PHANTOOPS_PROVIDER,
+      baseUrl: PHANTOOPS_DEFAULT_BASE_URL,
+    }));
+
+    expect(await restoreModelsJson(dir, undefined)).toEqual({ ok: true });
+    expect(await snapshotModelsJson(dir)).toBeUndefined();
+  });
+
+  test("an existing file comes back byte-identical, foreign providers included", async () => {
+    const dir = await scratchAgentDir();
+    const original = `${JSON.stringify({ providers: { ollama: { baseUrl: "http://x/v1" } } }, null, 2)}\n`;
+    await Bun.write(modelsJsonPath(dir), original);
+    const image = await snapshotModelsJson(dir);
+
+    await writeCustomProviderEntry(dir, OPENAI_COMPATIBLE_PROVIDER, buildProviderEntry({
+      id: OPENAI_COMPATIBLE_PROVIDER,
+      baseUrl: "http://localhost:11434/v1",
+      models: ["llama3.1"],
+    }));
+    expect(await readFile(modelsJsonPath(dir), "utf8")).not.toBe(original);
+
+    expect(await restoreModelsJson(dir, image)).toEqual({ ok: true });
+    expect(await readFile(modelsJsonPath(dir), "utf8")).toBe(original);
   });
 });

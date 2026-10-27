@@ -97,6 +97,7 @@ import {
 } from "../lib/nativeAgentDir.ts";
 import { removePiApiKey } from "../lib/piAuthStore.ts";
 import {
+  customProviderAllowsKeyless,
   ensureCustomProviderEntry,
   isCustomProvider,
   resolveCustomProviderBaseUrl,
@@ -474,6 +475,13 @@ export class PiHarness implements Harness {
     // "No API key found" from an empty store. copyNativeKeys (startup/doctor)
     // is what keeps this path rare: it copies the legacy key into the vault
     // before anything depends on native.
+    //
+    // EXEMPT: the bring-your-own-endpoint openai-compatible provider (issue
+    // #694) may be a server that needs no credential at all (Ollama, LM Studio,
+    // llama.cpp). The wizard accepts it keyless and registers the entry with a
+    // literal placeholder key precisely so pi can resolve it — throwing here
+    // would kill that turn before spawn (review, Kai). Every catalog provider
+    // and PhantomOps keep the required-token check.
     const piApiKey = this.config.mode !== "native" || routing?.useLocalConfig
       ? undefined
       : spawnEnv[this.config.apiKeyEnv ?? ENV_PI_API_KEY]?.trim();
@@ -481,7 +489,8 @@ export class PiHarness implements Harness {
       this.config.mode === "native" &&
       !routing?.useLocalConfig &&
       provider &&
-      !piApiKey
+      !piApiKey &&
+      !customProviderAllowsKeyless(provider)
     ) {
       const secret = this.config.apiKeyEnv ?? ENV_PI_API_KEY;
       throw new Error(
@@ -687,9 +696,19 @@ export class PiHarness implements Harness {
         );
       } else {
         try {
-          // No `models`: keep whatever the entry lists (the wizard's picks).
+          // MODELS: union whatever routing names as a turn this harness can run
+          // (review, Kai). Passing none only worked when this exact agent dir
+          // already held the wizard's entry — in a FRESH dir (a new persona, or
+          // the ephemeral dir every persona-less relayed turn gets, seeded from
+          // the legacy host dir) the entry had no models and pi answered
+          // `Unknown provider "openai-compatible"` despite valid routing.
+          // ensureCustomProviderEntry UNIONS, so this can only add ids the
+          // operator's own config already selected (no invented models).
           const written = await ensureCustomProviderEntry(entryDir, provider as string, {
             baseUrl,
+            models: [routing?.primaryModel, routing?.imageModel, routing?.codingModel].filter(
+              (m): m is string => typeof m === "string" && m.trim() !== "",
+            ),
             keyAvailable: Boolean(piApiKey),
           });
           if (!written.ok) {

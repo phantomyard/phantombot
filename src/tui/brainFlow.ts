@@ -41,6 +41,14 @@ import {
   resolvePiApiKeyWrite,
   type RoutingChoices,
 } from "../lib/piRouting.ts";
+import {
+  CUSTOM_PROVIDERS,
+  customProviderAllowsKeyless,
+  customProviderSpec,
+  normalizeBaseUrl,
+  resolveCustomProviderBaseUrl,
+  storedBaseUrlForProvider,
+} from "../lib/piCustomProvider.ts";
 import { probeProviderKey, type KeyProbeResult } from "../lib/providerKeyProbe.ts";
 import { fetchProviderModels } from "../lib/providerModelCatalog.ts";
 import type { PiAuthWriteResult } from "../lib/piAuthStore.ts";
@@ -88,6 +96,12 @@ export interface BrainDeps {
     primaryModel?: string;
     imageModel?: string;
     codingModel?: string;
+    /**
+     * `[harnesses.pi.routing].base_url` — the endpoint a bring-your-own-endpoint
+     * provider lives at (issue #694). Only meaningful while `provider` is the
+     * one it was stored for.
+     */
+    baseUrl?: string;
   };
   /** The stored Pi API key, when one is readable — drives the "keep it" hint. */
   storedKey?: string;
@@ -105,16 +119,45 @@ export interface BrainDeps {
   /**
    * Cheap provider-side key check, run the moment a key is entered — before
    * the model slots, so a bad key never costs the user a full re-pick.
-   * Injectable for tests; defaults to the real HTTP probe.
+   * Injectable for tests; defaults to the real HTTP probe. `baseUrl` matters
+   * only for the bring-your-own-endpoint providers (issue #694): their `/models`
+   * lives wherever the operator said it does.
    */
-  probeProviderKey?(providerId: string, key: string): Promise<KeyProbeResult>;
+  probeProviderKey?(
+    providerId: string,
+    key: string,
+    opts?: { baseUrl?: string },
+  ): Promise<KeyProbeResult>;
   /**
    * The provider's OWN model list, asked over HTTP. The fallback for when
    * `pi --list-models` knows nothing about the chosen provider — without it the
    * model pickers collapse to free text and the operator has to type a model id
    * from memory. Injectable for tests; defaults to the real fetch.
    */
-  fetchProviderModels?(providerId: string, key: string): Promise<PiModel[]>;
+  fetchProviderModels?(
+    providerId: string,
+    key: string,
+    opts?: { baseUrl?: string },
+  ): Promise<PiModel[]>;
+  /**
+   * Register a bring-your-own-endpoint provider in the native engine's
+   * `models.json` (issue #694). Pi knows `openai-compatible` / `phantomops` ONLY
+   * through that entry, so the flow cannot configure them without this — the
+   * CLI wizard has always done it, and the interactive flow must too, or the
+   * provider it just saved is unusable on the next turn (review, Kai).
+   * `models` are UNIONED with whatever the entry already lists.
+   */
+  writeProviderEntry?(
+    providerId: string,
+    entry: { baseUrl: string; models?: readonly string[]; keyAvailable?: boolean },
+  ): Promise<{ ok: true; path: string; changed: boolean } | { ok: false; error: string }>;
+  /**
+   * Drop a custom provider's entry — the "operator switched away" path. A
+   * leftover entry keeps the provider (and its stale models) selectable.
+   */
+  clearProviderEntry?(
+    providerId: string,
+  ): Promise<{ ok: true; path?: string; changed?: boolean } | { ok: false; error: string }>;
   setSecret(
     value: string,
     instanceId?: string,
@@ -270,6 +313,12 @@ export async function configureNative(
   const current = instanceId
     ? (deps.piInstances?.[role] ?? { routing: {}, storedKey: undefined })
     : { routing: deps.routing, storedKey: deps.storedKey };
+  // One callable for the provider's own /models, whichever way it arrives: the
+  // injected test double, or the real fetch (whose 3rd arg is the fetch impl,
+  // not the endpoint opts).
+  const fetchModels: NonNullable<BrainDeps["fetchProviderModels"]> =
+    deps.fetchProviderModels ??
+    ((id, key, opts) => fetchProviderModels(id, key, fetch, opts));
 
   // The catalogue is fetched once and reused by every slot's list. With no
   // catalogue (no key yet) the lists degrade to free-text rows.
@@ -308,7 +357,45 @@ export async function configureNative(
   });
   if (provider === undefined) return true;
 
-  const keyLabel = provider ? `${provider} API key` : "Pi API key";
+  // BRING-YOUR-OWN-ENDPOINT providers (issue #694). Pi only knows
+  // `openai-compatible` / `phantomops` through a `models.json` entry that names
+  // their endpoint, so the endpoint comes BEFORE the key (there is nothing to
+  // probe without it) and before the model slots (nothing to list).
+  const custom = customProviderSpec(provider || undefined);
+  if (custom && !deps.writeProviderEntry) {
+    q.note(
+      "Custom provider",
+      `this flow cannot register ${custom.label}: no models.json writer is wired up. Nothing was changed.`,
+    );
+    return true;
+  }
+  // The STORED endpoint belongs to the stored provider. Reusing it across a
+  // provider switch is how selecting PhantomOps after a self-hosted box ended up
+  // announcing (and then persisting) the OLD inference URL — sending the new
+  // personal token there (review, Kai).
+  const storedBaseUrl = storedBaseUrlForProvider(
+    provider || undefined,
+    current.routing.provider,
+    current.routing.baseUrl,
+  );
+  let baseUrl: string | undefined;
+  if (custom?.needsBaseUrl) {
+    const asked = await askBaseUrl(q, custom.id, storedBaseUrl);
+    if (asked === undefined) return true;
+    baseUrl = asked;
+  } else if (custom) {
+    baseUrl = resolveCustomProviderBaseUrl(custom.id, storedBaseUrl);
+    q.note(
+      custom.label,
+      `${custom.label} runs on ${baseUrl ?? "(no endpoint!)"} — the personal token is the only credential it needs.`,
+    );
+  }
+
+  const keyLabel = custom ? custom.keyLabel : provider ? `${provider} API key` : "Pi API key";
+  // A self-hosted OpenAI-compatible server may be unauthenticated; PhantomOps
+  // (and every catalogue provider) cannot run without its credential. ONE
+  // definition, shared with the harness's pre-spawn guard.
+  const keyless = customProviderAllowsKeyless(provider || undefined);
   let key = await q.value({
     title: keyLabel,
     hint: current.storedKey
@@ -338,9 +425,30 @@ export async function configureNative(
         : keyWrite.action === "keep"
           ? current.storedKey
           : undefined;
-    if (!candidate) break;
-    const result = await probe(provider || "google", candidate);
+    // A keyless endpoint is still CHECKABLE — an empty Authorization is exactly
+    // the configuration a self-hosted server gets — so probe it rather than
+    // skipping the step that catches a wrong URL.
+    const probeKeyless = !candidate && keyless;
+    if (!candidate && !probeKeyless) break;
+    const result = await probe(provider || "google", candidate ?? "", { baseUrl });
     if (result.status === "invalid") {
+      if (probeKeyless) {
+        // The endpoint answered, but not as an anonymous server: it wants a
+        // credential. Ask for one instead of saving a brain whose every turn
+        // will 401.
+        q.note(
+          keyLabel,
+          `the endpoint at ${baseUrl} rejected an unauthenticated request (${result.detail}). Paste its API key (esc goes back).`,
+        );
+        key = await q.value({
+          title: keyLabel,
+          hint: "this endpoint requires a key — paste it, or esc to go back",
+          masked: true,
+          allowEmpty: true,
+        });
+        if (key === undefined) return true;
+        continue;
+      }
       q.note(
         keyLabel,
         `REJECTED by the provider: ${result.detail}\nNothing was saved. Enter the key again, or press esc to go back.`,
@@ -383,7 +491,7 @@ export async function configureNative(
         : gateWrite.action === "keep"
           ? current.storedKey
           : undefined;
-    if (!provider || gateCandidate) break;
+    if (!provider || gateCandidate || keyless) break;
     if (attempt > MAX_NATIVE_KEY_ATTEMPTS) {
       q.note(
         "API key required",
@@ -465,6 +573,55 @@ export async function configureNative(
     );
   }
 
+  // REGISTER the endpoint before the pickers (issue #694). Pi knows this
+  // provider only through `models.json`, so the entry has to exist before
+  // `--list-models` (and the pickers) can see it — the CLI wizard has always
+  // done this write and the interactive flow inherited neither the write nor the
+  // endpoint prompt, which left Configure → Brain unable to configure the
+  // feature at all (review, Kai). The seeded list comes from the provider's own
+  // /models and is UNIONED with whatever the entry already holds.
+  const effectiveKey =
+    keyWrite.action === "set"
+      ? keyWrite.value
+      : keyWrite.action === "keep"
+        ? current.storedKey
+        : undefined;
+  if (custom && baseUrl) {
+    let seeded: PiModel[] = [];
+    if (provider) {
+      seeded = await fetchModels(provider, effectiveKey ?? "", { baseUrl });
+    }
+    const write = await deps.writeProviderEntry!(custom.id, {
+      baseUrl,
+      models: seeded.map((m) => m.model),
+      keyAvailable: Boolean(effectiveKey),
+    });
+    if (!write.ok) {
+      // Without the entry the provider does not exist for pi, so saving a brain
+      // on it would be saving a brain that cannot run. Refuse, loudly.
+      q.note(
+        "Custom provider",
+        `couldn't write the provider entry (${write.error}) — nothing was changed. Fix the agent directory and retry.`,
+      );
+      return true;
+    }
+    if (write.changed) q.note("Custom provider", `registered ${provider} at ${baseUrl} (${write.path})`);
+    if (seeded.length > 0) models = mergeModels(models, seeded);
+    // A fresh listing now sees the provider, so the pickers fill from it.
+    if (provider) {
+      const refreshed = await deps.listModels();
+      if (refreshed.length > 0) models = mergeModels(models, refreshed);
+    }
+  } else if (deps.clearProviderEntry) {
+    // Switching to a normal provider must DROP the endpoint entries: a leftover
+    // one keeps the provider (and its stale models) selectable in
+    // `pi --list-models`, i.e. a brain the operator thinks they moved away from.
+    for (const spec of CUSTOM_PROVIDERS) {
+      const cleared = await deps.clearProviderEntry(spec.id);
+      if (!cleared.ok) q.note("Custom provider", cleared.error);
+    }
+  }
+
   // LAST RESORT before the pickers: if Pi still lists nothing for this
   // provider, ask the provider itself. `pi --list-models` only enumerates
   // providers Pi has already keyed, and a key written seconds ago may not be
@@ -472,10 +629,7 @@ export async function configureNative(
   // lone "(none)" row and a demand that the user type a model id from memory.
   let scoped = modelsForProvider(provider || undefined, models);
   if (scoped.length === 0 && provider) {
-    const fetchModels = deps.fetchProviderModels ?? fetchProviderModels;
-    const effectiveKey =
-      keyWrite.action === "set" ? keyWrite.value : (current.storedKey ?? "");
-    const live = await fetchModels(provider, effectiveKey);
+    const live = await fetchModels(provider, effectiveKey ?? "", { baseUrl });
     if (live.length > 0) {
       models = mergeModels(models, live);
       scoped = modelsForProvider(provider, models);
@@ -535,14 +689,32 @@ export async function configureNative(
 
   await deps.applyRouting({
     provider: provider || undefined,
+    // Endpoint for a bring-your-own-endpoint provider; `computeRoutingWrites`
+    // keeps it only for those and CLEARS it for a catalogue provider, so a
+    // switch away cannot leave dead config that reads like a live setting.
+    baseUrl,
     primaryModel,
     imageModel,
     codingModel: codingPick || undefined,
   }, instanceId);
+  // Keep the entry in step with the PICKS: pi lists a custom provider's models
+  // FROM that entry, so a model selected here and missing there is selectable in
+  // the wizard and unresolvable at spawn (same rule as the CLI wizard).
+  if (custom && baseUrl && provider) {
+    const write = await deps.writeProviderEntry!(custom.id, {
+      baseUrl,
+      models: [primaryModel, imageModel, codingPick].filter(
+        (m): m is string => typeof m === "string" && m !== "",
+      ),
+      keyAvailable: Boolean(effectiveKey),
+    });
+    if (!write.ok) q.note("Custom provider", write.error);
+  }
   q.note(
     "Model routing saved",
     [
       `provider: ${provider || "(none — Pi's default)"}`,
+      ...(baseUrl ? [`endpoint: ${baseUrl}`] : []),
       `primary: ${primaryModel}`,
       `vision:  ${imageModel ?? "(none — primary is multimodal)"}`,
       `coder:   ${codingPick || "(none)"}`,
@@ -551,6 +723,47 @@ export async function configureNative(
     ].join("\n"),
   );
   return false;
+}
+
+/**
+ * Ask for a bring-your-own-endpoint provider's base URL (issue #694).
+ *
+ * Asked BEFORE the key and the model slots: without an endpoint there is nothing
+ * to probe the key against and nothing for `pi --list-models` to list. Validated
+ * here rather than at request time — a pasted `<base>/chat/completions` or a
+ * missing scheme is the common mistake, and accepting it would save a provider
+ * whose every turn 404s. A blank answer keeps the stored value when there is one
+ * (`initial`), so re-running the flow on a working endpoint is one Enter.
+ *
+ * Returns undefined on a real cancel, and after MAX_NATIVE_KEY_ATTEMPTS invalid
+ * answers — a prompt source that keeps answering garbage must abort cleanly
+ * rather than spin (same bound as the key prompt).
+ */
+async function askBaseUrl(
+  q: BrainQuestions,
+  providerId: string,
+  current: string | undefined,
+): Promise<string | undefined> {
+  const spec = customProviderSpec(providerId);
+  const initial = current?.trim() || spec?.defaultBaseUrl || "";
+  for (let attempt = 1; ; attempt++) {
+    const answer = await q.value({
+      title: `${spec?.label ?? providerId} base URL`,
+      hint: "the root its /chat/completions and /models live under — e.g. http://localhost:11434/v1",
+      allowEmpty: true,
+    });
+    if (answer === undefined) return undefined;
+    const norm = normalizeBaseUrl((answer ?? "").trim() || initial);
+    if (norm.ok) return norm.value;
+    q.note("Base URL", `${norm.error}. Nothing was saved.`);
+    if (attempt >= MAX_NATIVE_KEY_ATTEMPTS) {
+      q.note(
+        "Base URL",
+        `no usable endpoint after ${MAX_NATIVE_KEY_ATTEMPTS} attempts — nothing was changed.`,
+      );
+      return undefined;
+    }
+  }
 }
 
 const CANCELLED = Symbol("cancelled");

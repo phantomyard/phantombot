@@ -534,3 +534,104 @@ describe("snapshotBrainWrites / restoreBrainWrites", () => {
     expect(r.landing).toBe("configure");
   });
 });
+
+/**
+ * The `models.json` rollback (issue #694, review Kai). The brain interview now
+ * WRITES a bring-your-own-endpoint provider's entry into the native agent dir,
+ * so a declined/failed/cancelled interview has to take it back like every other
+ * store it touches — including deleting a file that did not exist before.
+ */
+describe("snapshotBrainWrites / restoreBrainWrites — models.json (#694)", () => {
+  const slots = [{ instanceId: undefined, secretName: "PB_TEST_MODELS_KEY" }];
+
+  test("the image is captured and put back (undefined text ⇒ the file is removed)", async () => {
+    const snap = await snapshotBrainWrites(slots, {
+      snapshotRouting: async () => undefined,
+      readVaultSecret: async () => undefined,
+      snapshotAuth: async () => undefined,
+      snapshotModelsJson: async () => undefined, // no models.json before
+    });
+    expect(snap.modelsJson).toEqual({ text: undefined });
+
+    const calls: Array<string | undefined> = [];
+    const ok = await restoreBrainWrites(snap, {
+      restoreRouting: async () => ({}),
+      setVaultSecret: async () => ({ ok: true }),
+      unsetVaultSecret: async () => ({ ok: true }),
+      restoreAuth: async () => ({ ok: true }),
+      restoreModelsJson: async (text) => {
+        calls.push(text);
+        return { ok: true };
+      },
+    });
+    expect(ok).toBe(true);
+    expect(calls).toEqual([undefined]);
+  });
+
+  test("an existing document is restored verbatim", async () => {
+    const snap = await snapshotBrainWrites(slots, {
+      snapshotRouting: async () => undefined,
+      readVaultSecret: async () => undefined,
+      snapshotAuth: async () => undefined,
+      snapshotModelsJson: async () => '{"providers":{"ollama":{"baseUrl":"http://x/v1"}}}\n',
+    });
+    const calls: Array<string | undefined> = [];
+    await restoreBrainWrites(snap, {
+      restoreRouting: async () => ({}),
+      setVaultSecret: async () => ({ ok: true }),
+      unsetVaultSecret: async () => ({ ok: true }),
+      restoreAuth: async () => ({ ok: true }),
+      restoreModelsJson: async (text) => {
+        calls.push(text);
+        return { ok: true };
+      },
+    });
+    expect(calls).toEqual(['{"providers":{"ollama":{"baseUrl":"http://x/v1"}}}\n']);
+  });
+
+  test("a failed models.json restore makes the rollback report failure", async () => {
+    const snap = await snapshotBrainWrites(slots, {
+      snapshotRouting: async () => undefined,
+      readVaultSecret: async () => undefined,
+      snapshotAuth: async () => undefined,
+      snapshotModelsJson: async () => undefined,
+    });
+    const ok = await restoreBrainWrites(snap, {
+      restoreRouting: async () => ({}),
+      setVaultSecret: async () => ({ ok: true }),
+      unsetVaultSecret: async () => ({ ok: true }),
+      restoreAuth: async () => ({ ok: true }),
+      restoreModelsJson: async () => ({ ok: false }),
+    });
+    expect(ok).toBe(false);
+  });
+
+  test("captured with no restorer wired ⇒ honest failure, never a false 'brain unchanged'", async () => {
+    const snap = await snapshotBrainWrites(slots, {
+      snapshotRouting: async () => undefined,
+      readVaultSecret: async () => undefined,
+      snapshotAuth: async () => undefined,
+      snapshotModelsJson: async () => "{}",
+    });
+    const ok = await restoreBrainWrites(snap, {
+      restoreRouting: async () => ({}),
+      setVaultSecret: async () => ({ ok: true }),
+      unsetVaultSecret: async () => ({ ok: true }),
+      restoreAuth: async () => ({ ok: true }),
+    });
+    expect(ok).toBe(false);
+  });
+
+  test("a fixture that never captured models.json is unaffected", async () => {
+    const ok = await restoreBrainWrites(
+      { routing: {}, secrets: {}, auth: undefined },
+      {
+        restoreRouting: async () => ({}),
+        setVaultSecret: async () => ({ ok: true }),
+        unsetVaultSecret: async () => ({ ok: true }),
+        restoreAuth: async () => ({ ok: true }),
+      },
+    );
+    expect(ok).toBe(true);
+  });
+});

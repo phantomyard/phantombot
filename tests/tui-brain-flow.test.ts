@@ -49,6 +49,16 @@ interface Harness {
       initial?: string;
       options: Array<{ value: string; label: string }>;
     }>;
+    /** The text prompts asked (title only) — the base URL is one of these. */
+    values: Array<{ title: string; masked?: boolean }>;
+    /** `models.json` registrations the flow asked for. */
+    entries: Array<{
+      providerId: string;
+      baseUrl: string;
+      models?: readonly string[];
+      keyAvailable?: boolean;
+    }>;
+    cleared: string[];
   };
 }
 
@@ -65,6 +75,7 @@ function harness(over: {
   value?: Array<string | undefined>;
   probeProviderKey?: BrainDeps["probeProviderKey"];
   fetchProviderModels?: BrainDeps["fetchProviderModels"];
+  writeProviderEntry?: BrainDeps["writeProviderEntry"];
 }): Harness {
   const applied: Harness["applied"] = {
     chains: [],
@@ -73,6 +84,9 @@ function harness(over: {
     authWrites: [],
     chooses: [],
     searches: [],
+    values: [],
+    entries: [],
+    cleared: [],
   };
   const c = [...(over.choose ?? [])];
   const s = [...(over.search ?? [])];
@@ -97,7 +111,11 @@ function harness(over: {
       const answer = s.shift();
       return answer === "CURRENT" ? (input.initial ?? "") : answer;
     },
-    value: async () => v.shift(),
+    value: async (input) => {
+      applied.values.push({ title: input.title, masked: input.masked });
+      const answer = v.shift();
+      return answer === "CURRENT" ? "" : answer;
+    },
     note: () => {},
   };
   const models = over.models ?? MODELS;
@@ -130,6 +148,16 @@ function harness(over: {
     writeAuth: async (provider, value) => {
       applied.authWrites.push({ provider, key: value });
       return { ok: true, path: "/tmp/.pi/agent/auth.json" };
+    },
+    writeProviderEntry:
+      over.writeProviderEntry ??
+      (async (providerId, entry) => {
+        applied.entries.push({ providerId, ...entry });
+        return { ok: true, path: "/tmp/.pi/agent/models.json", changed: true };
+      }),
+    clearProviderEntry: async (providerId) => {
+      applied.cleared.push(providerId);
+      return { ok: true, path: "/tmp/.pi/agent/models.json", changed: false };
     },
     applyChain: async (chain) => void applied.chains.push([...chain]),
     applyRouting: async (choices, instanceId) =>
@@ -589,5 +617,139 @@ describe("the brain flow", () => {
       { provider: "openrouter", key: "sk-fallback-instance-key" },
     ]);
     expect(listCalls).toBeGreaterThanOrEqual(2);
+  });
+});
+
+/**
+ * BRING-YOUR-OWN-ENDPOINT providers in the INTERACTIVE flow (issue #694,
+ * review Kai): the configure-Native path used by ordinary onboarding and
+ * Configure → Brain never asked for a base URL, refused a keyless endpoint,
+ * and wrote no `models.json` entry — so the feature could only be configured
+ * through the injected/non-TTY CLI branch. These pin the whole path: endpoint
+ * question, keyless acceptance, the entry write, and the endpoint reaching
+ * `applyRouting`.
+ */
+describe("native custom providers (openai-compatible / phantomops)", () => {
+  const CUSTOM_MODELS: PiModel[] = [
+    { provider: "openai-compatible", model: "llama3.1", supportsImages: false },
+    { provider: "phantomops", model: "phantomops/auto", supportsImages: false },
+  ];
+
+  test("openai-compatible: asks for the endpoint, accepts NO key, registers the provider, saves the endpoint", async () => {
+    const h = harness({
+      models: CUSTOM_MODELS,
+      choose: ["native", ""], // primary native, no fallback
+      search: ["openai-compatible", "llama3.1", "", ""], // provider, primary, vision, coder
+      value: ["http://localhost:11434/v1", ""], // base URL, then a BLANK key
+    });
+
+    const notice = await configureBrain(h.q, h.deps);
+
+    expect(notice).toBe("brain saved: native");
+    // The endpoint question exists at all — it didn't before.
+    expect(h.applied.values[0]!.title).toContain("base URL");
+    // No key is written for an unauthenticated server, and none is demanded.
+    // (The blank answer after a provider switch CLEARS any previous provider's
+    // key, which is correct and is not a stored secret.)
+    expect(h.applied.secrets.filter((s) => s !== "CLEARED")).toEqual([]);
+    // Pi knows the provider only through this entry, so it must be written —
+    // once to seed it (so the pickers can see the provider) and again with the
+    // picks, because a model selected here and missing from the entry is
+    // selectable in the wizard and unresolvable at spawn.
+    expect(h.applied.entries.length).toBeGreaterThanOrEqual(1);
+    for (const write of h.applied.entries) {
+      expect(write).toMatchObject({
+        providerId: "openai-compatible",
+        baseUrl: "http://localhost:11434/v1",
+        keyAvailable: false,
+      });
+    }
+    expect(h.applied.entries.at(-1)!.models).toContain("llama3.1");
+    // …and the endpoint has to be PERSISTED with the routing, or the next turn
+    // resolves the provider with no URL.
+    expect(h.applied.routings).toHaveLength(1);
+    expect(h.applied.routings[0]!.choices).toMatchObject({
+      provider: "openai-compatible",
+      baseUrl: "http://localhost:11434/v1",
+      primaryModel: "llama3.1",
+    });
+  });
+
+  test("switching to PhantomOps does NOT inherit the previous provider's endpoint", async () => {
+    const h = harness({
+      models: CUSTOM_MODELS,
+      // A working self-hosted brain, reconfigured to PhantomOps.
+      routing: {
+        provider: "openai-compatible",
+        baseUrl: "http://old-inference.example/v1",
+        primaryModel: "llama3.1",
+      },
+      choose: ["native", ""],
+      search: ["phantomops", "phantomops/auto", "", ""],
+      value: ["pok_live_token"],
+    });
+
+    await configureBrain(h.q, h.deps);
+
+    expect(h.applied.routings[0]!.choices).toMatchObject({
+      provider: "phantomops",
+      // The gateway default — NOT the old server, which would have received the
+      // new personal token.
+      baseUrl: "https://phantomops.app/api/v1",
+    });
+    expect(h.applied.entries[0]).toMatchObject({
+      providerId: "phantomops",
+      baseUrl: "https://phantomops.app/api/v1",
+      keyAvailable: true,
+    });
+  });
+
+  test("switching to PhantomOps with no stored endpoint still resolves the gateway default", async () => {
+    const h = harness({
+      models: CUSTOM_MODELS,
+      routing: { provider: "openrouter" },
+      choose: ["native", ""],
+      search: ["phantomops", "phantomops/auto", "", ""],
+      value: ["pok_live_token"],
+    });
+
+    await configureBrain(h.q, h.deps);
+
+    expect(h.applied.routings[0]!.choices).toMatchObject({
+      baseUrl: "https://phantomops.app/api/v1",
+    });
+  });
+
+  test("a provider entry that cannot be written aborts instead of saving an unusable brain", async () => {
+    const h = harness({
+      models: CUSTOM_MODELS,
+      choose: ["native", ""],
+      search: ["openai-compatible"],
+      value: ["http://localhost:11434/v1", ""],
+      writeProviderEntry: async () => ({ ok: false, error: "agent dir is read-only" }),
+    });
+
+    const notice = await configureBrain(h.q, h.deps);
+
+    expect(notice).toBe("brain unchanged");
+    expect(h.applied.routings).toEqual([]);
+    expect(h.applied.chains).toEqual([]);
+  });
+
+  test("switching to a catalogue provider DROPS the endpoint entries", async () => {
+    const h = harness({
+      routing: { provider: "openai-compatible", baseUrl: "http://old:1234/v1" },
+      choose: ["native", ""],
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: ["sk-or"],
+    });
+
+    await configureBrain(h.q, h.deps);
+
+    expect(h.applied.cleared).toEqual(["openai-compatible", "phantomops"]);
+    expect(h.applied.entries).toEqual([]);
+    // The stale endpoint must not survive on the routing either.
+    expect(h.applied.routings[0]!.choices).toMatchObject({ provider: "openrouter" });
+    expect((h.applied.routings[0]!.choices as { baseUrl?: string }).baseUrl).toBeUndefined();
   });
 });

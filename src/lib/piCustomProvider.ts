@@ -121,8 +121,50 @@ export function customProviderSpec(id: string | undefined): CustomProviderSpec |
   return CUSTOM_PROVIDERS.find((p) => p.id === id);
 }
 
+/**
+ * The stored endpoint a wizard may REUSE for the provider it is configuring.
+ *
+ * `[harnesses.pi.routing].base_url` belongs to the provider that was configured
+ * with it, so it is reusable ONLY while the operator keeps that provider. Both
+ * wizards had been feeding it to any custom provider: switching from a
+ * self-hosted `openai-compatible` box to PhantomOps made PhantomOps inherit
+ * `http://old-inference.example/v1`, announce it, and persist it — after which
+ * the operator's personal token was sent to their old inference server. A
+ * switched provider starts from its own default or collects a fresh endpoint.
+ *
+ * Pure and shared so the two flows cannot drift apart again.
+ */
+export function storedBaseUrlForProvider(
+  provider: string | undefined,
+  currentProvider: string | undefined,
+  storedBaseUrl: string | undefined,
+): string | undefined {
+  if ((provider ?? "") !== (currentProvider ?? "")) return undefined;
+  return storedBaseUrl;
+}
+
 export function isCustomProvider(id: string | undefined): boolean {
   return customProviderSpec(id) !== undefined;
+}
+
+/**
+ * Custom providers that may legitimately run with NO credential.
+ *
+ * A self-hosted OpenAI-compatible server (Ollama, LM Studio, llama.cpp) often
+ * ignores the Authorization header entirely, so "no key" is a real, supported
+ * configuration for it — the wizard accepts it and the entry carries the literal
+ * {@link NO_KEY_PLACEHOLDER} so pi can still resolve the provider. PhantomOps is
+ * the opposite: the personal token IS the configuration, so it never qualifies.
+ *
+ * ONE definition, read by the wizard (to decide whether the key prompt may be
+ * left empty) and by the harness's native pre-spawn guard (to decide whether a
+ * missing key is fatal) — they must never disagree, or a keyless brain saves
+ * cleanly and then fails its first turn (review, Kai).
+ */
+export function customProviderAllowsKeyless(id: string | undefined): boolean {
+  // Deliberately an ID check, not "does it need a base URL": a future custom
+  // provider must opt in here explicitly before it can run unauthenticated.
+  return customProviderSpec(id)?.id === OPENAI_COMPATIBLE_PROVIDER;
 }
 
 /**
@@ -436,6 +478,38 @@ export async function clearCustomProviderEntry(
       return { ok: true, path, changed: true };
     } catch (err) {
       return { ok: false, error: `could not write ${path}: ${(err as Error).message}` };
+    }
+  });
+}
+
+/**
+ * Read `models.json` as-is, for a rollback image (the wizard's brain interview
+ * writes provider entries into it, so "put the brain back" has to include it).
+ */
+export async function snapshotModelsJson(agentDir: string): Promise<string | undefined> {
+  return readText(modelsJsonPath(agentDir));
+}
+
+/**
+ * Put a {@link snapshotModelsJson} image back. `undefined` means the file did not
+ * exist before the interview, so the restore REMOVES it rather than leaving the
+ * new entries behind as un-owned state.
+ */
+export async function restoreModelsJson(
+  agentDir: string,
+  text: string | undefined,
+): Promise<{ ok: boolean; error?: string }> {
+  const path = modelsJsonPath(agentDir);
+  return serialized(path, async () => {
+    try {
+      if (text === undefined) {
+        if (existsSync(path)) await unlink(path);
+        return { ok: true };
+      }
+      await writeAtomic(path, text);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: `could not restore ${path}: ${(err as Error).message}` };
     }
   });
 }
