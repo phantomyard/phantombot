@@ -195,4 +195,38 @@ describe("providerEnvVar", () => {
   test("undefined for an unknown provider (refresh is skipped)", () => {
     expect(providerEnvVar("some-new-provider")).toBeUndefined();
   });
+
+  test("the custom providers expose the env var their models.json entry interpolates (#694)", () => {
+    // These two have no vendor endpoint, so the env var is not Pi's own choice:
+    // it is OUR choice, written into the entry as `$NAME` and relayed per-turn.
+    // A mismatch would mean Pi looks for a key nobody sets.
+    expect(providerEnvVar("openai-compatible")).toBe("OPENAI_COMPATIBLE_API_KEY");
+    expect(providerEnvVar("phantomops")).toBe("PHANTOOPS_API_KEY");
+  });
+});
+
+/**
+ * The provider picker must OFFER the bring-your-own-endpoint providers before
+ * anything is configured for them (issue #694): they have no live models until
+ * the operator supplies an endpoint, so "only providers that list models are
+ * visible" would make them unreachable — the exact dead end the feature exists
+ * to remove.
+ */
+describe("providerChoices — custom providers (#694)", () => {
+  test("openai-compatible and phantomops are offered with no live models at all", () => {
+    const ids = providerChoices([]).map((p) => p.id);
+    expect(ids).toContain("openai-compatible");
+    expect(ids).toContain("phantomops");
+  });
+
+  test("they sort with the rest and are never duplicated once they list models", () => {
+    const choices = providerChoices([
+      { provider: "phantomops", model: "phantomops/auto", supportsImages: false },
+    ]);
+    const phantomops = choices.filter((p) => p.id === "phantomops");
+    expect(phantomops).toHaveLength(1);
+    // hasModels providers come first, so a live PhantomOps leads.
+    expect(choices[0]!.id).toBe("phantomops");
+    expect(choices[0]!.hasModels).toBe(true);
+  });
 });

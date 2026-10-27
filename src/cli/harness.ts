@@ -7,6 +7,15 @@
 import { defineCommand } from "citty";
 import * as p from "@clack/prompts";
 import { clackPrompts, type HarnessPrompts } from "./harnessPrompts.ts";
+import {
+  clearCustomProviderEntry,
+  customProviderSpec,
+  ensureCustomProviderEntry,
+  normalizeBaseUrl,
+  resolveCustomProviderBaseUrl,
+  CUSTOM_PROVIDERS,
+  OPENAI_COMPATIBLE_PROVIDER,
+} from "../lib/piCustomProvider.ts";
 
 import { type Config, loadConfig } from "../config.ts";
 import {
@@ -216,6 +225,10 @@ export async function applyRouting(
     // no image/coding model so a multimodal switch clears a stale entry.
     setRoutingKey(toml, "image_model", writes.toml.image_model, base);
     setRoutingKey(toml, "coding_model", writes.toml.coding_model, base);
+    // The endpoint for a bring-your-own-endpoint provider (issue #694): only
+    // ever stated for one of those, and deleted when the operator moves back to
+    // a catalog provider — a leftover base_url would read like a live setting.
+    setRoutingKey(toml, "base_url", writes.toml.base_url, base);
     // Configuring models REVOKES a previous "use Pi's own config" opt-out in
     // the same write. Left behind, the tombstone would win over the models the
     // operator just picked (resolveRouting short-circuits on it) and the wizard
@@ -584,13 +597,36 @@ async function configureNative(
   const provider = await pickProvider(models, currentRouting.provider, q);
   if (provider === CANCELLED) return true;
 
+  // BRING-YOUR-OWN-ENDPOINT providers (issue #694). They exist in pi only
+  // through a `models.json` entry that names a base URL, so the endpoint comes
+  // BEFORE the key and the models: without it there is nothing to check the key
+  // against and no provider for `pi --list-models` to scope. PhantomOps needs no
+  // question at all — its gateway is the provider's own default, and a personal
+  // token is the whole configuration.
+  const custom = customProviderSpec(provider);
+  let baseUrl: string | undefined;
+  if (custom?.needsBaseUrl) {
+    const asked = await askCustomProviderBaseUrl(q, provider, currentRouting.baseUrl);
+    if (asked === undefined) return true;
+    baseUrl = asked;
+  } else if (custom) {
+    baseUrl = resolveCustomProviderBaseUrl(provider, currentRouting.baseUrl);
+    q.note(
+      `${custom.label} runs on ${baseUrl ?? "(no endpoint!)"} — the personal token is the only credential it needs.`,
+      "Custom provider",
+    );
+  }
+
   // Collect the API key, LABELLED by the chosen provider so it's unambiguous
   // what to paste ("openrouter API key:" vs a bare "Pi API key:"). Blank =
   // keep what is stored — but a native slot with NO key anywhere cannot run
   // (native never reads the host ~/.pi; 2026-09-13 Atlas), so the loop below
   // refuses to finish until a key resolves. The "use Pi's own" escape hatch
   // exists only for pi-host, which this native flow is not.
-  const keyLabel = provider ? `${provider} API key` : "Pi API key";
+  const keyLabel = custom ? custom.keyLabel : provider ? `${provider} API key` : "Pi API key";
+  // A self-hosted OpenAI-compatible server may be unauthenticated; PhantomOps
+  // (and every catalog provider) cannot run without its key.
+  const keyRequired = !!provider && provider !== OPENAI_COMPATIBLE_PROVIDER;
   const apiKeyName = instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY;
   const storedBefore = await getPersonaSecret(config, apiKeyName, target.persona);
   let apiKey: string | undefined;
@@ -613,7 +649,7 @@ async function configureNative(
         : keyWrite.action === "keep"
           ? storedBefore
           : undefined;
-    if (provider && !candidate) {
+    if (keyRequired && !candidate) {
       q.note(
         `the ${role} brain cannot run without a key: native never reads the host's own pi configuration. Paste the ${keyLabel} (esc aborts without changing anything).`,
         "API key required",
@@ -735,6 +771,44 @@ async function configureNative(
   break;
   }
 
+  // Write the provider's `models.json` entry BEFORE the model pickers run:
+  // without it `pi --list-models` does not know the provider exists at all, so
+  // the picker would collapse to free text even for a server that publishes its
+  // own list. The live list is the entry's seed; the picks the operator makes
+  // are merged in afterwards (see the write inside runRoutingWizard), and the
+  // harness re-checks the entry on every spawn.
+  const effectiveKey =
+    keyWrite.action === "set" ? keyWrite.value : keyWrite.action === "keep" ? storedBefore : undefined;
+  if (custom && baseUrl) {
+    const seeded = await seededCustomProviderModels(custom.id, baseUrl, effectiveKey ?? "");
+    const write = await ensureCustomProviderEntry(
+      nativeAgentDir(undefined, target.persona),
+      custom.id,
+      {
+        baseUrl,
+        models: seeded.map((m) => m.model),
+        keyAvailable: Boolean(effectiveKey),
+      },
+    );
+    if (!write.ok) {
+      q.note(
+        `couldn't write the provider entry (${write.error}) — the ${provider} models will be entered by hand and this provider will not run until it is fixed.`,
+        "Custom provider",
+      );
+    } else if (write.changed) {
+      q.note(`registered ${provider} at ${baseUrl} (${write.path})`, "Custom provider");
+    }
+    // A fresh listing now sees the provider, so the pickers fill from it.
+    if (piCommand) {
+      const refreshed = await listPiModels(
+        piCommand,
+        undefined,
+        nativeAgentEnv(undefined, target.persona),
+      );
+      if (refreshed.length > 0) models = refreshed;
+    }
+  }
+
   // Straight into custom routing — Pi is already the chosen harness, so we don't
   // re-ask "use defaults?"; we go collect primary / image / coding models, all
   // filtered to the chosen provider. Reuse the catalog we already fetched.
@@ -749,6 +823,8 @@ async function configureNative(
     target,
     instanceId,
     apiKey: keyWrite.action === "set" ? keyWrite.value : apiKey,
+    baseUrl,
+    keyAvailable: Boolean(effectiveKey),
   });
 }
 
@@ -794,6 +870,19 @@ async function runRoutingWizard(
      * when Pi's catalogue has nothing for it. Never persisted from here.
      */
     apiKey?: string;
+    /**
+     * The endpoint collected for a bring-your-own-endpoint provider (issue
+     * #694). Persisted as `base_url` and written into the provider's
+     * `models.json` entry; ignored for catalog providers.
+     */
+    baseUrl?: string;
+    /**
+     * Is a key stored for the provider? Only matters for the custom providers:
+     * an unauthenticated self-hosted endpoint (Ollama, LM Studio) is a valid
+     * configuration, and Pi hides a provider whose `apiKey` reference cannot be
+     * resolved — so "no key" has to be spelled as a placeholder.
+     */
+    keyAvailable?: boolean;
   } = {},
 ): Promise<boolean> {
   const target: HarnessWriteTarget = opts.target ??
@@ -842,13 +931,22 @@ async function runRoutingWizard(
   // one provider. With no provider (or no catalog) we show everything.
   // "" (explicit "(none)") clears; undefined (step skipped) keeps current.
   const provider = resolveRoutingProvider(opts.provider, current.provider);
+  // A bring-your-own-endpoint provider (issue #694) is invisible to Pi unless a
+  // `models.json` entry names its base URL. Resolve it ONCE here so the live
+  // model fetch, the persisted routing and that entry all agree on the endpoint.
+  const custom = customProviderSpec(provider);
+  const customBaseUrl = custom
+    ? resolveCustomProviderBaseUrl(custom.id, opts.baseUrl ?? current.baseUrl)
+    : undefined;
   let models = modelsForProvider(provider, allModels);
   // Same last resort as the TUI flow: when Pi lists nothing for this provider,
   // ask the provider's own models endpoint rather than making the user type a
   // model id from memory. Empty result ⇒ free-text, exactly as before.
   if (models.length === 0 && provider) {
     const { fetchProviderModels } = await import("../lib/providerModelCatalog.ts");
-    const live = await fetchProviderModels(provider, opts.apiKey ?? "");
+    const live = await fetchProviderModels(provider, opts.apiKey ?? "", fetch, {
+      baseUrl: customBaseUrl,
+    });
     if (live.length > 0) {
       models = live;
       q.note(
@@ -902,14 +1000,54 @@ async function runRoutingWizard(
 
   const choices: RoutingChoices = {
     provider,
+    baseUrl: customBaseUrl,
     primaryModel,
     imageModel,
     codingModel,
   };
   const writes = await applyRouting(target.path, choices, opts.instanceId);
+
+  // Keep the provider's `models.json` entry in step with the picks (issue #694).
+  // Pi lists a custom provider's models FROM that entry, so a picked model that
+  // is not in it would be selectable in the wizard and unresolvable at spawn.
+  // Switching to any other provider DROPS the entries: a leftover one keeps a
+  // provider (and its stale models) selectable in `pi --list-models`.
+  const agentDir = nativeAgentDir(undefined, target.persona);
+  if (custom && customBaseUrl) {
+    // Pi hides a provider whose key reference cannot be resolved, so "is a key
+    // stored?" decides between the `$VAR` reference and the literal placeholder
+    // for an unauthenticated endpoint. Ask the vault when the caller did not
+    // just collect a key here — this path is reachable without going through
+    // configureNative (the "configure models now" row).
+    const keyAvailable =
+      opts.keyAvailable ??
+      Boolean(
+        await getPersonaSecret(
+          config,
+          opts.instanceId ? piInstanceSecretName(opts.instanceId) : ENV_PI_API_KEY,
+          target.persona,
+        ),
+      );
+    const write = await ensureCustomProviderEntry(agentDir, custom.id, {
+      baseUrl: customBaseUrl,
+      // Every model the wizard can hand a turn: the picks, minus "(none)".
+      models: [primaryModel, imageModel, codingModel].filter(
+        (m): m is string => typeof m === "string" && m !== "",
+      ),
+      keyAvailable,
+    });
+    if (!write.ok) q.note(write.error, "Custom provider");
+  } else {
+    for (const spec of CUSTOM_PROVIDERS) {
+      const cleared = await clearCustomProviderEntry(agentDir, spec.id);
+      if (!cleared.ok) q.note(cleared.error, "Custom provider");
+    }
+  }
+
   q.note(
     [
       `provider: ${writes.toml.provider ?? "(none — Pi's default)"}`,
+      ...(writes.toml.base_url ? [`endpoint: ${writes.toml.base_url}`] : []),
       `primary: ${writes.toml.primary_model}`,
       `image:   ${writes.toml.image_model ?? "(none — primary is multimodal)"}`,
       `coding:  ${writes.toml.coding_model ?? "(none)"}`,
@@ -922,6 +1060,54 @@ async function runRoutingWizard(
 }
 
 const CANCELLED = Symbol("cancelled");
+
+/**
+ * Ask for a bring-your-own-endpoint provider's base URL (issue #694).
+ *
+ * Asked BEFORE the key and the models: without an endpoint there is nothing to
+ * probe the key against and nothing for `pi --list-models` to list. Validated
+ * here rather than at request time — a pasted `<base>/chat/completions` or a
+ * missing scheme is the common mistake, and accepting it would hand the
+ * operator a provider whose every turn 404s.
+ *
+ * Blank keeps the stored value when there is one (`initialValue` carries it), so
+ * re-running the wizard on a working endpoint is one Enter. Returns undefined
+ * only on a real cancel.
+ */
+async function askCustomProviderBaseUrl(
+  q: HarnessPrompts,
+  providerId: string,
+  current: string | undefined,
+): Promise<string | undefined> {
+  const spec = customProviderSpec(providerId);
+  const initial = current?.trim() || spec?.defaultBaseUrl || "";
+  for (;;) {
+    const answer = await q.text({
+      message: `${spec?.label ?? providerId} base URL — the root its /chat/completions and /models live under`,
+      placeholder: "http://localhost:11434/v1",
+      initialValue: initial,
+    });
+    if (answer === undefined) return undefined;
+    const norm = normalizeBaseUrl(answer.trim() || initial);
+    if (norm.ok) return norm.value;
+    q.note(`${norm.error}. Nothing was saved.`, "Base URL");
+  }
+}
+
+/**
+ * The models a custom provider publishes, used to SEED its `models.json` entry
+ * so the model pickers can offer them. An empty result is not an error — the
+ * entry still carries the provider's default model and the pickers fall back to
+ * free text, exactly as for any provider with no listing.
+ */
+async function seededCustomProviderModels(
+  providerId: string,
+  baseUrl: string,
+  key: string,
+): Promise<PiModel[]> {
+  const { fetchProviderModels } = await import("../lib/providerModelCatalog.ts");
+  return fetchProviderModels(providerId, key, fetch, { baseUrl });
+}
 
 /**
  * Provider picker. The provider is asked BEFORE the API key (Pi's `--provider`

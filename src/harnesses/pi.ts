@@ -90,11 +90,17 @@ import {
 import {
   ensureNativeAgentDir,
   ENV_PI_AGENT_DIR,
+  nativeAgentDir,
   nativeAgentEnv,
   nativeExtensionsDir,
   seedEphemeralAgentConfig,
 } from "../lib/nativeAgentDir.ts";
 import { removePiApiKey } from "../lib/piAuthStore.ts";
+import {
+  ensureCustomProviderEntry,
+  isCustomProvider,
+  resolveCustomProviderBaseUrl,
+} from "../lib/piCustomProvider.ts";
 import type { WriteSink } from "../lib/io.ts";
 
 export const EXPECTED_PI_HEAP_MB = 2_048;
@@ -652,6 +658,57 @@ export class PiHarness implements Harness {
       }
     } else {
       childEnv[ENV_PHANTOMBOT_PI_COMMAND] = "";
+    }
+
+    // BRING-YOUR-OWN-ENDPOINT providers (issue #694 — openai-compatible,
+    // phantomops) are invisible to Pi unless a `models.json` entry in the agent
+    // dir this child reads names their base URL and models. The wizard writes
+    // that entry, but a turn must never depend on a write that happened an
+    // upgrade (or a hand-edited agent dir) ago: Pi's failure mode for a missing
+    // entry is "Use /login to log into a provider", which says nothing about
+    // the real cause. So re-assert it here, at spawn, into the SAME dir the
+    // child gets — and only rewrite when the entry has actually drifted.
+    // Best-effort by design: an unwritable agent dir must not kill the turn
+    // silently, so it logs and lets Pi report its own error.
+    if (
+      this.config.mode === "native" &&
+      !routing?.useLocalConfig &&
+      isCustomProvider(provider)
+    ) {
+      const entryDir = ephemeralAgentDir ?? nativeAgentDir(xdgDataHome(), req.persona);
+      const baseUrl = resolveCustomProviderBaseUrl(
+        provider as string,
+        routing?.baseUrl,
+      );
+      if (!baseUrl) {
+        log.warn(
+          `${this.id}: provider '${provider}' has no base URL configured — the ` +
+            "turn cannot resolve it. Re-run 'phantombot harness' and set one.",
+        );
+      } else {
+        try {
+          // No `models`: keep whatever the entry lists (the wizard's picks).
+          const written = await ensureCustomProviderEntry(entryDir, provider as string, {
+            baseUrl,
+            keyAvailable: Boolean(piApiKey),
+          });
+          if (!written.ok) {
+            log.warn(
+              `${this.id}: could not register provider '${provider}' in models.json — ${written.error}`,
+            );
+          } else if (written.changed) {
+            log.debug("pi.invoke custom provider entry refreshed", {
+              persona: req.persona,
+              provider,
+              path: written.path,
+            });
+          }
+        } catch (err) {
+          log.warn(
+            `${this.id}: custom provider entry refresh failed for '${provider}' — ${(err as Error).message}`,
+          );
+        }
+      }
     }
 
     // Managed capability-routing extension (PR #606 review, issue #674): the

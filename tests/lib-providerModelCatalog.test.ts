@@ -89,3 +89,79 @@ describe("fetchProviderModels", () => {
     expect(models).toHaveLength(1);
   });
 });
+
+/**
+ * The bring-your-own-endpoint providers (issue #694). Their `/models` lives
+ * wherever the operator says it does, and an unauthenticated self-hosted server
+ * is a legitimate configuration — both are the opposite of every catalog entry.
+ */
+describe("fetchProviderModels — custom providers (#694)", () => {
+  test("openai-compatible asks the operator's endpoint, not a hardcoded vendor", async () => {
+    const { impl, calls } = stubFetch({ data: [{ id: "llama3.1:70b" }] });
+    const models = await fetchProviderModels(
+      "openai-compatible",
+      "sk-local",
+      impl,
+      { baseUrl: "http://localhost:11434/v1/" },
+    );
+    expect(calls[0]!.url).toBe("http://localhost:11434/v1/models");
+    expect(calls[0]!.headers.Authorization).toBe("Bearer sk-local");
+    expect(models).toEqual([
+      { provider: "openai-compatible", model: "llama3.1:70b", supportsImages: false },
+    ]);
+  });
+
+  test("an unauthenticated self-hosted server is queried with NO auth header", async () => {
+    // Ollama / LM Studio / llama.cpp ignore Authorization, and an empty Bearer
+    // is worse than no header. The empty key must not short-circuit the fetch.
+    const { impl, calls } = stubFetch({ models: [{ name: "qwen2.5-coder:7b" }] });
+    const models = await fetchProviderModels(
+      "openai-compatible",
+      "",
+      impl,
+      { baseUrl: "http://localhost:11434/v1" },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.headers.Authorization).toBeUndefined();
+    expect(models.map((m) => m.model)).toEqual(["qwen2.5-coder:7b"]);
+  });
+
+  test("no base URL ⇒ no request at all (never a guess)", async () => {
+    const { impl, calls } = stubFetch({ data: [{ id: "x" }] });
+    expect(await fetchProviderModels("openai-compatible", "k", impl)).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("PhantomOps defaults to the gateway and needs its token", async () => {
+    const { impl, calls } = stubFetch({ data: [{ id: "phantomops/auto" }] });
+    expect(await fetchProviderModels("phantomops", "", impl)).toEqual([]);
+    expect(calls).toHaveLength(0);
+
+    const models = await fetchProviderModels("phantomops", "pok_x", impl);
+    expect(calls[0]!.url).toBe("https://phantomops.app/api/v1/models");
+    expect(calls[0]!.headers.Authorization).toBe("Bearer pok_x");
+    expect(models.map((m) => m.model)).toEqual(["phantomops/auto"]);
+  });
+
+  test("phantomops/auto is FIRST even when the server lists it last", async () => {
+    // The pickers pre-select index 0, and "your full phantom" is the product
+    // decision the provider exists for.
+    const { impl } = stubFetch({
+      data: [{ id: "openrouter/foo" }, { id: "anthropic/bar" }, { id: "phantomops/auto" }],
+    });
+    const models = await fetchProviderModels("phantomops", "pok_x", impl);
+    expect(models.map((m) => m.model)).toEqual([
+      "phantomops/auto",
+      "openrouter/foo",
+      "anthropic/bar",
+    ]);
+  });
+
+  test("a baseUrl passed for a CATALOG provider is ignored", async () => {
+    // Only the custom providers carry an endpoint; letting a stray base_url
+    // redirect a catalog provider would send a vendor key to an arbitrary host.
+    const { impl, calls } = stubFetch({ data: [{ id: "gpt-5.2" }] });
+    await fetchProviderModels("openai", "sk-test", impl, { baseUrl: "https://evil.example/v1" });
+    expect(calls[0]!.url).toBe("https://api.openai.com/v1/models");
+  });
+});

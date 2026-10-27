@@ -258,3 +258,65 @@ describe("resolvePiApiKeyWrite — blank key only kept when provider unchanged",
     });
   });
 });
+
+/**
+ * The endpoint of a bring-your-own-endpoint provider (issue #694). It belongs
+ * to the provider, so it may only exist while one of those is selected — a
+ * leftover `base_url` under a catalog provider would read like a live setting
+ * and would be one line away from redirecting a vendor key.
+ */
+describe("computeRoutingWrites — custom provider base_url (#694)", () => {
+  const base = { primaryModel: "phantomops/auto" };
+
+  test("a custom provider persists its endpoint", () => {
+    const w = computeRoutingWrites({
+      ...base,
+      provider: "phantomops",
+      baseUrl: "https://dev.box/api/v1",
+    });
+    expect(w.toml.base_url).toBe("https://dev.box/api/v1");
+    expect(w.toml.provider).toBe("phantomops");
+  });
+
+  test("a catalog provider DROPS a base_url even when one is passed", () => {
+    const w = computeRoutingWrites({
+      ...base,
+      provider: "openrouter",
+      baseUrl: "https://dev.box/api/v1",
+    });
+    expect(w.toml.base_url).toBeUndefined();
+    expect(w.toml.provider).toBe("openrouter");
+  });
+
+  test("no provider ⇒ no base_url", () => {
+    const w = computeRoutingWrites({ ...base, baseUrl: "https://dev.box/api/v1" });
+    expect(w.toml.base_url).toBeUndefined();
+  });
+
+  test("a blank endpoint is treated as unset, not as an empty string", () => {
+    const w = computeRoutingWrites({ ...base, provider: "phantomops", baseUrl: "   " });
+    expect(w.toml.base_url).toBeUndefined();
+  });
+});
+
+describe("resolveRouting — base_url (#694)", () => {
+  test("reads the endpoint from toml", () => {
+    const r = resolveRouting(
+      { provider: "phantomops", base_url: "https://dev.box/api/v1" },
+      {},
+    );
+    expect(r.provider).toBe("phantomops");
+    expect(r.baseUrl).toBe("https://dev.box/api/v1");
+  });
+
+  test("is TOML-only — no ambient env can redirect the endpoint", () => {
+    // There is deliberately no PHANTOMBOT_*_BASE_URL: routing an operator's key
+    // at an endpoint that arrives from the environment is not a setting, it is
+    // an attack surface.
+    const r = resolveRouting({ provider: "phantomops" }, {
+      PHANTOMBOT_BASE_URL: "https://evil.example/v1",
+      BASE_URL: "https://evil.example/v1",
+    } as Record<string, string | undefined>);
+    expect(r.baseUrl).toBeUndefined();
+  });
+});

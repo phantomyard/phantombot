@@ -45,6 +45,8 @@
  * of phantombot's config path or TOML schema.
  */
 
+import { isCustomProvider } from "./piCustomProvider.ts";
+
 export const ENV_PRIMARY_MODEL = "PHANTOMBOT_PRIMARY_MODEL";
 export const ENV_IMAGE_MODEL = "PHANTOMBOT_IMAGE_MODEL";
 export const ENV_CODING_MODEL = "PHANTOMBOT_CODING_MODEL";
@@ -132,6 +134,19 @@ export interface PiRoutingConfig {
    * api-key fails. undefined ⇒ no `--provider` (Pi's own default).
    */
   provider?: string;
+  /**
+   * Endpoint for a BRING-YOUR-OWN-ENDPOINT provider (`openai-compatible`,
+   * `phantomops` — issue #694). Those providers exist in Pi only through a
+   * `models.json` entry, and that entry carries the base URL, so the harness
+   * needs this value to (re)build it. Ignored for catalog providers, whose
+   * endpoints Pi already knows.
+   *
+   * Stored in config.toml ONLY (no env mirror): it is not a secret, and unlike
+   * the model ids there is no ambient-env path that ever needed it.
+   * undefined ⇒ use the provider's default (PhantomOps has one; openai-
+   * compatible has none, so a turn through it fails loud and actionable).
+   */
+  baseUrl?: string;
   primaryModel?: string;
   imageModel?: string;
   codingModel?: string;
@@ -249,6 +264,8 @@ export function resolveRouting(
     primaryModel: clean(env[ENV_PRIMARY_MODEL]) ?? tomlStr("primary_model"),
     imageModel: clean(env[ENV_IMAGE_MODEL]) ?? tomlStr("image_model"),
     codingModel: clean(env[ENV_CODING_MODEL]) ?? tomlStr("coding_model"),
+    // TOML only — see PiRoutingConfig.baseUrl.
+    baseUrl: tomlStr("base_url"),
   };
 }
 
@@ -264,6 +281,12 @@ export interface RoutingChoices {
    * primary + image + coding. undefined ⇒ no `--provider` override.
    */
   provider?: string;
+  /**
+   * Endpoint for a custom provider (openai-compatible / phantomops, issue
+   * #694). Ignored — and cleared — for catalog providers, whose endpoints Pi
+   * already knows.
+   */
+  baseUrl?: string;
   primaryModel: string;
   /** May be set even for a multimodal primary; auto-skip discards it. */
   imageModel?: string;
@@ -278,6 +301,8 @@ export interface RoutingWrites {
     primary_model: string;
     image_model?: string;
     coding_model?: string;
+    /** Only ever set for a custom provider (issue #694). */
+    base_url?: string;
   };
   /**
    * Env vars to write to ~/.env. A value of "" means UNSET (delete the key) —
@@ -312,6 +337,12 @@ export function computeRoutingWrites(choices: RoutingChoices): RoutingWrites {
   if (provider) toml.provider = provider;
   if (image) toml.image_model = image;
   if (coding) toml.coding_model = coding;
+  // The endpoint belongs to the bring-your-own-endpoint providers only. A
+  // leftover base_url with a catalog provider would be dead config that reads
+  // like a live setting, so switching back clears it (setRoutingKey deletes an
+  // undefined value — "cleared must be spelled").
+  const baseUrl = isCustomProvider(provider) ? clean(choices.baseUrl) : undefined;
+  if (baseUrl) toml.base_url = baseUrl;
 
   // "" clears the key (updateEnvFile delete semantics). We always write all
   // keys so switching from a non-multimodal to a multimodal primary actively
@@ -362,6 +393,7 @@ export const ROUTING_TOML_KEYS = [
   "primary_model",
   "image_model",
   "coding_model",
+  "base_url",
 ] as const;
 
 /**

@@ -18,6 +18,11 @@
  * key. Only an explicit rejection from the provider's own API counts.
  */
 
+import {
+  customProviderSpec,
+  resolveCustomProviderBaseUrl,
+} from "./piCustomProvider.ts";
+
 export type KeyProbeStatus = "verified" | "invalid" | "unverified";
 
 export interface KeyProbeResult {
@@ -100,8 +105,27 @@ async function check(
 export async function probeProviderKey(
   providerId: string,
   key: string,
+  opts: { baseUrl?: string } = {},
 ): Promise<KeyProbeResult> {
   const trimmed = key.trim();
+  // Bring-your-own-endpoint providers (issue #694) may be UNAUTHENTICATED
+  // (Ollama, LM Studio, llama.cpp) — for those an empty key is a real, checkable
+  // configuration rather than "nothing to check". PhantomOps always needs the
+  // token, so it keeps the guard.
+  const custom = customProviderSpec(providerId);
+  if (custom) {
+    const base = resolveCustomProviderBaseUrl(providerId, opts.baseUrl);
+    if (!base) {
+      return {
+        status: "unverified",
+        detail: `no base URL configured for '${providerId}' — the endpoint cannot be checked`,
+      };
+    }
+    if (!trimmed && providerId === "phantomops") {
+      return { status: "unverified", detail: "no token to check" };
+    }
+    return check(`${base}/models`, trimmed ? { Authorization: `Bearer ${trimmed}` } : {});
+  }
   if (!trimmed) return { status: "unverified", detail: "no key to check" };
   const special = SPECIAL[providerId];
   if (special) {
