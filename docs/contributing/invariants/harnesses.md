@@ -2,6 +2,19 @@
 
 Part of the phantombot contributor guide: the tool watchdog, spawn/kill/timeout coordination, the fallback chain, resume and nudge, native Pi. The index of every invariant is in [`/AGENTS.md`](../../../AGENTS.md). Numbers are stable identifiers — code comments and tests cite them — so a new rule takes the next free number and nothing is renumbered or reused (the one-time renumbering into 71–73 and 77 is recorded in AGENTS.md). Only the `### N.` headings below, each with its `inv-N` anchor, are numbered invariants; a numbered list in an intro section is prose, so never cite its item numbers. Each rule records a real incident; a deliberate, documented trade-off is not a defect.
 
+## Coder-swap empty completion recovery (issue #692)
+
+The existing ladder in `src/harnesses/pi.ts` treats a completed attempt with no
+usable assistant text and no tool progress as a recoverable empty result.
+Whitespace, reasoning/replay, and lifecycle/completion markers are not answers.
+Hold terminal success until classification; discard leading whitespace only for
+empty attempts. Empty results and eligible explicit errors share the existing
+three coder attempts, followed by one primary attempt. Preserve the existing
+routing/manual overrides, timeout policy, cancellation, hard-cap, terminal-error,
+rate-limit and outer fallback rules. Never replay usable text or tool progress.
+Log the fixed empty-result reason through existing retry/exhaustion diagnostics,
+without including reply/reasoning content or tool arguments.
+
 ## Invariants
 
 <a id="inv-9"></a>

@@ -311,6 +311,10 @@ under that provider's privacy and retention terms.
 Phantombot never installs an optional host harness for you. Missing fallbacks
 do not stop the daemon; `phantombot doctor` reports what is available.
 
+Native coding-model swaps retry empty replies alongside eligible provider errors: up
+to three coder attempts, then the existing primary-model fallback. An attempt that
+already streamed usable text or tool progress is never replayed.
+
 ### Scratch workspace
 
 Every harness subprocess gets a workspace for working files (repro clones,

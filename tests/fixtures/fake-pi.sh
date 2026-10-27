@@ -65,6 +65,35 @@ emit_normal() {
 
 
 case "$mode" in
+  sequence)
+    # Per-test argv log also supplies the attempt number; no shared counter.
+    attempt=$(wc -l < "$FAKE_PI_ARGV_LOG")
+    action=$(printf '%s' "$FAKE_PI_SEQUENCE" | cut -d, -f"$attempt")
+    case "$action" in
+      answer) emit_normal ;;
+      error) echo "simulated provider failure" >&2; exit 1 ;;
+      terminal) exit 127 ;;
+      rate) echo "429 Too Many Requests" >&2; exit 1 ;;
+      whitespace)
+        printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":" \n\t"}}'
+        ;;
+      reasoning)
+        printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"private reasoning"}}'
+        ;;
+      tool-empty)
+        printf '%s\n' '{"type":"tool_execution_start","toolCallId":"one","toolName":"bash","args":{"command":"true"}}'
+        printf '%s\n' '{"type":"tool_execution_end","toolCallId":"one"}'
+        ;;
+      leading)
+        printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":" \n"}}'
+        emit_normal
+        ;;
+    esac
+    printf '%s\n' '{"type":"session"}' '{"type":"agent_start"}' '{"type":"turn_start"}'
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}' '{"type":"agent_end"}' '{"type":"agent_settled"}'
+    exit 0
+    ;;
+
   argv)
     joined="$*"
     printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"argv: ${joined}\",\"partial\":{}},\"message\":{}}"

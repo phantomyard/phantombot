@@ -135,6 +135,9 @@ One line per rule: its stable number, then its title. Click through for the full
 
 ### Harnesses — [harnesses.md](docs/contributing/invariants/harnesses.md)
 
+Coder-swap empty-result recovery preserves the three-attempt ladder and side-effect
+guards; see the [recovery contract](docs/contributing/invariants/harnesses.md#coder-swap-empty-completion-recovery-issue-692).
+
 - [9](docs/contributing/invariants/harnesses.md#inv-9) Adding a new harness — three places that must be touched, not one.
 - [26](docs/contributing/invariants/harnesses.md#inv-26) Two different kernel limits govern argv, and the one that bites on Linux is per-STRING (issue #426).
 - [31](docs/contributing/invariants/harnesses.md#inv-31) There is ONE harness detector, and a persisted bin is a CACHE that must be platform-checked (issue #450).
