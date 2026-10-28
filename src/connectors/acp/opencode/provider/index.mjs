@@ -43,8 +43,15 @@
  *   - sends only the turns Phantombot has NOT seen (prefix-matched against what
  *     this instance already sent), never the full transcript;
  *   - keeps ONE ACP session per OpenCode conversation, and starts a new one when
- *     the incoming transcript does not extend a known conversation (a fork or a
- *     fresh chat that happens to share an opening line);
+ *     the incoming transcript does not extend a known conversation (a fork, a
+ *     fresh chat that happens to share an opening line, or — see
+ *     `continuesConversation` — a transcript whose ASSISTANT history disagrees
+ *     with the replies this instance actually produced);
+ *   - re-registers its known sessions with `session/load` when it has to replace
+ *     the child process, because the ACP server keeps its session registry in
+ *     memory and rejects ids a new child never issued;
+ *   - never dispatches a prompt for a turn that was already aborted, whether the
+ *     abort landed before the call or while it waited its turn in the queue;
  *   - answers OpenCode's session-title requests locally. OpenCode asks the same
  *     model to name the conversation with the conversation's first user message
  *     as its prompt; sending that to Phantombot would burn a real turn, write a
@@ -100,6 +107,7 @@ class AcpConnection {
     this.closed = false;
     this.closing = null;
     this.failure = null;
+    this.capabilities = {};
     this.onNotification = () => {};
 
     this.child = spawn(command, args, {
@@ -279,13 +287,21 @@ function textOf(content) {
 }
 
 /**
- * Split the incoming request into system text and the ordered user turns.
- * System-reminders are stripped: Phantombot's own harness already supplies its
- * context, and OpenCode's reminders change between retries of the same turn,
- * which would defeat the prefix matching below.
+ * Split the incoming request into system text and the ordered conversation
+ * entries. BOTH roles are kept, in order: matching a transcript on user turns
+ * alone would let a request that carries a visibly different assistant reply
+ * resume somebody else's thread and inherit the missing history.
+ *
+ * System-reminders are stripped from every entry: Phantombot's own harness
+ * already supplies its context, and OpenCode's reminders change between retries
+ * of the same turn, which would defeat the matching below.
+ *
+ * `turns` stays user-only — it is what gets sent, what the title detector reads
+ * and what decides whether the request is empty.
  */
 function readPrompt(prompt) {
   const system = [];
+  const entries = [];
   const turns = [];
   for (const message of Array.isArray(prompt) ? prompt : []) {
     if (!message || typeof message !== "object") continue;
@@ -293,11 +309,13 @@ function readPrompt(prompt) {
       system.push(textOf(message.content));
       continue;
     }
-    if (message.role !== "user") continue;
+    if (message.role !== "user" && message.role !== "assistant") continue;
     const text = textOf(message.content).replace(SYSTEM_REMINDER, "").trim();
-    if (text) turns.push(text);
+    if (!text) continue;
+    entries.push({ role: message.role, text });
+    if (message.role === "user") turns.push(text);
   }
-  return { system: system.join("\n\n"), turns };
+  return { system: system.join("\n\n"), entries, turns };
 }
 
 /**
@@ -319,26 +337,67 @@ function localTitle(turns) {
 
 // ── conversation matching ────────────────────────────────────────────────
 
-function isPrefix(prefix, full) {
-  if (prefix.length > full.length) return false;
-  return prefix.every((text, index) => text === full[index]);
+/** Same message: same role, same text. Both sides are reminder-stripped + trimmed. */
+function sameEntry(a, b) {
+  return a.role === b.role && a.text === b.text;
 }
 
 /**
- * Find the conversation this transcript extends.
+ * Does `supplied` continue — or retry the tail of — the transcript `stored`?
  *
- * Longest-prefix wins, so a transcript that diverges from a known conversation
- * (an edited or branched message) does NOT silently resume it — the caller
- * starts a new session instead. Identical openings stay ambiguous, which is
- * exactly why the whole transcript is compared and not just the first message.
+ * The whole prior transcript is compared, role included, not just the user
+ * turns. Two shapes qualify:
+ *
+ *   1. `supplied` extends `stored` (every stored entry appears verbatim at the
+ *      same index). The extra entries are the turns to send. This is the normal
+ *      continuation, and also a byte-identical replay.
+ *   2. `supplied` stops exactly one entry short of `stored`, at a user turn, and
+ *      the omitted entry is the assistant reply this instance produced — the
+ *      client re-asking the same question. That reply is regenerated, so it is
+ *      not required to be echoed back.
+ *
+ * Anything else — an edited turn, a different opening, or an assistant reply
+ * that contradicts what we actually wrote — is a DIFFERENT conversation. It gets
+ * a fresh session, so a private answer can never be attached to a transcript
+ * that visibly disagrees with it.
  */
-function matchConversation(registry, turns) {
-  let best;
-  for (const entry of registry.values()) {
-    if (!isPrefix(entry.turns, turns)) continue;
-    if (!best || entry.turns.length > best.turns.length) best = entry;
+function continuesConversation(stored, supplied) {
+  if (stored.length === 0 || supplied.length === 0) return false;
+  const overlap = Math.min(stored.length, supplied.length);
+  for (let index = 0; index < overlap; index += 1) {
+    if (!sameEntry(stored[index], supplied[index])) return false;
   }
-  return best;
+  if (supplied.length >= stored.length) return true;
+  return (
+    stored.length === supplied.length + 1 &&
+    stored[stored.length - 1].role === "assistant" &&
+    supplied[supplied.length - 1].role === "user"
+  );
+}
+
+/**
+ * Find the conversation this transcript continues.
+ *
+ * Longest match wins, so a transcript that diverges from a known conversation
+ * (an edited or branched message) does NOT silently resume it — the caller
+ * starts a new session instead. Two known conversations matching equally well
+ * is genuine ambiguity (identical transcripts in different threads), and the
+ * only safe reading of that is a new session: picking either one would hand one
+ * thread's private turn to the other.
+ */
+function matchConversation(registry, entries) {
+  let best;
+  let tied = false;
+  for (const entry of registry.values()) {
+    if (!continuesConversation(entry.entries, entries)) continue;
+    if (!best || entry.entries.length > best.entries.length) {
+      best = entry;
+      tied = false;
+    } else if (entry.entries.length === best.entries.length) {
+      tied = true;
+    }
+  }
+  return tied ? undefined : best;
 }
 
 // ── runtime ──────────────────────────────────────────────────────────────
@@ -383,13 +442,15 @@ async function ensureConnection(runtime) {
   };
   runtime.connection = connection;
   runtime.initialized = (async () => {
-    await connection.request("initialize", {
+    const init = await connection.request("initialize", {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
     });
+    connection.capabilities = init?.agentCapabilities ?? {};
     await connection.request("authenticate", { methodId: "none" }).catch(() => {
       // authMethods is empty on the Phantombot side; a rejection here is benign.
     });
+    await restoreSessions(runtime, connection);
   })().catch((error) => {
     runtime.connection = null;
     runtime.initialized = null;
@@ -398,6 +459,43 @@ async function ensureConnection(runtime) {
   });
   await runtime.initialized;
   return connection;
+}
+
+/**
+ * Re-register this runtime's known sessions on a REPLACEMENT child.
+ *
+ * The ACP server keeps its session registry in process memory: an id issued by
+ * the previous child is unknown to the new one, and `session/prompt` with it is
+ * rejected outright. The registry here would otherwise survive the swap and keep
+ * handing out dead ids, so every continuation would fail and retrying would not
+ * repair the thread.
+ *
+ * `session/load` is the ACP answer — the server re-derives the conversation key
+ * from the token, so the thread resumes verbatim. The replay it streams lands on
+ * `connection.onNotification`, where `runtime.active` is null outside a turn and
+ * the chunks are dropped; the transcript is already in the client.
+ *
+ * A session the new child cannot restore is DROPPED, never kept: a missing
+ * session costs the thread's context (a fresh session, one turn of history),
+ * while a stale id costs every following turn.
+ */
+async function restoreSessions(runtime, connection) {
+  if (runtime.conversations.size === 0) return;
+  const canLoad = connection.capabilities?.loadSession === true;
+  for (const sessionId of [...runtime.conversations.keys()]) {
+    if (!canLoad) {
+      runtime.conversations.delete(sessionId);
+      continue;
+    }
+    try {
+      await connection.request("session/load", {
+        sessionId,
+        cwd: runtime.cwd ?? process.cwd(),
+      });
+    } catch {
+      runtime.conversations.delete(sessionId);
+    }
+  }
 }
 
 /** Serialize turns on this runtime: one ACP prompt in flight per child. */
@@ -410,28 +508,33 @@ function serialized(runtime, work) {
   return run;
 }
 
-/** Resolve (or create) the ACP session for this transcript, and the text to send. */
-async function prepareTurn(runtime, connection, turns) {
-  const known = matchConversation(runtime.conversations, turns);
+/** Resolve (or create) the ACP session for this transcript, and the turns to send. */
+async function prepareTurn(runtime, connection, entries, turns) {
+  const known = matchConversation(runtime.conversations, entries);
   if (known && known.sessionId) {
-    const pending = turns.slice(known.turns.length);
-    known.turns = turns.slice();
+    const pending = entries.slice(known.entries.length);
+    // Optimistic: the transcript is adopted as the stored state, and the reply
+    // this turn produces is appended once it exists (and dropped if it doesn't,
+    // e.g. the turn was cancelled — an answer the client never saw must not be
+    // required to appear in the next request).
+    known.entries = entries.slice();
     known.touched = Date.now();
+    const send = pending.filter((entry) => entry.role === "user").map((entry) => entry.text);
     // A retry of the very same turn replays nothing new; answer it again rather
     // than returning an empty turn.
-    return { sessionId: known.sessionId, send: pending.length > 0 ? pending : [turns[turns.length - 1]] };
+    return { entry: known, sessionId: known.sessionId, send: send.length > 0 ? send : [turns[turns.length - 1]] };
   }
 
   const created = await connection.request("session/new", { cwd: runtime.cwd ?? process.cwd(), mcpServers: [] });
   const sessionId = created?.sessionId;
   if (typeof sessionId !== "string") throw new Error("phantombot acp did not return a session id");
-  const entry = { sessionId, turns: turns.slice(), touched: Date.now() };
+  const entry = { sessionId, entries: entries.slice(), touched: Date.now() };
   runtime.conversations.set(sessionId, entry);
   evictConversations(runtime);
   // A brand-new ACP session has no history in Phantombot, so it gets the newest
   // turn only. Anything older is unrecoverable context (a fork, or a session
   // that predates this process) — sending the tail is the honest option.
-  return { sessionId, send: [turns[turns.length - 1]] };
+  return { entry, sessionId, send: [turns[turns.length - 1]] };
 }
 
 function evictConversations(runtime) {
@@ -444,11 +547,12 @@ function evictConversations(runtime) {
  * Run one turn and drive the AI SDK stream. Resolves once the stream is closed,
  * whether it ended, failed or was cancelled.
  */
-async function runTurn(runtime, { turns, controller, abortSignal }) {
+async function runTurn(runtime, { entries, turns, controller, abortSignal }) {
   let textId = 0;
   let lastTextId = null;
   let reasoningId = 0;
   let lastReasoningId = null;
+  let reply = "";
   let closed = false;
 
   const emit = (part) => {
@@ -478,17 +582,44 @@ async function runTurn(runtime, { turns, controller, abortSignal }) {
   const fail = (error) => {
     close({ type: "error", error: error instanceof Error ? error : new Error(String(error)) });
   };
+  const finishCancelled = () => {
+    close({
+      type: "finish",
+      finishReason: { unified: STOP.cancelled, raw: "cancelled" },
+      usage: { inputTokens: { total: 0 }, outputTokens: { total: 0 } },
+    });
+  };
 
   try {
+    // A turn that is already aborted must not touch the child at all — spawning a
+    // process (or resuming a thread) to answer a request nobody is reading is
+    // wasted work at best, and a real agent turn at worst. This also catches the
+    // request that was aborted while it waited its turn in the queue below.
+    if (abortSignal?.aborted) {
+      emit({ type: "stream-start", warnings: [] });
+      finishCancelled();
+      return;
+    }
+
     const connection = await ensureConnection(runtime);
-    const { sessionId, send } = await prepareTurn(runtime, connection, turns);
+    const { entry, sessionId, send } = await prepareTurn(runtime, connection, entries, turns);
 
     emit({ type: "stream-start", warnings: [] });
+
+    // The abort may have landed during initialization or the queue wait, i.e.
+    // BEFORE any prompt is in flight. `session/cancel` has nothing to cancel at
+    // that point, and letting the prompt through would run the whole agent loop
+    // (tools included) only to race a kill timer.
+    if (abortSignal?.aborted) {
+      finishCancelled();
+      return;
+    }
 
     let finish;
     runtime.active = {
       sessionId,
       text(delta) {
+        reply += delta;
         if (!lastTextId) {
           lastTextId = `text-${textId++}`;
           emit({ type: "text-start", id: lastTextId });
@@ -526,6 +657,12 @@ async function runTurn(runtime, { turns, controller, abortSignal }) {
 
     if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
     runtime.active = null;
+
+    // Record what we actually said. The next request replays the assistant
+    // history, and it is matched against this: a transcript whose assistant
+    // turns disagree with it belongs to a different conversation.
+    const replyText = reply.replace(SYSTEM_REMINDER, "").trim();
+    if (finish !== "cancelled" && replyText) entry.entries = entries.concat([{ role: "assistant", text: replyText }]);
 
     if (lastReasoningId) {
       emit({ type: "reasoning-end", id: lastReasoningId });
@@ -626,7 +763,7 @@ export function createPhantombot(settings = {}) {
       },
 
       async doStream(options) {
-        const { system, turns } = readPrompt(options?.prompt);
+        const { system, entries, turns } = readPrompt(options?.prompt);
         if (turns.length === 0) {
           return { stream: textOnlyStream("") };
         }
@@ -636,7 +773,7 @@ export function createPhantombot(settings = {}) {
         const abortSignal = options?.abortSignal;
         const stream = new ReadableStream({
           start(controller) {
-            void serialized(bound, () => runTurn(bound, { turns, controller, abortSignal }));
+            void serialized(bound, () => runTurn(bound, { entries, turns, controller, abortSignal }));
           },
           cancel() {
             const sessionId = bound.active?.sessionId;

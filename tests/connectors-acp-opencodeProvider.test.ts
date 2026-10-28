@@ -41,6 +41,8 @@ afterEach(() => {
   delete process.env.FAKE_ACP_LOG;
   delete process.env.FAKE_ACP_DELAY_MS;
   delete process.env.FAKE_ACP_DIE_ON_PROMPT;
+  delete process.env.FAKE_ACP_EXIT_AFTER_PROMPT;
+  delete process.env.FAKE_ACP_NO_LOAD_SESSION;
   try {
     rmSync(workDir, { recursive: true, force: true });
   } catch {
@@ -255,6 +257,139 @@ describe("opencode provider package", () => {
     expect(error).toBeDefined();
     expect(String(error.error.message)).toContain("phantombot acp install opencode");
   });
+
+  test("a transcript whose ASSISTANT history disagrees starts a new session", async () => {
+    const language = model("assistant-history");
+
+    await collect((await language.doStream({ prompt: [userTurn("hello")] })).stream);
+    // A different chat that opens with the same word but carries a reply this
+    // instance never produced: resuming would attach the private answer we DID
+    // produce to it, and the client would see history it never had.
+    await collect(
+      (
+        await language.doStream({
+          prompt: [
+            userTurn("hello"),
+            assistantTurn("A different answer from a different chat"),
+            userTurn("summarize MAPLE"),
+          ],
+        })
+      ).stream,
+    );
+
+    expect(events().filter((entry) => entry.event === "session/new").length).toBe(2);
+    expect(prompts()).toEqual([["hello"], ["summarize MAPLE"]]);
+  });
+
+  test("a matching assistant reply keeps the conversation in one session", async () => {
+    const language = model("assistant-match");
+
+    await collect((await language.doStream({ prompt: [userTurn("hello")] })).stream);
+    await collect(
+      (
+        await language.doStream({
+          prompt: [userTurn("hello"), assistantTurn("echo:hello"), userTurn("again")],
+        })
+      ).stream,
+    );
+
+    expect(events().filter((entry) => entry.event === "session/new").length).toBe(1);
+    expect(prompts()).toEqual([["hello"], ["again"]]);
+  });
+
+  test("a replaced child re-registers known sessions with session/load", async () => {
+    process.env.FAKE_ACP_EXIT_AFTER_PROMPT = "1";
+    const language = model("restorer");
+
+    await collect((await language.doStream({ prompt: [userTurn("first")] })).stream);
+    // Wait for the child to be gone before continuing, so the provider has to
+    // spawn a replacement for the second turn.
+    await Bun.sleep(200);
+
+    await collect(
+      (
+        await language.doStream({
+          prompt: [userTurn("first"), assistantTurn("echo:first"), userTurn("second")],
+        })
+      ).stream,
+    );
+
+    const loads = events().filter((entry) => entry.event === "session/load");
+    expect(loads.map((entry) => entry.sessionId)).toEqual(["session-1"]);
+    // No stale id ever reached the new child.
+    expect(events().filter((entry) => entry.event === "unknown-session")).toEqual([]);
+    const sessionIds = events()
+      .filter((entry) => entry.event === "prompt")
+      .map((entry) => entry.sessionId);
+    expect(sessionIds).toEqual(["session-1", "session-1"]);
+    expect(prompts()).toEqual([["first"], ["second"]]);
+  });
+
+  test("sessions are dropped, not reused, when the new child cannot load them", async () => {
+    process.env.FAKE_ACP_EXIT_AFTER_PROMPT = "1";
+    process.env.FAKE_ACP_NO_LOAD_SESSION = "1";
+    const language = model("no-loader");
+
+    await collect((await language.doStream({ prompt: [userTurn("first")] })).stream);
+    await Bun.sleep(200);
+
+    const parts = await collect(
+      (
+        await language.doStream({
+          prompt: [userTurn("first"), assistantTurn("echo:first"), userTurn("second")],
+        })
+      ).stream,
+    );
+
+    expect(events().filter((entry) => entry.event === "session/load")).toEqual([]);
+    expect(events().filter((entry) => entry.event === "unknown-session")).toEqual([]);
+    expect(events().filter((entry) => entry.event === "session/new").length).toBe(2);
+    expect(textOf(parts)).toBe("echo:second");
+  });
+
+  test("an already-aborted turn never reaches the child", async () => {
+    const language = model("pre-aborted");
+    const controller = new AbortController();
+    controller.abort();
+
+    const { stream } = await language.doStream({
+      prompt: [userTurn("DO NOT EXECUTE THIS")],
+      abortSignal: controller.signal,
+    });
+    const parts = await collect(stream);
+
+    // Nothing spawned, nothing sent: no process, no session, no prompt.
+    expect(events()).toEqual([]);
+    const finish = parts.at(-1)!;
+    expect(finish.type).toBe("finish");
+    expect(finish.finishReason.raw).toBe("cancelled");
+  });
+
+  test("a turn aborted while queued never reaches the child", async () => {
+    process.env.FAKE_ACP_DELAY_MS = "400";
+    const language = model("queued-abort");
+
+    const first = collect((await language.doStream({ prompt: [userTurn("first")] })).stream);
+    const controller = new AbortController();
+    const { stream } = await language.doStream({
+      prompt: [userTurn("first"), assistantTurn("echo:first"), userTurn("queued turn")],
+      abortSignal: controller.signal,
+    });
+    const queued = collect(stream);
+
+    await Bun.sleep(50);
+    controller.abort();
+
+    await first;
+    const parts = await queued;
+
+    // Only the first turn was ever sent; the aborted one must not run the agent loop.
+    expect(prompts()).toEqual([["first"]]);
+    expect(events().some((entry) => entry.event === "cancel")).toBe(false);
+    const finish = parts.at(-1)!;
+    expect(finish.type).toBe("finish");
+    expect(finish.finishReason.raw).toBe("cancelled");
+  }, 15_000);
 
   test("doGenerate folds the stream into content", async () => {
     const language = model("generator");
