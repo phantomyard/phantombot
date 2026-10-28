@@ -269,6 +269,7 @@ describe("cache-friendly prompt layout", () => {
       expect(DEFAULT_PROMPT_CACHE.enabled).toBe(false);
       await collect(
         runTurn({
+          screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
           persona: "phantom",
           conversation: "cli:default",
           userMessage: "current off",
@@ -286,6 +287,7 @@ describe("cache-friendly prompt layout", () => {
 
       await collect(
         runTurn({
+          screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
           persona: "phantom",
           conversation: "cli:default",
           userMessage: "current on",
@@ -381,6 +383,7 @@ describe("cache-friendly prompt layout", () => {
         }
         await collect(
           runTurn({
+            screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
             persona: "phantom",
             conversation: "cli:prepare-error",
             userMessage: "seed",
@@ -395,6 +398,7 @@ describe("cache-friendly prompt layout", () => {
         );
         await collect(
           runTurn({
+            screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
             persona: "phantom",
             conversation: "cli:prepare-error",
             userMessage: "seed",
@@ -412,6 +416,7 @@ describe("cache-friendly prompt layout", () => {
         state!.epochTurns = [{}];
         await collect(
           runTurn({
+            screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
             persona: "phantom",
             conversation: "cli:prepare-error",
             userMessage: "current user secret",
@@ -428,6 +433,7 @@ describe("cache-friendly prompt layout", () => {
         );
         await collect(
           runTurn({
+            screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
             persona: "phantom",
             conversation: "cli:prepare-error",
             userMessage: "current user secret",
@@ -551,6 +557,7 @@ describe("cache-friendly prompt layout", () => {
         await writeFile(join(agentDir, "BOOT.md"), "# PhantomBot", "utf8");
         await collect(
           runTurn({
+            screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
             persona: "phantom",
             conversation: "cli:complete-error",
             userMessage: "current user secret",
@@ -602,6 +609,7 @@ describe("cache-friendly prompt layout", () => {
         await writeFile(join(agentDir, "BOOT.md"), "# PhantomBot", "utf8");
         await collect(
           runTurn({
+            screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
             persona: "phantom",
             conversation: "cli:fail-error",
             userMessage: "failed user secret",

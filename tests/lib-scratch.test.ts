@@ -390,6 +390,7 @@ describe("runTurn integration", () => {
           harnesses: [harness],
           idleTimeoutMs: 1_000,
           trusted: false,
+          screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
         }),
       );
       const req = harness.captured!;
