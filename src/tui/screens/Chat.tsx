@@ -43,7 +43,7 @@ import { useElapsedSeconds, useSpinnerFrame } from "../components/Spinner.tsx";
 import { badge, humanDuration, theme } from "../theme.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { rawKeyFeed } from "../stdinTap.ts";
-import { frameChromeRows } from "../chrome.ts";
+import { frameChromeColumns, frameChromeRows } from "../chrome.ts";
 import {
   ROW_INDENT,
   minTerminalColumns,
@@ -221,12 +221,15 @@ function Activity(props: {
   const frame = useSpinnerFrame(true);
   const seconds = useElapsedSeconds(props.since);
   return (
-    <Box paddingX={1}>
+    // One row, budgeted as one in CHAT_CHROME_ROWS: cut, never wrapped.
+    <Box paddingX={1} height={1} flexShrink={0} overflow="hidden">
       <Text color={theme.accent}>{frame} </Text>
-      <Text color={theme.dim}>{props.note}</Text>
-      <Text color={theme.dim}>{` · ${seconds}s`}</Text>
+      <Text color={theme.dim} wrap="truncate">{props.note}</Text>
+      <Box flexShrink={0}>
+        <Text color={theme.dim}>{` · ${seconds}s`}</Text>
+      </Box>
       <Box flexGrow={1} />
-      <Text color={theme.dim}>ctrl+c interrupts</Text>
+      <Text color={theme.dim} wrap="truncate">ctrl+c interrupts</Text>
     </Box>
   );
 }
@@ -590,7 +593,9 @@ export function ChatScreen(props: {
   // constant assumes ONE input row; every extra wrapped row is paid for by
   // the transcript in the same render, so a long prompt shrinks the scroll
   // region instead of pushing the footer off the screen.
-  promptWidthRef.current = Math.max(8, size.columns - 4);
+  // Frame chrome plus the strip's own paddingX={1}: `columns - 4` was right
+  // for the bare frame only, and wrapped the boxed prompt two columns late.
+  promptWidthRef.current = Math.max(8, size.columns - frameChromeColumns() - 2);
   const inputRows = promptRows(
     input.text,
     input.cursor,
@@ -693,11 +698,14 @@ export function ChatScreen(props: {
       )}
       {hints.length > 0 ? (
         <Box flexDirection="column" paddingX={2}>
+          {/* Each hint is budgeted as ONE row (hints.length above). */}
           {hints.map((hint) => (
-            <Text key={hint.name} color={theme.dim}>
-              <Text color={theme.accent}>{`/${hint.name}`}</Text>
-              {`  ${hint.description}`}
-            </Text>
+            <Box key={hint.name} height={1} flexShrink={0} overflow="hidden">
+              <Text color={theme.dim} wrap="truncate">
+                <Text color={theme.accent}>{`/${hint.name}`}</Text>
+                {`  ${hint.description}`}
+              </Text>
+            </Box>
           ))}
         </Box>
       ) : null}
