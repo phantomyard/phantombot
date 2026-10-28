@@ -18,6 +18,7 @@ import {
   type TranscriptLine,
 } from "../src/tui/transcript.ts";
 import { textWidth } from "../src/tui/markdown.ts";
+import { minTerminalColumns, rowColumns, rowWidth } from "../src/tui/transcript.ts";
 import { frameChromeColumns, type FrameVariant } from "../src/tui/chrome.ts";
 import type { ChatMessage, ChatMessagePart } from "../src/tui/chatSession.ts";
 
@@ -132,6 +133,49 @@ describe("the row invariant: a row of transcript is a row on screen", () => {
           variant,
           columns,
           widest: Math.min(Math.max(...widths), columns),
+        });
+      }
+    }
+  });
+});
+
+/**
+ * The invariant for EVERY row kind at once: `rowWidth(row) <= rowColumns`.
+ * `transcriptLines` throws under test when it breaks, so this is the test that
+ * fails first when a new row kind or markdown block stops fitting — rather
+ * than the box in `Chat.tsx` silently cutting text off in production.
+ */
+describe("every row kind fits its row box", () => {
+  const everything = [
+    "# A heading long enough to need wrapping at every width we try here",
+    "Plain text with `inline code`, **bold**, a very-long-unbreakable-identifier-that-has-to-hard-split and \u6f22\u5b57\u6f22\u5b57 wide glyphs.",
+    "- a list\n  - nested\n    - deeper still, with enough words to wrap twice over\n1. numbered",
+    "> a quote that also goes on long enough to wrap onto a second row",
+    "```ts\nconst x = \"a code line that is definitely wider than any narrow terminal\";\n```",
+    "| col a | col b | col c |\n|---|---|---|\n| one | two two two two | three three three three |",
+    "---",
+  ].join("\n\n");
+  const conversation: ChatMessage[] = [
+    user("a user line \u6f22".repeat(12)),
+    msg(everything, [`Bash(${"x".repeat(160)})`]),
+    failed("Error: " + "stack ".repeat(40)),
+    { role: "assistant", text: "", at: 0, parts: [{ kind: "text", text: everything }] },
+  ];
+  test("at every width from the minimum up, in both frames", () => {
+    for (const variant of ["bare", "boxed"] as const) {
+      for (let columns = minTerminalColumns(variant); columns <= 130; columns += 7) {
+        const lines = withFrame(variant, () =>
+          transcriptLines(conversation, columns, {
+            ...options,
+            personaName: "a-persona-name-far-longer-than-any-header-row",
+          }),
+        );
+        const box = rowColumns(columns, variant);
+        const widest = Math.max(...lines.map(rowWidth));
+        expect({ variant, columns, widest: Math.min(widest, box) }).toEqual({
+          variant,
+          columns,
+          widest,
         });
       }
     }

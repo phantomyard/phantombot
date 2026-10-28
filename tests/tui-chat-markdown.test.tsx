@@ -50,14 +50,18 @@ function fakeStdin() {
  * line, but a reply taller than the window scrolls that out of view, and
  * waiting for it would time out and hand back whatever frame came last.
  */
-async function frameFor(text: string, ready = "go on then"): Promise<string> {
+async function frameFor(
+  text: string,
+  ready = "go on then",
+  columns = COLUMNS,
+): Promise<string> {
   const frames: string[] = [];
   const stdout = new EventEmitter() as EventEmitter & {
     columns: number;
     rows: number;
     write: (c: string) => void;
   };
-  stdout.columns = COLUMNS;
+  stdout.columns = columns;
   stdout.rows = ROWS;
   stdout.write = (c: string) => void frames.push(c);
   const history: ChatMessage[] = [
@@ -85,7 +89,7 @@ async function frameFor(text: string, ready = "go on then"): Promise<string> {
   // and the second is COLUMNS, so every width assertion here compared a
   // layout against a screen it was never computed for.
   const instance = render(
-    <TerminalSizeContext.Provider value={{ rows: ROWS, columns: COLUMNS }}>
+    <TerminalSizeContext.Provider value={{ rows: ROWS, columns }}>
       <ChatScreen
         session={session}
         status="claude"
@@ -160,5 +164,16 @@ describe("a rendered reply", () => {
     // chrome off screen — the footer must still be the last thing rendered.
     const nonEmpty = frame.split("\n").filter((l) => l.trim().length > 0);
     expect(nonEmpty.slice(-2).join(" ")).toContain("Send");
+  });
+
+  /**
+   * Below the width a body can be wrapped to, rows would have to overhang the
+   * window. The screen says so instead of drawing a transcript it cannot fit.
+   */
+  test("a terminal narrower than the minimum shows a notice, not rows", async () => {
+    const frame = await frameFor("a reply nobody can read here", "narrow", 22);
+    expect(frame).toContain("narrow");
+    expect(frame).not.toContain("a reply");
+    expect(frame).not.toContain("go on then");
   });
 });
