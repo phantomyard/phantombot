@@ -126,6 +126,19 @@ export function embeddedPiCommand(
 }
 
 /**
+ * The inline extensions the embedded pi runs with. The escort extension is
+ * THE enforcement point of the escort for `native` (issue #702): it is inert
+ * unless the harness set an escort context in this process's env. Kept as a
+ * function so tests pin that runEmbeddedPi registers it.
+ */
+export function embeddedPiExtensionFactories(): Array<(pi: never) => unknown> {
+  return [
+    phantombotAttributionExtension as never,
+    ((pi: ToolCallHookApi) => phantombotEscortExtension(pi)) as never,
+  ];
+}
+
+/**
  * The argv prefix that re-enters THIS phantombot (no subcommand): the binary
  * itself when compiled, `bun <entry>` from source. The escort's claude hook
  * runs `<this> __escort` (lib/escort.ts).
@@ -318,12 +331,7 @@ export async function runEmbeddedPi(args: string[]): Promise<void> {
   const { main } = await piDistModule("main.js");
   setupCli();
   await main(args, {
-    // The escort extension is inert unless the harness set an escort context
-    // in this process's env (an escorted, judge-passed untrusted turn).
-    extensionFactories: [
-      phantombotAttributionExtension as never,
-      ((pi: ToolCallHookApi) => phantombotEscortExtension(pi)) as never,
-    ],
+    extensionFactories: embeddedPiExtensionFactories() as never[],
   });
 }
 

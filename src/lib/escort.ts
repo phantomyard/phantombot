@@ -59,10 +59,17 @@ export const ESCORT_SUBCOMMAND = "__escort";
  * Cap on the task text carried in the context. The context rides in an
  * environment variable, and the whole environment block on Windows is 32K
  * characters, so the task is a summary-sized slice, not the full message.
+ * KNOWN LIMIT: on a longer message the escort judges actions against the
+ * first 2 KB only, so an action asked for past the cut reads as unsupported
+ * and is refused — the safe direction (docs/concepts/decision-model.md).
  */
 export const ESCORT_TASK_CAP_BYTES = 2 * 1024;
 
-/** Cap on the serialized tool input shown to the decision model. */
+/**
+ * Cap on the rendered action (tool name + serialized input). An action over
+ * the cap is REFUSED without asking the decision model, never cut: a cut
+ * action is judged on its head while its tail is what runs.
+ */
 export const ESCORT_ACTION_CAP_BYTES = 8 * 1024;
 
 /**
@@ -183,8 +190,13 @@ function stripMarkers(s: string): string {
   return s.replace(/<\/?(?:task|proposed_action)>/gi, "[marker removed]");
 }
 
-/** Render the action for the decision model (capped, never throws). */
-function renderAction(action: EscortAction): string {
+/**
+ * Render the action for the decision model (never throws). Returns undefined
+ * when the rendered action does not fit ESCORT_ACTION_CAP_BYTES: a cut action
+ * would be judged on its head while its tail runs, so the escort refuses it
+ * outright instead (an action that large is never something a task needs).
+ */
+function renderAction(action: EscortAction): string | undefined {
   let input: string;
   try {
     input = typeof action.input === "string"
@@ -193,7 +205,9 @@ function renderAction(action: EscortAction): string {
   } catch {
     input = String(action.input);
   }
-  return capPayloadUtf8(`tool: ${action.tool}\ninput:\n${input}`, ESCORT_ACTION_CAP_BYTES);
+  const rendered = `tool: ${action.tool}\ninput:\n${input}`;
+  if (Buffer.byteLength(rendered, "utf8") > ESCORT_ACTION_CAP_BYTES) return undefined;
+  return rendered;
 }
 
 /**
@@ -214,9 +228,16 @@ export async function escortCheck(
     if (!apiKey) {
       return { allow: false, reason: `the decision-model key (${ctx.keyEnv}) is not available` };
     }
+    const rendered = renderAction(action);
+    if (rendered === undefined) {
+      return {
+        allow: false,
+        reason: `the action is larger than the escort can check (${ESCORT_ACTION_CAP_BYTES} bytes)`,
+      };
+    }
     const state = wrapJudgeContent(
       `<task>\n${stripMarkers(ctx.task)}\n</task>\n` +
-        `<proposed_action>\n${stripMarkers(renderAction(action))}\n</proposed_action>`,
+        `<proposed_action>\n${stripMarkers(rendered)}\n</proposed_action>`,
     );
     const decision = await decisionModelDecide({
       baseUrl: ctx.baseUrl,
@@ -346,13 +367,27 @@ export async function runEscortHook(
   }
 }
 
-/** Quote one argv word for the hook's shell command line (sh and cmd). */
+/**
+ * Quote one argv word for the hook's command line, POSIX-sh style (escapes
+ * `"`, `\\`, `$` and backtick inside double quotes). Claude Code runs hook
+ * commands through a POSIX shell; this is NOT cmd.exe quoting.
+ */
 function quoteArg(s: string): string {
   return `"${s.replace(/(["\\$`])/g, "\\$1")}"`;
 }
 
 /**
- * The claude settings fragment that runs the escort before EVERY tool call
+ * The claude settings fragment for an escorted turn: the escort hook plus
+ * `disableAllHooks: false`, so an operator-level `disableAllHooks: true` in
+ * ~/.claude/settings.json cannot switch the escort off (the CLI --settings
+ * source outranks the user file). Spread into the --settings object.
+ */
+export function claudeEscortSettings(command: string[]): Record<string, unknown> {
+  return { disableAllHooks: false, hooks: claudeEscortHooks(command) };
+}
+
+/**
+ * The claude hooks object that runs the escort before EVERY tool call
  * (no matcher = all tools, MCP included). `command` is the argv prefix that
  * re-enters this binary — the same self-exec shape as the embedded pi.
  */

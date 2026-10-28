@@ -11,6 +11,7 @@ import { describe, expect, it } from "bun:test";
 import {
   applyEscortEnv,
   claudeEscortHooks,
+  claudeEscortSettings,
   ENV_PHANTOMBOT_ESCORT,
   ESCORT_ACTION_CAP_BYTES,
   ESCORT_TASK_CAP_BYTES,
@@ -147,14 +148,29 @@ describe("escortCheck", () => {
     expect(state.match(/<proposed_action>/g)).toHaveLength(1);
   });
 
-  it("caps an oversized tool input", async () => {
+  it("refuses an oversized action outright — never judges a cut head", async () => {
+    // Even a model that would score it benign is never asked: a cut action is
+    // judged on its head while its tail is what runs (PR #706 review).
     const { fetchImpl, seen } = stubFetch(0);
-    await escortCheck(
+    const d = await escortCheck(
       CTX,
-      { tool: "write", input: { content: "y".repeat(ESCORT_ACTION_CAP_BYTES * 4) } },
+      { tool: "bash", input: { command: `: '${"x".repeat(ESCORT_ACTION_CAP_BYTES)}' ; printf reached > /tmp/m` } },
       { env: ENV, fetchImpl },
     );
-    expect(String(seen.body?.state).length).toBeLessThan(ESCORT_ACTION_CAP_BYTES * 2);
+    expect(d.allow).toBe(false);
+    if (!d.allow) expect(d.reason).toContain("larger than the escort can check");
+    expect(seen.calls).toBe(0);
+  });
+
+  it("still asks about an action just under the cap", async () => {
+    const { fetchImpl, seen } = stubFetch(0);
+    const d = await escortCheck(
+      CTX,
+      { tool: "write", input: "y".repeat(ESCORT_ACTION_CAP_BYTES - 64) },
+      { env: ENV, fetchImpl },
+    );
+    expect(d.allow).toBe(true);
+    expect(seen.calls).toBe(1);
   });
 });
 
@@ -256,5 +272,13 @@ describe("claudeEscortHooks", () => {
     expect(h.type).toBe("command");
     expect(h.command).toBe('"/opt/my bin/phantombot" "__escort"');
     expect(h.timeout).toBeGreaterThan(30);
+  });
+});
+
+describe("claudeEscortSettings", () => {
+  it("pins disableAllHooks false so a user-level switch cannot drop the escort", () => {
+    const s = claudeEscortSettings(["/bin/phantombot"]);
+    expect(s.disableAllHooks).toBe(false);
+    expect(s.hooks).toEqual(claudeEscortHooks(["/bin/phantombot"]));
   });
 });

@@ -1155,6 +1155,8 @@ describe("ClaudeHarness escort", () => {
     const argv = await run("argv", { escort: ESCORT });
     expect(argv).toContain("PreToolUse");
     expect(argv).toContain("__escort");
+    // A user-level `disableAllHooks: true` cannot switch the escort off.
+    expect(argv).toContain('"disableAllHooks":false');
     // The baseline policy still rides along.
     expect(argv).toContain("CronCreate");
   });
@@ -1163,6 +1165,7 @@ describe("ClaudeHarness escort", () => {
     const argv = await run("argv", {});
     expect(argv).not.toContain("PreToolUse");
     expect(argv).not.toContain("__escort");
+    expect(argv).not.toContain("disableAllHooks");
   });
 
   test("the context reaches the env only when escorted, and an inherited one is cleared", async () => {

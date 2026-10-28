@@ -22,8 +22,10 @@
  *   - Non-recursive: a single runWithFallback pass. If it also fails we
  *     return undefined and the caller stays silent — the original
  *     diagnostic is already in the journal via the orchestrator's logs.
- *   - Tool-free by instruction: the prompt forbids tools, so recovery
- *     won't re-trigger the same wedged call.
+ *   - Tool-free STRUCTURALLY: toolsMode "none" + mcpMode "none", not just
+ *     the prompt. Recovery re-feeds the same (possibly untrusted) message to
+ *     a fresh run that has no escort (issue #702), so it must not be able to
+ *     act — only write the snag note.
  */
 
 import { homedir } from "node:os";
@@ -102,6 +104,8 @@ export async function generateRecoveryReply(
         workingDir: input.workingDir ?? homedir(),
         idleTimeoutMs: RECOVERY_IDLE_TIMEOUT_MS,
         hardTimeoutMs: RECOVERY_HARD_TIMEOUT_MS,
+        toolsMode: "none",
+        mcpMode: "none",
         signal: input.signal,
       },
       // Fresh cooldown state: the failed turn just marked harnesses down,

@@ -58,7 +58,7 @@ import { buildToolCall } from "./toolNote.ts";
 import { DEFAULT_REASONING_REPLAY, type ParseEventResult, type ReasoningReplayConfig } from "./reasoningReplay.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
 import { harnessSpawnEnv } from "../lib/vault.ts";
-import { applyEscortEnv, claudeEscortHooks } from "../lib/escort.ts";
+import { applyEscortEnv, claudeEscortSettings } from "../lib/escort.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 import {
   type HarnessActivity,
@@ -394,7 +394,7 @@ export class ClaudeHarness implements Harness {
         escorted
           ? {
               ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
-              hooks: claudeEscortHooks(phantombotSelfCommand()),
+              ...claudeEscortSettings(phantombotSelfCommand()),
             }
           : PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
       ),

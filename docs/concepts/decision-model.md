@@ -62,6 +62,29 @@ and a host `pi` are skipped for that turn; if nothing is left, the request is
 held. Trusted turns are never escorted, and without a decision model nothing
 changes.
 
+An action too large to show the decision model whole (over 8 KB rendered) is
+refused without asking — it is never judged on a cut-off head. The `claude`
+escort settings pin `disableAllHooks: false`, so a user-level setting cannot
+switch the hook off.
+
+Known limits:
+
+- **The task is capped at 2 KB.** On a longer message the escort judges
+  actions against its first 2 KB; an action only the tail asks for reads as
+  unsupported and is refused (the safe direction, but a false hold).
+- **The claude hook is a process.** Inside it every failure blocks (exit 2),
+  but if Claude Code cannot spawn it at all (binary moved, `bun` missing) or
+  kills it at its 60 s timeout, Claude Code treats that as a non-blocking hook
+  error and the call runs. The decision itself is bounded well inside that
+  (`[jev.judge] timeout_ms`, capped at 30 s), but a badly loaded host eats the
+  margin.
+- **Cost and latency.** One decision-model request per tool call, each up to
+  `[jev.judge] timeout_ms`: a tool-heavy turn adds tens of requests and can add
+  tens of seconds. A provider rate limit refuses every call until it clears.
+- **The no-escort-harness hold is not surfaced.** When no harness in the chain
+  can run an escorted turn, the turn is held with an error in the log and no
+  notification — check the chain (`claude` or `native` must be in it).
+
 ## Provider boundary
 
 Built-in transports know their endpoint. A custom provider must declare an
