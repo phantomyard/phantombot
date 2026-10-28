@@ -67,6 +67,19 @@ import { spawn } from "node:child_process";
 /** Binary spawned when the install did not bake an absolute path in. */
 const DEFAULT_COMMAND = "phantombot";
 
+/**
+ * Default argv for the child.
+ *
+ * The `--persona=<id>` SINGLE-ARGUMENT form is load-bearing: Phantombot's CLI
+ * (citty) parses the spaced pair `--persona <id>` as the option plus a COMMAND
+ * name, so `phantombot acp --persona omar` dies with
+ * `Unknown command 'omar'` and every turn in OpenCode fails before
+ * `initialize`. Do not "tidy" this into two array entries.
+ */
+function defaultArgs(persona) {
+  return ["acp", `--persona=${persona}`];
+}
+
 /** A Phantombot turn can legitimately run for many minutes; only bound the setup. */
 const INIT_TIMEOUT_MS = 60_000;
 const PROMPT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
@@ -343,36 +356,31 @@ function sameEntry(a, b) {
 }
 
 /**
- * Does `supplied` continue — or retry the tail of — the transcript `stored`?
+ * Does `supplied` extend the transcript `stored`?
  *
  * The whole prior transcript is compared, role included, not just the user
- * turns. Two shapes qualify:
+ * turns, and `supplied` must reach at least as far as `stored`:
  *
- *   1. `supplied` extends `stored` (every stored entry appears verbatim at the
- *      same index). The extra entries are the turns to send. This is the normal
- *      continuation, and also a byte-identical replay.
- *   2. `supplied` stops exactly one entry short of `stored`, at a user turn, and
- *      the omitted entry is the assistant reply this instance produced — the
- *      client re-asking the same question. That reply is regenerated, so it is
- *      not required to be echoed back.
+ *   - every stored entry must appear verbatim at the same index;
+ *   - the extra entries are the turns to send.
  *
- * Anything else — an edited turn, a different opening, or an assistant reply
- * that contradicts what we actually wrote — is a DIFFERENT conversation. It gets
- * a fresh session, so a private answer can never be attached to a transcript
- * that visibly disagrees with it.
+ * A byte-identical replay qualifies too (it sends the trailing turn again).
+ *
+ * Everything else is a DIFFERENT conversation and gets a fresh session. That
+ * includes the tempting case — `supplied` stopping one entry short of `stored`,
+ * at the user turn whose answer `stored` holds — because a retry and a second
+ * chat that opens with the same words are the SAME request on the wire. Resuming
+ * on that shape is what lets chat B be answered inside chat A's context and walk
+ * away with A's private reply; a fresh session costs a retried turn its context,
+ * which is recoverable, while the leak is not.
  */
 function continuesConversation(stored, supplied) {
   if (stored.length === 0 || supplied.length === 0) return false;
-  const overlap = Math.min(stored.length, supplied.length);
-  for (let index = 0; index < overlap; index += 1) {
+  if (supplied.length < stored.length) return false;
+  for (let index = 0; index < stored.length; index += 1) {
     if (!sameEntry(stored[index], supplied[index])) return false;
   }
-  if (supplied.length >= stored.length) return true;
-  return (
-    stored.length === supplied.length + 1 &&
-    stored[stored.length - 1].role === "assistant" &&
-    supplied[supplied.length - 1].role === "user"
-  );
+  return true;
 }
 
 /**
@@ -422,7 +430,7 @@ async function ensureConnection(runtime) {
     await runtime.initialized;
     return runtime.connection;
   }
-  const args = runtime.baseArgs ?? ["acp", "--persona", runtime.persona];
+  const args = runtime.baseArgs ?? defaultArgs(runtime.persona);
   const connection = new AcpConnection({ command: runtime.command, args, cwd: runtime.cwd });
   connection.onNotification = (message) => {
     if (!message || message.method !== "session/update") return;
@@ -520,8 +528,9 @@ async function prepareTurn(runtime, connection, entries, turns) {
     known.entries = entries.slice();
     known.touched = Date.now();
     const send = pending.filter((entry) => entry.role === "user").map((entry) => entry.text);
-    // A retry of the very same turn replays nothing new; answer it again rather
-    // than returning an empty turn.
+    // A byte-identical replay (the client re-sending the whole transcript) has
+    // nothing new in it; answer the last turn again rather than returning an
+    // empty reply.
     return { entry: known, sessionId: known.sessionId, send: send.length > 0 ? send : [turns[turns.length - 1]] };
   }
 
@@ -732,6 +741,33 @@ export function createPhantombot(settings = {}) {
     }
     const bound = runtime;
 
+    /**
+     * The one place a request turns into an ACP turn. Defined as a local
+     * function, not a method: `doGenerate` folds the same stream, and reaching
+     * for `this.doStream` would break the moment either is detached or called
+     * with a different receiver.
+     */
+    const doStream = async (options) => {
+      const { system, entries, turns } = readPrompt(options?.prompt);
+      if (turns.length === 0) {
+        return { stream: textOnlyStream("") };
+      }
+      if (isTitleRequest(system, turns)) {
+        return { stream: textOnlyStream(localTitle(turns)) };
+      }
+      const abortSignal = options?.abortSignal;
+      const stream = new ReadableStream({
+        start(controller) {
+          void serialized(bound, () => runTurn(bound, { entries, turns, controller, abortSignal }));
+        },
+        cancel() {
+          const sessionId = bound.active?.sessionId;
+          if (sessionId) bound.connection?.notify("session/cancel", { sessionId });
+        },
+      });
+      return { stream };
+    };
+
     return {
       specificationVersion: "v3",
       provider: "phantombot",
@@ -739,7 +775,7 @@ export function createPhantombot(settings = {}) {
       supportedUrls: {},
 
       async doGenerate(options) {
-        const { stream } = await this.doStream(options);
+        const { stream } = await doStream(options);
         const reader = stream.getReader();
         let text = "";
         let reasoning = "";
@@ -762,26 +798,7 @@ export function createPhantombot(settings = {}) {
         return { content, finishReason, usage: { inputTokens: { total: 0 }, outputTokens: { total: 0 } }, warnings: [] };
       },
 
-      async doStream(options) {
-        const { system, entries, turns } = readPrompt(options?.prompt);
-        if (turns.length === 0) {
-          return { stream: textOnlyStream("") };
-        }
-        if (isTitleRequest(system, turns)) {
-          return { stream: textOnlyStream(localTitle(turns)) };
-        }
-        const abortSignal = options?.abortSignal;
-        const stream = new ReadableStream({
-          start(controller) {
-            void serialized(bound, () => runTurn(bound, { entries, turns, controller, abortSignal }));
-          },
-          cancel() {
-            const sessionId = bound.active?.sessionId;
-            if (sessionId) bound.connection?.notify("session/cancel", { sessionId });
-          },
-        });
-        return { stream };
-      },
+      doStream,
     };
   }
 

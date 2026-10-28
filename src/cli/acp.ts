@@ -129,7 +129,7 @@ const installOpencodeCmd = defineCommand({
     const personas = personaModelNames(personasDir).filter(
       (name) => only === undefined || name === only,
     );
-    const result = installOpencode({ binaryPath: process.execPath, personas });
+    const result = installOpencode({ binaryPath: process.execPath, personas, requestedPersona: only });
     printOpencodeInstall(result, process.stdout, process.stderr);
     // Same event-loop caveat as installZed: importing the ACP server keeps the
     // loop open, so force a clean exit once the write is done.

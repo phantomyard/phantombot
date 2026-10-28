@@ -153,6 +153,23 @@ describe("installOpencode", () => {
     expect(fs.writes).toEqual([]);
   });
 
+  test("an explicit --persona that matches nothing fails instead of writing an empty models map", () => {
+    const fs = fakeFs({}, ["/home/tester/.config/opencode"]);
+    const result = installOpencode({
+      binaryPath: "/usr/local/bin/phantombot",
+      personas: [],
+      requestedPersona: "typo",
+      deps: fs.deps,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.action).toBe("error");
+    expect(result.message).toContain('no persona named "typo"');
+    // Nothing staged, no config written: exit 0 with models:{} would tell the
+    // user the install worked while OpenCode offers no PhantomBot model.
+    expect(fs.writes).toEqual([]);
+  });
+
   test("registers a fresh config, staging the module first", () => {
     const fs = fakeFs({}, ["/home/tester/.config/opencode"]);
     const result = installOpencode({

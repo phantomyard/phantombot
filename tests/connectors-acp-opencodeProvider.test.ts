@@ -14,7 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -35,10 +35,12 @@ let workDir = "";
 beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), "pb-opencode-provider-"));
   process.env.FAKE_ACP_LOG = join(workDir, "acp.jsonl");
+  process.env.FAKE_ACP_ARGV_LOG = join(workDir, "argv.json");
 });
 
 afterEach(() => {
   delete process.env.FAKE_ACP_LOG;
+  delete process.env.FAKE_ACP_ARGV_LOG;
   delete process.env.FAKE_ACP_DELAY_MS;
   delete process.env.FAKE_ACP_DIE_ON_PROMPT;
   delete process.env.FAKE_ACP_EXIT_AFTER_PROMPT;
@@ -74,6 +76,32 @@ function model(persona: string, extra: Record<string, unknown> = {}) {
     ...extra,
   });
   return provider.languageModel(persona);
+}
+
+/**
+ * A model whose child is a SHIM that records its argv and then hands the same
+ * stdin/stdout to the fake agent — the only way to observe the DEFAULT argv,
+ * because `args` in these tests normally replaces it with the fixture path.
+ */
+function shimModel(persona: string, extra: Record<string, unknown> = {}) {
+  const shimPath = join(workDir, "argv-shim.mjs");
+  writeFileSync(
+    shimPath,
+    [
+      `#!${process.execPath}`,
+      'import { writeFileSync } from "node:fs";',
+      'writeFileSync(process.env.FAKE_ACP_ARGV_LOG, JSON.stringify(process.argv.slice(2)));',
+      `await import(${JSON.stringify(pathToFileURL(fixturePath).href)});`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const provider = createPhantombot({ command: shimPath, ...extra });
+  return provider.languageModel(persona);
+}
+
+function spawnedArgv(): string[] {
+  return JSON.parse(readFileSync(process.env.FAKE_ACP_ARGV_LOG!, "utf8"));
 }
 
 function userTurn(text: string) {
@@ -390,6 +418,51 @@ describe("opencode provider package", () => {
     expect(finish.type).toBe("finish");
     expect(finish.finishReason.raw).toBe("cancelled");
   }, 15_000);
+
+  test("a second chat with an identical opening starts a new session", async () => {
+    const language = model("same-opening");
+
+    await collect((await language.doStream({ prompt: [userTurn("Hello")] })).stream);
+    // Chat B opens with the same word. The wire cannot tell this apart from a
+    // retry of chat A's first turn, so the only safe reading is a new thread:
+    // resuming would answer B inside A's context.
+    await collect((await language.doStream({ prompt: [userTurn("Hello")] })).stream);
+
+    expect(events().filter((entry) => entry.event === "session/new").length).toBe(2);
+    expect(prompts()).toEqual([["Hello"], ["Hello"]]);
+  });
+
+  test("spawns the CLI with the `--persona=` form its arg parser accepts", async () => {
+    const language = shimModel("argv-form");
+    await collect((await language.doStream({ prompt: [userTurn("hi")] })).stream);
+
+    // ONE argv entry: the spaced pair is parsed as an unknown COMMAND by citty,
+    // so `phantombot acp --persona <id>` never starts a turn for a real user.
+    expect(spawnedArgv()).toEqual(["acp", "--persona=argv-form"]);
+  });
+
+  test("explicit args override the default argv", async () => {
+    const language = shimModel("argv-override", { args: ["acp", "--persona=explicit"] });
+    await collect((await language.doStream({ prompt: [userTurn("hi")] })).stream);
+
+    expect(spawnedArgv()).toEqual(["acp", "--persona=explicit"]);
+  });
+
+  test("the real CLI accepts the argv the provider builds", async () => {
+    // Pins the OTHER half of the contract: the form above parses. Uses the
+    // installed binary when there is one, and is skipped otherwise.
+    const binary = Bun.which("phantombot");
+    if (!binary) return;
+    const child = Bun.spawnSync({
+      cmd: [binary, "acp", "--persona=argv-form"],
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 20_000,
+    });
+    const stderr = child.stderr.toString();
+    expect(stderr).not.toContain("Unknown command");
+  }, 30_000);
 
   test("doGenerate folds the stream into content", async () => {
     const language = model("generator");

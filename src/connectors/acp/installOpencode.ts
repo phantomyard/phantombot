@@ -145,6 +145,12 @@ export interface InstallOpencodeOptions {
   binaryPath: string;
   /** Personas to expose as models. Empty ⇒ the caller supplies none; we still write the provider. */
   personas?: string[];
+  /**
+   * The persona the user explicitly asked for, if any. Recorded separately so an
+   * id that matches nothing is a hard error: writing `models: {}` and exiting 0
+   * tells the user the install worked while OpenCode shows no PhantomBot model.
+   */
+  requestedPersona?: string;
   /** Override the config file (tests). */
   configPath?: string;
   /** Override the staged module path (tests). */
@@ -347,6 +353,17 @@ export function installOpencode(options: InstallOpencodeOptions): InstallOpencod
         configPath: "",
         modulePath,
         message: "OpenCode not detected (no config directory and no `opencode` CLI on PATH)",
+      };
+    }
+
+    if (options.requestedPersona !== undefined && !(options.personas ?? []).includes(options.requestedPersona)) {
+      const available = (options.personas ?? []).join(", ") || "none";
+      return {
+        code: 1,
+        action: "error",
+        configPath,
+        modulePath,
+        message: `no persona named "${options.requestedPersona}" (available: ${available}) — nothing written`,
       };
     }
 
