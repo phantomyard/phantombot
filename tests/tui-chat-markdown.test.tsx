@@ -54,6 +54,7 @@ async function frameFor(
   text: string,
   ready = "go on then",
   columns = COLUMNS,
+  status = "claude",
 ): Promise<string> {
   const frames: string[] = [];
   const stdout = new EventEmitter() as EventEmitter & {
@@ -92,7 +93,7 @@ async function frameFor(
     <TerminalSizeContext.Provider value={{ rows: ROWS, columns }}>
       <ChatScreen
         session={session}
-        status="claude"
+        status={status}
         onSettings={() => {}}
         onQuit={() => {}}
       />
@@ -176,4 +177,45 @@ describe("a rendered reply", () => {
     expect(frame).not.toContain("a reply");
     expect(frame).not.toContain("go on then");
   });
+
+  /**
+   * The chrome is part of the row invariant too. The screen budgets ONE row
+   * for the header and ONE for the footer (CHAT_CHROME_ROWS +
+   * frameChromeRows); on a narrow terminal both used to wrap onto several
+   * rows, the transcript box was taller than the room left for it, and with
+   * the rows clipped it was the BOTTOM of the conversation — the line you
+   * are reading — that fell off the screen.
+   */
+  for (const [columns, variant] of [
+    [26, "bare"],
+    [30, "bare"],
+    [40, "bare"],
+    [30, "boxed"],
+    [40, "boxed"],
+  ] as const) {
+    test(`at ${columns} columns (${variant}) the last transcript row stays on screen`, async () => {
+      const prev = process.env.PHANTOMBOT_TUI_FRAME;
+      process.env.PHANTOMBOT_TUI_FRAME = variant;
+      try {
+        const reply =
+          Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n\n") +
+          "\n\nEND-MARKER";
+        const frame = await frameFor(
+          reply,
+          "END-MARKER",
+          columns,
+          "claude \u00b7 stable \u00b7 autostart: on",
+        );
+        expect(frame).toContain("END-MARKER");
+        const rows = frame.trimEnd().split("\n");
+        expect(rows.length).toBeLessThanOrEqual(ROWS);
+        for (const row of rows) expect(row.length).toBeLessThanOrEqual(columns);
+        const nonEmpty = rows.filter((l) => l.trim().length > 0);
+        expect(nonEmpty.at(-1)).toContain("Send");
+      } finally {
+        if (prev === undefined) delete process.env.PHANTOMBOT_TUI_FRAME;
+        else process.env.PHANTOMBOT_TUI_FRAME = prev;
+      }
+    });
+  }
 });
