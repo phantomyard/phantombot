@@ -1123,3 +1123,55 @@ describe("ClaudeHarness background-agent lockdown", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Escort (issue #702): an escorted request gets the PreToolUse hook in its
+// --settings argv and the context in its env; an unescorted one gets neither.
+// ---------------------------------------------------------------------------
+
+describe("ClaudeHarness escort", () => {
+  const ESCORT = {
+    baseUrl: "https://jev.test/api/v1",
+    model: "typesafe/jev-1.13",
+    keyEnv: "TEST_JEV_KEY",
+    timeoutMs: 500,
+    threshold: 70,
+    task: "t",
+  };
+  const run = async (mode: string, req: Partial<HarnessRequest>) => {
+    process.env.FAKE_CLAUDE_MODE = mode;
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    return (await collect(h.invoke(newRequest(req))))
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+  };
+
+  test("claude supports the escort", () => {
+    expect(new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" }).supportsEscort).toBe(true);
+  });
+
+  test("an escorted turn's --settings carries the PreToolUse escort hook", async () => {
+    const argv = await run("argv", { escort: ESCORT });
+    expect(argv).toContain("PreToolUse");
+    expect(argv).toContain("__escort");
+    // The baseline policy still rides along.
+    expect(argv).toContain("CronCreate");
+  });
+
+  test("an unescorted turn gets no hook", async () => {
+    const argv = await run("argv", {});
+    expect(argv).not.toContain("PreToolUse");
+    expect(argv).not.toContain("__escort");
+  });
+
+  test("the context reaches the env only when escorted, and an inherited one is cleared", async () => {
+    expect(await run("escort", { escort: ESCORT })).toBe("ESCORT=set");
+    process.env.PHANTOMBOT_ESCORT = JSON.stringify(ESCORT);
+    try {
+      expect(await run("escort", {})).toBe("ESCORT=unset");
+    } finally {
+      delete process.env.PHANTOMBOT_ESCORT;
+    }
+  });
+});

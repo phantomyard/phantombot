@@ -1,9 +1,10 @@
 # Decision model
 
-Phantombot can use an optional typed decision backend for two narrow choices:
+Phantombot can use an optional typed decision backend for three narrow choices:
 
 1. Score untrusted input for the threat screen.
-2. Choose the primary or coding model before a Pi turn.
+2. Escort a screened turn: score each tool call before it runs (below).
+3. Choose the primary or coding model before a Pi turn.
 
 The current built-in provider is TypeSafe Jev. A decision model is not a
 harness: it cannot write free text, use tools, or answer the user. It receives
@@ -44,6 +45,22 @@ data to tune `timeout_ms` on.
 The threat score uses the maximum of two views in one request: a defender frame
 and a red-team frame. The calibrated default threshold belongs to this backend
 and is intentionally independent from the harness judge's threshold.
+
+## Escort
+
+When the threat-judge consumer is enabled (`[jev.judge] enabled`, with a key),
+every untrusted turn the screen passes is **escorted**: before each tool call
+runs, the decision model scores that one action against the task that woke the
+turn, and a call at or above `[jev.judge] threshold` is refused. The turn is
+told the step was blocked and carries on with the rest. The escort uses the
+judge's settings and has none of its own.
+
+It fails closed: no answer, a timeout, a missing key or an unreadable answer
+refuses the call. Only harnesses with a blocking pre-tool hook run an escorted
+turn — `claude` (a `PreToolUse` hook) and `native` (a pi extension). `codex`
+and a host `pi` are skipped for that turn; if nothing is left, the request is
+held. Trusted turns are never escorted, and without a decision model nothing
+changes.
 
 ## Provider boundary
 

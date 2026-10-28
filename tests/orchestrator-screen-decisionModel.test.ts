@@ -567,3 +567,49 @@ describe("screener + Jev — fallback telemetry", () => {
     expect(h.judge!.last_error).toContain("unresolved");
   });
 });
+
+// Issue #702: a PASS carries the escort settings whenever the decision-model
+// judge is configured — whichever judge answered — and never otherwise.
+describe("screener escort settings", () => {
+  it("a Jev pass carries the escort settings (never the key)", async () => {
+    const jev = decisionModelStub({ ok: true, verdict: { score: 5, reason: "fine", question: "" } });
+    const { screen } = mk(decisionModelSettings({ threshold: 70, timeoutMs: 4000 }), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+    });
+    const v = await screen("hello");
+    expect(v.action).toBe("pass");
+    expect(v.escort).toEqual({
+      baseUrl: "https://openrouter.ai/api/v1",
+      model: "typesafe/jev-1.13",
+      keyEnv: "PHANTOMBOT_JEV_API_KEY",
+      timeoutMs: 4000,
+      threshold: 70,
+    });
+    expect(JSON.stringify(v.escort)).not.toContain("sk-test");
+  });
+
+  it("a pass from the harness-judge fallback is still escorted", async () => {
+    const jev = decisionModelStub({ ok: false, error: "jev timeout" });
+    const { screen, harnessCalls } = mk(decisionModelSettings(), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+    });
+    const v = await screen("hello");
+    expect(harnessCalls).toHaveLength(1);
+    expect(v.action).toBe("pass");
+    expect(v.escort).toBeDefined();
+  });
+
+  it("no decision model ⇒ no escort", async () => {
+    const { screen } = mk(undefined, ALLOW_JSON);
+    const v = await screen("hello");
+    expect(v.action).toBe("pass");
+    expect(v.escort).toBeUndefined();
+  });
+
+  it("a judge consumer that is configured but disabled ⇒ no escort", async () => {
+    const { screen } = mk(decisionModelSettings({ enabled: false }), ALLOW_JSON);
+    const v = await screen("hello");
+    expect(v.action).toBe("pass");
+    expect(v.escort).toBeUndefined();
+  });
+});

@@ -152,6 +152,7 @@ import {
   decisionModelJudgeThreat,
 } from "../lib/decisionModelJudge.ts";
 import { recordDecisionModelOutcome } from "../lib/decisionModelHealth.ts";
+import type { EscortSettings } from "../lib/escort.ts";
 import {
   confirmAlertDelivered,
   noteAlertDeliveryFailed,
@@ -185,6 +186,12 @@ export interface ScreenVerdict {
   question?: string;
   /** What runTurn shows the untrusted caller in place of a real reply. */
   heldMessage?: string;
+  /**
+   * Pass only, and only when the decision-model judge is configured: the
+   * settings the escort (issue #702) checks every tool call of this turn
+   * with. Absent = no decision model, so the turn runs unescorted as before.
+   */
+  escort?: EscortSettings;
 }
 
 /**
@@ -714,7 +721,26 @@ export function makeScreener(
 
     const v = result.verdict;
     if (v.score < holdThreshold) {
-      return { action: "pass", score: v.score, reason: v.reason };
+      return {
+        action: "pass",
+        score: v.score,
+        reason: v.reason,
+        // The escort rides on the DECISION MODEL being configured, not on
+        // which judge happened to answer this screen: a pass from the harness
+        // judge during a Jev outage is still escorted, and its tool calls
+        // then fail closed until the decision model answers again.
+        ...(decisionModelJudgeOn
+          ? {
+              escort: {
+                baseUrl: jev!.baseUrl!,
+                model: jev!.model,
+                keyEnv: jev!.keyEnv,
+                timeoutMs: jev!.judge.timeoutMs,
+                threshold: jev!.judge.threshold,
+              },
+            }
+          : {}),
+      };
     }
 
     // 3. GROUNDING WRITE (concern D+E) — BEFORE notifying. Write the held

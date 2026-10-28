@@ -20,6 +20,9 @@
  *
  * Wrapped so a bootstrap hiccup never blocks the CLI from running.
  *
+ * `__escort` (the escort's claude hook, lib/escort.ts) is dispatched the same
+ * way, before any bootstrap.
+ *
  * `__pi <args>` is dispatched FIRST and never reaches any of the above: it
  * turns this binary into the pi engine the `native` harness spawns (see
  * lib/embeddedPi.ts). The CLI keeps its static import graph on purpose — a
@@ -48,9 +51,20 @@ import { log } from "./lib/logger.ts";
 import { loadVaultIntoEnv } from "./lib/vault.ts";
 import { migratePlaintextToVault } from "./lib/vaultMigrate.ts";
 import { EMBEDDED_PI_SUBCOMMAND, runEmbeddedPi } from "./lib/embeddedPi.ts";
+import { ESCORT_SUBCOMMAND, runEscortHook } from "./lib/escort.ts";
 
 if (process.argv[2] === EMBEDDED_PI_SUBCOMMAND) {
   await runEmbeddedPi(process.argv.slice(3));
+} else if (process.argv[2] === ESCORT_SUBCOMMAND) {
+  // The escort's claude PreToolUse hook (issue #702, lib/escort.ts). Dispatched
+  // before the CLI bootstrap like `__pi`: it needs nothing but the env claude
+  // hands it, and it runs before EVERY tool call of an escorted turn.
+  const stdinText = await new Response(Bun.stdin.stream()).text();
+  let reason = "";
+  const code = await runEscortHook(stdinText, { stderr: (s) => { reason += s; } });
+  // Flushed before exit: on a block, this text is what claude shows the model.
+  if (reason) await Bun.write(Bun.stderr, reason);
+  process.exit(code);
 } else {
   await runPhantombotCli();
 }

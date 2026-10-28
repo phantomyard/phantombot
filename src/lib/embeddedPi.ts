@@ -47,6 +47,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ENV_PI_AGENT_DIR, nativeAgentEnv } from "./nativeAgentDir.ts";
+import { phantombotEscortExtension, type ToolCallHookApi } from "./escort.ts";
 
 /** Hidden argv[2] that turns the phantombot binary into the pi CLI. */
 export const EMBEDDED_PI_SUBCOMMAND = "__pi";
@@ -122,6 +123,17 @@ export function embeddedPiCommand(
   if (isCompiledBinary(opts.moduleUrl)) return [execPath, EMBEDDED_PI_SUBCOMMAND];
   const entry = opts.entry ?? resolve(import.meta.dir, "..", "index.ts");
   return [execPath, entry, EMBEDDED_PI_SUBCOMMAND];
+}
+
+/**
+ * The argv prefix that re-enters THIS phantombot (no subcommand): the binary
+ * itself when compiled, `bun <entry>` from source. The escort's claude hook
+ * runs `<this> __escort` (lib/escort.ts).
+ */
+export function phantombotSelfCommand(
+  opts: { execPath?: string; moduleUrl?: string; entry?: string } = {},
+): string[] {
+  return embeddedPiCommand(opts).slice(0, -1);
 }
 
 /**
@@ -306,7 +318,12 @@ export async function runEmbeddedPi(args: string[]): Promise<void> {
   const { main } = await piDistModule("main.js");
   setupCli();
   await main(args, {
-    extensionFactories: [phantombotAttributionExtension as never],
+    // The escort extension is inert unless the harness set an escort context
+    // in this process's env (an escorted, judge-passed untrusted turn).
+    extensionFactories: [
+      phantombotAttributionExtension as never,
+      ((pi: ToolCallHookApi) => phantombotEscortExtension(pi)) as never,
+    ],
   });
 }
 

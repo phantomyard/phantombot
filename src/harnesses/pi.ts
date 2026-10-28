@@ -68,6 +68,7 @@ import { classifyFailure } from "../lib/harnessAlert.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
 import { harnessSpawnEnv } from "../lib/vault.ts";
+import { applyEscortEnv } from "../lib/escort.ts";
 import {
   type HarnessActivity,
   isHardCapError,
@@ -173,9 +174,16 @@ export interface PiHarnessConfig {
 
 export class PiHarness implements Harness {
   readonly id: string;
+  /**
+   * Escort (issue #702): only the EMBEDDED engine loads phantombot's escort
+   * extension (lib/embeddedPi.ts), so only native mode can enforce it. A host
+   * pi runs its owner's extensions, not ours, and sits out escorted turns.
+   */
+  readonly supportsEscort: boolean;
 
   constructor(private readonly config: PiHarnessConfig) {
     this.id = config.id ?? (config.mode === "native" ? "native" : "pi-host");
+    this.supportsEscort = config.mode === "native";
   }
 
   /** Routing applies to native mode only; a host pi decides for itself. */
@@ -605,6 +613,9 @@ export class PiHarness implements Harness {
     // processes (Kai's review point). spawnPi.ts falls back to os.tmpdir() when
     // it's unset (degraded/no-persona paths).
     if (req.tmpBaseDir) childEnv[ENV_PHANTOMBOT_TMP_DIR] = req.tmpBaseDir;
+    // Escort (issue #702): the embedded engine's escort extension reads its
+    // context from here. Set or CLEARED on every spawn, never inherited.
+    applyEscortEnv(childEnv, this.config.mode === "native" ? req.escort : undefined);
     // Native: hand the child the embedded engine's package dir (compiled
     // binaries only) and the self-exec argv, so the capability-routing
     // extension's delegates re-enter THIS engine rather than hunting for a

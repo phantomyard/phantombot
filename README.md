@@ -277,6 +277,10 @@ looks.
 - Suspicious requests are held and surfaced to the owner for a trusted
   conversation. The judge is the only gate on autonomous work: a request it
   passes is carried through without a second approval step.
+- With a decision model configured, a passed request is also escorted: each
+  tool call is scored before it runs, and one that looks like a hijack is
+  refused while the rest of the job continues. Without a decision model,
+  nothing changes.
 - A request nobody could screen is held too. If no judge answers — provider
   outage, timeout, no network — the request does not run: the owner gets
   `🔒 I held an untrusted request because I could not screen it`, with the

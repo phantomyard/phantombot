@@ -58,6 +58,8 @@ import { buildToolCall } from "./toolNote.ts";
 import { DEFAULT_REASONING_REPLAY, type ParseEventResult, type ReasoningReplayConfig } from "./reasoningReplay.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
 import { harnessSpawnEnv } from "../lib/vault.ts";
+import { applyEscortEnv, claudeEscortHooks } from "../lib/escort.ts";
+import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 import {
   type HarnessActivity,
   runHarnessProcess,
@@ -91,6 +93,8 @@ export interface ClaudeHarnessConfig {
 
 export class ClaudeHarness implements Harness {
   readonly id = "claude";
+  /** Escort (issue #702): enforced by a PreToolUse hook in --settings. */
+  readonly supportsEscort = true;
 
   constructor(
     private readonly config: ClaudeHarnessConfig,
@@ -188,6 +192,7 @@ export class ClaudeHarness implements Harness {
       systemPromptFile,
       req.mcpMode,
       foregroundMcpConfig,
+      req.escort !== undefined,
     );
     log.debug("claude.invoke spawning", {
       bin: this.config.bin,
@@ -227,6 +232,9 @@ export class ClaudeHarness implements Harness {
       req.turnId,
       req.scratchDir,
     );
+    // The escort hook reads its context from the env claude hands it (set or
+    // CLEARED here, never inherited — see applyEscortEnv).
+    applyEscortEnv(env, req.escort);
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
@@ -281,6 +289,8 @@ export class ClaudeHarness implements Harness {
     // Foreground turns only: the `--mcp-config` payload pointing at phantombot's
     // own registry/proxy. Undefined on background turns (mcpMode "none").
     foregroundMcpConfig?: string,
+    // Escorted turn (issue #702): add the PreToolUse escort hook.
+    escorted = false,
   ): string[] {
     const args = [
       "--print",
@@ -374,7 +384,21 @@ export class ClaudeHarness implements Harness {
     // own ~/.claude/settings.json — we don't touch that file, so an operator
     // running `claude` directly on this host (e.g. for emergency repairs) is
     // unaffected. See PHANTOMBOT_INJECTED_CLAUDE_SETTINGS for the policy.
-    args.push("--settings", JSON.stringify(PHANTOMBOT_INJECTED_CLAUDE_SETTINGS));
+    //
+    // An escorted turn also gets the escort's PreToolUse hook here. It lives in
+    // the --settings ARGV, not in any file, so the running turn has nothing it
+    // can edit to remove it.
+    args.push(
+      "--settings",
+      JSON.stringify(
+        escorted
+          ? {
+              ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
+              hooks: claudeEscortHooks(phantombotSelfCommand()),
+            }
+          : PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
+      ),
+    );
     if (systemPromptFile) {
       // Read the persona system prompt from a file to keep it off the
       // length-limited command line. Verified against Claude Code.

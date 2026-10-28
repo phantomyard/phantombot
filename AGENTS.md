@@ -28,7 +28,7 @@ If unsure, update the docs. Cheaper than the post-merge "wait, the README says X
 
 Pointers, not the rules themselves: the linked text is authoritative.
 
-- **Untrusted input reaches a harness only through the threat screener** — email, web, webhooks, a raw `phantombot ask`, a scheduled task wake. One gate per channel; a screen with no verdict holds the turn. Never add a second gate or a fail-open path. [Security perimeter](docs/contributing/invariants/security-perimeter.md)
+- **Untrusted input reaches a harness only through the threat screener** — email, web, webhooks, a raw `phantombot ask`, a scheduled task wake. One gate per channel; a screen with no verdict holds the turn. Never add a second gate or a fail-open path. The opt-in decision-model escort checks a passed turn's tool calls and fails closed; it is not a gate on the input (#702). [Security perimeter](docs/contributing/invariants/security-perimeter.md)
 - **Every `runTurn` call states its `workingDir`, and either passes `screen` or is on the trusted-by-construction list** that `tests/perimeter-entrypoints.test.ts` enforces. [Architecture at a glance](docs/contributing/invariants/architecture-and-orchestrator.md)
 - **Resolve the persona before loading config, and write where the read path looks.** [27](docs/contributing/invariants/personas-and-config.md#inv-27)
 - **Secrets live in the persona's encrypted vault** — never in `.env`, never in a command argument, and a resolved key is never written back into `process.env`. [Credentials](docs/contributing/invariants/personas-and-config.md), [32](docs/contributing/invariants/personas-and-config.md#inv-32)
