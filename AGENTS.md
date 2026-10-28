@@ -207,6 +207,7 @@ guards; see the [recovery contract](docs/contributing/invariants/harnesses.md#co
 - [76](docs/contributing/invariants/cli-tui-and-wizards.md#inv-76) Settings snapshots must preserve config-layer provenance.
 - [77](docs/contributing/invariants/cli-tui-and-wizards.md#inv-77) ↑↓ in the chat prompt walk the rows AS DRAWN, and only the edge rows scroll (issue #667).
 - [78](docs/contributing/invariants/cli-tui-and-wizards.md#inv-78) The chat prompt's Emacs keys are matched on what Ink reports, never on the characters macOS types for Option (issue #677).
+- [81](docs/contributing/invariants/cli-tui-and-wizards.md#inv-81) A chat-screen row is a one-row BOX — the layout cannot wrap it, and the width it is laid out at has one source.
 
 ### Testing — [testing.md](docs/contributing/invariants/testing.md)
 
