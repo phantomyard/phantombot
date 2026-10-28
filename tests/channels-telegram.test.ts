@@ -199,7 +199,9 @@ class ScriptedHarness implements Harness {
     // that returns no verdict at all now HOLDS the turn instead of passing,
     // so a scripted turn reply is no longer a usable judge answer. Not
     // counted or captured — `invocations`/`lastRequest` describe the turn.
-    if (req.toolsMode === "none") {
+    // The recovery reply is tool-less too (#706) but is NOT the judge: it
+    // runs the script like a turn.
+    if (req.toolsMode === "none" && !req.systemPrompt.includes("hit a snag")) {
       yield {
         type: "done",
         finalText: '{"score": 0, "reason": "test fixture", "question": ""}',
