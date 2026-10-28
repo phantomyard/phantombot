@@ -116,6 +116,7 @@ One line per rule: its stable number, then its title. Click through for the full
 - [15](docs/contributing/invariants/channels.md#inv-15) Slash commands on the ACP surface must be dispatched OUT OF BAND, ahead of the serial request queue.
 - [16](docs/contributing/invariants/channels.md#inv-16) `/status` live probes must stay bounded — a dead provider must never hang the diagnostic.
 - [57](docs/contributing/invariants/channels.md#inv-57) Relay write quarantine is minute-scale and actively recoverable; publish confirmation is a quorum.
+- [81](docs/contributing/invariants/channels.md#inv-81) OpenCode consumes Phantombot as a MODEL via an `aisdk:` provider module, never as an ACP agent (issue #699).
 
 ### Security perimeter — [security-perimeter.md](docs/contributing/invariants/security-perimeter.md)
 

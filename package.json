@@ -28,7 +28,8 @@
     "build:x64": "bun build --compile --target=bun-linux-x64-baseline ./src/index.ts --outfile dist/phantombot",
     "build:arm64": "bun build --compile --target=bun-linux-arm64 ./src/index.ts --outfile dist/phantombot-arm64",
     "build:win": "bun build --compile --target=bun-windows-x64 ./src/index.ts --outfile dist/phantombot.exe",
-    "tui:sandbox": "bun src/dev/tui-sandbox.ts"
+    "tui:sandbox": "bun src/dev/tui-sandbox.ts",
+    "gen:opencode-provider": "bun scripts/genOpencodeProviderAsset.ts"
   },
   "dependencies": {
     "@clack/prompts": "^1.3.0",

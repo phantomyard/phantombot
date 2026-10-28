@@ -28,6 +28,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parse } from "jsonc-parser";
 
+import { resolvePersonasDirSync } from "../../config.ts";
 import type { WriteSink } from "../../lib/io.ts";
 import { defaultZedSettingsPath, installZed } from "./installZed.ts";
 import {
@@ -39,6 +40,11 @@ import {
   installVscode,
   type VscodeInstallResult,
 } from "./installVscode.ts";
+import {
+  installOpencode,
+  personaModelNames,
+  type InstallOpencodeResult,
+} from "./installOpencode.ts";
 import {
   checkProposedApi,
   ensureProposedApi,
@@ -108,8 +114,13 @@ export interface EditorSpec {
    * Self-driven editors implement this and own their whole flow. When present,
    * the other (settings-model) fields are ignored.
    */
-  reconcile?: (opts: { repair: boolean; out: WriteSink; err: WriteSink }) =>
-    EditorConnectorResult;
+  reconcile?: (opts: {
+    repair: boolean;
+    out: WriteSink;
+    err: WriteSink;
+    /** Absolute path to the phantombot binary (the same one settings editors get). */
+    binaryPath: string;
+  }) => EditorConnectorResult;
   /** Resolve this editor's settings.json path. (settings editors) */
   settingsPath?(): string;
   /**
@@ -288,11 +299,64 @@ export const VSCODE_EDITOR: EditorSpec = {
   reconcile: ({ repair }) => reconcileVscode(repair),
 };
 
+/**
+ * Map an installOpencode result onto the shared EditorConnectorResult vocabulary
+ * so OpenCode shows up in `doctor` exactly like Zed. In REPORT-ONLY mode
+ * (`repair: false`) the installer writes nothing and reports the drift as
+ * `stale`, so doctor flags it without claiming we changed anything.
+ */
+export function opencodeResultToConnector(
+  r: InstallOpencodeResult,
+  repair: boolean,
+): EditorConnectorResult {
+  switch (r.action) {
+    case "not-detected":
+      return { editor: "opencode", action: "not-detected", settingsPath: "" };
+    case "current":
+      return { editor: "opencode", action: "current", settingsPath: r.configPath };
+    case "registered":
+      return {
+        editor: "opencode",
+        action: repair ? "registered" : "stale",
+        settingsPath: r.configPath,
+      };
+    case "updated":
+      return {
+        editor: "opencode",
+        action: repair ? "updated" : "stale",
+        settingsPath: r.configPath,
+      };
+    case "error":
+      return {
+        editor: "opencode",
+        action: "error",
+        settingsPath: r.configPath,
+        error: r.message,
+      };
+  }
+}
+
+export const OPENCODE_EDITOR: EditorSpec = {
+  id: "opencode",
+  reconcile: ({ repair, binaryPath }) =>
+    opencodeResultToConnector(
+      installOpencode({
+        binaryPath,
+        // Runs inside the SYNC reconcile loop, so the personas root is resolved
+        // synchronously (same precedence as loadConfig).
+        personas: personaModelNames(resolvePersonasDirSync()),
+        repair,
+      }),
+      repair,
+    ),
+};
+
 /** Editors phantombot knows how to register itself into. */
 export const KNOWN_EDITORS: EditorSpec[] = [
   ZED_EDITOR,
   JETBRAINS_EDITOR,
   VSCODE_EDITOR,
+  OPENCODE_EDITOR,
 ];
 
 export interface ReconcileOptions {
@@ -331,6 +395,7 @@ export function reconcileEditorConnectors(
             repair,
             out: opts.out ?? SILENT,
             err: opts.err ?? SILENT,
+            binaryPath: opts.binaryPath,
           }),
         );
         continue;
