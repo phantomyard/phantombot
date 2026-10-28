@@ -17,6 +17,7 @@ import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import type { ChatMessage, ChatSession } from "../src/tui/chatSession.ts";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 import { TurnStore } from "../src/tui/turnRunner.ts";
+import { TerminalSizeContext } from "../src/tui/terminal.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -44,7 +45,12 @@ function fakeStdin() {
   return s;
 }
 
-async function frameFor(text: string): Promise<string> {
+/**
+ * `ready` is text the settled frame must contain. It defaults to the user's
+ * line, but a reply taller than the window scrolls that out of view, and
+ * waiting for it would time out and hand back whatever frame came last.
+ */
+async function frameFor(text: string, ready = "go on then"): Promise<string> {
   const frames: string[] = [];
   const stdout = new EventEmitter() as EventEmitter & {
     columns: number;
@@ -74,13 +80,19 @@ async function frameFor(text: string): Promise<string> {
     },
     async close() {},
   };
+  // The transcript MEASURES with the size from context and Ink DRAWS at
+  // `stdout.columns`; without the provider the first is the 80-column default
+  // and the second is COLUMNS, so every width assertion here compared a
+  // layout against a screen it was never computed for.
   const instance = render(
-    <ChatScreen
-      session={session}
-      status="claude"
-      onSettings={() => {}}
-      onQuit={() => {}}
-    />,
+    <TerminalSizeContext.Provider value={{ rows: ROWS, columns: COLUMNS }}>
+      <ChatScreen
+        session={session}
+        status="claude"
+        onSettings={() => {}}
+        onQuit={() => {}}
+      />
+    </TerminalSizeContext.Provider>,
     {
       stdin: fakeStdin() as unknown as NodeJS.ReadStream,
       stdout: stdout as unknown as NodeJS.WriteStream,
@@ -92,7 +104,7 @@ async function frameFor(text: string): Promise<string> {
   // fixed delay: under a loaded suite the first paint can be the empty box,
   // and asserting on it fails for reasons that have nothing to do with
   // markdown.
-  for (let i = 0; i < 40 && !plain(frames.at(-1) ?? "").includes("go on then"); i += 1) {
+  for (let i = 0; i < 40 && !plain(frames.at(-1) ?? "").includes(ready); i += 1) {
     await sleep(25);
   }
   instance.unmount();
@@ -112,6 +124,28 @@ describe("a rendered reply", () => {
     expect(frame).toContain("• alpha");
     expect(frame).toContain("ls -la");
     expect(frame).not.toContain("```");
+  });
+
+  /**
+   * The row invariant on the SCREEN: a list nested deeper than the window is
+   * wide used to keep a four-column body on top of its indent, so Ink wrapped
+   * each overhanging row onto extra physical rows the transcript had not
+   * counted — the frame grew past the terminal and the footer went with it.
+   */
+  test("a list nested past the window width does not grow the frame", async () => {
+    const deep = Array.from(
+      { length: 35 },
+      (_, d) => `${"  ".repeat(d)}- level ${d}`,
+    ).join("\n") + "\n- end";
+    const frame = await frameFor(deep, "• end");
+    expect(frame).toContain("• end");
+    // trimEnd: under the full suite Ink pads the frame with a trailing row of
+    // spaces, which is not a drawn row.
+    const rows = frame.trimEnd().split("\n");
+    for (const row of rows) expect(row.length).toBeLessThanOrEqual(COLUMNS);
+    expect(rows.length).toBeLessThanOrEqual(ROWS);
+    const nonEmpty = rows.filter((l) => l.trim().length > 0);
+    expect(nonEmpty.slice(-2).join(" ")).toContain("Send");
   });
 
   test("a table wider than the window does not shear the frame", async () => {

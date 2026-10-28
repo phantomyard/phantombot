@@ -55,6 +55,34 @@ describe("markdownLines", () => {
     }
   });
 
+  /**
+   * A list item is indented two columns per level, and that indent is part of
+   * the row: `Chat.tsx` draws it as `paddingLeft`. The body was given
+   * `max(4, cols - indent - lead)`, so once the indent alone ate the width the
+   * floor of 4 pushed the row past it — 22 columns at width 20 and depth 8.
+   * Ink then wraps the overflow onto rows nothing budgeted for: the
+   * phantombot#556 frame drift by another road.
+   */
+  test("a deeply nested list item never draws wider than the width", () => {
+    for (const width of [8, 12, 20, 40]) {
+      for (let depth = 0; depth <= 24; depth += 1) {
+        const md = `${"  ".repeat(depth)}- item text that is long enough to wrap`;
+        const lines = markdownLines(md, width);
+        expect({ width, depth, widest: widest(lines) }).toEqual({
+          width,
+          depth,
+          widest: Math.min(widest(lines), width),
+        });
+        // Clamping the indent must not swallow the item: every glyph is still
+        // there, in order (a word longer than the row is hard-split, so
+        // compare without the whitespace the wrap introduced).
+        expect(plain(lines).join("").replace(/[•\s]/g, "")).toBe(
+          "itemtextthatislongenoughtowrap",
+        );
+      }
+    }
+  });
+
   test("a rendered row is exactly one row — spans never carry a newline", () => {
     const lines = markdownLines("one\n\ntwo\n\n```\na\nb\n```", 40);
     for (const line of lines) {
