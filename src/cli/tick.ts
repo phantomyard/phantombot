@@ -161,6 +161,17 @@ export interface RunTickInput {
   err?: WriteSink;
 }
 
+/**
+ * The system-task exemption as an explicit verdict. runTurn holds any
+ * untrusted turn without one (GHSA-w7w8-rcjc-g6cx), so a row this binary
+ * wrote is waved through by name here — never by leaving `screen` unset.
+ */
+const SYSTEM_TASK_SCREEN = async (): Promise<ScreenVerdict> => ({
+  action: "pass",
+  score: 0,
+  reason: "system task (runtime-authored prompt), exempt from screening",
+});
+
 export async function runTick(input: RunTickInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
@@ -826,8 +837,10 @@ export async function runTaskWake(
         // prompt this binary wrote. Do not add a per-task or per-config
         // opt-out here — an exemption a task row can claim for itself is a
         // perimeter bypass.
+        // runTurn fails closed on a missing screen, so the exemption is an
+        // explicit pass, never an omitted screener.
         screen: systemTask
-          ? undefined
+          ? SYSTEM_TASK_SCREEN
           : (input.screen ??
             makeScreener(
               taskConfig,

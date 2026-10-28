@@ -71,6 +71,8 @@ async function promptFor(
     // The owner is on the line by default: the confirm gate is for turns the
     // OWNER can answer. Untrusted cases override this explicitly.
     trusted: true,
+    // Untrusted cases model a judge-passed turn (an unscreened one now holds).
+    screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
     ...extra,
   } as Parameters<typeof runTurn>[0])) {
     // drain
