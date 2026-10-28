@@ -549,10 +549,21 @@ async function* runTurnBody(
   const screening: "screened" | "unscreened" | "trusted" =
     input.trusted === true ? "trusted" : "unscreened";
   let effectiveScreening: "screened" | "unscreened" | "trusted" = screening;
-  if (input.trusted !== true && input.screen) {
+  if (input.trusted !== true) {
     let verdict: ScreenVerdict | undefined;
     try {
-      verdict = await input.screen(input.userMessage, input.signal);
+      // Fail CLOSED on a missing screen (GHSA-w7w8-rcjc-g6cx addendum): an
+      // untrusted turn whose caller passed no screener — or `screen:
+      // undefined`, which a source scan can't tell apart from a real one —
+      // never reaches the harness unjudged. Nothing exempts itself by
+      // omission; an exemption must be an explicit `pass` screener.
+      if (!input.screen) {
+        log.error("turn: untrusted turn has no threat screen, holding it", {
+          persona: input.persona,
+        });
+      } else {
+        verdict = await input.screen(input.userMessage, input.signal);
+      }
       if (verdict?.action === "pass") effectiveScreening = "screened";
     } catch (e) {
       if (input.signal?.aborted) {
@@ -584,7 +595,21 @@ async function* runTurnBody(
         };
       }
     }
-    if (verdict && verdict.action !== "pass" && verdict.action !== "hold") {
+    if (!verdict) {
+      // No screen, or a screener that resolved to no verdict: nothing cleared
+      // the content, so hold it — same as a screen that threw. The owner was
+      // not notified (no screener ran its escalation), so the held message
+      // does not claim they were.
+      verdict = {
+        action: "hold",
+        score: 0,
+        reason: "no threat screen verdict",
+        heldMessage:
+          "🔒 I couldn't run my safety check on that request, so I've paused " +
+          "it. Nothing was done.",
+      };
+    }
+    if (verdict.action !== "pass" && verdict.action !== "hold") {
       // Written as "neither pass nor hold" on purpose: only an explicit
       // `pass` may reach the harness, so a verdict action added later can
       // never fall through into running an uncleared request.
@@ -603,7 +628,7 @@ async function* runTurnBody(
       };
       return;
     }
-    if (verdict?.action === "hold") {
+    if (verdict.action === "hold") {
       // A held untrusted request never reaches prompt-cache preparation, so
       // invalidate the prior disposable epoch at the actual hold boundary.
       // This must remain best-effort: cache bookkeeping cannot weaken or turn

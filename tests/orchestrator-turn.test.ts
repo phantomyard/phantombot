@@ -6,6 +6,7 @@
  * deterministically.
  */
 
+import type { ScreenVerdict } from "../src/orchestrator/screen.ts";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -72,6 +73,10 @@ const baseInput = () => ({
   memory,
   idleTimeoutMs: 1_000,
   hardTimeoutMs: 5_000,
+  // An untrusted turn now HOLDS without a screen verdict (fail closed), so
+  // the fixture models the production path: a turn the judge passed. Tests
+  // of the missing-screen hold override `screen` explicitly.
+  screen: async () => ({ action: "pass" as const, score: 0, reason: "test: judge passed" }),
 });
 
 const FAKE_PI = resolve(__dirname, "fixtures/fake-pi.sh");
@@ -578,6 +583,67 @@ describe("runTurn — failure path", () => {
     );
 
     expect(await memory.recentTurns("phantom", "cli:default", 10)).toEqual([]);
+  });
+});
+
+describe("runTurn — fails closed without a screen verdict (GHSA-w7w8-rcjc-g6cx)", () => {
+  // The screen gate used to run only when a caller HANDED it a screener, and
+  // only an explicit `hold` stopped the turn. So an untrusted turn with no
+  // screen — or a screener that resolved to nothing — reached the harness
+  // unjudged. Every case below must hold: nothing runs, no retrieval.
+  async function expectHeld(input: Record<string, unknown>) {
+    let invoked = 0;
+    let retrieved = 0;
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ran" }], () => invoked++);
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "untrusted",
+        harnesses: [harness],
+        retrieve: async () => {
+          retrieved++;
+          return "secret context";
+        },
+        ...input,
+      } as Parameters<typeof runTurn>[0]),
+    );
+    expect(invoked).toBe(0);
+    expect(retrieved).toBe(0);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", meta: { screenedHold: true } });
+    const text = chunks.find((c) => c.type === "text");
+    expect(text).toMatchObject({ text: expect.stringContaining("couldn't run my safety check") });
+  }
+
+  test("an untrusted turn with NO screen is held, not run", async () => {
+    const { screen: _omit, ...noScreen } = baseInput();
+    await expectHeld({ ...noScreen, screen: undefined, trusted: false });
+  });
+
+  test("`screen: undefined` with `trusted` OMITTED is held (omitted = untrusted)", async () => {
+    await expectHeld({ screen: undefined });
+  });
+
+  test("a screener that resolves to undefined is held", async () => {
+    await expectHeld({
+      trusted: false,
+      screen: async () => undefined as unknown as ScreenVerdict,
+    });
+  });
+
+  test("a trusted turn still needs no screen", async () => {
+    let invoked = 0;
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ran" }], () => invoked++);
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [harness],
+        trusted: true,
+        screen: undefined,
+      }),
+    );
+    expect(invoked).toBe(1);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "ran" });
   });
 });
 
