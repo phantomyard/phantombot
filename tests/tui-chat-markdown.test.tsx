@@ -17,6 +17,7 @@ import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import type { ChatMessage, ChatSession } from "../src/tui/chatSession.ts";
 import { TranscriptStore } from "../src/tui/transcriptStore.ts";
 import { TurnStore } from "../src/tui/turnRunner.ts";
+import { TerminalSizeContext } from "../src/tui/terminal.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -44,14 +45,24 @@ function fakeStdin() {
   return s;
 }
 
-async function frameFor(text: string): Promise<string> {
+/**
+ * `ready` is text the settled frame must contain. It defaults to the user's
+ * line, but a reply taller than the window scrolls that out of view, and
+ * waiting for it would time out and hand back whatever frame came last.
+ */
+async function frameFor(
+  text: string,
+  ready = "go on then",
+  columns = COLUMNS,
+  status = "claude",
+): Promise<string> {
   const frames: string[] = [];
   const stdout = new EventEmitter() as EventEmitter & {
     columns: number;
     rows: number;
     write: (c: string) => void;
   };
-  stdout.columns = COLUMNS;
+  stdout.columns = columns;
   stdout.rows = ROWS;
   stdout.write = (c: string) => void frames.push(c);
   const history: ChatMessage[] = [
@@ -74,13 +85,19 @@ async function frameFor(text: string): Promise<string> {
     },
     async close() {},
   };
+  // The transcript MEASURES with the size from context and Ink DRAWS at
+  // `stdout.columns`; without the provider the first is the 80-column default
+  // and the second is COLUMNS, so every width assertion here compared a
+  // layout against a screen it was never computed for.
   const instance = render(
-    <ChatScreen
-      session={session}
-      status="claude"
-      onSettings={() => {}}
-      onQuit={() => {}}
-    />,
+    <TerminalSizeContext.Provider value={{ rows: ROWS, columns }}>
+      <ChatScreen
+        session={session}
+        status={status}
+        onSettings={() => {}}
+        onQuit={() => {}}
+      />
+    </TerminalSizeContext.Provider>,
     {
       stdin: fakeStdin() as unknown as NodeJS.ReadStream,
       stdout: stdout as unknown as NodeJS.WriteStream,
@@ -92,7 +109,7 @@ async function frameFor(text: string): Promise<string> {
   // fixed delay: under a loaded suite the first paint can be the empty box,
   // and asserting on it fails for reasons that have nothing to do with
   // markdown.
-  for (let i = 0; i < 40 && !plain(frames.at(-1) ?? "").includes("go on then"); i += 1) {
+  for (let i = 0; i < 40 && !plain(frames.at(-1) ?? "").includes(ready); i += 1) {
     await sleep(25);
   }
   instance.unmount();
@@ -114,6 +131,28 @@ describe("a rendered reply", () => {
     expect(frame).not.toContain("```");
   });
 
+  /**
+   * The row invariant on the SCREEN: a list nested deeper than the window is
+   * wide used to keep a four-column body on top of its indent, so Ink wrapped
+   * each overhanging row onto extra physical rows the transcript had not
+   * counted — the frame grew past the terminal and the footer went with it.
+   */
+  test("a list nested past the window width does not grow the frame", async () => {
+    const deep = Array.from(
+      { length: 35 },
+      (_, d) => `${"  ".repeat(d)}- level ${d}`,
+    ).join("\n") + "\n- end";
+    const frame = await frameFor(deep, "• end");
+    expect(frame).toContain("• end");
+    // trimEnd: under the full suite Ink pads the frame with a trailing row of
+    // spaces, which is not a drawn row.
+    const rows = frame.trimEnd().split("\n");
+    for (const row of rows) expect(row.length).toBeLessThanOrEqual(COLUMNS);
+    expect(rows.length).toBeLessThanOrEqual(ROWS);
+    const nonEmpty = rows.filter((l) => l.trim().length > 0);
+    expect(nonEmpty.slice(-2).join(" ")).toContain("Send");
+  });
+
   test("a table wider than the window does not shear the frame", async () => {
     const frame = await frameFor(
       "| a | b |\n| --- | --- |\n| " + "x".repeat(80) + " | y |",
@@ -127,4 +166,56 @@ describe("a rendered reply", () => {
     const nonEmpty = frame.split("\n").filter((l) => l.trim().length > 0);
     expect(nonEmpty.slice(-2).join(" ")).toContain("Send");
   });
+
+  /**
+   * Below the width a body can be wrapped to, rows would have to overhang the
+   * window. The screen says so instead of drawing a transcript it cannot fit.
+   */
+  test("a terminal narrower than the minimum shows a notice, not rows", async () => {
+    const frame = await frameFor("a reply nobody can read here", "narrow", 22);
+    expect(frame).toContain("narrow");
+    expect(frame).not.toContain("a reply");
+    expect(frame).not.toContain("go on then");
+  });
+
+  /**
+   * The chrome is part of the row invariant too. The screen budgets ONE row
+   * for the header and ONE for the footer (CHAT_CHROME_ROWS +
+   * frameChromeRows); on a narrow terminal both used to wrap onto several
+   * rows, the transcript box was taller than the room left for it, and with
+   * the rows clipped it was the BOTTOM of the conversation — the line you
+   * are reading — that fell off the screen.
+   */
+  for (const [columns, variant] of [
+    [26, "bare"],
+    [30, "bare"],
+    [40, "bare"],
+    [30, "boxed"],
+    [40, "boxed"],
+  ] as const) {
+    test(`at ${columns} columns (${variant}) the last transcript row stays on screen`, async () => {
+      const prev = process.env.PHANTOMBOT_TUI_FRAME;
+      process.env.PHANTOMBOT_TUI_FRAME = variant;
+      try {
+        const reply =
+          Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n\n") +
+          "\n\nEND-MARKER";
+        const frame = await frameFor(
+          reply,
+          "END-MARKER",
+          columns,
+          "claude \u00b7 stable \u00b7 autostart: on",
+        );
+        expect(frame).toContain("END-MARKER");
+        const rows = frame.trimEnd().split("\n");
+        expect(rows.length).toBeLessThanOrEqual(ROWS);
+        for (const row of rows) expect(row.length).toBeLessThanOrEqual(columns);
+        const nonEmpty = rows.filter((l) => l.trim().length > 0);
+        expect(nonEmpty.at(-1)).toContain("Send");
+      } finally {
+        if (prev === undefined) delete process.env.PHANTOMBOT_TUI_FRAME;
+        else process.env.PHANTOMBOT_TUI_FRAME = prev;
+      }
+    });
+  }
 });

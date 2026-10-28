@@ -55,6 +55,8 @@ export interface RichLine {
 
 const BULLET = "•";
 const ELLIPSIS = "…";
+/** Columns a list item's body keeps before its indent stops growing. */
+const MIN_LIST_BODY = 4;
 
 const SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
@@ -367,10 +369,15 @@ export function markdownLines(text: string, width: number): RichLine[] {
     if (list) {
       const depth = Math.floor(list[1]!.replace(/\t/g, "  ").length / 2);
       const marker = /^\d/.test(list[2]!) ? list[2]! : BULLET;
-      const indent = depth * 2;
       const lead = `${marker} `;
+      // The indent is part of the row — the screen draws it as padding — so it
+      // is clamped to leave the lead and a minimal body inside `cols`. Past
+      // that, deeper levels stop indenting further: flattening the nesting
+      // costs less than a row wider than the window, which Ink would wrap onto
+      // rows the transcript never counted (phantombot#556).
+      const indent = Math.max(0, Math.min(depth * 2, cols - lead.length - MIN_LIST_BODY));
       const body = inlineSpans(list[3]!);
-      const rows = wrapSpans(body, Math.max(4, cols - indent - lead.length));
+      const rows = wrapSpans(body, Math.max(1, cols - indent - lead.length));
       rows.forEach((row, n) => {
         out.push({
           indent,

@@ -18,6 +18,8 @@ import {
   type TranscriptLine,
 } from "../src/tui/transcript.ts";
 import { textWidth } from "../src/tui/markdown.ts";
+import { minTerminalColumns, rowColumns, rowWidth } from "../src/tui/transcript.ts";
+import { frameChromeColumns, type FrameVariant } from "../src/tui/chrome.ts";
 import type { ChatMessage, ChatMessagePart } from "../src/tui/chatSession.ts";
 
 const options = {
@@ -59,6 +61,127 @@ const texts = (lines: readonly TranscriptLine[]) =>
         : l.spans.map((s) => s.text).join(""),
     );
 
+/** `Chat.tsx` draws every body row with `paddingLeft={2}` (plus a list indent). */
+const ROW_INDENT = 2;
+
+/**
+ * Every row's DRAWN width on a terminal `columns` wide: frame chrome, the
+ * row indent, the markdown indent and the glyphs. This is the row invariant —
+ * it must never exceed `columns`, or Ink wraps the row onto a second physical
+ * row nothing budgeted for (phantombot#556).
+ */
+const drawnWidths = (lines: readonly TranscriptLine[], variant: FrameVariant) =>
+  lines.flatMap((l) => {
+    const chrome = frameChromeColumns(variant) + ROW_INDENT;
+    if (l.kind === "text") return [chrome + textWidth(l.text)];
+    if (l.kind === "rich")
+      return [chrome + l.indent + l.spans.reduce((a, sp) => a + textWidth(sp.text), 0)];
+    if (l.kind === "tool") return [chrome + toolWidth(l)];
+    return [];
+  });
+
+/** The content width at 80 columns in the active (default) frame. */
+const WIDTH_80 = 80 - frameChromeColumns() - ROW_INDENT;
+
+/** Run `fn` with the frame variant set, restoring the environment after. */
+function withFrame<T>(variant: FrameVariant, fn: () => T): T {
+  const prev = process.env.PHANTOMBOT_TUI_FRAME;
+  process.env.PHANTOMBOT_TUI_FRAME = variant;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.PHANTOMBOT_TUI_FRAME;
+    else process.env.PHANTOMBOT_TUI_FRAME = prev;
+  }
+}
+
+describe("the row invariant: a row of transcript is a row on screen", () => {
+  /**
+   * The content width was the literal `columns - 6`: right for the boxed
+   * frame (border 2 + padding 2 + row indent 2), but `bare` — the DEFAULT —
+   * only costs 2 for chrome, so every row wrapped two columns early.
+   */
+  test("the content width is the window minus the frame chrome and row indent", () => {
+    for (const variant of ["bare", "boxed"] as const) {
+      for (const columns of [40, 80, 120]) {
+        const fits = columns - frameChromeColumns(variant) - ROW_INDENT;
+        const rows = (n: number) =>
+          withFrame(variant, () =>
+            texts(transcriptLines([user("x".repeat(n))], columns, options)),
+          ).length;
+        expect({ variant, columns, rows: rows(fits) }).toEqual({ variant, columns, rows: 1 });
+        expect({ variant, columns, rows: rows(fits + 1) }).toEqual({ variant, columns, rows: 2 });
+      }
+    }
+  });
+
+  /**
+   * A list nested deeper than the window is wide: before the fix its body kept
+   * a floor of four columns ON TOP of the indent, so the row overhung.
+   */
+  test("a deeply nested list never draws wider than the window", () => {
+    const deep = Array.from(
+      { length: 20 },
+      (_, d) => `${"  ".repeat(d)}- level ${d} item with some words in it`,
+    ).join("\n");
+    for (const variant of ["bare", "boxed"] as const) {
+      for (const columns of [30, 40, 60, 80]) {
+        const widths = withFrame(variant, () =>
+          drawnWidths(transcriptLines([msg(deep)], columns, options), variant),
+        );
+        expect({ variant, columns, widest: Math.max(...widths) }).toEqual({
+          variant,
+          columns,
+          widest: Math.min(Math.max(...widths), columns),
+        });
+      }
+    }
+  });
+});
+
+/**
+ * The invariant for EVERY row kind at once: `rowWidth(row) <= rowColumns`.
+ * `transcriptLines` throws under test when it breaks, so this is the test that
+ * fails first when a new row kind or markdown block stops fitting — rather
+ * than the box in `Chat.tsx` silently cutting text off in production.
+ */
+describe("every row kind fits its row box", () => {
+  const everything = [
+    "# A heading long enough to need wrapping at every width we try here",
+    "Plain text with `inline code`, **bold**, a very-long-unbreakable-identifier-that-has-to-hard-split and \u6f22\u5b57\u6f22\u5b57 wide glyphs.",
+    "- a list\n  - nested\n    - deeper still, with enough words to wrap twice over\n1. numbered",
+    "> a quote that also goes on long enough to wrap onto a second row",
+    "```ts\nconst x = \"a code line that is definitely wider than any narrow terminal\";\n```",
+    "| col a | col b | col c |\n|---|---|---|\n| one | two two two two | three three three three |",
+    "---",
+  ].join("\n\n");
+  const conversation: ChatMessage[] = [
+    user("a user line \u6f22".repeat(12)),
+    msg(everything, [`Bash(${"x".repeat(160)})`]),
+    failed("Error: " + "stack ".repeat(40)),
+    { role: "assistant", text: "", at: 0, parts: [{ kind: "text", text: everything }] },
+  ];
+  test("at every width from the minimum up, in both frames", () => {
+    for (const variant of ["bare", "boxed"] as const) {
+      for (let columns = minTerminalColumns(variant); columns <= 130; columns += 7) {
+        const lines = withFrame(variant, () =>
+          transcriptLines(conversation, columns, {
+            ...options,
+            personaName: "a-persona-name-far-longer-than-any-header-row",
+          }),
+        );
+        const box = rowColumns(columns, variant);
+        const widest = Math.max(...lines.map(rowWidth));
+        expect({ variant, columns, widest: Math.min(widest, box) }).toEqual({
+          variant,
+          columns,
+          widest,
+        });
+      }
+    }
+  });
+});
+
 describe("transcriptLines", () => {
   test("a message is a header, its tools, its wrapped body and a gap", () => {
     expect(kinds(transcriptLines([msg("short")], 80, options))).toEqual([
@@ -66,7 +189,7 @@ describe("transcriptLines", () => {
       "rich",
       "gap",
     ]);
-    // 200 chars at an effective width of 74 wraps to three rows.
+    // 200 chars at an effective width of WIDTH_80 (76 bare, 74 boxed) wraps to three rows.
     expect(texts(transcriptLines([msg("x".repeat(200))], 80, options))).toHaveLength(3);
     // Explicit newlines are rows of their own.
     expect(texts(transcriptLines([msg("a\nb\nc")], 80, options))).toEqual(["a", "b", "c"]);
@@ -94,7 +217,7 @@ describe("transcriptLines", () => {
     // A tool note is capped at 160 columns, so this is the row the TUI draws
     // on a real terminal — at every width, including ones wider than the cap.
     for (const columns of [40, 80, 100, 166, 200]) {
-      const width = Math.max(20, columns - 6);
+      const width = Math.max(20, columns - frameChromeColumns() - ROW_INDENT);
       const rows = toolRows(
         transcriptLines([msg("done", [`Bash(${"x".repeat(160)})`])], columns, options),
       );
@@ -134,8 +257,8 @@ describe("transcriptLines", () => {
       transcriptLines([msg("done", ["z".repeat(200)])], 80, options),
     );
     expect(textWidth(finished!.title)).toBeLessThan(textWidth(running!.title));
-    expect(toolWidth(finished!)).toBeLessThanOrEqual(74);
-    expect(toolWidth(running!)).toBeLessThanOrEqual(74);
+    expect(toolWidth(finished!)).toBeLessThanOrEqual(WIDTH_80);
+    expect(toolWidth(running!)).toBeLessThanOrEqual(WIDTH_80);
   });
 
   test("a wide-glyph tool title is measured in columns, not code units", () => {
@@ -145,7 +268,7 @@ describe("transcriptLines", () => {
     const [row] = toolRows(
       transcriptLines([msg("done", ["\u6f22".repeat(200)])], 80, options),
     );
-    expect(toolWidth(row!)).toBeLessThanOrEqual(74);
+    expect(toolWidth(row!)).toBeLessThanOrEqual(WIDTH_80);
   });
 
   /**
@@ -157,11 +280,11 @@ describe("transcriptLines", () => {
    * cut a surrogate pair in half on the way.
    */
   test("a wide-glyph user line wraps by columns, not code units", () => {
-    // 100 ideographs = 200 columns, which is three rows of 74, not the two
+    // 100 ideographs = 200 columns, which is three rows of WIDTH_80 (76 bare, 74 boxed), not the two
     // that 100 code units would suggest.
     const rows = texts(transcriptLines([user("\u6f22".repeat(100))], 80, options));
     expect(rows).toHaveLength(3);
-    for (const row of rows) expect(textWidth(row)).toBeLessThanOrEqual(74);
+    for (const row of rows) expect(textWidth(row)).toBeLessThanOrEqual(WIDTH_80);
   });
 
   test("an error row is measured in columns too", () => {
@@ -169,7 +292,7 @@ describe("transcriptLines", () => {
     // when the frame deforms, so they are pinned separately.
     const rows = texts(transcriptLines([failed("\u6f22".repeat(100))], 80, options));
     expect(rows.length).toBeGreaterThan(2);
-    for (const row of rows) expect(textWidth(row)).toBeLessThanOrEqual(74);
+    for (const row of rows) expect(textWidth(row)).toBeLessThanOrEqual(WIDTH_80);
   });
 
   test("wrapping cuts between graphemes and drops nothing", () => {
