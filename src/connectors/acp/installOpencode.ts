@@ -347,8 +347,9 @@ export function opencodeCliCandidates(deps: Partial<OpencodeDeps> = {}): string[
   // record of where. Follow the desktop entry's Exec= to the app dir, then probe
   // the CLI that sits beside it.
   for (const appDir of linuxOpencodeAppDirs(d)) {
+    // Only the bundled CLI, never the app dir itself: a directory is not
+    // executable, so probing it would just fail and waste the budget.
     addIfExists(joinFor("linux", appDir, "resources", "opencode-cli"));
-    addIfExists(appDir);
   }
   return candidates;
 }
@@ -362,6 +363,9 @@ function firstExecToken(exec: string): string {
   if (quoted && quoted[1] !== undefined) return quoted[1].trim();
   for (const token of exec.split(/\s+/)) {
     if (token.length === 0 || token.startsWith("%")) continue;
+    // `Exec=env FOO=bar /opt/OpenCode/ai.opencode %U` is legal and does occur:
+    // skip the wrapper and its assignments rather than returning "env".
+    if (token === "env" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
     return token.replace(/^"|"$/g, "");
   }
   return "";
@@ -384,8 +388,19 @@ function linuxOpencodeAppDirs(d: OpencodeDeps): string[] {
   ].filter((dir) => dir.trim().length > 0);
   const seen: string[] = [];
   for (const dataDir of dataDirs) {
-    for (const entry of ["ai.opencode.desktop.desktop", "opencode-desktop.desktop", "opencode.desktop"]) {
-      const text = d.readFile(joinFor("linux", dataDir, "applications", entry));
+    const applications = joinFor("linux", dataDir, "applications");
+    // Snap installs name their entry `<snap>_<app>.desktop`, so the three fixed
+    // names below are not enough — match any opencode-y entry in the directory.
+    const entries = [
+      ...new Set([
+        ...["ai.opencode.desktop.desktop", "opencode-desktop.desktop", "opencode.desktop"],
+        ...d.listDir(applications).filter(
+          (name) => name.endsWith(".desktop") && name.includes("opencode"),
+        ),
+      ]),
+    ];
+    for (const entry of entries) {
+      const text = d.readFile(joinFor("linux", applications, entry));
       if (!text) continue;
       for (const line of text.split(/\r?\n/)) {
         if (!line.startsWith("Exec=")) continue;
@@ -394,6 +409,10 @@ function linuxOpencodeAppDirs(d: OpencodeDeps): string[] {
         // naive whitespace split would take half a path.
         const exe = firstExecToken(line.slice("Exec=".length).trim());
         if (exe.length === 0 || !exe.startsWith("/")) continue;
+        // A stale entry (uninstalled app, unmounted AppImage at /tmp/.mount_…)
+        // must not count as installed: require the Exec target itself to exist,
+        // which is also what keeps a truthful `not-detected` truthful.
+        if (!d.exists(exe)) continue;
         const appDir = dirname(exe);
         if (!seen.includes(appDir)) seen.push(appDir);
       }

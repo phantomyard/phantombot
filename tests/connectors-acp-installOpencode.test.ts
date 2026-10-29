@@ -187,7 +187,7 @@ describe("opencode config path resolution", () => {
     const desktopFile = "/usr/share/applications/ai.opencode.desktop.desktop";
     const cli = "/usr/local/opt/OpenCode/resources/opencode-cli";
     const fs = fakeFs({ [desktopFile]: entry });
-    fs.deps.exists = (path) => path === cli;
+    fs.deps.exists = (path) => path === cli || path === "/usr/local/opt/OpenCode/ai.opencode";
     expect(opencodeCliCandidates(fs.deps)).toContain(cli);
   });
 
@@ -196,7 +196,7 @@ describe("opencode config path resolution", () => {
     const cli = "/opt/OpenCode-test/resources/opencode-cli";
     const fs = fakeFs({ [desktopFile]: "[Desktop Entry]\nExec=\"/opt/OpenCode-test/ai.opencode\" %F\n" });
     fs.deps.env = { XDG_DATA_DIRS: "/opt/share" };
-    fs.deps.exists = (path) => path === cli;
+    fs.deps.exists = (path) => path === cli || path === "/opt/OpenCode-test/ai.opencode";
     expect(opencodeCliCandidates(fs.deps)).toContain(cli);
   });
 
@@ -221,7 +221,11 @@ describe("opencode config path resolution", () => {
       "/usr/share/applications/ai.opencode.desktop.desktop": `[Desktop Entry]\nExec="${spaced}/ai.opencode" %U\n`,
       "/usr/local/share/applications/opencode-desktop.desktop": "[Desktop Entry]\nExec=%U /opt/OpenCode2/ai.opencode\n",
     });
-    fs.deps.exists = (path) => path === `${spaced}/resources/opencode-cli` || path === "/opt/OpenCode2/resources/opencode-cli";
+    fs.deps.exists = (path) =>
+      path === `${spaced}/resources/opencode-cli` ||
+      path === "/opt/OpenCode2/resources/opencode-cli" ||
+      path === `${spaced}/ai.opencode` ||
+      path === "/opt/OpenCode2/ai.opencode";
     const candidates = opencodeCliCandidates(fs.deps);
     expect(candidates).toContain(`${spaced}/resources/opencode-cli`);
     // A field code ahead of the command is never treated as the executable.
@@ -232,7 +236,7 @@ describe("opencode config path resolution", () => {
     // Marker comes from the desktop entry, not the /opt default — the only way a
     // relocated or AppImage-style payload is detected before its first launch.
     const fs = fakeFs({ "/usr/share/applications/ai.opencode.desktop.desktop": "[Desktop Entry]\nExec=/data/OpenCode/ai.opencode %U\n" });
-    fs.deps.exists = (path) => path === "/data/OpenCode";
+    fs.deps.exists = (path) => path === "/data/OpenCode" || path === "/data/OpenCode/ai.opencode";
     expect(opencodeDesktopMarkers(fs.deps)).toContain("/opt/OpenCode");
     expect(resolveOpencodeConfigPath(fs.deps).detected).toBe(true);
   });
@@ -273,6 +277,46 @@ describe("opencode config path resolution", () => {
     } finally {
       Object.defineProperty(process, "platform", { value: original, configurable: true });
     }
+  });
+
+  test("a stale desktop entry does not fake an install", () => {
+    // Anything left behind by an uninstalled app (or an unmounted AppImage whose
+    // Exec points into /tmp/.mount_…) must keep answering `not-detected` rather
+    // than registering a provider for an editor that is not there.
+    const fs = fakeFs({
+      "/usr/share/applications/opencode.desktop": "[Desktop Entry]\nExec=/usr/bin/opencode %U\n",
+    });
+    fs.deps.exists = (path) => path === "/usr/bin"; // the dir exists, the target does not
+    const resolved = resolveOpencodeConfigPath(fs.deps);
+    expect(resolved.detected).toBe(false);
+    expect(opencodeDesktopMarkers(fs.deps)).not.toContain("/usr/bin");
+    const result = installOpencode({
+      binaryPath: "/usr/local/bin/phantombot",
+      personas: ["kai"],
+      deps: fs.deps,
+    });
+    expect(result.action).toBe("not-detected");
+  });
+
+  test("Linux: an `env`-prefixed Exec= still resolves the app dir", () => {
+    // A NON-static app dir, so only the Exec= follow can produce the candidate.
+    const desktopFile = "/usr/share/applications/ai.opencode.desktop.desktop";
+    const app = "/data/OC-env/ai.opencode";
+    const fs = fakeFs({ [desktopFile]: "[Desktop Entry]\nExec=env FOO=bar /data/OC-env/ai.opencode %U\n" });
+    fs.deps.exists = (path) => path === app || path === "/data/OC-env/resources/opencode-cli";
+    expect(opencodeCliCandidates(fs.deps)).toContain("/data/OC-env/resources/opencode-cli");
+  });
+
+  test("Linux: a snap entry named `<snap>_<app>.desktop` is followed too", () => {
+    // The point is the ENTRY NAME: `opencode_opencode.desktop` never matches the
+    // three fixed names, so only the listDir scan finds it.
+    const desktopFile = "/var/lib/snapd/desktop/applications/opencode_opencode.desktop";
+    const cli = "/snap/opencode/42/resources/opencode-cli";
+    const fs = fakeFs({ [desktopFile]: "[Desktop Entry]\nExec=/snap/opencode/42/opencode %U\n" });
+    fs.deps.env = { XDG_DATA_DIRS: "/var/lib/snapd/desktop" };
+    fs.deps.listDir = (path) => (path === "/var/lib/snapd/desktop/applications" ? ["opencode_opencode.desktop"] : []);
+    fs.deps.exists = (path) => path === "/snap/opencode/42/opencode" || path === cli;
+    expect(opencodeCliCandidates(fs.deps)).toContain(cli);
   });
 
   test("module path honours XDG_DATA_HOME", () => {

@@ -492,11 +492,12 @@ describe("opencode provider package", () => {
     expect(spawnedArgv()).toEqual(["acp", "--persona=explicit"]);
   });
 
-  test("the real CLI accepts the argv the provider builds", async () => {
-    // Pins the OTHER half of the contract: the form above parses. Uses the
-    // installed binary when there is one, and is skipped otherwise.
-    const binary = Bun.which("phantombot");
-    if (!binary) return;
+  // Pins the OTHER half of the contract: the form above parses against the real
+  // CLI. Skipped (and REPORTED as skipped) where no build is installed — CI has
+  // none, so an early `return` would read as coverage it does not have.
+  const realBinary = Bun.which("phantombot");
+  test.skipIf(!realBinary)("the real CLI accepts the argv the provider builds", async () => {
+    const binary = realBinary!;
     const child = Bun.spawnSync({
       cmd: [binary, "acp", "--persona=argv-form"],
       stdin: "ignore",
