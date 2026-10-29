@@ -13,6 +13,8 @@ import {
   defaultOpencodeModulePath,
   fallbackOpencodeConfigPath,
   installOpencode,
+  opencodeCliCandidates,
+  opencodeDesktopMarkers,
   personaModelNames,
   phantombotOpencodeProviderBlock,
   resolveOpencodeConfigPath,
@@ -152,6 +154,86 @@ describe("opencode config path resolution", () => {
     };
     expect(resolveOpencodeConfigPath(fs.deps).detected).toBe(true);
     expect(probed).toContain("/Applications/OpenCode.app/Contents/Resources/opencode-cli");
+  });
+
+  test("Linux: Desktop payload at /opt/OpenCode/resources/opencode-cli is a probe candidate", () => {
+    // Observed on a real Ubuntu 26.04 / OpenCode Desktop 2.2.0 install: the deb
+    // payload keeps the CLI inside its app dir and nothing named `opencode` is
+    // on PATH, so without this candidate the install is a silent no-op.
+    const cli = "/opt/OpenCode/resources/opencode-cli";
+    const fs = fakeFs();
+    fs.deps.exists = (path) => path === cli || path === "/opt/OpenCode";
+    expect(opencodeCliCandidates(fs.deps)).toContain(cli);
+    const probed: string[] = [];
+    fs.deps.runOpencode = (_args, exe) => {
+      probed.push(exe ?? "opencode");
+      return exe === cli ? { code: 0, stdout: "/home/tester/.config/opencode\n" } : undefined;
+    };
+    expect(resolveOpencodeConfigPath(fs.deps)).toEqual({
+      configPath: "/home/tester/.config/opencode/opencode.json",
+      detected: true,
+    });
+    expect(probed).toContain(cli);
+  });
+
+  test("Linux: a non-standard app dir is found via the desktop entry's Exec=", () => {
+    const entry = [
+      "[Desktop Entry]",
+      "Name=OpenCode",
+      "Exec=/usr/local/opt/OpenCode/ai.opencode %U",
+      "Type=Application",
+    ].join("\n");
+    const desktopFile = "/usr/share/applications/ai.opencode.desktop.desktop";
+    const cli = "/usr/local/opt/OpenCode/resources/opencode-cli";
+    const fs = fakeFs({ [desktopFile]: entry });
+    fs.deps.exists = (path) => path === cli;
+    expect(opencodeCliCandidates(fs.deps)).toContain(cli);
+  });
+
+  test("Linux: XDG_DATA_DIRS desktop entries are searched too", () => {
+    const desktopFile = "/opt/share/applications/ai.opencode.desktop.desktop";
+    const cli = "/opt/OpenCode-test/resources/opencode-cli";
+    const fs = fakeFs({ [desktopFile]: "[Desktop Entry]\nExec=\"/opt/OpenCode-test/ai.opencode\" %F\n" });
+    fs.deps.env = { XDG_DATA_DIRS: "/opt/share" };
+    fs.deps.exists = (path) => path === cli;
+    expect(opencodeCliCandidates(fs.deps)).toContain(cli);
+  });
+
+  test("Linux: a relative Exec= is not mistaken for an app dir", () => {
+    // `Exec=opencode %U` (snap-style wrapper or a hand-written entry) must not
+    // produce a relative candidate like "resources/opencode-cli".
+    const fs = fakeFs({
+      "/usr/share/applications/ai.opencode.desktop.desktop": "[Desktop Entry]\nExec=opencode %U\n",
+    });
+    fs.deps.exists = () => true;
+    // The bare `opencode` PATH probe is fine; what must never appear is an
+    // app-dir candidate derived from a relative Exec.
+    for (const candidate of opencodeCliCandidates(fs.deps)) {
+      if (candidate === "opencode") continue;
+      expect(candidate.startsWith("/")).toBe(true);
+    }
+  });
+
+  test("Linux: quote and field-code handling in Exec=", () => {
+    const spaced = "/opt/My Apps/OpenCode";
+    const fs = fakeFs({
+      "/usr/share/applications/ai.opencode.desktop.desktop": `[Desktop Entry]\nExec="${spaced}/ai.opencode" %U\n`,
+      "/usr/local/share/applications/opencode-desktop.desktop": "[Desktop Entry]\nExec=%U /opt/OpenCode2/ai.opencode\n",
+    });
+    fs.deps.exists = (path) => path === `${spaced}/resources/opencode-cli` || path === "/opt/OpenCode2/resources/opencode-cli";
+    const candidates = opencodeCliCandidates(fs.deps);
+    expect(candidates).toContain(`${spaced}/resources/opencode-cli`);
+    // A field code ahead of the command is never treated as the executable.
+    expect(candidates).toContain("/opt/OpenCode2/resources/opencode-cli");
+  });
+
+  test("Linux: a Desktop app dir counts as installed even before first launch", () => {
+    // Marker comes from the desktop entry, not the /opt default — the only way a
+    // relocated or AppImage-style payload is detected before its first launch.
+    const fs = fakeFs({ "/usr/share/applications/ai.opencode.desktop.desktop": "[Desktop Entry]\nExec=/data/OpenCode/ai.opencode %U\n" });
+    fs.deps.exists = (path) => path === "/data/OpenCode";
+    expect(opencodeDesktopMarkers(fs.deps)).toContain("/opt/OpenCode");
+    expect(resolveOpencodeConfigPath(fs.deps).detected).toBe(true);
   });
 
   test("module path honours XDG_DATA_HOME", () => {

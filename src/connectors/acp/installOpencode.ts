@@ -243,9 +243,12 @@ export function fallbackOpencodeConfigPath(deps: Partial<OpencodeDeps> = {}): st
  * end in a silent "not detected":
  *   - macOS   /Applications/OpenCode.app/Contents/Resources/opencode-cli
  *   - Windows %APPDATA%\ai.opencode.desktop\cli\<version>\opencode-cli.exe
- *   - Linux   the AppImage/deb/Arch payload, wherever the packaging put it
+ *   - Linux   <app dir>/resources/opencode-cli, where <app dir> is whatever the
+ *             desktop entry's `Exec=` points at (observed 2.2.0 deb payload:
+ *             /opt/OpenCode/resources/opencode-cli)
  * Verified on real installs: the bundled binary answers `debug paths config`
- * (macOS 2.2.1 → ~/.config/opencode; Windows 2.2.1 → %USERPROFILE%\.config\opencode).
+ * (macOS 2.2.1 → ~/.config/opencode; Windows 2.2.1 → %USERPROFILE%\.config\opencode;
+ * Ubuntu 26.04 / Desktop 2.2.0 → ~/.config/opencode).
  */
 export function opencodeCliCandidates(deps: Partial<OpencodeDeps> = {}): string[] {
   const d = { ...defaultOpencodeDeps(), ...deps };
@@ -279,12 +282,74 @@ export function opencodeCliCandidates(deps: Partial<OpencodeDeps> = {}): string[
     join(d.homedir(), ".opencode", "bin", "opencode"),
     "/usr/bin/opencode",
     "/usr/local/bin/opencode",
+    "/snap/bin/opencode",
     "/opt/opencode/opencode",
     "/opt/OpenCode/opencode",
+    "/opt/opencode/resources/opencode-cli",
+    "/opt/OpenCode/resources/opencode-cli",
+    "/usr/lib/opencode/resources/opencode-cli",
+    "/usr/share/opencode/resources/opencode-cli",
   ]) {
     addIfExists(path);
   }
+  // Linux has no fixed app bundle: deb/tar/AppImage/Arch payloads all land in
+  // different places, and the Desktop app's own entry point is the only reliable
+  // record of where. Follow the desktop entry's Exec= to the app dir, then probe
+  // the CLI that sits beside it.
+  for (const appDir of linuxOpencodeAppDirs(d)) {
+    addIfExists(joinFor("linux", appDir, "resources", "opencode-cli"));
+    addIfExists(appDir);
+  }
   return candidates;
+}
+
+/**
+ * First real token of a desktop entry's `Exec=` line: quoted paths survive intact,
+ * field codes (`%U`, `%F`, …) are skipped, and a trailing argument list is dropped.
+ */
+function firstExecToken(exec: string): string {
+  const quoted = /^"([^"]*)"/.exec(exec);
+  if (quoted && quoted[1] !== undefined) return quoted[1].trim();
+  for (const token of exec.split(/\s+/)) {
+    if (token.length === 0 || token.startsWith("%")) continue;
+    return token.replace(/^"|"$/g, "");
+  }
+  return "";
+}
+
+/**
+ * App directories named by OpenCode's Linux desktop entries, newest lookup first.
+ *
+ * `Exec=/opt/OpenCode/ai.opencode %U` (observed on the real 2.2.0 deb payload) or
+ * `/snap/bin/opencode` for a snap install — either way the directory holding that
+ * executable is where `resources/opencode-cli` lives. Unreadable entries are
+ * skipped silently: this is discovery, never a hard requirement.
+ */
+function linuxOpencodeAppDirs(d: OpencodeDeps): string[] {
+  const dataDirs = [
+    join(d.homedir(), ".local", "share"),
+    ...(d.env.XDG_DATA_DIRS && d.env.XDG_DATA_DIRS.trim().length > 0
+      ? d.env.XDG_DATA_DIRS.split(":")
+      : ["/usr/local/share", "/usr/share"]),
+  ].filter((dir) => dir.trim().length > 0);
+  const seen: string[] = [];
+  for (const dataDir of dataDirs) {
+    for (const entry of ["ai.opencode.desktop.desktop", "opencode-desktop.desktop", "opencode.desktop"]) {
+      const text = d.readFile(joinFor("linux", dataDir, "applications", entry));
+      if (!text) continue;
+      for (const line of text.split(/\r?\n/)) {
+        if (!line.startsWith("Exec=")) continue;
+        // Strip field codes (%U, %F…) and honour quoting: an installed path can
+        // contain spaces ("Exec=\"/opt/My Apps/OpenCode/ai.opencode\" %U"), so a
+        // naive whitespace split would take half a path.
+        const exe = firstExecToken(line.slice("Exec=".length).trim());
+        if (exe.length === 0 || !exe.startsWith("/")) continue;
+        const appDir = dirname(exe);
+        if (!seen.includes(appDir)) seen.push(appDir);
+      }
+    }
+  }
+  return seen;
 }
 
 /**
@@ -304,9 +369,16 @@ export function opencodeDesktopMarkers(deps: Partial<OpencodeDeps> = {}): string
   if (d.platform === "darwin") {
     return ["/Applications/OpenCode.app", join(d.homedir(), "Applications", "OpenCode.app")];
   }
-  return [" /opt/OpenCode", "/opt/opencode", join(d.homedir(), ".local", "share", "opencode")].map((p) =>
-    p.trim(),
-  );
+  return [
+    "/opt/OpenCode",
+    "/opt/opencode",
+    "/usr/lib/opencode",
+    "/usr/share/opencode",
+    "/snap/opencode/current",
+    "/snap/bin/opencode",
+    join(d.homedir(), ".local", "share", "opencode"),
+    ...linuxOpencodeAppDirs(d),
+  ];
 }
 
 /**
