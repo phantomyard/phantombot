@@ -104,7 +104,7 @@ export default defineCommand({
   meta: {
     name: "fix-signing",
     description:
-      "macOS: install a stable code-signing identity so TCC stops re-prompting for permissions after every update.",
+      "macOS: install a stable signing identity so permissions stop re-prompting after updates.",
   },
   async run() {
     process.exitCode = await runFixSigning();

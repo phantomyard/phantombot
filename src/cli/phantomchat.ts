@@ -417,7 +417,7 @@ export default defineCommand({
   meta: {
     name: "phantomchat",
     description:
-      "Configure the phantomchat channel (Nostr NIP-17 DMs) for a persona. Generates a per-persona keypair on first run, prints the npub to share, and sets relays + allowed npubs (stored in the persona dir's phantomchat.json).",
+      "Configure PhantomChat: Nostr keypair, relays and allowed npubs in the persona directory.",
   },
   args: {
     persona: {

@@ -15,7 +15,7 @@ export default defineCommand({
   meta: {
     name: "logs",
     description:
-      "Tail the phantombot service logs (journalctl/launchd/Task Scheduler). Follows by default; --no-follow prints the last N and exits.",
+      "Tail service logs. Follows by default; `--no-follow` prints and exits.",
   },
   args: {
     follow: {

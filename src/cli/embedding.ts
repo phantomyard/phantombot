@@ -573,7 +573,7 @@ export default defineCommand({
   meta: {
     name: "embedding",
     description:
-      "Configure semantic-memory embeddings (Gemini, OpenAI Compatible, or none).",
+      "Configure semantic-memory embeddings: Gemini, an OpenAI-compatible endpoint, or none.",
   },
   async run() {
     const code = await runEmbedding();

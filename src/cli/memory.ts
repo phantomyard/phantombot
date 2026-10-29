@@ -1485,7 +1485,7 @@ export default defineCommand({
   meta: {
     name: "memory",
     description:
-      "Memory tools the harness can call from its Bash loop (search, get, list, today, index, capture, drawers).",
+      "Search, read, capture, list, index or back up this persona's memory.",
   },
   subCommands: {
     search: searchCmd,

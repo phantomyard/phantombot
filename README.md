@@ -4,8 +4,8 @@
 
 Phantombot gives an AI coding harness a durable identity, long-term memory,
 secure credentials, scheduled work, and multiple ways to reach you. Use the
-same persona from PhantomChat, Telegram, a terminal, VS Code, Zed, or JetBrains
-without starting from zero each time.
+same persona from PhantomChat, Telegram, a terminal, VS Code, Zed, JetBrains,
+or OpenCode without starting from zero each time.
 
 It ships with a native AI harness and can also use your existing Pi, Claude
 Code, or Codex installation. The harness keeps its own tools; Phantombot owns
@@ -19,7 +19,7 @@ and updates.
 | **One continuous persona** | The same identity, preferences, and context across chat, terminal, and editor sessions. |
 | **Memory that compounds** | Local journals, structured decisions and lessons, durable knowledge, and meaning-based retrieval. |
 | **Bring your own brain** | Built-in native harness, plus Pi, Claude Code, and Codex as primary or fallback options. |
-| **Safe by origin** | Trusted owners act directly; untrusted email, webhooks, bridges, and scheduled task wakes are screened before a capable model runs. |
+| **Safe by origin** | Trusted owners act directly; untrusted email, webhooks, bridges, and scheduled task wakes are screened before a capable model runs, and an escorted turn has every tool call scored. |
 | **Real background work** | Persistent scheduled tasks, health checks, notifications, and service management survive restarts. |
 | **Local control** | Persona state and encrypted secrets stay on your machine. Model-provider privacy terms still apply to prompts sent to that provider. |
 
@@ -30,7 +30,7 @@ flowchart LR
     You[You] --> Surface{Choose a surface}
     Surface --> PC[PhantomChat]
     Surface --> TG[Telegram]
-    Surface --> Editor[VS Code / Zed / JetBrains]
+    Surface --> Editor[VS Code / Zed / JetBrains / OpenCode]
     Surface --> CLI[Terminal]
 
     PC --> Runtime[Phantombot runtime]
@@ -104,6 +104,11 @@ phantombot acp install jetbrains
 phantombot acp install opencode   # Phantombot as a selectable model in OpenCode
 ```
 
+The OpenCode install merges `providers.phantombot` into your `opencode.json` —
+one model per local persona, backed up first, other providers and comments
+untouched. Pick `Phantombot — <persona>` in OpenCode's model picker and that
+conversation runs as that persona.
+
 Check that everything is healthy:
 
 ```bash
@@ -139,7 +144,7 @@ flowchart TD
 | `phantombot phantomchat` | Configure encrypted PhantomChat messaging. |
 | `phantombot voice` | Configure speech-to-text and text-to-speech. |
 | `phantombot ask "…"` | Run a one-shot local prompt. |
-| `phantombot acp install …` | Add Phantombot to a supported editor (zed, jetbrains, vscode) or as a model in OpenCode. |
+| `phantombot acp install …` | Add Phantombot to a supported editor (zed, jetbrains, vscode) or as a model in OpenCode (desktop and CLI). |
 | `phantombot memory …` | Search, capture, inspect, back up, or restore memory. |
 | `phantombot task …` | Add, inspect, cancel, or audit scheduled work. |
 | `phantombot mcp …` | Discover and use external integrations lazily. |
@@ -213,6 +218,10 @@ For the storage model and lifecycle details, see
 - **Telegram** — text, voice, groups, attachments, and notifications.
 - **VS Code, Zed, and JetBrains** — the same persona through ACP, with editor
   workspace context.
+- **OpenCode (desktop and CLI)** — Phantombot registers as a model provider, so
+  one model appears per local persona. It spawns the agent per conversation over
+  stdio: no daemon, no port, no token, and it keeps working while the Phantombot
+  service is down.
 - **Terminal** — interactive TUI with Emacs-style editing
   ([keys](docs/reference/tui-keys.md)), plain REPL, or one-shot `ask` calls.
 
@@ -265,7 +274,9 @@ authentication options.
 Phantombot decides trust from **where a request came from**, not how polite it
 looks.
 
-- Allow-listed owners and local editor sessions are trusted.
+- Allow-listed owners and local editor sessions are trusted. ACP clients
+  (VS Code, Zed, JetBrains) and the OpenCode provider spawn Phantombot as the
+  signed-in OS user, who already owns the persona directory.
 - Chat commands (`/update`, `/restart`, `/reset`, `/harness`, …) answer only
   an authenticated owner, on every channel. From a sender who is answered but
   is not an owner — a Telegram bot or PhantomChat persona with no allowlist, a
@@ -374,6 +385,10 @@ state, explicit trust, memory, harness fallback, and validated decisions. See
 
 - [`docs/README.md`](docs/README.md) — indexed guides for setup, daily use,
   operations, concepts, and the engine API.
+- [`docs/how-to/editors.md`](docs/how-to/editors.md) — registering Phantombot
+  with VS Code, Zed, JetBrains, and OpenCode.
+- [`docs/concepts/security-and-trust.md`](docs/concepts/security-and-trust.md)
+  — the perimeter: origin-based trust, the judge, and the escort on tool calls.
 - [`AGENTS.md`](AGENTS.md) — the contributor guide and the index of invariants;
   the lessons written in blood live under
   [`docs/contributing/invariants/`](docs/contributing/invariants/README.md).

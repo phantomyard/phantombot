@@ -8,7 +8,7 @@ import {
 export default defineCommand({
   meta: {
     name: "reply-mode",
-    description: "Set or clear this turn's temporary text/voice reply override",
+    description: "Set or clear this turn's text/voice reply override.",
   },
   args: {
     mode: {

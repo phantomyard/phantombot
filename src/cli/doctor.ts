@@ -2766,7 +2766,7 @@ export default defineCommand({
   meta: {
     name: "doctor",
     description:
-      "Memory health check — reports nightly sweep backlog, capture health, timers and connectors. The nightly repairs itself by sweeping; doctor only reports it.",
+      "Report memory, channel, timer and harness health. Repairs nothing; the nightly sweep does.",
   },
   args: {
     persona: {

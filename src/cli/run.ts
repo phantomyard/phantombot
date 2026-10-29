@@ -1626,7 +1626,7 @@ export default defineCommand({
   meta: {
     name: "run",
     description:
-      "Run phantombot in the foreground (Telegram listener + harness loop). Ctrl-C to stop.",
+      "Run in the foreground: channels and harness loop. Ctrl-C to stop.",
   },
   args: {
     "if-not-running": {

@@ -26,7 +26,7 @@ export default defineCommand({
   meta: {
     name: "decision-model",
     description:
-      "Configure the recommended decision model (TypeSafe Jev today) for the threat judge and/or brain-swap router. Validates the key before saving.",
+      "Configure the decision model (TypeSafe Jev) that scores the threat judge and escorts tool calls.",
   },
   args: {
     persona: {

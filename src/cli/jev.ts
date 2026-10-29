@@ -447,7 +447,7 @@ export default defineCommand({
   meta: {
     name: "jev",
     description:
-      "DEPRECATED alias for `phantombot decision-model`. Forwards to the same decision-model walkthrough (TypeSafe Jev today).",
+      "Deprecated alias for `phantombot decision-model`.",
   },
   args: {
     persona: {

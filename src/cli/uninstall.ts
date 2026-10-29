@@ -156,7 +156,7 @@ export default defineCommand({
   meta: {
     name: "uninstall",
     description:
-      "Stop, disable, and remove the phantombot service-manager units (systemd --user on Linux, launchd LaunchAgent on macOS, Task Scheduler tasks on Windows).",
+      "Stop, disable and remove the phantombot service units on this host.",
   },
   async run() {
     const code = await runUninstall();

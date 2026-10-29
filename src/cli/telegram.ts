@@ -441,7 +441,7 @@ export default defineCommand({
   meta: {
     name: "telegram",
     description:
-      "Configure the Telegram channel (token + allowed users). Validates the token before saving.",
+      "Configure the Telegram channel: bot token and owner allowlist. Validates before saving.",
   },
   args: {
     persona: {

@@ -16,7 +16,7 @@ New here? Start with [Install Phantombot](getting-started/install.md), then
 - [Group chats](how-to/group-chats.md) — routing, privacy mode, names, and bot
   participation.
 - [Editors](how-to/editors.md) — use the same persona from VS Code, Zed, or
-  JetBrains through ACP.
+  JetBrains through ACP, or as a model provider inside OpenCode.
 - [Voice](how-to/voice.md) — speech-to-text, text-to-speech, and reply behavior.
 - [Scheduled tasks](how-to/scheduled-tasks.md) — persistent one-off and recurring
   work.
@@ -52,7 +52,8 @@ New here? Start with [Install Phantombot](getting-started/install.md), then
 - [Architecture](concepts/architecture.md) — how messages, trust, context,
   harnesses, memory, and replies fit together.
 - [Security and trust](concepts/security-and-trust.md) — principal versus
-  untrusted input, threat screening, and capability boundaries.
+  untrusted input, threat screening, escorted tool calls, and capability
+  boundaries.
 - [Memory lifecycle](concepts/memory-lifecycle.md) — conversations, journal,
   drawers, nightly distillation, knowledge base, and retrieval.
 - [Prompt cache](concepts/prompt-cache.md) — bounded context epochs and their

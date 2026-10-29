@@ -348,7 +348,7 @@ export default defineCommand({
   meta: {
     name: "heartbeat",
     description:
-      "Mechanical 30-min maintenance: promote tagged daily-file lines to drawers, scan ## Recent for staleness, refresh FTS index, flush due conversation-turn tails, embed newly-written notes, and fire the nightly sweep when the calendar day has rolled over. No LLM call.",
+      "Mechanical 30-minute upkeep: promote captures, refresh the index, embed notes. No model call.",
   },
   args: {
     persona: {

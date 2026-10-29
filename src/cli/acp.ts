@@ -155,7 +155,7 @@ export default defineCommand({
   meta: {
     name: "acp",
     description:
-      "Run phantombot as an ACP agent server over stdio (Zed/JetBrains spawn this). Use `acp install zed` / `acp install jetbrains` (settings merge), `acp install vscode` (first-party extension) or `acp install opencode` (model provider) to register it with an editor.",
+      "Run as an ACP agent over stdio, or register with VS Code, Zed, JetBrains or OpenCode.",
   },
   args: {
     persona: {

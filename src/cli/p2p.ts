@@ -47,7 +47,7 @@ const statusCmd = defineCommand({
 export default defineCommand({
   meta: {
     name: "p2p",
-    description: "Relay-free P2P transport node (phantombot#258).",
+    description: "Run the relay-free P2P transport node used by PhantomChat.",
   },
   subCommands: {
     status: statusCmd,

@@ -513,7 +513,7 @@ export default defineCommand({
   meta: {
     name: "persona",
     description:
-      "Manage personas: create, import, switch, or list. Run with no args for the TUI; pass <name> to switch; pass --import <dir> to import non-interactively.",
+      "Create, import, list or switch personas. With no arguments it opens the persona TUI.",
   },
   args: {
     name: {

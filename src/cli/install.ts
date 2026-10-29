@@ -656,7 +656,7 @@ export default defineCommand({
   meta: {
     name: "install",
     description:
-      "Install the host-appropriate service unit for `phantombot run` (systemd --user on Linux, launchd LaunchAgent on macOS, Task Scheduler logon task on Windows) and start it.",
+      "Install and start the host service unit — systemd, launchd or Task Scheduler.",
   },
   args: {
     "run-logged-off": {

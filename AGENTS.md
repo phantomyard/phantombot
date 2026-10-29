@@ -82,7 +82,8 @@ Moved to [docs/contributing/repo-layout.md](docs/contributing/repo-layout.md) �
 3. **Update the test** in `tests/cli.test.ts` — the `expect(names).toEqual([…])` list must include the new subcommand.
 4. **Test the function directly** (in `tests/cli-<name>.test.ts`) by injecting fake deps. Don't drive `defineCommand` end-to-end; @clack/prompts is non-TTY-hostile in tests.
 5. **Update README** — add the command to the "Commands" section.
-6. **Add or update an invariant** (its area file, plus its index line here) if the command introduces new conventions (a new lockfile, a new file location, a new credential interaction).
+6. **Add it to `HELP_GROUPS`** in `src/cli/help.ts` (exactly one group) and keep its `meta.description` at 20 words or fewer — `tests/cli-help.test.ts` fails otherwise (invariant 83).
+7. **Add or update an invariant** (its area file, plus its index line here) if the command introduces new conventions (a new lockfile, a new file location, a new credential interaction).
 
 ## Testing conventions
 
@@ -209,6 +210,7 @@ guards; see the [recovery contract](docs/contributing/invariants/harnesses.md#co
 - [77](docs/contributing/invariants/cli-tui-and-wizards.md#inv-77) ↑↓ in the chat prompt walk the rows AS DRAWN, and only the edge rows scroll (issue #667).
 - [78](docs/contributing/invariants/cli-tui-and-wizards.md#inv-78) The chat prompt's Emacs keys are matched on what Ink reports, never on the characters macOS types for Option (issue #677).
 - [81](docs/contributing/invariants/cli-tui-and-wizards.md#inv-81) A chat-screen row is a one-row BOX — the layout cannot wrap it, and the width it is laid out at has one source.
+- [83](docs/contributing/invariants/cli-tui-and-wizards.md#inv-83) The root `--help` is GROUPED and BOUNDED — every top-level command sits in exactly one group, and its description fits one short line.
 
 ### Testing — [testing.md](docs/contributing/invariants/testing.md)
 

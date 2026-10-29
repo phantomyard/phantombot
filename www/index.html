@@ -74,11 +74,16 @@
             </div>
         </section>
 
-        <!-- Additive: editor extensions (VS Code / Zed / JetBrains) -->
+        <!-- Additive: editor extensions (VS Code / Zed / JetBrains / OpenCode) -->
         <section class="editors">
             <p class="section-eyebrow">Now in your editor</p>
-            <h2>Your Phantom, inside VS&nbsp;Code, Zed and JetBrains.</h2>
+            <h2>Your Phantom, inside VS&nbsp;Code, Zed, JetBrains and OpenCode.</h2>
             <p class="section-intro">Phantombot speaks the <a href="https://agentclientprotocol.com">Agent Client Protocol</a>, so the same Phantom you talk to on your phone now lives in your editor's chat panel, across <strong>VS&nbsp;Code</strong>, <strong>Zed</strong> and the whole <strong>JetBrains</strong> family. Same persona, same memory, same tools. Pick <em>Phantombot</em> from the agent list and start coding with an agent that already knows your repo, your decisions, and you.</p>
+            <!-- OpenCode is also supported now: OpenCode runs its own agent, so it
+                 cannot consume an external ACP agent. Phantombot registers as a
+                 model provider instead and shows up in OpenCode's model picker —
+                 one model per persona, desktop and CLI. -->
+            <p class="shot-cap"><strong>OpenCode</strong> is supported too — desktop and CLI. It runs its own agent, so Phantombot registers as a <strong>model provider</strong> instead: pick <em>Phantombot &mdash; &lt;persona&gt;</em> in the model list and that conversation runs as that persona. One model per persona, no daemon, no port, no token &mdash; and it keeps working while the Phantombot service is down.</p>
 
             <div class="terminal-window editors-parallel-frame">
                 <div class="terminal-header">
