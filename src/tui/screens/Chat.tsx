@@ -43,8 +43,15 @@ import { useElapsedSeconds, useSpinnerFrame } from "../components/Spinner.tsx";
 import { badge, humanDuration, theme } from "../theme.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { rawKeyFeed } from "../stdinTap.ts";
-import { frameChromeRows } from "../chrome.ts";
-import { transcriptLines, transcriptWindow } from "../transcript.ts";
+import { frameChromeColumns, frameChromeRows } from "../chrome.ts";
+import {
+  ROW_INDENT,
+  minTerminalColumns,
+  rowColumns,
+  tooNarrow,
+  transcriptLines,
+  transcriptWindow,
+} from "../transcript.ts";
 import type { TranscriptLine } from "../transcript.ts";
 import type { Span } from "../markdown.ts";
 import { commandHints, commandName, completeCommand } from "../slash.ts";
@@ -92,38 +99,58 @@ export const CHAT_CHROME_ROWS = 8;
 export const MAX_COMMAND_HINTS = 5;
 
 /**
- * One transcript row.
+ * One transcript row, in a box exactly ONE row tall and `width` wide.
  *
- * The screen draws exactly the lines `transcript.ts` produced — no component
- * decides how tall a message is any more, because the thing that measures and
- * the thing that draws are now the same list. That is what makes a row of
- * scroll mean a row on screen.
+ * The screen draws exactly the lines `transcript.ts` produced, and the box
+ * makes "a row of scroll is a row on screen" structural rather than a sum two
+ * modules have to agree on: Ink cannot wrap inside it, so a row that is ever
+ * too wide is cut at the edge instead of growing the frame and wrecking the
+ * repaint math (phantombot#556). `transcript.ts` fits every row to `width`
+ * and fails the tests if one does not, so the cut is a backstop, not a layout.
+ *
+ * Indents are leading spaces inside the row, not box padding: what the row
+ * draws is what `rowWidth` counts.
  */
-function Line(props: { line: TranscriptLine }): React.ReactElement {
-  const line = props.line;
-  if (line.kind === "gap") return <Text> </Text>;
+function Row(props: { width: number; children: React.ReactNode }): React.ReactElement {
+  return (
+    <Box width={props.width} height={1} flexShrink={0} overflow="hidden">
+      {props.children}
+    </Box>
+  );
+}
+
+function Line(props: { line: TranscriptLine; width: number }): React.ReactElement {
+  const { line, width } = props;
+  const pad = " ".repeat(ROW_INDENT);
+  if (line.kind === "gap") {
+    // A blank row must still DRAW a row: an empty box would collapse.
+    return (
+      <Row width={width}>
+        <Text> </Text>
+      </Row>
+    );
+  }
   if (line.kind === "header") {
     return (
-      <Box>
-        <Text
-          backgroundColor={line.role === "user" ? theme.accent : theme.ok}
-          color="black"
-          bold
-        >
-          {` ${line.name} `}
+      <Row width={width}>
+        <Text wrap="truncate">
+          <Text
+            backgroundColor={line.role === "user" ? theme.accent : theme.ok}
+            color="black"
+            bold
+          >
+            {` ${line.name} `}
+          </Text>
+          <Text color={theme.dim}>{line.time ? `  ${line.time}` : ""}</Text>
         </Text>
-        <Text color={theme.dim}>{line.time ? `  ${line.time}` : ""}</Text>
-      </Box>
+      </Row>
     );
   }
   if (line.kind === "tool") {
-    // `wrap="truncate"` is the BACKSTOP, not the fit: `transcript.ts` already
-    // cut the title to the drawable width, and this guarantees that even if
-    // that arithmetic is ever wrong again the row cannot become two and take
-    // the frame's repaint math with it (phantombot#556).
     return (
-      <Box paddingLeft={2}>
+      <Row width={width}>
         <Text color={theme.dim} wrap="truncate">
+          {pad}
           {"\u203a "}
           {line.title}
         </Text>
@@ -131,21 +158,17 @@ function Line(props: { line: TranscriptLine }): React.ReactElement {
         <Text color={theme.dim} wrap="truncate">
           {line.duration}
         </Text>
-      </Box>
+      </Row>
     );
   }
   if (line.kind === "rich") {
-    // A blank markdown row must still DRAW a row. An empty Ink box collapses
-    // to zero height, and a row that measures one and draws none is exactly
-    // the measurement/rendering drift this transcript is built to prevent —
-    // every scroll offset below it would be out by one.
-    if (line.spans.length === 0) return <Text> </Text>;
     // Markdown, already flattened to ONE row by `markdown.ts`: the spans carry
-    // attributes, never a line break, so this stays a single Ink row and the
-    // transcript's row arithmetic still holds (phantombot#481).
+    // attributes, never a line break (phantombot#481).
     return (
-      <Box paddingLeft={2 + line.indent}>
-        <Text>
+      <Row width={width}>
+        <Text wrap="truncate">
+          {pad + " ".repeat(line.indent)}
+          {line.spans.length === 0 ? " " : null}
           {line.spans.map((span, i) => (
             <Text
               key={i}
@@ -158,13 +181,16 @@ function Line(props: { line: TranscriptLine }): React.ReactElement {
             </Text>
           ))}
         </Text>
-      </Box>
+      </Row>
     );
   }
   return (
-    <Box paddingLeft={2}>
-      <Text color={line.error ? theme.bad : undefined}>{line.text}</Text>
-    </Box>
+    <Row width={width}>
+      <Text color={line.error ? theme.bad : undefined} wrap="truncate">
+        {pad}
+        {line.text}
+      </Text>
+    </Row>
   );
 }
 
@@ -195,12 +221,15 @@ function Activity(props: {
   const frame = useSpinnerFrame(true);
   const seconds = useElapsedSeconds(props.since);
   return (
-    <Box paddingX={1}>
+    // One row, budgeted as one in CHAT_CHROME_ROWS: cut, never wrapped.
+    <Box paddingX={1} height={1} flexShrink={0} overflow="hidden">
       <Text color={theme.accent}>{frame} </Text>
-      <Text color={theme.dim}>{props.note}</Text>
-      <Text color={theme.dim}>{` · ${seconds}s`}</Text>
+      <Text color={theme.dim} wrap="truncate">{props.note}</Text>
+      <Box flexShrink={0}>
+        <Text color={theme.dim}>{` · ${seconds}s`}</Text>
+      </Box>
       <Box flexGrow={1} />
-      <Text color={theme.dim}>ctrl+c interrupts</Text>
+      <Text color={theme.dim} wrap="truncate">ctrl+c interrupts</Text>
     </Box>
   );
 }
@@ -564,7 +593,9 @@ export function ChatScreen(props: {
   // constant assumes ONE input row; every extra wrapped row is paid for by
   // the transcript in the same render, so a long prompt shrinks the scroll
   // region instead of pushing the footer off the screen.
-  promptWidthRef.current = Math.max(8, size.columns - 4);
+  // Frame chrome plus the strip's own paddingX={1}: `columns - 4` was right
+  // for the bare frame only, and wrapped the boxed prompt two columns late.
+  promptWidthRef.current = Math.max(8, size.columns - frameChromeColumns() - 2);
   const inputRows = promptRows(
     input.text,
     input.cursor,
@@ -588,6 +619,10 @@ export function ChatScreen(props: {
   // ONE flat list of rows: what is measured is what is drawn. Clipping happens
   // before layout — overflowing the window is what pushes the border off the
   // bottom of the screen. See `transcript.ts`.
+  // The one row width: every transcript row is fitted to it and drawn in a
+  // box exactly this wide. Below the minimum there is nothing sane to fit to.
+  const rowWidthCols = rowColumns(size.columns);
+  const narrow = tooNarrow(size.columns);
   const lines = transcriptLines(messages, size.columns, {
     personaName: props.session.persona,
     formatDuration: (ms) => (ms === undefined ? "\u2026" : humanDuration(ms)),
@@ -628,7 +663,13 @@ export function ChatScreen(props: {
       ]}
     >
       <Box flexDirection="column" flexGrow={1} overflow="hidden">
-        {lines.length === 0 ? (
+        {narrow ? (
+          <Row width={rowWidthCols}>
+            <Text color={theme.dim} wrap="truncate">
+              {`Terminal too narrow \u2014 widen to ${minTerminalColumns()} columns.`}
+            </Text>
+          </Row>
+        ) : lines.length === 0 ? (
           <Text color={theme.dim}>
             Say something to {props.session.persona}. ctrl+s for settings.
           </Text>
@@ -643,7 +684,7 @@ export function ChatScreen(props: {
               </Text>
             ) : null}
             {view.lines.map((line, i) => (
-              <Line key={`${view.above + i}`} line={line} />
+              <Line key={`${view.above + i}`} line={line} width={rowWidthCols} />
             ))}
           </>
         )}
@@ -657,11 +698,14 @@ export function ChatScreen(props: {
       )}
       {hints.length > 0 ? (
         <Box flexDirection="column" paddingX={2}>
+          {/* Each hint is budgeted as ONE row (hints.length above). */}
           {hints.map((hint) => (
-            <Text key={hint.name} color={theme.dim}>
-              <Text color={theme.accent}>{`/${hint.name}`}</Text>
-              {`  ${hint.description}`}
-            </Text>
+            <Box key={hint.name} height={1} flexShrink={0} overflow="hidden">
+              <Text color={theme.dim} wrap="truncate">
+                <Text color={theme.accent}>{`/${hint.name}`}</Text>
+                {`  ${hint.description}`}
+              </Text>
+            </Box>
           ))}
         </Box>
       ) : null}

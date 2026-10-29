@@ -88,25 +88,48 @@ export function Frame(props: {
     /* A BAR, not a line of text: the background is painted by the layout
        engine across this box's own width, so it stays flush edge to edge on
        any resize. Never fill with spaces — that encodes a column count. */
-    <Box width="100%" backgroundColor={theme.bar.bg} paddingX={1}>
-      <Text color={theme.bar.accent} bold>
-        phantombot
-      </Text>
-      <Text color={theme.bar.dim}> v{VERSION}</Text>
+    /* ONE row, always: the screens budget exactly one row for it
+       (`frameChromeRows`, `CHAT_CHROME_ROWS`), so on a narrow terminal the
+       parts are cut, never wrapped — a wrapped bar is a row the budget did
+       not pay for, and it pushes the bottom of the body off the screen. */
+    <Box
+      width="100%"
+      height={1}
+      overflow="hidden"
+      backgroundColor={theme.bar.bg}
+      paddingX={1}
+    >
+      <Box flexShrink={0}>
+        <Text color={theme.bar.accent} bold>
+          phantombot
+        </Text>
+      </Box>
+      <Text color={theme.bar.dim} wrap="truncate">{` v${VERSION}`}</Text>
       {crumbs.length > 0 ? (
-        <Text color={theme.bar.fg}>{` \u25b8 ${crumbs.join(" \u25b8 ")}`}</Text>
+        <Text color={theme.bar.fg} wrap="truncate">{` \u25b8 ${crumbs.join(" \u25b8 ")}`}</Text>
       ) : null}
       <Box flexGrow={1} />
       {props.status ? (
-        <Text color={props.statusColor ?? theme.bar.dim}>{props.status}</Text>
+        <Text color={props.statusColor ?? theme.bar.dim} wrap="truncate">
+          {` ${props.status}`}
+        </Text>
       ) : null}
     </Box>
   );
   const footer =
     props.footer && props.footer.length > 0 ? (
-      <Box width="100%" backgroundColor={theme.bar.bg} paddingX={1} flexWrap="nowrap">
+      /* ONE row, like the header: hints that do not fit are cut at the edge
+         rather than wrapped onto rows the screen never budgeted. */
+      <Box
+        width="100%"
+        height={1}
+        overflow="hidden"
+        backgroundColor={theme.bar.bg}
+        paddingX={1}
+        flexWrap="nowrap"
+      >
         {props.footer.map((f) => (
-          <Box key={f.key + f.label} marginRight={1}>
+          <Box key={f.key + f.label} marginRight={1} flexShrink={0}>
             {f.icon ? <Text color={theme.bar.dim}>{f.icon} </Text> : null}
             <Text color={theme.bar.accent} bold>
               {f.key}
