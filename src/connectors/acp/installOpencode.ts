@@ -85,6 +85,8 @@ export interface OpencodeDeps {
   runOpencode(args: string[], exe?: string): { code: number; stdout: string } | undefined;
   /** Names of the DIRECTORIES directly under `path`; empty when unreadable. */
   listDir(path: string): string[];
+  /** Names of ALL entries under `path` (files included); empty when unreadable. */
+  listFiles(path: string): string[];
   /** Clock, injectable so the probe budget can be tested. Default: `Date.now`. */
   now(): number;
 }
@@ -105,6 +107,13 @@ export function defaultOpencodeDeps(): OpencodeDeps {
     writeFile: (path, data) => writeFileSync(path, data, { encoding: "utf8", mode: 0o644 }),
     mkdirp: (path) => mkdirSync(path, { recursive: true }),
     rename: (from, to) => renameSync(from, to),
+    listFiles: (path) => {
+      try {
+        return readdirSync(path).map((entry) => String(entry));
+      } catch {
+        return [];
+      }
+    },
     listDir: (path) => {
       try {
         return readdirSync(path, { withFileTypes: true })
@@ -394,7 +403,7 @@ function linuxOpencodeAppDirs(d: OpencodeDeps): string[] {
     const entries = [
       ...new Set([
         ...["ai.opencode.desktop.desktop", "opencode-desktop.desktop", "opencode.desktop"],
-        ...d.listDir(applications).filter(
+        ...d.listFiles(applications).filter(
           (name) => name.endsWith(".desktop") && name.includes("opencode"),
         ),
       ]),

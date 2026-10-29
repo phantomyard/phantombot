@@ -7,6 +7,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { parse } from "jsonc-parser";
 
 import {
@@ -57,6 +60,7 @@ function fakeFs(initial: Record<string, string> = {}, dirs: string[] = []): Fake
     },
     runOpencode: () => undefined,
     listDir: () => [],
+    listFiles: () => [],
   };
   return { deps, files, dirs: dirSet, writes, renames };
 }
@@ -314,9 +318,38 @@ describe("opencode config path resolution", () => {
     const cli = "/snap/opencode/42/resources/opencode-cli";
     const fs = fakeFs({ [desktopFile]: "[Desktop Entry]\nExec=/snap/opencode/42/opencode %U\n" });
     fs.deps.env = { XDG_DATA_DIRS: "/var/lib/snapd/desktop" };
-    fs.deps.listDir = (path) => (path === "/var/lib/snapd/desktop/applications" ? ["opencode_opencode.desktop"] : []);
+    fs.deps.listFiles = (path) => (path === "/var/lib/snapd/desktop/applications" ? ["opencode_opencode.desktop"] : []);
     fs.deps.exists = (path) => path === "/snap/opencode/42/opencode" || path === cli;
     expect(opencodeCliCandidates(fs.deps)).toContain(cli);
+  });
+
+  test("the SHIPPED deps can actually list a desktop entry (no stubs)", () => {
+    // Regression for review finding: `listDir` filters directories, so a snap
+    // `opencode_opencode.desktop` could never be matched in production even
+    // though the stubbed unit case passed.
+    const root = mkdtempSync(join(tmpdir(), "pb-oc-apps-"));
+    try {
+      const applications = join(root, "applications");
+      mkdirSync(applications, { recursive: true });
+      const app = join(root, "OpenCode", "ai.opencode");
+      mkdirSync(dirname(app), { recursive: true });
+      writeFileSync(app, "", { mode: 0o755 });
+      writeFileSync(
+        join(applications, "opencode_opencode.desktop"),
+        `[Desktop Entry]\nExec=${app} %U\n`,
+      );
+      mkdirSync(join(root, "OpenCode", "resources"), { recursive: true });
+      const cli = join(root, "OpenCode", "resources", "opencode-cli");
+      writeFileSync(cli, "", { mode: 0o755 });
+
+      const candidates = opencodeCliCandidates({
+        homedir: () => root,
+        env: { XDG_DATA_DIRS: root },
+      });
+      expect(candidates).toContain(cli);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("module path honours XDG_DATA_HOME", () => {
