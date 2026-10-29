@@ -75,11 +75,13 @@ export interface OpencodeDeps {
   mkdirp(path: string): void;
   rename(from: string, to: string): void;
   /**
-   * Run `opencode <args>` and capture stdout. Returns undefined when the CLI is
-   * absent or the command fails — `debug paths config` is a convenience, never a
-   * hard requirement.
+   * Run `opencode <args>` (or `<exe> <args>` when `exe` is given) and capture
+   * stdout. Returns undefined when the CLI is absent or the command fails —
+   * `debug paths config` is a convenience, never a hard requirement.
    */
-  runOpencode(args: string[]): { code: number; stdout: string } | undefined;
+  runOpencode(args: string[], exe?: string): { code: number; stdout: string } | undefined;
+  /** Names of the DIRECTORIES directly under `path`; empty when unreadable. */
+  listDir(path: string): string[];
 }
 
 export function defaultOpencodeDeps(): OpencodeDeps {
@@ -98,9 +100,18 @@ export function defaultOpencodeDeps(): OpencodeDeps {
     writeFile: (path, data) => writeFileSync(path, data, { encoding: "utf8", mode: 0o644 }),
     mkdirp: (path) => mkdirSync(path, { recursive: true }),
     rename: (from, to) => renameSync(from, to),
-    runOpencode: (args) => {
+    listDir: (path) => {
       try {
-        const result = spawnSync("opencode", args, {
+        return readdirSync(path, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name);
+      } catch {
+        return [];
+      }
+    },
+    runOpencode: (args, exe = "opencode") => {
+      try {
+        const result = spawnSync(exe, args, {
           encoding: "utf8",
           timeout: 20_000,
           shell: process.platform === "win32",
@@ -209,15 +220,93 @@ export function fallbackOpencodeConfigPath(deps: Partial<OpencodeDeps> = {}): st
     }
     return joinFor(d.platform, dir, "opencode.json");
   };
-  if (d.platform === "win32") {
-    const appData = d.env.APPDATA || joinFor("win32", d.homedir(), "AppData", "Roaming");
-    return file(joinFor("win32", appData, "opencode"));
-  }
+  // OpenCode resolves its USER config as `$XDG_CONFIG_HOME || ~/.config` + "opencode"
+  // on EVERY platform — there is no win32/darwin branch (verified in the shipped
+  // v2.2.x bundle: `var r=i.homedir(),u=process.env.XDG_CONFIG_HOME||(r?t.join(r,".config"):void 0)`
+  // then `join(u,'opencode')`). Only the SYSTEM config dir is per-OS
+  // (%ProgramData%\opencode, /Library/Application Support/opencode, /etc/opencode).
+  // Windows therefore uses ~/.config/opencode, NOT %APPDATA%\opencode — a
+  // Desktop-only Windows install creates ~/.config/opencode and nothing at all
+  // under %APPDATA%\opencode (observed on a real 2.2.1 install).
   const xdg =
     d.env.XDG_CONFIG_HOME && d.env.XDG_CONFIG_HOME.trim().length > 0
       ? d.env.XDG_CONFIG_HOME
       : join(d.homedir(), ".config");
   return file(joinFor(d.platform, xdg, "opencode"));
+}
+
+/**
+ * Executables worth trying for `opencode debug paths config`, best first.
+ *
+ * The bare name covers a CLI on PATH. The rest cover the **Desktop** app, which
+ * bundles its own CLI and does NOT put it on PATH — the exact case that used to
+ * end in a silent "not detected":
+ *   - macOS   /Applications/OpenCode.app/Contents/Resources/opencode-cli
+ *   - Windows %APPDATA%\ai.opencode.desktop\cli\<version>\opencode-cli.exe
+ *   - Linux   the AppImage/deb/Arch payload, wherever the packaging put it
+ * Verified on real installs: the bundled binary answers `debug paths config`
+ * (macOS 2.2.1 → ~/.config/opencode; Windows 2.2.1 → %USERPROFILE%\.config\opencode).
+ */
+export function opencodeCliCandidates(deps: Partial<OpencodeDeps> = {}): string[] {
+  const d = { ...defaultOpencodeDeps(), ...deps };
+  const candidates: string[] = ["opencode"];
+  const addIfExists = (path: string) => {
+    if (d.exists(path) && !candidates.includes(path)) candidates.push(path);
+  };
+  // Newest staged version first.
+  const listDirs = (root: string): string[] => [...d.listDir(root)].sort().reverse();
+
+  if (d.platform === "win32") {
+    const appData = d.env.APPDATA || joinFor("win32", d.homedir(), "AppData", "Roaming");
+    const cliRoot = joinFor("win32", appData, "ai.opencode.desktop", "cli");
+    for (const version of listDirs(cliRoot)) {
+      addIfExists(joinFor("win32", cliRoot, version, "opencode-cli.exe"));
+    }
+    const local = d.env.LOCALAPPDATA || joinFor("win32", d.homedir(), "AppData", "Local");
+    addIfExists(joinFor("win32", local, "Programs", "opencode", "opencode.exe"));
+    return candidates;
+  }
+
+  if (d.platform === "darwin") {
+    for (const app of ["/Applications/OpenCode.app", join(d.homedir(), "Applications", "OpenCode.app")]) {
+      addIfExists(join(app, "Contents", "Resources", "opencode-cli"));
+    }
+    addIfExists(join(d.homedir(), ".opencode", "bin", "opencode"));
+    return candidates;
+  }
+
+  for (const path of [
+    join(d.homedir(), ".opencode", "bin", "opencode"),
+    "/usr/bin/opencode",
+    "/usr/local/bin/opencode",
+    "/opt/opencode/opencode",
+    "/opt/OpenCode/opencode",
+  ]) {
+    addIfExists(path);
+  }
+  return candidates;
+}
+
+/**
+ * Files/dirs whose presence proves the OpenCode **Desktop** app is installed even
+ * when it has never been launched (so no config dir exists yet).
+ */
+export function opencodeDesktopMarkers(deps: Partial<OpencodeDeps> = {}): string[] {
+  const d = { ...defaultOpencodeDeps(), ...deps };
+  if (d.platform === "win32") {
+    const appData = d.env.APPDATA || joinFor("win32", d.homedir(), "AppData", "Roaming");
+    const local = d.env.LOCALAPPDATA || joinFor("win32", d.homedir(), "AppData", "Local");
+    return [
+      joinFor("win32", appData, "ai.opencode.desktop"),
+      joinFor("win32", local, "Programs", "ai.opencode.desktop"),
+    ];
+  }
+  if (d.platform === "darwin") {
+    return ["/Applications/OpenCode.app", join(d.homedir(), "Applications", "OpenCode.app")];
+  }
+  return [" /opt/OpenCode", "/opt/opencode", join(d.homedir(), ".local", "share", "opencode")].map((p) =>
+    p.trim(),
+  );
 }
 
 /**
@@ -239,20 +328,30 @@ export function resolveOpencodeConfigPath(deps: Partial<OpencodeDeps> = {}): {
   if (explicit && explicit.trim().length > 0) {
     return { configPath: explicit.trim(), detected: true };
   }
-  const probe = d.runOpencode(["debug", "paths", "config"]);
-  const dir = probe && probe.code === 0 ? probe.stdout.trim().split(/\r?\n/).pop() ?? "" : "";
+  let dir = "";
+  for (const exe of opencodeCliCandidates(d)) {
+    const probe = d.runOpencode(["debug", "paths", "config"], exe);
+    const candidate = probe && probe.code === 0 ? probe.stdout.trim().split(/\r?\n/).pop() ?? "" : "";
+    if (candidate.length > 0) {
+      dir = candidate;
+      break;
+    }
+  }
   if (dir && dir.length > 0) {
     const inside = dir.endsWith(".json") || dir.endsWith(".jsonc") ? dir : null;
     if (inside) return { configPath: inside, detected: true };
     for (const name of ["opencode.jsonc", "opencode.json"]) {
-      const candidate = join(dir, name);
+      const candidate = joinFor(d.platform, dir, name);
       if (d.exists(candidate)) return { configPath: candidate, detected: true };
     }
-    // The directory exists ⇒ OpenCode is installed; write the canonical name.
-    if (d.exists(dir)) return { configPath: join(dir, "opencode.json"), detected: true };
+    // OpenCode itself just answered, so it IS installed and this is exactly where
+    // it will look — even if the directory has not been created yet (a Desktop
+    // install that has never been launched). Write the canonical name.
+    return { configPath: joinFor(d.platform, dir, "opencode.json"), detected: true };
   }
   const fallback = fallbackOpencodeConfigPath(d);
-  return { configPath: fallback, detected: d.exists(dirname(fallback)) };
+  const detected = d.exists(dirname(fallback)) || opencodeDesktopMarkers(d).some((marker) => d.exists(marker));
+  return { configPath: fallback, detected };
 }
 
 /**
@@ -430,6 +529,10 @@ export function installOpencode(options: InstallOpencodeOptions): InstallOpencod
       deps.mkdirp(dirname(modulePath));
       deps.writeFile(modulePath, opencodeProviderSource().toString("utf8"));
     }
+
+    // A Desktop-only install has the app but no config directory yet — the first
+    // run of this installer is what creates it.
+    deps.mkdirp(dirname(configPath));
 
     const edits = modify(text, ["providers", OPENCODE_PROVIDER_ID], block, {
       formattingOptions: { insertSpaces: true, tabSize: 2, eol: text.includes("\r\n") ? "\r\n" : "\n" },

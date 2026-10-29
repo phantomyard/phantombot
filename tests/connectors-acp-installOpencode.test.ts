@@ -53,6 +53,7 @@ function fakeFs(initial: Record<string, string> = {}, dirs: string[] = []): Fake
       files.delete(from);
     },
     runOpencode: () => undefined,
+    listDir: () => [],
   };
   return { deps, files, dirs: dirSet, writes, renames };
 }
@@ -88,13 +89,69 @@ describe("opencode config path resolution", () => {
     });
   });
 
-  test("Windows default lives under APPDATA", () => {
+  test("Windows default is ~/.config/opencode, NOT %APPDATA%\\opencode", () => {
+    // Verified against real OpenCode 2.2.1 bundle: user config is
+    // `$XDG_CONFIG_HOME || ~/.config` + "opencode" on every platform, and a real
+    // Desktop-only Windows install creates %USERPROFILE%\\.config\\opencode.
     const fs = fakeFs();
     fs.deps.platform = "win32";
+    fs.deps.homedir = () => "C:\\Users\\tester";
     fs.deps.env = { APPDATA: "C:\\Users\\tester\\AppData\\Roaming" };
     expect(fallbackOpencodeConfigPath(fs.deps)).toBe(
-      "C:\\Users\\tester\\AppData\\Roaming\\opencode\\opencode.json",
+      "C:\\Users\\tester\\.config\\opencode\\opencode.json",
     );
+  });
+
+  test("Windows default honours XDG_CONFIG_HOME", () => {
+    const fs = fakeFs();
+    fs.deps.platform = "win32";
+    fs.deps.env = { XDG_CONFIG_HOME: "D:\\xdg" };
+    expect(fallbackOpencodeConfigPath(fs.deps)).toBe("D:\\xdg\\opencode\\opencode.json");
+  });
+
+  test("Windows: bundled Desktop CLI is probed when `opencode` is not on PATH", () => {
+    const cli = "C:\\Users\\tester\\AppData\\Roaming\\ai.opencode.desktop\\cli\\2.2.1-x64\\opencode-cli.exe";
+    const fs = fakeFs({ [cli]: "" }, ["C:\\Users\\tester\\AppData\\Roaming\\ai.opencode.desktop\\cli"]);
+    fs.deps.platform = "win32";
+    fs.deps.homedir = () => "C:\\Users\\tester";
+    fs.deps.env = { APPDATA: "C:\\Users\\tester\\AppData\\Roaming" };
+    fs.deps.listDir = () => ["2.2.1-x64"];
+    const tried: string[] = [];
+    fs.deps.runOpencode = (_args, exe) => {
+      tried.push(exe ?? "opencode");
+      return exe === "opencode" ? { code: 1, stdout: "" } : { code: 0, stdout: "C:\\Users\\tester\\.config\\opencode\r\n" };
+    };
+    expect(resolveOpencodeConfigPath(fs.deps).configPath).toBe(
+      "C:\\Users\\tester\\.config\\opencode\\opencode.json",
+    );
+    expect(tried[0]).toBe("opencode");
+    expect(tried).toContain(cli);
+  });
+
+  test("macOS: Desktop-only install (app bundle, never launched) counts as detected", () => {
+    const fs = fakeFs({}, ["/Applications/OpenCode.app"]);
+    fs.deps.platform = "darwin";
+    fs.deps.homedir = () => "/Users/tester";
+    fs.deps.exists = (path) => path === "/Applications/OpenCode.app";
+    const resolved = resolveOpencodeConfigPath(fs.deps);
+    expect(resolved.detected).toBe(true);
+    expect(resolved.configPath).toBe("/Users/tester/.config/opencode/opencode.json");
+  });
+
+  test("macOS: bundled CLI inside the app bundle is a probe candidate", () => {
+    const fs = fakeFs();
+    fs.deps.platform = "darwin";
+    fs.deps.homedir = () => "/Users/tester";
+    fs.deps.exists = (path) => path === "/Applications/OpenCode.app/Contents/Resources/opencode-cli";
+    const probed: string[] = [];
+    fs.deps.runOpencode = (_args, exe) => {
+      probed.push(exe ?? "opencode");
+      return exe === "/Applications/OpenCode.app/Contents/Resources/opencode-cli"
+        ? { code: 0, stdout: "/Users/tester/.config/opencode\n" }
+        : undefined;
+    };
+    expect(resolveOpencodeConfigPath(fs.deps).detected).toBe(true);
+    expect(probed).toContain("/Applications/OpenCode.app/Contents/Resources/opencode-cli");
   });
 
   test("module path honours XDG_DATA_HOME", () => {
@@ -189,6 +246,26 @@ describe("installOpencode", () => {
     expect(config.providers.phantombot.settings.command).toBe("/usr/local/bin/phantombot");
     expect(config.providers.phantombot.models.omar.name).toContain("omar");
     expect(config.providers.phantombot.models.kai.name).toContain("kai");
+  });
+
+  test("creates the config directory on a Desktop-only install that never ran", () => {
+    // Real state on a fresh macOS install: /Applications/OpenCode.app exists but
+    // ~/.config/opencode does not. Before this fix the write threw ENOENT and the
+    // whole install failed with action "error".
+    const fs = fakeFs({}, ["/Applications/OpenCode.app"]);
+    fs.deps.platform = "darwin";
+    fs.deps.homedir = () => "/Users/tester";
+    fs.deps.exists = (path) => path === "/Applications/OpenCode.app";
+    const made: string[] = [];
+    fs.deps.mkdirp = (path) => made.push(path);
+    const result = installOpencode({
+      binaryPath: "/Users/tester/.local/bin/phantombot",
+      personas: ["matt"],
+      deps: fs.deps,
+    });
+    expect(result.action).toBe("registered");
+    expect(made).toContain("/Users/tester/.config/opencode");
+    expect(result.configPath).toBe("/Users/tester/.config/opencode/opencode.json");
   });
 
   test("preserves comments, other keys and other providers", () => {
