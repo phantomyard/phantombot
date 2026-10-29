@@ -7,9 +7,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 
 import {
@@ -608,5 +609,18 @@ describe("installOpencode", () => {
     expect(result.message).toContain("repair is off");
     expect(fs.writes).toEqual([]);
     expect(fs.files.has(CONFIG)).toBe(false);
+  });
+});
+
+describe("installer probes", () => {
+  test("the CLI probe runs without a console window on Windows", () => {
+    // Same class as the provider's `spawn`: the editor is a GUI process, so a
+    // console child flashes a window. `windowsHide` is a no-op on POSIX and
+    // therefore unobservable in a test — its absence is the regression.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(join(dirname(here), "src/connectors/acp/installOpencode.ts"), "utf8");
+    const probe = /spawnSync\(exe, args, \{([\s\S]*?)\}\)/.exec(source);
+    expect(probe).not.toBeNull();
+    expect(probe![1]).toContain("windowsHide: true");
   });
 });

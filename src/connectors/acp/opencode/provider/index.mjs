@@ -127,6 +127,10 @@ class AcpConnection {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: process.env,
+      // Without this a console-subsystem child gets its own conhost window on
+      // Windows: the editor is a GUI process, so every turn flashes a black
+      // PowerShell-ish console titled with the child's cwd. No-op elsewhere.
+      windowsHide: true,
     });
 
     this.child.stdout.setEncoding("utf8");

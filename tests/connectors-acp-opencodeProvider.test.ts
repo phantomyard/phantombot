@@ -136,6 +136,18 @@ function textOf(parts: any[]): string {
 }
 
 describe("opencode provider package", () => {
+  test("the child is spawned without a console window on Windows", () => {
+    // A console-subsystem child of a GUI editor gets its own conhost window on
+    // Windows unless `windowsHide` is set — the symptom was a black window titled
+    // with the child's cwd flashing on every single turn. It is a no-op on POSIX,
+    // so it cannot be observed behaviourally here; the option going missing is the
+    // regression, and a missing option is invisible at runtime.
+    const source = readFileSync(modulePath, "utf8");
+    const spawnCall = /spawn\(command, args, \{([\s\S]*?)\}\)/.exec(source);
+    expect(spawnCall).not.toBeNull();
+    expect(spawnCall![1]).toContain("windowsHide: true");
+  });
+
   test("streams text deltas and never emits tool calls", async () => {
     const language = model("streamer");
     const { stream } = await language.doStream({

@@ -129,6 +129,9 @@ export function defaultOpencodeDeps(): OpencodeDeps {
         const result = spawnSync(exe, args, {
           encoding: "utf8",
           timeout: 20_000,
+          // Same reason as the provider's `spawn`: the editor is a GUI process,
+          // so a console child flashes a window on Windows. No-op elsewhere.
+          windowsHide: true,
           // `shell: true` is what makes an npm `.cmd` shim work on Windows, but it
           // does NOT quote the command — so an absolute exe under a profile with a
           // space in it (`C:\Users\Andrew Hodges\…`) would be split and the probe
