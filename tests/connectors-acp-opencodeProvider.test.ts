@@ -14,7 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -37,15 +37,21 @@ beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), "pb-opencode-provider-"));
   process.env.FAKE_ACP_LOG = join(workDir, "acp.jsonl");
   process.env.FAKE_ACP_ARGV_LOG = join(workDir, "argv.json");
+  // Thread-token resume lives under the user state dir. Point it at the temp dir
+  // so a test can never read — or leave behind — the real one.
+  process.env.XDG_STATE_HOME = join(workDir, "state");
 });
 
 afterEach(() => {
   delete process.env.FAKE_ACP_LOG;
   delete process.env.FAKE_ACP_ARGV_LOG;
+  delete process.env.XDG_STATE_HOME;
   delete process.env.FAKE_ACP_DELAY_MS;
   delete process.env.FAKE_ACP_DIE_ON_PROMPT;
   delete process.env.FAKE_ACP_EXIT_AFTER_PROMPT;
   delete process.env.FAKE_ACP_NO_LOAD_SESSION;
+  delete process.env.FAKE_ACP_REJECT_LOAD;
+  delete process.env.FAKE_ACP_SESSION_PREFIX;
   delete process.env.FAKE_ACP_INIT_DELAY_MS;
   try {
     rmSync(workDir, { recursive: true, force: true });
@@ -102,6 +108,28 @@ function shimModel(persona: string, extra: Record<string, unknown> = {}) {
   return provider.languageModel(persona);
 }
 
+/**
+ * A model from a FRESH module instance — a different process, for this purpose.
+ *
+ * Both the runtime cache and the conversation registry live in module scope, so
+ * a second `import()` with a cache-busting query is the only way to reproduce
+ * "OpenCode restarted" inside one test file. The fake child is new too, exactly
+ * like a real restart: it knows none of the previous child's session ids.
+ */
+async function coldModel(persona: string, extra: Record<string, unknown> = {}) {
+  // A COPY, not a cache-busted specifier: bun resolves a file URL to the module
+  // it already has in its registry even with a query string, which would hand
+  // the "restarted" process the live registry and hide the bug under test.
+  const dir = join(workDir, `process-${randomUUID()}`);
+  mkdirSync(dir, { recursive: true });
+  const copy = join(dir, "provider.mjs");
+  copyFileSync(modulePath, copy);
+  const fresh = (await import(pathToFileURL(copy).href)) as {
+    createPhantombot: (settings?: Record<string, unknown>) => { languageModel(modelID: string): any };
+  };
+  return fresh.createPhantombot({ command: process.execPath, args: [fixturePath], ...extra }).languageModel(persona);
+}
+
 function spawnedArgv(): string[] {
   return JSON.parse(readFileSync(process.env.FAKE_ACP_ARGV_LOG!, "utf8"));
 }
@@ -156,6 +184,22 @@ function textOf(parts: any[]): string {
     .filter((part) => part.type === "text-delta")
     .map((part) => part.delta)
     .join("");
+}
+
+/**
+ * The text of one sent prompt, joined.
+ *
+ * When a thread cannot be resumed the sent turn carries a bounded recap prefix
+ * (issue #710), so a test that cares about the turn itself asserts on the TAIL
+ * rather than on whole-prompt equality.
+ */
+function sentText(index: number): string {
+  return (prompts()[index] ?? []).join("\n");
+}
+
+/** …and the real turn is always last, after any recap. */
+function endsWithTurn(index: number, text: string): boolean {
+  return sentText(index).trimEnd().endsWith(text);
 }
 
 describe("opencode provider package", () => {
@@ -250,7 +294,11 @@ describe("opencode provider package", () => {
     );
 
     expect(events().filter((entry) => entry.event === "session/new").length).toBe(2);
-    expect(prompts()).toEqual([["start"], ["go"]]);
+    expect(sentText(0)).toBe("start");
+    // The new session cannot inherit the other thread, so it gets a bounded recap
+    // (issue #710) — never the tail alone — and the real turn still comes last.
+    expect(sentText(1)).toMatch(/do not answer/i);
+    expect(endsWithTurn(1, "go")).toBe(true);
   });
 
   test("answers OpenCode's session-title request locally", async () => {
@@ -342,7 +390,9 @@ describe("opencode provider package", () => {
     );
 
     expect(events().filter((entry) => entry.event === "session/new").length).toBe(2);
-    expect(prompts()).toEqual([["hello"], ["summarize MAPLE"]]);
+    expect(sentText(0)).toBe("hello");
+    expect(sentText(1)).toMatch(/do not answer/i);
+    expect(endsWithTurn(1, "summarize MAPLE")).toBe(true);
   });
 
   test("a matching assistant reply keeps the conversation in one session", async () => {
@@ -408,7 +458,8 @@ describe("opencode provider package", () => {
     expect(events().filter((entry) => entry.event === "session/load")).toEqual([]);
     expect(events().filter((entry) => entry.event === "unknown-session")).toEqual([]);
     expect(events().filter((entry) => entry.event === "session/new").length).toBe(2);
-    expect(textOf(parts)).toBe("echo:second");
+    // The fake agent echoes whatever it was sent; the recap prefix rides along.
+    expect(textOf(parts).trimEnd().endsWith("second")).toBe(true);
   });
 
   test("an already-aborted turn never reaches the child", async () => {
@@ -472,7 +523,9 @@ describe("opencode provider package", () => {
     );
 
     expect(events().filter((entry) => entry.event === "session/new").length).toBe(3);
-    expect(prompts()).toEqual([["X"], ["X"], ["Z"]]);
+    expect(prompts().slice(0, 2)).toEqual([["X"], ["X"]]);
+    expect(sentText(2)).toMatch(/do not answer/i);
+    expect(endsWithTurn(2, "Z")).toBe(true);
   });
 
   test("a turn aborted while the child is still initializing never prompts it", async () => {
@@ -670,10 +723,13 @@ describe("opencode provider attachments", () => {
     // Matching on text alone would read this as a replay of the first turn and
     // hand the agent the SECOND image as if it were the first.
     expect(events().filter((entry) => entry.event === "session/new").length).toBe(2);
-    expect(promptParts()[1]).toEqual([
-      { type: "text", text: "what is this?" },
+    // Same caption, different picture: a different turn, and the recap prefix
+    // (issue #710) rides in front of the caption rather than replacing it.
+    const second = promptParts()[1] ?? [];
+    expect(second.filter((part) => part.type === "image")).toEqual([
       { type: "image", data: otherPng, mimeType: "image/png" },
     ]);
+    expect(String(second.find((part) => part.type === "text")?.text ?? "")).toMatch(/what is this\?$/);
     expect(promptParts()[1]).not.toContainEqual({ type: "image", data: PNG_B64, mimeType: "image/png" });
   });
 
@@ -690,5 +746,223 @@ describe("opencode provider attachments", () => {
     const note = promptParts()[0]?.[1] ?? {};
     expect(note.type).toBe("text");
     expect(String(note.text)).toContain("could not be forwarded");
+  });
+
+  // ── issue #710: a cold registry must not throw the thread away ────────
+
+  test("a restarted provider resumes the thread on the token it wrote down", async () => {
+    const persona = `restart-${randomUUID()}`;
+
+    const before = await coldModel(persona);
+    await collect((await before.doStream({ prompt: [userTurn("add a retry to the billing webhook")] })).stream);
+    const created = events().find((entry) => entry.event === "session/new")!.sessionId as string;
+
+    // Restart: fresh module, fresh child, empty in-memory registry.
+    const mark = events().length;
+    const after = await coldModel(persona);
+    await collect(
+      (
+        await after.doStream({
+          prompt: [
+            userTurn("add a retry to the billing webhook"),
+            assistantTurn("echo:add a retry to the billing webhook"),
+            userTurn("pick this up"),
+          ],
+        })
+      ).stream,
+    );
+
+    const delta = events().slice(mark);
+    expect(delta.filter((entry) => entry.event === "session/load").map((entry) => entry.sessionId)).toEqual([created]);
+    // No new thread was started, and only the unseen turn travelled: the whole
+    // transcript is already in the phantom's own memory store.
+    expect(delta.filter((entry) => entry.event === "session/new")).toEqual([]);
+    expect(delta.filter((entry) => entry.event === "prompt").length).toBe(1);
+    expect(prompts().at(-1)).toEqual(["pick this up"]);
+  });
+
+  test("a restarted provider does not resume on a reworded reply", async () => {
+    const persona = `reworded-${randomUUID()}`;
+
+    const before = await coldModel(persona);
+    await collect((await before.doStream({ prompt: [userTurn("hello")] })).stream);
+
+    // Same opening, but the assistant turn is NOT the reply this thread produced.
+    // The persisted digest covers the reply as well as the ask, so this cannot
+    // resume — exactly the rule `continuesConversation` applies in memory.
+    const mark = events().length;
+    const after = await coldModel(persona);
+    await collect(
+      (
+        await after.doStream({
+          prompt: [userTurn("hello"), assistantTurn("an answer this thread never gave"), userTurn("continue")],
+        })
+      ).stream,
+    );
+
+    const delta = events().slice(mark);
+    expect(delta.filter((entry) => entry.event === "session/load")).toEqual([]);
+    expect(delta.filter((entry) => entry.event === "session/new").length).toBe(1);
+  });
+
+  test("a token the server refuses is forgotten, not retried", async () => {
+    const persona = `refused-${randomUUID()}`;
+
+    const before = await coldModel(persona);
+    await collect((await before.doStream({ prompt: [userTurn("hello")] })).stream);
+
+    // The server advertises loadSession but no longer knows this thread (an
+    // upgrade that wiped its memory, another persona's token): the id must be
+    // dropped, or every later turn pays for the same rejected attempt.
+    process.env.FAKE_ACP_REJECT_LOAD = "1";
+    // Distinct ids so the replacement server is visibly a different one: without
+    // this the fake hands out `session-1` again and a forgotten token would look
+    // like a freshly created one.
+    process.env.FAKE_ACP_SESSION_PREFIX = "next-";
+    const after = await coldModel(persona);
+    await collect(
+      (
+        await after.doStream({ prompt: [userTurn("hello"), assistantTurn("echo:hello"), userTurn("still there?")] })
+      ).stream,
+    );
+    expect(prompts().at(-1)?.join("\n")).toContain("still there?");
+
+    // A THIRD process must not attempt the dead token again.
+    const stateFile = join(workDir, "state/phantombot/opencode-provider", `${persona}.json`);
+    const saved = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(saved.threads.some((record: any) => record.token === "session-1")).toBe(false);
+    expect(saved.threads.some((record: any) => record.token === "next-session-1")).toBe(true);
+  });
+
+  test("a chat with no assistant history is never seeded", async () => {
+    // Two user turns and no reply between them (a cancelled turn looks like
+    // this). Nothing here is another thread's context, and the never-seed guard
+    // additionally keeps every seeding path behind an assistant entry.
+    const language = await coldModel(`nosseed-${randomUUID()}`);
+    await collect((await language.doStream({ prompt: [userTurn("first ask"), userTurn("second ask")] })).stream);
+
+    expect(events().filter((entry) => entry.event === "session/new").length).toBe(1);
+    expect(prompts().at(-1)).toEqual(["second ask"]);
+  });
+
+  test("two records matching equally well are not guessed between", async () => {
+    const persona = `tied-disk-${randomUUID()}`;
+
+    // Two separate chats with an identical opening and an identical reply leave
+    // two indistinguishable resume records.
+    const first = await coldModel(persona);
+    await collect((await first.doStream({ prompt: [userTurn("X")] })).stream);
+    await collect((await first.doStream({ prompt: [userTurn("X")] })).stream);
+
+    const mark = events().length;
+    const second = await coldModel(persona);
+    await collect(
+      (
+        await second.doStream({ prompt: [userTurn("X"), assistantTurn("echo:X"), userTurn("Z")] })
+      ).stream,
+    );
+
+    // Picking either would hand one thread's private history to the other.
+    const delta = events().slice(mark);
+    expect(delta.filter((entry) => entry.event === "session/load")).toEqual([]);
+    expect(delta.filter((entry) => entry.event === "session/new").length).toBe(1);
+  });
+
+  test("a failed turn still leaves a record to resume from", async () => {
+    const persona = `died-${randomUUID()}`;
+    process.env.FAKE_ACP_DIE_ON_PROMPT = "1";
+
+    const before = await coldModel(persona);
+    await collect((await before.doStream({ prompt: [userTurn("hello")] })).stream);
+
+    // No reply means no reply-digest write; the CREATE must already have written
+    // the token down, or a crash on the first turn loses the thread for good.
+    const stateFile = join(workDir, "state/phantombot/opencode-provider", `${persona}.json`);
+    const saved = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(saved.threads.length).toBe(1);
+    expect(saved.threads[0].length).toBe(1);
+  });
+
+  test("a persisted token whose transcript does not extend it starts a new session", async () => {
+    const persona = `forked-${randomUUID()}`;
+
+    const before = await coldModel(persona);
+    await collect((await before.doStream({ prompt: [userTurn("alpha")] })).stream);
+
+    const mark = events().length;
+    const after = await coldModel(persona);
+    await collect(
+      (
+        await after.doStream({
+          prompt: [userTurn("alpha, rewritten"), assistantTurn("echo:alpha"), userTurn("go")],
+        })
+      ).stream,
+    );
+
+    const delta = events().slice(mark);
+    expect(delta.filter((entry) => entry.event === "session/load")).toEqual([]);
+    expect(delta.filter((entry) => entry.event === "session/new").length).toBe(1);
+  });
+
+  test("a child that cannot load sessions falls back instead of failing the turn", async () => {
+    const persona = `noload-${randomUUID()}`;
+
+    const before = await coldModel(persona);
+    await collect((await before.doStream({ prompt: [userTurn("hello")] })).stream);
+
+    const mark = events().length;
+    process.env.FAKE_ACP_NO_LOAD_SESSION = "1";
+    const after = await coldModel(persona);
+    await collect(
+      (
+        await after.doStream({ prompt: [userTurn("hello"), assistantTurn("echo:hello"), userTurn("still there?")] })
+      ).stream,
+    );
+
+    const delta = events().slice(mark);
+    expect(delta.filter((entry) => entry.event === "session/load")).toEqual([]);
+    expect(delta.filter((entry) => entry.event === "session/new").length).toBe(1);
+    expect(prompts().at(-1)?.join("\n")).toContain("still there?");
+  });
+
+  test("no state file at all: a cold registry seeds a recoverable recap", async () => {
+    const language = await coldModel(`recap-${randomUUID()}`);
+    await collect(
+      (
+        await language.doStream({
+          prompt: [
+            userTurn("let us add a retry to the billing webhook"),
+            assistantTurn("done: three attempts with backoff"),
+            userTurn("pick this up"),
+          ],
+        })
+      ).stream,
+    );
+
+    const sent = (prompts().at(-1) ?? []).join("\n");
+    // The earlier ask is quoted, framed as context, and the real turn is last.
+    expect(sent).toContain("let us add a retry to the billing webhook");
+    expect(sent).toMatch(/do not answer/i);
+    expect(sent.trimEnd().endsWith("pick this up")).toBe(true);
+    expect(events().filter((entry) => entry.event === "session/new").length).toBe(1);
+  });
+
+  test("a genuinely new chat is never seeded with another thread's turns", async () => {
+    const persona = `leak-${randomUUID()}`;
+
+    const first = await coldModel(persona);
+    await collect((await first.doStream({ prompt: [userTurn("the launch date is Tuesday")] })).stream);
+
+    // A NEW chat arrives as exactly one user entry and no assistant history. The
+    // state file for this persona exists and must still not be used.
+    const mark = events().length;
+    const second = await coldModel(persona);
+    await collect((await second.doStream({ prompt: [userTurn("hello there")] })).stream);
+
+    const delta = events().slice(mark);
+    expect(delta.filter((entry) => entry.event === "session/load")).toEqual([]);
+    expect(delta.filter((entry) => entry.event === "session/new").length).toBe(1);
+    expect(prompts().at(-1)).toEqual(["hello there"]);
+    expect((prompts().at(-1) ?? []).join("\n")).not.toContain("launch date");
   });
 });

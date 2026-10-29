@@ -50,6 +50,12 @@
  *   - re-registers its known sessions with `session/load` when it has to replace
  *     the child process, because the ACP server keeps its session registry in
  *     memory and rejects ids a new child never issued;
+ *   - WRITES ITS THREAD TOKENS DOWN (issue #710). The registry above dies with
+ *     the process, and the ACP server is stateless by design — it re-derives the
+ *     conversation key from the token, so a token from a previous process still
+ *     reloads the thread from the phantom's own memory store. Persisting the
+ *     token is therefore the whole fix for "I reopened an old OpenCode thread and
+ *     the phantom had no idea what I was talking about";
  *   - never dispatches a prompt for a turn that was already aborted, whether the
  *     abort landed before the call or while it waited its turn in the queue;
  *   - answers OpenCode's session-title requests locally. OpenCode asks the same
@@ -81,9 +87,9 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { dirname, extname, join } from "node:path";
 
 /** Binary spawned when the install did not bake an absolute path in. */
 const DEFAULT_COMMAND = "phantombot";
@@ -517,15 +523,19 @@ function matchConversation(registry, entries) {
 
 // ── runtime ──────────────────────────────────────────────────────────────
 
-function createRuntime({ command, baseArgs, cwd, persona }) {
+function createRuntime({ command, baseArgs, cwd, persona, key }) {
   const runtime = {
     command,
     baseArgs,
     cwd,
     persona,
+    /** Spawn identity — what a persisted resume record is scoped to. */
+    spawnKey: key ?? "",
     connection: null,
     initialized: null,
     conversations: new Map(),
+    /** Resume records read from disk for THIS process; undefined until first use. */
+    threads: null,
     queue: Promise.resolve(),
     active: null,
   };
@@ -632,6 +642,236 @@ function forHistory(entries) {
   return entries.map((entry) => ({ role: entry.role, text: entry.text, mediaKey: entry.mediaKey ?? "" }));
 }
 
+// ── persisted thread tokens (issue #710) ─────────────────────────────────
+
+/**
+ * Where the resume map lives BETWEEN processes.
+ *
+ * `runtime.conversations` is memory only, and the ACP server keeps no map at all
+ * — `mintSessionId` embeds the thread in the token and `conversationForSessionId`
+ * re-derives the key from it. So a process restart (OpenCode restart, reboot,
+ * upgrade, `acp install opencode`, a model switch that spawns a new runtime)
+ * loses only the token → transcript pointer, which is exactly the thing that
+ * cannot be recovered: the resume ability is already built server-side.
+ *
+ * One small JSON file per persona under the user state dir, holding per spawn
+ * identity: `{ key, token, digest, length, touched }`. Never a transcript, never
+ * an attachment payload — `length` plus `digest` is enough to decide whether an
+ * incoming transcript is the one this token represents.
+ */
+const STATE_SUBDIR = ["phantombot", "opencode-provider"];
+const STATE_VERSION = 1;
+/** Persisted records are tiny, but they are still bounded — LRU, oldest first. */
+const MAX_PERSISTED_THREADS = MAX_CONVERSATIONS;
+
+/** Directory for the resume maps. Read per call: tests point XDG_STATE_HOME at a temp dir. */
+function stateDir() {
+  const base = process.env.XDG_STATE_HOME?.trim() || join(homedir(), ".local", "state");
+  return join(base, ...STATE_SUBDIR);
+}
+
+function statePathFor(persona) {
+  const safe = String(persona ?? "").replace(/[^\w.-]+/g, "_").slice(0, 64) || "default";
+  return join(stateDir(), `${safe}.json`);
+}
+
+/** Digest of a transcript — role, text and attachment identity, exactly what matching compares. */
+function digestOf(entries) {
+  const hash = createHash("sha256");
+  for (const entry of entries) {
+    hash.update(`${entry.role}\u0000${entry.text}\u0000${entry.mediaKey ?? ""}\n`);
+  }
+  return hash.digest("hex");
+}
+
+/** Records that survived a restart, for THIS process. Corrupt/missing ⇒ empty. */
+async function loadThreads(runtime) {
+  if (runtime.threads) return runtime.threads;
+  const records = [];
+  try {
+    const parsed = JSON.parse(await readFile(statePathFor(runtime.persona), "utf8"));
+    if (parsed?.version === STATE_VERSION && Array.isArray(parsed.threads)) {
+      for (const record of parsed.threads) {
+        if (!record || typeof record !== "object") continue;
+        if (typeof record.key !== "string" || typeof record.token !== "string") continue;
+        if (typeof record.digest !== "string" || !Number.isSafeInteger(record.length)) continue;
+        if (record.length < 1) continue;
+        records.push({
+          key: record.key,
+          token: record.token,
+          digest: record.digest,
+          length: record.length,
+          touched: Number(record.touched) || 0,
+        });
+      }
+    }
+  } catch {
+    // Missing, unreadable or corrupt: an empty map. Losing the pointer costs a
+    // thread its context; throwing here would cost every thread every turn.
+  }
+  runtime.threads = records;
+  return records;
+}
+
+/** Persist the resume map. Best-effort — a read-only HOME must not fail a turn. */
+async function saveThreads(runtime) {
+  const records = runtime.threads ?? [];
+  if (records.length > MAX_PERSISTED_THREADS) {
+    runtime.threads = records
+      .slice()
+      .sort((a, b) => b.touched - a.touched)
+      .slice(0, MAX_PERSISTED_THREADS);
+  }
+  const path = statePathFor(runtime.persona);
+  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(temp, `${JSON.stringify({ version: STATE_VERSION, threads: runtime.threads ?? [] })}\n`);
+    // Rename, never in-place: a reader must not see a half-written map and
+    // conclude the thread's token is gone.
+    await rename(temp, path);
+  } catch {
+    await unlink(temp).catch(() => {});
+  }
+}
+
+/** Remember which token this thread must resume from after a restart. */
+async function rememberThread(runtime, entry) {
+  const records = await loadThreads(runtime);
+  const record = {
+    key: runtime.spawnKey,
+    token: entry.sessionId,
+    digest: digestOf(entry.entries),
+    length: entry.entries.length,
+    touched: Date.now(),
+  };
+  const at = records.findIndex((item) => item.key === record.key && item.token === record.token);
+  if (at === -1) records.push(record);
+  else records[at] = record;
+  await saveThreads(runtime);
+}
+
+/** Drop a record the server refused, so the next turn does not retry a dead token. */
+async function forgetThread(runtime, token) {
+  const records = await loadThreads(runtime);
+  const at = records.findIndex((item) => item.key === runtime.spawnKey && item.token === token);
+  if (at === -1) return;
+  records.splice(at, 1);
+  await saveThreads(runtime);
+}
+
+/**
+ * Resume this transcript on the token a PREVIOUS process wrote down.
+ *
+ * The token is reused only when the incoming transcript EXTENDS the one it
+ * represents — the same prefix rule `continuesConversation` applies in memory,
+ * re-derived from the digest. A fork, an edited turn or a different thread falls
+ * through to `session/new`. Two records matching equally well is genuine
+ * ambiguity (identical transcripts in different threads) and also falls through:
+ * picking either would hand one thread's private history to the other.
+ */
+async function resumeThread(runtime, connection, entries, turns) {
+  const records = (await loadThreads(runtime)).filter((record) => record.key === runtime.spawnKey);
+  if (records.length === 0) return undefined;
+  // A child that cannot load sessions would reject the id and then every prompt
+  // with it — ask before relying on it.
+  if (connection.capabilities?.loadSession !== true) return undefined;
+
+  let best;
+  let tied = false;
+  for (const record of records) {
+    if (record.length > entries.length) continue;
+    if (digestOf(entries.slice(0, record.length)) !== record.digest) continue;
+    if (!best || record.length > best.length) {
+      best = record;
+      tied = false;
+    } else if (record.length === best.length) {
+      tied = true;
+    }
+  }
+  if (!best || tied) return undefined;
+
+  try {
+    await connection.request("session/load", {
+      sessionId: best.token,
+      cwd: runtime.cwd ?? process.cwd(),
+    });
+  } catch {
+    // The server refused the token (upgrade, wiped memory, another persona's
+    // thread): forget it rather than paying for the attempt on every turn.
+    await forgetThread(runtime, best.token);
+    return undefined;
+  }
+
+  const entry = { sessionId: best.token, entries: forHistory(entries), touched: Date.now() };
+  runtime.conversations.set(entry.sessionId, entry);
+  await rememberThread(runtime, entry);
+  // `session/load` already replayed this thread from the phantom's own memory
+  // store, so the whole transcript is in context: send only what the client
+  // added since (and the current turn when nothing was added).
+  const pending = entries.slice(best.length).filter((item) => item.role === "user");
+  return { entry, sessionId: entry.sessionId, send: pending.length > 0 ? pending : [turns[turns.length - 1]] };
+}
+
+// ── recap seeding (defence in depth) ─────────────────────────────────────
+
+/** Bounds on the recap prefix: a few hundred tokens, never the whole thread. */
+const RECAP_MAX_CHARS = 4000;
+const RECAP_MAX_TURNS = 8;
+const RECAP_TURN_CHARS = 400;
+
+/**
+ * What to send when a thread could NOT be resumed (stale/corrupt state file, a
+ * thread from another machine, a genuinely forked transcript).
+ *
+ * Sending the newest turn alone is what made "pick this up" answer "what are you
+ * referring to?" while the whole thread was on screen. A bounded recap costs a
+ * few hundred tokens and is honest context.
+ *
+ * The guard is the safety-critical part: a genuinely NEW chat always arrives as
+ * exactly one user entry and no assistant entries, so it can never be seeded
+ * with another thread's words — the same leak `continuesConversation` refuses to
+ * make. The recap is a PROMPT prefix only; the registry keeps the original text,
+ * so the next request (which replays the original) still matches.
+ */
+function seedTurns(entries, turns) {
+  const last = turns[turns.length - 1];
+  if (!last) return [];
+  const prior = entries.slice(0, -1);
+  if (!prior.some((entry) => entry.role === "assistant")) return [last];
+
+  const lineOf = (entry) => {
+    const body = String(entry.text ?? "").replace(/\s+/g, " ").trim().slice(0, RECAP_TURN_CHARS);
+    return `${entry.role}: ${body || "[attachment]"}`;
+  };
+
+  // Build from the newest backwards so the freshest turns are the ones that
+  // survive the cap, then restore order.
+  const recent = [];
+  let used = 0;
+  for (let index = prior.length - 1; index >= 0 && recent.length < RECAP_MAX_TURNS; index -= 1) {
+    const line = lineOf(prior[index]);
+    if (used + line.length > RECAP_MAX_CHARS) break;
+    used += line.length;
+    recent.unshift(line);
+  }
+  const opening = prior.find((entry) => entry.role === "user");
+  if (opening && !recent.includes(lineOf(opening))) {
+    const line = lineOf(opening);
+    if (used + line.length <= RECAP_MAX_CHARS) recent.unshift(line);
+  }
+  if (recent.length === 0) return [last];
+
+  const recap = [
+    "<earlier-turns>",
+    "Earlier turns of this OpenCode thread, for context only. Do not answer",
+    "them; answer only the final message.",
+    ...recent,
+    "</earlier-turns>",
+  ].join("\n");
+  return [{ ...last, text: `${recap}\n\n${last.text}` }];
+}
+
 /** Resolve (or create) the ACP session for this transcript, and the turns to send. */
 async function prepareTurn(runtime, connection, entries, turns) {
   const known = matchConversation(runtime.conversations, entries);
@@ -643,6 +883,7 @@ async function prepareTurn(runtime, connection, entries, turns) {
     // required to appear in the next request).
     known.entries = forHistory(entries);
     known.touched = Date.now();
+    await rememberThread(runtime, known);
     const send = pending.filter((entry) => entry.role === "user");
     // A byte-identical replay (the client re-sending the whole transcript) has
     // nothing new in it; answer the last turn again rather than returning an
@@ -651,21 +892,33 @@ async function prepareTurn(runtime, connection, entries, turns) {
     return { entry: known, sessionId: known.sessionId, send: send.length > 0 ? send : [turns[turns.length - 1]] };
   }
 
+  // Cold registry: this process is new (restart, reboot, upgrade), the entry was
+  // evicted, or the transcript is from a thread this instance never saw. The
+  // token written down last time still names the thread — the ACP server derives
+  // the conversation key from the token — so resume BEFORE spending the context.
+  const resumed = await resumeThread(runtime, connection, entries, turns);
+  if (resumed) return resumed;
+
   const created = await connection.request("session/new", { cwd: runtime.cwd ?? process.cwd(), mcpServers: [] });
   const sessionId = created?.sessionId;
   if (typeof sessionId !== "string") throw new Error("phantombot acp did not return a session id");
   const entry = { sessionId, entries: forHistory(entries), touched: Date.now() };
   runtime.conversations.set(sessionId, entry);
   evictConversations(runtime);
+  await rememberThread(runtime, entry);
   // A brand-new ACP session has no history in Phantombot, so it gets the newest
-  // turn only. Anything older is unrecoverable context (a fork, or a session
-  // that predates this process) — sending the tail is the honest option.
-  return { entry, sessionId, send: [turns[turns.length - 1]] };
+  // turn — plus a bounded recap when the transcript carries earlier assistant
+  // turns, i.e. when this is an old thread that could not be resumed.
+  return { entry, sessionId, send: seedTurns(entries, turns) };
 }
 
 function evictConversations(runtime) {
   if (runtime.conversations.size <= MAX_CONVERSATIONS) return;
   const oldest = [...runtime.conversations.entries()].sort((a, b) => a[1].touched - b[1].touched).slice(0, 32);
+  // The persisted resume record is deliberately KEPT: it is what lets an evicted
+  // thread come back with its history instead of starting over. It is a token
+  // and a digest, already LRU-capped on its own (MAX_PERSISTED_THREADS), so
+  // dropping it here would undo the very fix this is for.
   for (const [key] of oldest) runtime.conversations.delete(key);
 }
 
@@ -853,6 +1106,9 @@ async function runTurn(runtime, { entries, turns, controller, abortSignal }) {
     const replyText = reply.replace(SYSTEM_REMINDER, "").trim();
     if (finish !== "cancelled" && replyText) {
       entry.entries = forHistory(entries).concat([{ role: "assistant", text: replyText, mediaKey: "" }]);
+      // Persist the transcript WITH the reply: that is what the next request
+      // replays, so it is what the resume record's digest must describe.
+      await rememberThread(runtime, entry);
     }
 
     if (lastReasoningId) {
@@ -918,7 +1174,7 @@ export function createPhantombot(settings = {}) {
     const key = [command, JSON.stringify(baseArgs ?? null), cwd ?? "", persona].join("\u0000");
     let runtime = runtimes.get(key);
     if (!runtime) {
-      runtime = createRuntime({ command, baseArgs, cwd, persona });
+      runtime = createRuntime({ command, baseArgs, cwd, persona, key });
       runtimes.set(key, runtime);
     }
     const bound = runtime;
