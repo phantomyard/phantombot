@@ -58,11 +58,32 @@
  *     bogus memory row, and — because its prompt is a prefix of the real first
  *     turn — corrupt the conversation matching below.
  *
+ * ## Attachments
+ *
+ * OpenCode delivers a pasted or attached image as an AI-SDK `file` part and a
+ * PDF the same way (base64 `data` + `mediaType`); everything else it rejects
+ * before a provider is ever called. Both are preserved:
+ *
+ *   - images → ACP `image` blocks. The ACP server decodes them into the
+ *     workspace inbox and appends `[attached: <path>]`, which is what the
+ *     vision path and the harness read.
+ *   - PDFs → a content-addressed file under the OS temp dir plus the same
+ *     `[attached: <path>]` line, because ACP has no document block.
+ *
+ * The attachment is part of the turn's IDENTITY (`mediaKey`): two captions that
+ * differ only by picture are different turns, so neither is mistaken for a
+ * replay of the other. Only the hash is kept in the conversation registry — the
+ * payloads are not.
+ *
  * Zero dependencies beyond `node:` builtins: no npm install, no build step at
  * install time, nothing for a user to keep in sync.
  */
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { extname, join } from "node:path";
 
 /** Binary spawned when the install did not bake an absolute path in. */
 const DEFAULT_COMMAND = "phantombot";
@@ -304,6 +325,77 @@ function textOf(content) {
 }
 
 /**
+ * Where a non-image attachment is spilled so the agent can read it.
+ *
+ * ACP has no document block: an `image` block is decoded by the server and handed
+ * to the harness as `[attached: <path>]`, and everything else can only travel as
+ * text. A PDF therefore becomes a real file plus that same `[attached: <path>]`
+ * line — the convention Telegram documents already use — which the harness
+ * resolves with its own file tools.
+ *
+ * Content-addressed, so replaying a turn is idempotent and always lands on the
+ * same path instead of littering the directory with copies.
+ */
+const ATTACHMENT_DIR = join(tmpdir(), "phantombot-acp-attachments");
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+/** Base64 payload of a media part, with any `data:` URL prefix removed. */
+function base64Of(data) {
+  const comma = data.indexOf(",");
+  return comma > 0 && data.slice(0, comma).includes("data:") ? data.slice(comma + 1) : data;
+}
+
+/**
+ * Split one message's content into its text and the media it carries.
+ *
+ * OpenCode hands an attachment over as an AI-SDK `file` part —
+ * `{ type: "file", mediaType, data, filename }` — for images AND for PDFs
+ * (verified against OpenCode 2.2.0's bundle: `dy()` maps a user media part to
+ * exactly that shape, and a mime that is neither `image/*` nor
+ * `application/pdf` is rejected upstream as an unsupported inline attachment).
+ *
+ * Keeping only `text` parts is what made an attachment vanish, and an
+ * attachment with no caption produce no turn at all.
+ */
+function partsOf(content) {
+  if (typeof content === "string") return { text: content, media: [] };
+  if (!Array.isArray(content)) return { text: "", media: [] };
+  const text = [];
+  const media = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "text" && typeof part.text === "string") {
+      text.push(part.text);
+      continue;
+    }
+    if (part.type !== "file") continue;
+    // `data` is base64 for an inline attachment. A provider media REFERENCE is a
+    // URL, and ACP cannot carry one — skipping it is honest; forwarding it as an
+    // empty attachment would not be.
+    if (typeof part.mediaType !== "string" || !part.mediaType) continue;
+    if (typeof part.data !== "string" || part.data.length === 0) continue;
+    const filename = typeof part.filename === "string" ? part.filename.trim() : "";
+    media.push({ mediaType: part.mediaType, data: part.data, filename: filename || undefined });
+  }
+  return { text: text.join("\n"), media };
+}
+
+/**
+ * Identity of a turn's attachments, used for transcript matching.
+ *
+ * Two turns with the same caption but different pictures are DIFFERENT turns; a
+ * text-only key would read the second as a replay of the first and answer about
+ * the wrong image. The payload is hashed rather than kept, so the conversation
+ * registry never holds megabytes of base64 for the life of the process.
+ */
+function mediaKey(media) {
+  if (!Array.isArray(media) || media.length === 0) return "";
+  return media
+    .map((part) => `${part.mediaType}:${createHash("sha256").update(part.data).digest("hex").slice(0, 16)}`)
+    .join(",");
+}
+
+/**
  * Split the incoming request into system text and the ordered conversation
  * entries. BOTH roles are kept, in order: matching a transcript on user turns
  * alone would let a request that carries a visibly different assistant reply
@@ -327,10 +419,17 @@ function readPrompt(prompt) {
       continue;
     }
     if (message.role !== "user" && message.role !== "assistant") continue;
-    const text = textOf(message.content).replace(SYSTEM_REMINDER, "").trim();
-    if (!text) continue;
-    entries.push({ role: message.role, text });
-    if (message.role === "user") turns.push(text);
+    const { text: raw, media } = partsOf(message.content);
+    const text = raw.replace(SYSTEM_REMINDER, "").trim();
+    // An attachment with no caption is a REAL turn — it is exactly what an
+    // image-only prompt looks like, and skipping it is what made pasting a
+    // screenshot do nothing at all.
+    if (!text && media.length === 0) continue;
+    const entry = { role: message.role, text, media, mediaKey: mediaKey(media) };
+    entries.push(entry);
+    // `turns` stays user-only: it is what gets sent, what the title detector
+    // reads, and what decides whether the request is empty.
+    if (message.role === "user") turns.push(entry);
   }
   return { system: system.join("\n\n"), entries, turns };
 }
@@ -346,17 +445,21 @@ function isTitleRequest(system, turns) {
   return turns.length === 1 && /name conversations/i.test(system) && /list of past sessions/i.test(system);
 }
 
-function localTitle(turns) {
-  const words = turns[0].replace(/\s+/g, " ").trim().split(" ").slice(0, 6).join(" ");
+function localTitle(turn) {
+  const words = (turn?.text ?? "").replace(/\s+/g, " ").trim().split(" ").filter(Boolean).slice(0, 6).join(" ");
   const title = words.replace(/[.,;:!?]+$/, "").slice(0, 60);
   return title || "New session";
 }
 
 // ── conversation matching ────────────────────────────────────────────────
 
-/** Same message: same role, same text. Both sides are reminder-stripped + trimmed. */
+/**
+ * Same message: same role, same text, same attachments. Both sides are
+ * reminder-stripped + trimmed, and attachments are compared by their hashed
+ * identity rather than by presence.
+ */
 function sameEntry(a, b) {
-  return a.role === b.role && a.text === b.text;
+  return a.role === b.role && a.text === b.text && (a.mediaKey ?? "") === (b.mediaKey ?? "");
 }
 
 /**
@@ -520,6 +623,15 @@ function serialized(runtime, work) {
   return run;
 }
 
+/**
+ * The conversation registry keeps matching KEYS, never the attachment payloads:
+ * a thread with pictures would otherwise pin their base64 in memory for as long
+ * as this process lives.
+ */
+function forHistory(entries) {
+  return entries.map((entry) => ({ role: entry.role, text: entry.text, mediaKey: entry.mediaKey ?? "" }));
+}
+
 /** Resolve (or create) the ACP session for this transcript, and the turns to send. */
 async function prepareTurn(runtime, connection, entries, turns) {
   const known = matchConversation(runtime.conversations, entries);
@@ -529,19 +641,20 @@ async function prepareTurn(runtime, connection, entries, turns) {
     // this turn produces is appended once it exists (and dropped if it doesn't,
     // e.g. the turn was cancelled — an answer the client never saw must not be
     // required to appear in the next request).
-    known.entries = entries.slice();
+    known.entries = forHistory(entries);
     known.touched = Date.now();
-    const send = pending.filter((entry) => entry.role === "user").map((entry) => entry.text);
+    const send = pending.filter((entry) => entry.role === "user");
     // A byte-identical replay (the client re-sending the whole transcript) has
     // nothing new in it; answer the last turn again rather than returning an
-    // empty reply.
+    // empty reply. Attachments ride along — re-sending the text alone would
+    // answer about an image the agent can no longer see.
     return { entry: known, sessionId: known.sessionId, send: send.length > 0 ? send : [turns[turns.length - 1]] };
   }
 
   const created = await connection.request("session/new", { cwd: runtime.cwd ?? process.cwd(), mcpServers: [] });
   const sessionId = created?.sessionId;
   if (typeof sessionId !== "string") throw new Error("phantombot acp did not return a session id");
-  const entry = { sessionId, entries: entries.slice(), touched: Date.now() };
+  const entry = { sessionId, entries: forHistory(entries), touched: Date.now() };
   runtime.conversations.set(sessionId, entry);
   evictConversations(runtime);
   // A brand-new ACP session has no history in Phantombot, so it gets the newest
@@ -554,6 +667,69 @@ function evictConversations(runtime) {
   if (runtime.conversations.size <= MAX_CONVERSATIONS) return;
   const oldest = [...runtime.conversations.entries()].sort((a, b) => a[1].touched - b[1].touched).slice(0, 32);
   for (const [key] of oldest) runtime.conversations.delete(key);
+}
+
+/**
+ * Translate turns into ACP content blocks.
+ *
+ * Images go through as `image` blocks: the ACP server decodes them into the
+ * workspace inbox and appends the `[attached: <path>]` line that both the vision
+ * path and the harness understand. A PDF has no ACP block, so it is spilled to a
+ * file and announced with the same line. Text keeps its original position.
+ */
+async function promptBlocks(entries) {
+  const blocks = [];
+  for (const entry of entries) {
+    if (entry?.text) blocks.push({ type: "text", text: entry.text });
+    for (const part of entry?.media ?? []) blocks.push(await attachmentBlock(part));
+  }
+  return blocks;
+}
+
+/** A filename we can join onto the attachment directory: no separators, no dots. */
+function safeFilename(filename) {
+  const base = String(filename ?? "").split(/[\\/]/).pop() ?? "";
+  const cleaned = base
+    .replace(/[^\w.-]+/g, "_")
+    .replace(/^\.+/, "")
+    .slice(0, 80);
+  if (!cleaned) return "document.pdf";
+  return extname(cleaned) ? cleaned : `${cleaned}.pdf`;
+}
+
+/** One attachment part → the ACP block that carries it. */
+async function attachmentBlock(part) {
+  if (part.mediaType.startsWith("image/")) {
+    return { type: "image", data: base64Of(part.data), mimeType: part.mediaType };
+  }
+  const label = part.filename ?? part.mediaType;
+  if (part.mediaType !== "application/pdf") {
+    // OpenCode rejects these before we see them; say so rather than dropping the
+    // attachment silently if that ever changes.
+    return {
+      type: "text",
+      text: `[attached ${label} could not be forwarded: Phantombot takes images, PDFs and text files]`,
+    };
+  }
+  try {
+    const bytes = Buffer.from(base64Of(part.data), "base64");
+    if (bytes.byteLength === 0) return { type: "text", text: "[attached PDF was empty / undecodable]" };
+    if (bytes.byteLength > MAX_ATTACHMENT_BYTES) {
+      const mb = (bytes.byteLength / 1024 / 1024).toFixed(1);
+      return {
+        type: "text",
+        text: `[attached PDF too large to forward: ${mb} MB > ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB cap]`,
+      };
+    }
+    const sha = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+    const path = join(ATTACHMENT_DIR, `${sha}-${safeFilename(part.filename)}`);
+    await mkdir(ATTACHMENT_DIR, { recursive: true });
+    await writeFile(path, bytes);
+    return { type: "text", text: `[attached: ${path}]` };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return { type: "text", text: `[attached PDF couldn't be saved: ${reason}]` };
+  }
 }
 
 /**
@@ -663,7 +839,7 @@ async function runTurn(runtime, { entries, turns, controller, abortSignal }) {
 
     const result = await connection.request(
       "session/prompt",
-      { sessionId, prompt: send.map((text) => ({ type: "text", text })) },
+      { sessionId, prompt: await promptBlocks(send) },
       PROMPT_TIMEOUT_MS,
     );
     finish = result?.stopReason ?? "end_turn";
@@ -675,7 +851,9 @@ async function runTurn(runtime, { entries, turns, controller, abortSignal }) {
     // history, and it is matched against this: a transcript whose assistant
     // turns disagree with it belongs to a different conversation.
     const replyText = reply.replace(SYSTEM_REMINDER, "").trim();
-    if (finish !== "cancelled" && replyText) entry.entries = entries.concat([{ role: "assistant", text: replyText }]);
+    if (finish !== "cancelled" && replyText) {
+      entry.entries = forHistory(entries).concat([{ role: "assistant", text: replyText, mediaKey: "" }]);
+    }
 
     if (lastReasoningId) {
       emit({ type: "reasoning-end", id: lastReasoningId });
@@ -757,7 +935,7 @@ export function createPhantombot(settings = {}) {
         return { stream: textOnlyStream("") };
       }
       if (isTitleRequest(system, turns)) {
-        return { stream: textOnlyStream(localTitle(turns)) };
+        return { stream: textOnlyStream(localTitle(turns[0])) };
       }
       const abortSignal = options?.abortSignal;
       const stream = new ReadableStream({

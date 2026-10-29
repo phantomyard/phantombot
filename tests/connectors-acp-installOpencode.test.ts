@@ -372,6 +372,23 @@ describe("provider block", () => {
     expect(Object.keys(block.models as Record<string, unknown>).sort()).toEqual(["kai", "omar"]);
   });
 
+  test("every model declares pdf input, or OpenCode drops the PDF before we see it", () => {
+    // OpenCode replaces a PDF that the model's `capabilities.input` does not
+    // cover with `ERROR: Cannot read "x.pdf" (this model does not support pdf
+    // input)`, and an `aisdk:` provider that declares nothing gets the default
+    // ["text","image"]. Verified against OpenCode 2.2.0 — only `capabilities`
+    // works; `modalities` in the same entry is ignored.
+    const block = phantombotOpencodeProviderBlock({
+      binaryPath: "/usr/local/bin/phantombot",
+      modulePath: MODULE,
+      personas: ["omar"],
+    });
+    expect((block.models as Record<string, unknown>).omar).toEqual({
+      name: "Phantombot — omar",
+      capabilities: { tools: true, input: ["text", "image", "pdf"], output: ["text"] },
+    });
+  });
+
   test("encodes Windows paths as file:/// URLs", () => {
     const block = phantombotOpencodeProviderBlock({
       binaryPath: "C:\\pb\\phantombot.exe",

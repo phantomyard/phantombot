@@ -14,7 +14,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -107,6 +108,28 @@ function spawnedArgv(): string[] {
 
 function userTurn(text: string) {
   return { role: "user", content: [{ type: "text", text }] };
+}
+
+/** 1x1 transparent PNG — the smallest thing Windows/macOS paste too. */
+const PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+/** A fresh PDF payload: unique bytes, so the spill path cannot look pre-warmed. */
+function pdfBase64(): string {
+  return Buffer.from(`%PDF-1.4\n% ${randomUUID()}\n1 0 obj\n<<>>\nendobj\n%%EOF\n`).toString("base64");
+}
+
+/**
+ * A user turn carrying an attachment, in the exact shape OpenCode 2.2.0 builds
+ * (packages/…/message.ts `dy()`: `{type:"file", mediaType, data, filename}`).
+ */
+function fileTurn(
+  text: string | undefined,
+  file: { mediaType: string; data: string; filename?: string },
+) {
+  const content: any[] = [];
+  if (text !== undefined) content.push({ type: "text", text });
+  content.push({ type: "file", ...file });
+  return { role: "user", content };
 }
 
 function assistantTurn(text: string) {
@@ -526,5 +549,146 @@ describe("opencode provider package", () => {
     const result = await language.doGenerate({ prompt: [userTurn("ping")] });
     expect(result.content).toEqual([{ type: "text", text: "echo:ping" }]);
     expect(result.finishReason.unified).toBe("stop");
+  });
+});
+
+/**
+ * Attachments.
+ *
+ * OpenCode delivers a pasted image — and a PDF — as an AI-SDK `file` part, and
+ * the first version of this provider flattened only `text` parts. A screenshot
+ * with a caption was silently dropped; a screenshot with NO caption produced no
+ * turn at all, so the editor spun and answered nothing. These tests pin the
+ * forwarding, the caption-less case, the PDF spill, and the fact that an
+ * attachment is part of a turn's identity.
+ */
+describe("opencode provider attachments", () => {
+  function promptParts(): Array<Array<Record<string, any>>> {
+    return events()
+      .filter((entry) => entry.event === "prompt")
+      .map((entry) => entry.prompt as Array<Record<string, any>>);
+  }
+
+  test("forwards a pasted image as an ACP image block", async () => {
+    const language = model("imager");
+    await collect(
+      (
+        await language.doStream({
+          prompt: [
+            fileTurn("what is this?", { mediaType: "image/png", data: PNG_B64, filename: "shot.png" }),
+          ],
+        })
+      ).stream,
+    );
+
+    expect(promptParts()[0]).toEqual([
+      { type: "text", text: "what is this?" },
+      { type: "image", data: PNG_B64, mimeType: "image/png" },
+    ]);
+  });
+
+  test("an attachment with no caption is still a turn", async () => {
+    const language = model("silent-image");
+    const parts = await collect(
+      (await language.doStream({ prompt: [fileTurn(undefined, { mediaType: "image/png", data: PNG_B64 })] }))
+        .stream,
+    );
+
+    // No text block (there is no text), but the image must be there — dropping
+    // the turn is what made an uncaptioned paste do nothing.
+    expect(promptParts()[0]).toEqual([{ type: "image", data: PNG_B64, mimeType: "image/png" }]);
+    expect(textOf(parts)).toBe("echo:");
+  });
+
+  test("a data: URL payload is unwrapped before it is forwarded", async () => {
+    const language = model("data-url");
+    await collect(
+      (
+        await language.doStream({
+          prompt: [
+            fileTurn(undefined, { mediaType: "image/png", data: `data:image/png;base64,${PNG_B64}` }),
+          ],
+        })
+      ).stream,
+    );
+
+    expect(promptParts()[0]?.[0]).toEqual({ type: "image", data: PNG_B64, mimeType: "image/png" });
+  });
+
+  test("a PDF is spilled to a file and announced by path", async () => {
+    const language = model("pdfdoc");
+    const PDF_B64 = pdfBase64();
+    await collect(
+      (
+        await language.doStream({
+          prompt: [
+            fileTurn("summarise this", {
+              mediaType: "application/pdf",
+              data: PDF_B64,
+              filename: "Q3 report.pdf",
+            }),
+          ],
+        })
+      ).stream,
+    );
+
+    const [text, attachment] = promptParts()[0] ?? [];
+    expect(text).toEqual({ type: "text", text: "summarise this" });
+    const path = /^\[attached: (.+)\]$/.exec(String(attachment?.text ?? ""))?.[1] ?? "";
+    expect(path).not.toBe("");
+    // ACP has no document block, so the agent has to be able to READ it: the
+    // bytes must actually be on disk, under a safe name.
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path).equals(Buffer.from(PDF_B64, "base64"))).toBe(true);
+    expect(path.endsWith("-Q3_report.pdf")).toBe(true);
+  });
+
+  test("the same caption with a different image is a different turn", async () => {
+    const language = model("two-pictures");
+    const otherPng =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+    await collect(
+      (
+        await language.doStream({
+          prompt: [fileTurn("what is this?", { mediaType: "image/png", data: PNG_B64 })],
+        })
+      ).stream,
+    );
+    await collect(
+      (
+        await language.doStream({
+          prompt: [
+            fileTurn("what is this?", { mediaType: "image/png", data: otherPng }),
+            assistantTurn("echo:what is this?"),
+            fileTurn("what is this?", { mediaType: "image/png", data: otherPng }),
+          ],
+        })
+      ).stream,
+    );
+
+    // Matching on text alone would read this as a replay of the first turn and
+    // hand the agent the SECOND image as if it were the first.
+    expect(events().filter((entry) => entry.event === "session/new").length).toBe(2);
+    expect(promptParts()[1]).toEqual([
+      { type: "text", text: "what is this?" },
+      { type: "image", data: otherPng, mimeType: "image/png" },
+    ]);
+    expect(promptParts()[1]).not.toContainEqual({ type: "image", data: PNG_B64, mimeType: "image/png" });
+  });
+
+  test("an unsupported attachment type is reported, not dropped", async () => {
+    const language = model("docx");
+    await collect(
+      (
+        await language.doStream({
+          prompt: [fileTurn("read this", { mediaType: "application/msword", data: "AAAA", filename: "a.doc" })],
+        })
+      ).stream,
+    );
+
+    const note = promptParts()[0]?.[1] ?? {};
+    expect(note.type).toBe("text");
+    expect(String(note.text)).toContain("could not be forwarded");
   });
 });

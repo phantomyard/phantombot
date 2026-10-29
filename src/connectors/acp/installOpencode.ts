@@ -28,7 +28,18 @@
  *       "name": "Phantombot",
  *       "package": "aisdk:file:///…/connectors/opencode/index.mjs",
  *       "settings": { "command": "<abs path to this binary>" },
- *       "models": { "omar": { "name": "Phantombot — omar" }, … } } } }
+ *       "models": { "omar": { "name": "Phantombot — omar",
+ *                             "capabilities": { … } }, … } } } }
+ *
+ * The `capabilities` block is NOT decoration. OpenCode decides which
+ * attachments it will hand a model from `capabilities.input`, and a dynamic
+ * (`aisdk:`) provider that declares nothing gets the built-in default
+ * `["text","image"]` — so a PDF is replaced with
+ * `ERROR: Cannot read "x.pdf" (this model does not support pdf input)` before
+ * this provider ever sees it. Declaring `pdf` is the only lever a provider has
+ * (verified against OpenCode 2.2.0: the check is
+ * `!model.capabilities.input.some(…)`, and `modalities` in the same config
+ * entry does not feed it).
  *
  * One model per local persona, because the provider treats the model id AS the
  * persona name (`phantombot acp --persona <model id>`). Two OpenCode sessions on
@@ -544,7 +555,13 @@ export function phantombotOpencodeProviderBlock(input: {
 }): Record<string, unknown> {
   const models: Record<string, unknown> = {};
   for (const persona of input.personas) {
-    models[persona] = { name: `Phantombot — ${persona}` };
+    models[persona] = {
+      name: `Phantombot — ${persona}`,
+      // Without this, OpenCode refuses to hand a PDF to the model at all (see the
+      // header). `tools: true` matches OpenCode's own default for a provider that
+      // declares nothing, so this block only ever ADDS the input modalities.
+      capabilities: { tools: true, input: ["text", "image", "pdf"], output: ["text"] },
+    };
   }
   return {
     name: "Phantombot",
