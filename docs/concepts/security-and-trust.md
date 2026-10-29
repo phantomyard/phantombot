@@ -47,7 +47,10 @@ Each side of the perimeter has exactly one check.
   things. There is no second "ask the owner first" step afterwards: the owner
   is not on the line to answer it, and an approval they have to repeat forever
   is not a control. The persona still treats everything it reads as data, never
-  as instructions, and reports content that tries to steer it.
+  as instructions, and reports content that tries to steer it. If you configure
+  a [decision model](decision-model.md#escort), it also escorts the passed
+  turn: each tool call is scored before it runs, and a call it holds is refused
+  (not escalated) while the rest of the job continues.
 - **Interactive work has no security gate.** When the owner is on the line
   their instructions are genuine and are acted on. The persona still outlines
   a plan and asks before a long job or one it cannot easily undo, which the

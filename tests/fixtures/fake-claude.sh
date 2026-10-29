@@ -61,6 +61,13 @@ case "$mode" in
     printf '%s\n' '{"type":"result"}'
     exit 0
     ;;
+  escort)
+    # Echo whether the escort context reached the subprocess env (issue #702).
+    v="${PHANTOMBOT_ESCORT:+set}"
+    printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ESCORT=${v:-unset}\"}]}}"
+    printf '%s\n' '{"type":"result"}'
+    exit 0
+    ;;
   env)
     # Echo the background-tasks flag the harness is expected to inject, so
     # tests can prove it reaches the subprocess env (and that an inherited

@@ -26,6 +26,7 @@
 import { join } from "node:path";
 
 import { runWithFallback } from "./fallback.ts";
+import { escortContext, type EscortContext } from "../lib/escort.ts";
 import { createAuditSink } from "../lib/auditLog.ts";
 import { createHarnessFailureSink } from "../lib/harnessFailureLog.ts";
 import { log } from "../lib/logger.ts";
@@ -549,6 +550,10 @@ async function* runTurnBody(
   const screening: "screened" | "unscreened" | "trusted" =
     input.trusted === true ? "trusted" : "unscreened";
   let effectiveScreening: "screened" | "unscreened" | "trusted" = screening;
+  // The escort (issue #702): set when the screen PASSED an untrusted turn and
+  // a decision model is configured. Every tool call of this turn is then
+  // checked by the decision model before it runs (lib/escort.ts).
+  let escort: EscortContext | undefined;
   if (input.trusted !== true) {
     let verdict: ScreenVerdict | undefined;
     try {
@@ -564,7 +569,10 @@ async function* runTurnBody(
       } else {
         verdict = await input.screen(input.userMessage, input.signal);
       }
-      if (verdict?.action === "pass") effectiveScreening = "screened";
+      if (verdict?.action === "pass") {
+        effectiveScreening = "screened";
+        if (verdict.escort) escort = escortContext(verdict.escort, input.userMessage);
+      }
     } catch (e) {
       if (input.signal?.aborted) {
         // The caller cancelled and the screen threw on the way out (an abort
@@ -663,6 +671,26 @@ async function* runTurnBody(
       yield { type: "done", finalText: held, meta: { screenedHold: true } };
       return;
     }
+  }
+
+  // An escorted turn runs only on harnesses that can block a tool call before
+  // it runs (issue #702). The rest (codex, a host pi) are left out of THIS
+  // turn's chain; with none left the turn does not run at all — an escort
+  // that cannot be enforced is not silently dropped (fail closed, as #703).
+  const chainHarnesses = escort
+    ? input.harnesses.filter((h) => h.supportsEscort === true)
+    : input.harnesses;
+  if (escort && chainHarnesses.length === 0) {
+    log.error("turn: no harness in the chain supports the escort, holding the turn", {
+      persona: input.persona,
+      chain: input.harnesses.map((h) => h.id),
+    });
+    const held =
+      "🔒 None of my AI engines can run this request under the safety escort, " +
+      "so I've paused it. Nothing was done.";
+    yield { type: "text", text: held };
+    yield { type: "done", finalText: held, meta: { screenedHold: true } };
+    return;
   }
 
   // Instinct layer: pull relevant memory/kb for this message and inject it
@@ -1052,7 +1080,7 @@ async function* runTurnBody(
       const passPrefix = finalText;
       terminalError = undefined;
       const upstream = runWithFallback(
-        input.harnesses,
+        chainHarnesses,
         {
           systemPrompt,
           ...(turnContext ? { turnContext } : {}),
@@ -1081,6 +1109,7 @@ async function* runTurnBody(
           startupTimeoutMs: input.startupTimeoutMs,
           mcpMode: input.mcpMode,
           toolsMode: input.toolsMode,
+          ...(escort ? { escort } : {}),
           signal: input.signal,
         },
         {

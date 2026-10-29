@@ -100,6 +100,13 @@ case "$mode" in
     printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
     exit 0
     ;;
+  escort)
+    # Echo whether the escort context reached the child env (issue #702).
+    v="${PHANTOMBOT_ESCORT:+set}"
+    printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"ESCORT=${v:-unset}\",\"partial\":{}},\"message\":{}}"
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
+    exit 0
+    ;;
   env)
     # The per-persona routing file the harness points us at (phantombot#441).
     # Echo its CONTENTS, not just the path: what the test needs to know is which

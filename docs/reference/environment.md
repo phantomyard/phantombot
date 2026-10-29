@@ -130,7 +130,7 @@ The compatibility durable-facts extractor uses
 ## Runtime-owned and test-only values
 
 Phantombot injects `PHANTOMBOT_PERSONA`, `PHANTOMBOT_CONVERSATION`,
-`PHANTOMBOT_TURN_ID`, `PHANTOMBOT_TRUST`, and `PHANTOMBOT_ENGINE_SCOPE` into
-scoped child processes. Treat them as runtime context, not host configuration.
+`PHANTOMBOT_TURN_ID`, `PHANTOMBOT_TRUST`, `PHANTOMBOT_ENGINE_SCOPE`, and (on an
+escorted turn) `PHANTOMBOT_ESCORT` into scoped child processes. Treat them as runtime context, not host configuration.
 `PHANTOMBOT_TEST_ISOLATION_ROOT` is test-only. Installer-only controls include
 `PHANTOMBOT_INSTALL_DIR` and `PHANTOMBOT_SKIP_TUI`.

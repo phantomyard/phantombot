@@ -2363,3 +2363,46 @@ describe("PiHarness — custom provider at spawn (#694)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Escort (issue #702): only the embedded engine loads the escort extension,
+// so only native mode claims support, and the context reaches ONLY that child.
+// ---------------------------------------------------------------------------
+
+describe("PiHarness escort", () => {
+  const ESCORT = {
+    baseUrl: "https://jev.test/api/v1",
+    model: "typesafe/jev-1.13",
+    keyEnv: "TEST_JEV_KEY",
+    timeoutMs: 500,
+    threshold: 70,
+    task: "t",
+  };
+  const textOf = (chunks: HarnessChunk[]) =>
+    chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+
+  test("native supports the escort; a host pi does not", () => {
+    expect(mkHarness().supportsEscort).toBe(true);
+    expect(new PiHarness({ bin: FAKE_PI, mode: "host" }).supportsEscort).toBe(false);
+  });
+
+  test("an escorted request puts the context in the native child's env", async () => {
+    process.env.FAKE_PI_MODE = "escort";
+    const chunks = await collect(mkHarness().invoke(newRequest({ escort: ESCORT })));
+    expect(textOf(chunks)).toBe("ESCORT=set");
+  });
+
+  test("an unescorted request CLEARS an inherited context", async () => {
+    process.env.FAKE_PI_MODE = "escort";
+    process.env.PHANTOMBOT_ESCORT = JSON.stringify(ESCORT);
+    try {
+      const chunks = await collect(mkHarness().invoke(newRequest()));
+      expect(textOf(chunks)).toBe("ESCORT=unset");
+    } finally {
+      delete process.env.PHANTOMBOT_ESCORT;
+    }
+  });
+});
