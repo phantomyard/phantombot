@@ -712,7 +712,7 @@ export default defineCommand({
   meta: {
     name: "nightly",
     description:
-      "Run the cognitive distillation sweep — every unprocessed or changed daily file is distilled into the drawers, MEMORY.md and the KB. The date sweep is idempotent: re-running with nothing pending distills nothing. The once-per-sweep compaction check still runs, and rewrites a file only if it is over budget (skip it with --no-compact).",
+      "Distil changed daily notes into the drawers, MEMORY.md and the knowledge base.",
   },
   args: {
     persona: {

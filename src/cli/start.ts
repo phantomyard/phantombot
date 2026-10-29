@@ -15,7 +15,7 @@ export default defineCommand({
   meta: {
     name: "start",
     description:
-      "Start the installed phantombot background service (systemd/launchd/Task Scheduler). Run 'phantombot install' first.",
+      "Start the installed background service.",
   },
   async run() {
     process.exitCode = await runLifecycleAction({ action: "start" });

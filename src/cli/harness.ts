@@ -1364,7 +1364,7 @@ export async function maybeUpgradeUnit(
 export default defineCommand({
   meta: {
     name: "harness",
-    description: "Set the harness chain (primary → fallback). Detects which binaries are on PATH.",
+    description: "Set the harness chain — primary then fallbacks — from binaries detected on PATH.",
   },
   args: {
     persona: {

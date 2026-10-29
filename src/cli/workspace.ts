@@ -48,7 +48,7 @@ export default defineCommand({
   meta: {
     name: "workspace",
     description:
-      "Advisory locks on shared working copies (git checkouts, build trees) so two concurrent turns don't trample each other. Advisory only — it records and reports a claim, it cannot block a write.",
+      "Advisory locks on shared checkouts so two concurrent turns never trample each other.",
   },
   subCommands: {
     lock: defineCommand({

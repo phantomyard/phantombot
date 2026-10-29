@@ -598,7 +598,7 @@ export default defineCommand({
   meta: {
     name: "task",
     description:
-      "Manage scheduled tasks. Add a prompt to fire once or on a recurring schedule. The harnessed agent calls these via Bash to set up background work for the user.",
+      "Add, list, inspect or cancel scheduled tasks that survive restarts.",
   },
   subCommands: {
     add: defineCommand({

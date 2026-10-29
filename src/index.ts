@@ -32,6 +32,7 @@
 
 import { runMain, showUsage } from "citty";
 import { mainCommand } from "./cli/index.ts";
+import { renderRootHelp } from "./cli/help.ts";
 import { loadConfig, personaDir } from "./config.ts";
 import { isReadOnlyInvocation } from "./lib/cliInvocation.ts";
 import {
@@ -182,6 +183,14 @@ async function runPhantombotCli(): Promise<void> {
       // `persona <name>`), so citty resolves `persona new --help` to the
       // PARENT command. Redirect that one case back to the real usage.
       async showUsage(cmd, parent) {
+        // The root surface is grouped and capped (cli/help.ts); citty's stock
+        // renderer stays for every subcommand, where the flag tables belong.
+        if (!parent && cmd === mainCommand) {
+          process.stdout.write(
+            await renderRootHelp(mainCommand, { columns: process.stdout.columns }),
+          );
+          return;
+        }
         const positionals = process.argv
           .slice(2)
           .filter((a) => !a.startsWith("-"));

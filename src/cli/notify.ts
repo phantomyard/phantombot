@@ -367,7 +367,7 @@ export default defineCommand({
   meta: {
     name: "notify",
     description:
-      "Surface a message to every authorized recipient on every configured channel (all Telegram owners + all phantomchat owners). The harnessed agent calls this when a scheduled task or background work needs to reach the user.",
+      "Send a message to every authorised owner on every configured channel.",
   },
   args: {
     message: {

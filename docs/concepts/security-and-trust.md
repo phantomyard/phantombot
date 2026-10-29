@@ -6,7 +6,11 @@ the wording inside the request.
 ## Trusted requests
 
 An allow-listed owner on a configured chat channel, the local terminal UI, and
-local ACP editor sessions are trusted entry points. They can direct normal
+local editor sessions are trusted entry points. Editors reach Phantombot either
+as an ACP agent (VS Code, Zed, JetBrains) or as a model provider (OpenCode);
+both spawn the binary as the signed-in OS user, who already has full access to
+the persona directory, so there is no privilege boundary for a judge to
+defend. They can direct normal
 persona work because the speaker already controls the account or authenticated
 channel identity.
 
@@ -86,6 +90,36 @@ Limit worth knowing: the judge reads the message that starts a turn. Content
 the persona fetches while working — a web page, an API response, another
 email — is not screened; it is covered only by the data-not-instructions
 discipline.
+
+## Escorted turns
+
+Screening reads the message that wakes a turn, not the actions taken while
+carrying it out. A judge-passed turn can therefore still be steered mid-flight
+by a page it fetches. The escort closes that gap — but only when a
+[decision model](decision-model.md#escort) is configured, and only on turns the
+judge screened. Trusted turns are never escorted.
+
+- Every tool call is scored before it runs: given the capped wake message and
+  the proposed action, is this something the task plausibly needs, or does it
+  look like a hijack?
+- A call at or above the threshold is refused, the model is told why, and the
+  rest of the job continues. It is not escalated, and the owner is not paged
+  mid-run.
+- Enforcement lives inside the harness subprocess, where the tool loop actually
+  runs: the native harness blocks on an inline `tool_call` extension, Claude
+  Code blocks through a `PreToolUse` hook that runs `phantombot __escort` and
+  exits 2. Harnesses without a blocking pre-tool hook — Codex, a host Pi — are
+  left out of an escorted turn's chain; if nothing is left, the turn does not
+  run.
+- It fails closed. No decision, a malformed context, a missing key, a timeout,
+  or an unreadable answer all refuse the call. The escort never falls open into
+  "the call runs".
+- The context rides in the harness's environment, and the API key is named
+  there rather than carried. A tool call cannot reach up and change its parent's
+  environment, so a running turn cannot switch its own escort off.
+
+Model trust does not travel with the model. A remote message quoted in the
+editor or a tool result is data, whichever client it arrives through.
 
 ## Boundaries
 

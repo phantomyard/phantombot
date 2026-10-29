@@ -544,7 +544,7 @@ export default defineCommand({
   meta: {
     name: "mcp",
     description:
-      "Connect this persona to MCP servers (three auth methods: env/header/oauth). The agent manages these; the user never edits a config file. Run `phantombot mcp help` for the full guide.",
+      "Connect this persona to MCP servers; the agent manages them, not a config file.",
   },
   subCommands: {
     help: defineCommand({

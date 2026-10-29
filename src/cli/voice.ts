@@ -705,7 +705,7 @@ export default defineCommand({
   meta: {
     name: "voice",
     description:
-      "Configure TTS / STT provider (ElevenLabs / OpenAI Compatible). Validates the API key before saving.",
+      "Configure speech-to-text and text-to-speech providers. Validates the key before saving.",
   },
   args: {
     persona: {

@@ -578,7 +578,7 @@ export default defineCommand({
   meta: {
     name: "update",
     description:
-      "Fetch the latest phantombot release, verify the SHA256, atomically swap the running binary, and optionally restart the service.",
+      "Fetch the latest release, verify its SHA256, swap the binary, optionally restart.",
   },
   args: {
     check: {

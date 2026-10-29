@@ -108,7 +108,7 @@ export default defineCommand({
   meta: {
     name: "backfill-identity",
     description:
-      "Ensure every persona has SOUL.md (shared behaviour) + IDENTITY.md (per-phantom facts). Fills only gaps; never overwrites. Idempotent.",
+      "Fill gaps in every persona's SOUL.md and IDENTITY.md. Never overwrites; idempotent.",
   },
   args: {
     persona: {

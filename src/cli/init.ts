@@ -111,7 +111,7 @@ async function probeHarness(bin: string): Promise<boolean> {
 export default defineCommand({
   meta: {
     name: "init",
-    description: "Launch the full Phantombot unified setup wizard.",
+    description: "Launch the unified setup wizard for a fresh install.",
   },
   async run() {
     p.intro("Welcome to Phantombot");

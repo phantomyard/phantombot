@@ -247,7 +247,7 @@ export default defineCommand({
   meta: {
     name: "vault",
     description:
-      "Manage the persona's encrypted secrets vault. AES-256-GCM at rest, key derived from the persona's identity. Pipe values to `phantombot vault set NAME` to keep secrets out of argv.",
+      "Manage the encrypted secrets vault. Pipe values in to keep them out of argv.",
   },
   subCommands: {
     set: defineCommand({

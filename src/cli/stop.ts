@@ -17,7 +17,7 @@ export default defineCommand({
   meta: {
     name: "stop",
     description:
-      "Stop the phantombot background service and keep it down until 'phantombot start'.",
+      "Stop the background service; it stays down until `phantombot start`.",
   },
   async run() {
     process.exitCode = await runLifecycleAction({ action: "stop" });

@@ -16,7 +16,7 @@ export default defineCommand({
   meta: {
     name: "restart",
     description:
-      "Restart the phantombot background service (systemd/launchd/Task Scheduler).",
+      "Restart the installed background service.",
   },
   async run() {
     process.exitCode = await runLifecycleAction({ action: "restart" });

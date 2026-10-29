@@ -286,7 +286,7 @@ export default defineCommand({
   meta: {
     name: "ask",
     description:
-      "Run one prompt through the persona + harness chain, print the reply to stdout, and exit. Stateless by default; pass --history --conversation <id> to thread.",
+      "Run one prompt through the persona and harness chain and print the reply.",
   },
   args: {
     prompt: {

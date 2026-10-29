@@ -1581,7 +1581,7 @@ export default defineCommand({
   meta: {
     name: "tick",
     description:
-      "Fire any scheduled tasks that are due. Called every minute by the platform scheduler (systemd timer, launchd or Task Scheduler); safe to run by hand for debugging.",
+      "Fire the scheduled tasks that are due. Runs every minute; safe to run by hand.",
   },
   args: {
     "run-task": {

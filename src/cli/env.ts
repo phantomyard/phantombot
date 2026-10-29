@@ -132,7 +132,7 @@ export default defineCommand({
   meta: {
     name: "env",
     description:
-      "DEPRECATED alias for `phantombot vault`. Forwards to the encrypted secrets vault (values are stored AES-256-GCM at rest, no longer in plaintext ~/.env).",
+      "Deprecated alias for `phantombot vault`; secrets no longer live in plaintext ~/.env.",
   },
   subCommands: {
     set: defineCommand({
