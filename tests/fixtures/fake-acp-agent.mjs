@@ -14,6 +14,7 @@
  * Env knobs:
  *   FAKE_ACP_LOG=<path>             JSONL of {event, ...} — prompts, cancels, exits
  *   FAKE_ACP_DELAY_MS=<n>           delay before answering session/prompt
+ *   FAKE_ACP_INIT_DELAY_MS=<n>      delay before answering initialize (slow startup)
  *   FAKE_ACP_DIE_ON_PROMPT=1        exit(3) instead of answering (mid-turn death)
  *   FAKE_ACP_EXIT_AFTER_PROMPT=1    exit(0) once a prompt has been answered
  *   FAKE_ACP_NO_LOAD_SESSION=1      advertise loadSession:false and reject session/load
@@ -24,6 +25,7 @@ import { createInterface } from "node:readline";
 
 const logPath = process.env.FAKE_ACP_LOG;
 const delay = Number(process.env.FAKE_ACP_DELAY_MS ?? "0");
+const initDelay = Number(process.env.FAKE_ACP_INIT_DELAY_MS ?? "0");
 const dieOnPrompt = process.env.FAKE_ACP_DIE_ON_PROMPT === "1";
 const exitAfterPrompt = process.env.FAKE_ACP_EXIT_AFTER_PROMPT === "1";
 const loadSession = process.env.FAKE_ACP_NO_LOAD_SESSION !== "1";
@@ -52,7 +54,7 @@ function text(update) {
 }
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
-rl.on("line", (line) => {
+rl.on("line", async (line) => {
   const trimmed = line.trim();
   if (!trimmed) return;
   let message;
@@ -65,6 +67,9 @@ rl.on("line", (line) => {
   switch (message.method) {
     case "initialize":
       record({ event: "initialize" });
+      if (initDelay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, initDelay));
+      }
       send({
         jsonrpc: "2.0",
         id: message.id,

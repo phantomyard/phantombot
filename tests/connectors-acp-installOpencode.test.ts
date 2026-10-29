@@ -13,6 +13,7 @@ import {
   defaultOpencodeModulePath,
   fallbackOpencodeConfigPath,
   installOpencode,
+  needsWindowsShell,
   opencodeCliCandidates,
   opencodeDesktopMarkers,
   personaModelNames,
@@ -236,6 +237,44 @@ describe("opencode config path resolution", () => {
     expect(resolveOpencodeConfigPath(fs.deps).detected).toBe(true);
   });
 
+  test("staged CLI versions are ranked numerically, not lexicographically", () => {
+    const fs = fakeFs();
+    fs.deps.platform = "win32";
+    fs.deps.homedir = () => "C:\\Users\\tester";
+    fs.deps.env = { APPDATA: "C:\\Users\\tester\\AppData\\Roaming" };
+    fs.deps.listDir = () => ["2.9.0-x64", "2.10.0-x64"];
+    fs.deps.exists = (path) => path.endsWith("opencode-cli.exe");
+    const candidates = opencodeCliCandidates(fs.deps);
+    const staged = candidates.filter((candidate) => candidate.includes("2."));
+    expect(staged[0]).toContain("2.10.0-x64");
+  });
+
+  test("the probe loop honours a shared deadline instead of 20s per candidate", () => {
+    const fs = fakeFs();
+    let clock = 0;
+    fs.deps.now = () => clock;
+    fs.deps.exists = (path) => path.startsWith("/opt/") || path.startsWith("/usr/");
+    const probed: string[] = [];
+    fs.deps.runOpencode = (_args, exe) => {
+      probed.push(exe ?? "opencode");
+      clock += 20_000; // every candidate hangs to its full timeout
+      return undefined;
+    };
+    resolveOpencodeConfigPath(fs.deps);
+    expect(probed.length).toBeLessThanOrEqual(2);
+  });
+
+  test("a bare `opencode` is the only probe routed through a Windows shell", () => {
+    const original = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      expect(needsWindowsShell("opencode")).toBe(true);
+      expect(needsWindowsShell("C:\\Users\\Andrew Hodges\\AppData\\Roaming\\ai.opencode.desktop\\cli\\2.2.1-x64\\opencode-cli.exe")).toBe(false);
+    } finally {
+      Object.defineProperty(process, "platform", { value: original, configurable: true });
+    }
+  });
+
   test("module path honours XDG_DATA_HOME", () => {
     expect(defaultOpencodeModulePath({ env: { XDG_DATA_HOME: "/xdg/data" }, homedir: () => "/home/tester" })).toBe(
       "/xdg/data/phantombot/connectors/opencode/index.mjs",
@@ -296,7 +335,8 @@ describe("installOpencode", () => {
     const fs = fakeFs({}, ["/home/tester/.config/opencode"]);
     const result = installOpencode({
       binaryPath: "/usr/local/bin/phantombot",
-      personas: [],
+      // The CLI passes EVERY persona so a typo can name the real choices.
+      personas: ["kai", "lena"],
       requestedPersona: "typo",
       deps: fs.deps,
     });
@@ -304,6 +344,7 @@ describe("installOpencode", () => {
     expect(result.code).toBe(1);
     expect(result.action).toBe("error");
     expect(result.message).toContain('no persona named "typo"');
+    expect(result.message).toContain("available: kai, lena");
     // Nothing staged, no config written: exit 0 with models:{} would tell the
     // user the install worked while OpenCode offers no PhantomBot model.
     expect(fs.writes).toEqual([]);

@@ -52,8 +52,8 @@ Brevity for voice replies, formatting for Slack, etc. should be appended to the 
 
 `RelayHealthTracker` excludes repeatedly dropping or slow relays from WRITES for a jittered 3-minute base, doubling to a 15-minute cap, but never narrows READS and never lets the publish set fall below `MIN_PUBLISH_RELAYS`. The inbound catch-up cadence offers at most one warm-spare `{ids:[knownEvent]}` probe per jittered minute; publish traffic never schedules probes, and a successful read probe releases only a dropping quarantine. A SLOW quarantine serves its span because reading an old event does not measure current publish-accept latency. `verifyStored` still records every target relay independently, but delivery logging is aggregate: at least two verified copies logs `delivered via N relays`; fewer than two keeps a truthful loud warning. The pass remains detached from sending. Tests: `tests/channels-phantomchat-relayHealth.test.ts`, `tests/channels-phantomchat-relayAuth.test.ts`.
 
-<a id="inv-81"></a>
-### 81. OpenCode consumes Phantombot as a MODEL via an `aisdk:` provider module, never as an ACP agent (issue #699).
+<a id="inv-82"></a>
+### 82. OpenCode consumes Phantombot as a MODEL via an `aisdk:` provider module, never as an ACP agent (issue #699).
 
 `opencode acp` makes *OpenCode* the agent that Zed/JetBrains spawn; it never spawns an ACP client, so there is no setting that points OpenCode at `phantombot acp`. The integration inverts the direction: `phantombot acp install opencode` writes `providers.phantombot` into OpenCode's `opencode.json` and points `package` at a provider module shipped inside this binary (`src/connectors/acp/opencode/provider/index.mjs`, embedded by `scripts/genOpencodeProviderAsset.ts`), which spawns `phantombot acp --persona <model id>` per conversation over stdio. No daemon, no port, no token — it works while the service is down, and the trust boundary is process ancestry, exactly like Zed.
 

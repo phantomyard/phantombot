@@ -126,9 +126,9 @@ const installOpencodeCmd = defineCommand({
   async run({ args }) {
     const personasDir = resolvePersonasDirSync();
     const only = args.persona ? String(args.persona) : undefined;
-    const personas = personaModelNames(personasDir).filter(
-      (name) => only === undefined || name === only,
-    );
+    // Pass every persona: installOpencode does the filtering so a typo can name
+    // the real choices instead of reporting `available: none`.
+    const personas = personaModelNames(personasDir);
     const result = installOpencode({ binaryPath: process.execPath, personas, requestedPersona: only });
     printOpencodeInstall(result, process.stdout, process.stderr);
     // Same event-loop caveat as installZed: importing the ACP server keeps the

@@ -62,6 +62,9 @@ import {
   OPENCODE_PROVIDER_SOURCE_BASE64,
 } from "../../lib/opencodeProviderAsset.generated.ts";
 
+/** Total time the `debug paths config` probe loop may spend across all candidates. */
+const OPENCODE_PROBE_BUDGET_MS = 30_000;
+
 /** Provider id under `providers` — also the `-m phantombot/<model>` prefix. */
 export const OPENCODE_PROVIDER_ID = "phantombot";
 
@@ -82,6 +85,8 @@ export interface OpencodeDeps {
   runOpencode(args: string[], exe?: string): { code: number; stdout: string } | undefined;
   /** Names of the DIRECTORIES directly under `path`; empty when unreadable. */
   listDir(path: string): string[];
+  /** Clock, injectable so the probe budget can be tested. Default: `Date.now`. */
+  now(): number;
 }
 
 export function defaultOpencodeDeps(): OpencodeDeps {
@@ -109,12 +114,18 @@ export function defaultOpencodeDeps(): OpencodeDeps {
         return [];
       }
     },
+    now: () => Date.now(),
     runOpencode: (args, exe = "opencode") => {
       try {
         const result = spawnSync(exe, args, {
           encoding: "utf8",
           timeout: 20_000,
-          shell: process.platform === "win32",
+          // `shell: true` is what makes an npm `.cmd` shim work on Windows, but it
+          // does NOT quote the command — so an absolute exe under a profile with a
+          // space in it (`C:\Users\Andrew Hodges\…`) would be split and the probe
+          // would fail silently. Only the bare name needs the shell; a native .exe
+          // is spawned directly, like `buildAcpSpawnCommand` does elsewhere.
+          shell: needsWindowsShell(exe),
         });
         if (result.error || typeof result.stdout !== "string") return undefined;
         return { code: result.status ?? 1, stdout: result.stdout };
@@ -187,6 +198,43 @@ export function personaModelNames(personasDir: string): string[] {
   }
 }
 
+/**
+ * Whether a probe executable must be launched through `cmd.exe`.
+ *
+ * On Windows a bare `opencode` may be an npm `.cmd` shim, which only runs through
+ * the shell. An absolute path to a real `.exe` must NOT: `shell: true` does not
+ * quote the command, so a profile directory with a space would split the path and
+ * the probe would fail silently — the same "not detected" failure this installer
+ * exists to avoid.
+ */
+export function needsWindowsShell(exe: string): boolean {
+  return process.platform === "win32" && exe === "opencode";
+}
+
+/**
+ * Descending numeric-then-lexical version compare for OpenCode's staged CLI dirs
+ * (`2.10.0-x64` vs `2.9.0-x64`). Lexicographic order would rank 2.9 above 2.10,
+ * so an in-place upgrade would keep probing the stale bundled CLI.
+ */
+function compareVersionsDesc(a: string, b: string): number {
+  const parts = (value: string): Array<string | number> =>
+    value
+      .split(/[.\-_+]/)
+      .map((part) => (/^\d+$/.test(part) ? Number(part) : part));
+  const left = parts(a);
+  const right = parts(b);
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    const x = left[i];
+    const y = right[i];
+    if (x === y) continue;
+    if (x === undefined) return 1;
+    if (y === undefined) return -1;
+    if (typeof x === "number" && typeof y === "number") return y - x;
+    return String(y).localeCompare(String(x));
+  }
+  return 0;
+}
+
 /** Join path segments using the TARGET platform's rules (not the host's). */
 function joinFor(platform: string, ...segments: string[]): string {
   return platform === "win32" ? win32.join(...segments) : posix.join(...segments);
@@ -256,8 +304,10 @@ export function opencodeCliCandidates(deps: Partial<OpencodeDeps> = {}): string[
   const addIfExists = (path: string) => {
     if (d.exists(path) && !candidates.includes(path)) candidates.push(path);
   };
-  // Newest staged version first.
-  const listDirs = (root: string): string[] => [...d.listDir(root)].sort().reverse();
+  // Newest staged version first. Ordered numerically, not lexicographically:
+  // `2.10.0` must beat `2.9.0`, or an in-place Desktop upgrade leaves the older
+  // bundled CLI winning the probe.
+  const listDirs = (root: string): string[] => [...d.listDir(root)].sort(compareVersionsDesc);
 
   if (d.platform === "win32") {
     const appData = d.env.APPDATA || joinFor("win32", d.homedir(), "AppData", "Roaming");
@@ -401,7 +451,11 @@ export function resolveOpencodeConfigPath(deps: Partial<OpencodeDeps> = {}): {
     return { configPath: explicit.trim(), detected: true };
   }
   let dir = "";
+  // A shared deadline: each candidate has its own 20s timeout, so a machine with
+  // several hung CLIs would otherwise stall the install for minutes.
+  const deadline = d.now() + OPENCODE_PROBE_BUDGET_MS;
   for (const exe of opencodeCliCandidates(d)) {
+    if (d.now() > deadline) break;
     const probe = d.runOpencode(["debug", "paths", "config"], exe);
     const candidate = probe && probe.code === 0 ? probe.stdout.trim().split(/\r?\n/).pop() ?? "" : "";
     if (candidate.length > 0) {
@@ -527,21 +581,26 @@ export function installOpencode(options: InstallOpencodeOptions): InstallOpencod
       };
     }
 
-    if (options.requestedPersona !== undefined && !(options.personas ?? []).includes(options.requestedPersona)) {
-      const available = (options.personas ?? []).join(", ") || "none";
-      return {
-        code: 1,
-        action: "error",
-        configPath,
-        modulePath,
-        message: `no persona named "${options.requestedPersona}" (available: ${available}) — nothing written`,
-      };
+    const allPersonas = options.personas ?? [];
+    let personas = allPersonas;
+    if (options.requestedPersona !== undefined) {
+      if (!allPersonas.includes(options.requestedPersona)) {
+        const available = allPersonas.join(", ") || "none";
+        return {
+          code: 1,
+          action: "error",
+          configPath,
+          modulePath,
+          message: `no persona named "${options.requestedPersona}" (available: ${available}) — nothing written`,
+        };
+      }
+      personas = [options.requestedPersona];
     }
 
     const block = phantombotOpencodeProviderBlock({
       binaryPath: options.binaryPath,
       modulePath,
-      personas: options.personas ?? [],
+      personas,
       platform: deps.platform,
     });
 

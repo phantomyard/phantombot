@@ -45,6 +45,7 @@ afterEach(() => {
   delete process.env.FAKE_ACP_DIE_ON_PROMPT;
   delete process.env.FAKE_ACP_EXIT_AFTER_PROMPT;
   delete process.env.FAKE_ACP_NO_LOAD_SESSION;
+  delete process.env.FAKE_ACP_INIT_DELAY_MS;
   try {
     rmSync(workDir, { recursive: true, force: true });
   } catch {
@@ -414,6 +415,49 @@ describe("opencode provider package", () => {
     // Only the first turn was ever sent; the aborted one must not run the agent loop.
     expect(prompts()).toEqual([["first"]]);
     expect(events().some((entry) => entry.event === "cancel")).toBe(false);
+    const finish = parts.at(-1)!;
+    expect(finish.type).toBe("finish");
+    expect(finish.finishReason.raw).toBe("cancelled");
+  }, 15_000);
+
+  test("two transcripts matching equally well start a third session", async () => {
+    // Ambiguity must NOT be resolved by picking a winner: chat A and chat B both
+    // end at [u:X, a:echo:X], so a third turn continuing exactly that state
+    // belongs to neither and has to open its own session.
+    const language = model("tied");
+
+    await collect((await language.doStream({ prompt: [userTurn("X")] })).stream);
+    await collect((await language.doStream({ prompt: [userTurn("X")] })).stream);
+    await collect(
+      (
+        await language.doStream({
+          prompt: [userTurn("X"), assistantTurn("echo:X"), userTurn("Z")],
+        })
+      ).stream,
+    );
+
+    expect(events().filter((entry) => entry.event === "session/new").length).toBe(3);
+    expect(prompts()).toEqual([["X"], ["X"], ["Z"]]);
+  });
+
+  test("a turn aborted while the child is still initializing never prompts it", async () => {
+    // The window between the queue-time check and the dispatch-time check: the
+    // abort lands inside ensureConnection, so without the second guard the agent
+    // loop would run and then race the kill timer.
+    process.env.FAKE_ACP_INIT_DELAY_MS = "800";
+    const language = model("init-abort");
+    const controller = new AbortController();
+
+    const { stream } = await language.doStream({
+      prompt: [userTurn("DO NOT EXECUTE THIS")],
+      abortSignal: controller.signal,
+    });
+    const collected = collect(stream);
+    await Bun.sleep(120);
+    controller.abort();
+    const parts = await collected;
+
+    expect(prompts()).toEqual([]);
     const finish = parts.at(-1)!;
     expect(finish.type).toBe("finish");
     expect(finish.finishReason.raw).toBe("cancelled");
