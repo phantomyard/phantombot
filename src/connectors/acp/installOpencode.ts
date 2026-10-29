@@ -636,8 +636,17 @@ export function installOpencode(options: InstallOpencodeOptions): InstallOpencod
     // install rather than leaving a new module on disk with no registration.
     const raw = deps.readFile(configPath);
     const text = raw ?? "{}\n";
+    // A config this installer has to update can legitimately start with a UTF-8
+    // BOM: OpenCode Desktop rewrites opencode.json itself on Windows and emits
+    // one, and a PowerShell `>` redirect produces one too. `jsonc-parser`
+    // rejects it as InvalidSymbol at offset 0, which turned every later install
+    // — including the startup reconcile — into a silent no-op on that machine.
+    // Strip it for parsing/editing and restore it on write, so the file keeps
+    // the encoding its owner gave it.
+    const bom = text.startsWith("\uFEFF") ? "\uFEFF" : "";
+    const body = bom ? text.slice(1) : text;
     const errors: ParseError[] = [];
-    const parsed = parse(text, errors, { allowTrailingComma: true, disallowComments: false });
+    const parsed = parse(body, errors, { allowTrailingComma: true, disallowComments: false });
     if (errors.length > 0) {
       const first = errors[0]!;
       return {
@@ -693,10 +702,10 @@ export function installOpencode(options: InstallOpencodeOptions): InstallOpencod
     // run of this installer is what creates it.
     deps.mkdirp(dirname(configPath));
 
-    const edits = modify(text, ["providers", OPENCODE_PROVIDER_ID], block, {
-      formattingOptions: { insertSpaces: true, tabSize: 2, eol: text.includes("\r\n") ? "\r\n" : "\n" },
+    const edits = modify(body, ["providers", OPENCODE_PROVIDER_ID], block, {
+      formattingOptions: { insertSpaces: true, tabSize: 2, eol: body.includes("\r\n") ? "\r\n" : "\n" },
     });
-    const next = applyEdits(text, edits);
+    const next = bom + applyEdits(body, edits);
 
     if (raw !== undefined) {
       deps.writeFile(`${configPath}.phantombot-bak`, raw);

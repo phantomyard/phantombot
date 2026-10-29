@@ -541,6 +541,43 @@ describe("installOpencode", () => {
     expect(fs.writes).toEqual([]);
   });
 
+  // OpenCode Desktop (Windows) rewrites opencode.json itself and emits a UTF-8
+  // BOM. jsonc-parser calls that InvalidSymbol at offset 0, which made every
+  // later install — and the startup reconcile — a silent no-op on Megan's box.
+  test("updates a BOM-prefixed config and preserves the BOM", () => {
+    const withBom = "\uFEFF" + JSON.stringify({ providers: { other: { name: "Other" } } }, null, 2);
+    const fs = fakeFs({ [CONFIG]: withBom }, ["/home/tester/.config/opencode"]);
+    const result = installOpencode({
+      binaryPath: "/usr/local/bin/phantombot",
+      personas: ["omar"],
+      deps: fs.deps,
+    });
+    expect(result.action).toBe("registered");
+    const written = fs.files.get(CONFIG)!;
+    expect(written.startsWith("\uFEFF")).toBe(true);
+    const parsed = parse(written.slice(1)) as any;
+    expect(parsed.providers.other.name).toBe("Other");
+    expect(parsed.providers.phantombot.models.omar).toBeDefined();
+  });
+
+  test("a BOM-prefixed config that is already current reports `current`, not an error", () => {
+    const fs = fakeFs({}, ["/home/tester/.config/opencode"]);
+    const first = installOpencode({
+      binaryPath: "/usr/local/bin/phantombot",
+      personas: ["omar"],
+      deps: fs.deps,
+    });
+    expect(first.action).toBe("registered");
+    // Simulate OpenCode Desktop rewriting the same config with a BOM.
+    fs.files.set(CONFIG, "\uFEFF" + fs.files.get(CONFIG)!);
+    const second = installOpencode({
+      binaryPath: "/usr/local/bin/phantombot",
+      personas: ["omar"],
+      deps: fs.deps,
+    });
+    expect(second.action).toBe("current");
+  });
+
   test("warns about the v1 singular `provider` block that v2 ignores", () => {
     const fs = fakeFs(
       { [CONFIG]: '{ "provider": { "phantombot": { "npm": "x" } } }' },
