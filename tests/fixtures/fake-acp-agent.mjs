@@ -18,6 +18,10 @@
  *   FAKE_ACP_DIE_ON_PROMPT=1        exit(3) instead of answering (mid-turn death)
  *   FAKE_ACP_EXIT_AFTER_PROMPT=1    exit(0) once a prompt has been answered
  *   FAKE_ACP_NO_LOAD_SESSION=1      advertise loadSession:false and reject session/load
+ *   FAKE_ACP_REJECT_LOAD=1          advertise loadSession:true but reject session/load
+ *                                   (a thread this server no longer knows)
+ *   FAKE_ACP_SESSION_PREFIX=<s>     prefix session ids, so a REPLACEMENT child is
+ *                                   visibly a different server than the first
  */
 
 import { appendFileSync } from "node:fs";
@@ -29,6 +33,8 @@ const initDelay = Number(process.env.FAKE_ACP_INIT_DELAY_MS ?? "0");
 const dieOnPrompt = process.env.FAKE_ACP_DIE_ON_PROMPT === "1";
 const exitAfterPrompt = process.env.FAKE_ACP_EXIT_AFTER_PROMPT === "1";
 const loadSession = process.env.FAKE_ACP_NO_LOAD_SESSION !== "1";
+const rejectLoad = process.env.FAKE_ACP_REJECT_LOAD === "1";
+const sessionPrefix = process.env.FAKE_ACP_SESSION_PREFIX ?? "";
 
 function record(entry) {
   if (!logPath) return;
@@ -86,7 +92,7 @@ rl.on("line", async (line) => {
       return;
     case "session/new": {
       sessionSeq += 1;
-      const sessionId = `session-${sessionSeq}`;
+      const sessionId = `${sessionPrefix}session-${sessionSeq}`;
       sessions.set(sessionId, { cwd: message.params?.cwd });
       record({ event: "session/new", sessionId, cwd: message.params?.cwd });
       send({ jsonrpc: "2.0", id: message.id, result: { sessionId } });
@@ -95,7 +101,7 @@ rl.on("line", async (line) => {
     case "session/load": {
       const sessionId = message.params?.sessionId;
       record({ event: "session/load", sessionId });
-      if (!loadSession) {
+      if (!loadSession || rejectLoad) {
         send({
           jsonrpc: "2.0",
           id: message.id,
