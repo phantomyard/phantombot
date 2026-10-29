@@ -24,6 +24,12 @@ import { runAcpServer } from "../connectors/acp/server.ts";
 import { installZed } from "../connectors/acp/installZed.ts";
 import { installJetbrains } from "../connectors/acp/installJetbrains.ts";
 import { installVscode } from "../connectors/acp/installVscode.ts";
+import {
+  installOpencode,
+  personaModelNames,
+  printOpencodeInstall,
+} from "../connectors/acp/installOpencode.ts";
+import { resolvePersonasDirSync } from "../config.ts";
 
 const installZedCmd = defineCommand({
   meta: {
@@ -99,16 +105,49 @@ const installVscodeCmd = defineCommand({
   },
 });
 
+/**
+ * `phantombot acp install opencode` — register phantombot as a selectable MODEL
+ * in OpenCode (CLI + Desktop), not as an ACP agent: OpenCode's ACP support runs
+ * the other direction. See connectors/acp/installOpencode.ts.
+ */
+const installOpencodeCmd = defineCommand({
+  meta: {
+    name: "opencode",
+    description:
+      "Register phantombot as a model in OpenCode (CLI + Desktop) by writing providers.phantombot into opencode.json — one model per local persona. JSONC-safe merge, backs up the original. Works while the phantombot service is down.",
+  },
+  args: {
+    persona: {
+      type: "string",
+      description:
+        "Expose only this persona as a model (default: every persona in the personas dir).",
+    },
+  },
+  async run({ args }) {
+    const personasDir = resolvePersonasDirSync();
+    const only = args.persona ? String(args.persona) : undefined;
+    // Pass every persona: installOpencode does the filtering so a typo can name
+    // the real choices instead of reporting `available: none`.
+    const personas = personaModelNames(personasDir);
+    const result = installOpencode({ binaryPath: process.execPath, personas, requestedPersona: only });
+    printOpencodeInstall(result, process.stdout, process.stderr);
+    // Same event-loop caveat as installZed: importing the ACP server keeps the
+    // loop open, so force a clean exit once the write is done.
+    process.exit(result.code);
+  },
+});
+
 const installCmd = defineCommand({
   meta: {
     name: "install",
     description:
-      "Install the ACP registration into a detected editor (zed/jetbrains: settings merge; vscode: first-party extension).",
+      "Register phantombot in a detected editor (zed/jetbrains: ACP settings merge; vscode: first-party extension; opencode: model provider).",
   },
   subCommands: {
     zed: installZedCmd,
     jetbrains: installJetbrainsCmd,
     vscode: installVscodeCmd,
+    opencode: installOpencodeCmd,
   },
 });
 
@@ -116,7 +155,7 @@ export default defineCommand({
   meta: {
     name: "acp",
     description:
-      "Run phantombot as an ACP agent server over stdio (Zed/JetBrains spawn this). Use `acp install zed` / `acp install jetbrains` (settings merge) or `acp install vscode` (first-party extension) to register it with an editor.",
+      "Run phantombot as an ACP agent server over stdio (Zed/JetBrains spawn this). Use `acp install zed` / `acp install jetbrains` (settings merge), `acp install vscode` (first-party extension) or `acp install opencode` (model provider) to register it with an editor.",
   },
   args: {
     persona: {

@@ -12,7 +12,7 @@
  * it doesn't exist.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1265,10 +1265,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
   // personas_dir and default_persona are resolved from the GLOBAL layer only —
   // they are what tells us which persona file to read, so they cannot
   // themselves come from it.
-  const personasDir =
-    hostLocationEnv("PHANTOMBOT_PERSONAS_DIR") ??
-    asString(globalToml.personas_dir) ??
-    join(dataDir, "personas");
+  const personasDir = personasDirFrom(globalToml);
   const personaLayer =
     persona ??
     hostLocationEnv("PHANTOMBOT_DEFAULT_PERSONA") ??
@@ -3090,6 +3087,47 @@ export function parseAutostartModes(
     }
   }
   return out;
+}
+
+/**
+ * Personas root for a given GLOBAL config layer.
+ *
+ * `personas_dir` and `PHANTOMBOT_PERSONAS_DIR` are host-only keys: they decide
+ * which persona file to read, so they can never come from a persona layer.
+ * ONE definition, two readers — `loadConfig` (async, full config) and
+ * `resolvePersonasDirSync` (sync, for callers that cannot await).
+ */
+function personasDirFrom(globalToml: Record<string, unknown>): string {
+  return (
+    hostLocationEnv("PHANTOMBOT_PERSONAS_DIR") ??
+    asString(globalToml.personas_dir) ??
+    join(xdgDataHome(), "phantombot", "personas")
+  );
+}
+
+/**
+ * Synchronously resolve the personas root.
+ *
+ * The editor-registration reconcile loop (connectors/acp/autoInstall.ts) runs
+ * from SYNC command paths — `phantombot doctor`, the startup hook — that cannot
+ * await `loadConfig`. It still has to name every local persona as an OpenCode
+ * model, so it reads just the global config.toml (one file, no persona layer,
+ * no vault) with the exact precedence `loadConfig` uses.
+ *
+ * A missing or unreadable config.toml is not an error here: it means "defaults",
+ * which is precisely what loadConfig would resolve too.
+ */
+export function resolvePersonasDirSync(): string {
+  const configPath =
+    hostLocationEnv("PHANTOMBOT_CONFIG") ??
+    join(xdgConfigHome(), "phantombot", "config.toml");
+  let globalToml: Record<string, unknown> = {};
+  try {
+    globalToml = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+  } catch {
+    // missing/unreadable ⇒ defaults
+  }
+  return personasDirFrom(globalToml);
 }
 
 /** Resolve the on-disk directory for a named persona. */

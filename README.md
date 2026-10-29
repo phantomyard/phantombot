@@ -101,6 +101,7 @@ phantombot ask "Summarize this repository"
 phantombot acp install vscode
 phantombot acp install zed
 phantombot acp install jetbrains
+phantombot acp install opencode   # Phantombot as a selectable model in OpenCode
 ```
 
 Check that everything is healthy:
@@ -138,7 +139,7 @@ flowchart TD
 | `phantombot phantomchat` | Configure encrypted PhantomChat messaging. |
 | `phantombot voice` | Configure speech-to-text and text-to-speech. |
 | `phantombot ask "…"` | Run a one-shot local prompt. |
-| `phantombot acp install …` | Add Phantombot to a supported editor. |
+| `phantombot acp install …` | Add Phantombot to a supported editor (zed, jetbrains, vscode) or as a model in OpenCode. |
 | `phantombot memory …` | Search, capture, inspect, back up, or restore memory. |
 | `phantombot task …` | Add, inspect, cancel, or audit scheduled work. |
 | `phantombot mcp …` | Discover and use external integrations lazily. |
