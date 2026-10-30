@@ -60,9 +60,10 @@ application has switched the cursor keys to application mode, as `less` and
 Drag an image file from Finder, or a screenshot thumbnail, onto the window. The
 chat box shows it as `[Image #1]`, `[Image #2]`, … at the cursor, and you can
 type around it. When you send, each image whose token is still in the text is
-attached, so deleting the token removes the image. PNG, JPEG, GIF and WebP up
-to 10 MB are accepted. Anything else you drop, or a path to a file that isn't
-there, is pasted as ordinary text.
+attached, so deleting the token removes the image. The path shows for a
+moment and turns into the token once the drop is complete. PNG, JPEG, GIF and
+WebP up to 10 MB are accepted. Anything else you drop, or a path to a file that
+isn't there, is pasted as ordinary text.
 
 The image is copied into the conversation's inbox as soon as you drop it, so a
 screenshot thumbnail that disappears afterwards still gets sent. The model

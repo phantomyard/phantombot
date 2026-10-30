@@ -5,9 +5,12 @@
  * window TYPES ITS PATH, as if the user had pasted it: Terminal.app and iTerm2
  * escape spaces with backslashes (`/Users/me/Screenshot\ 1.png `), other
  * terminals quote the path instead. No bracketed paste is enabled, so the
- * path arrives as one plain input chunk.
+ * path arrives as plain typed text, in one read or several: a read boundary is
+ * not a drop boundary. The chat box therefore judges a RUN of typed text, once
+ * the input has been quiet for `DROP_SETTLE_MS` or another key arrives, never
+ * a single read.
  *
- * When a chunk is ONLY such paths and every one is an image file, the chat box
+ * When a run is ONLY such paths and every one is an image file, the chat box
  * shows `[Image #1]`, `[Image #2]`, … instead, and the files are copied into
  * the conversation's inbox right away: a macOS screenshot thumbnail points
  * into a temporary folder that is gone a few seconds after the drop. On
@@ -15,7 +18,7 @@
  * line, the same convention Telegram, PhantomChat and ACP use, so the harness
  * reads the image exactly as it reads a Telegram photo.
  *
- * Anything else is pasted as text, exactly as before: a chunk with a word in
+ * Anything else is pasted as text, exactly as before: a run with a word in
  * it, a path that does not exist, a non-image file, an image over the cap.
  */
 
@@ -32,6 +35,16 @@ export const DROPPABLE_IMAGE_EXTENSIONS: ReadonlySet<string> = new Set([
   ".gif",
   ".webp",
 ]);
+
+/**
+ * How long the input must be quiet before a run of typed text is judged as a
+ * possible drop. A read boundary is not a drop boundary, so the end of a drop
+ * comes from time, never from the bytes: long enough for the rest of a path
+ * cut between reads, short enough that the path only flickers before it turns
+ * into `[Image #1]`. Any other key ends the run at once, so this is a ceiling,
+ * not a delay every drop pays before Enter.
+ */
+export const DROP_SETTLE_MS = 75;
 
 /** Same cap as a pasted ACP image (`ACP_MAX_IMAGE_BYTES`). */
 export const MAX_DROPPED_IMAGE_BYTES = 10 * 1024 * 1024;
