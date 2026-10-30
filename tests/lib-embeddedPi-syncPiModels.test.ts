@@ -1,7 +1,7 @@
 /**
  * The Settings-entry model-catalog refresh (lib/embeddedPi.ts `syncPiModels`).
  *
- * Two guards here are invisible in a green run and were review findings on PR
+ * Three guards here are invisible in a green run and were review findings on PR
  * #715:
  *
  *   - SCOPE: pi keeps the catalog in its AGENT DIR and phantombot keeps one per
@@ -10,6 +10,8 @@
  *   - CRASH PATH: spawn reports ENOENT asynchronously via `error`, and an
  *     unhandled `error` event on an EventEmitter is an uncaughtException, so
  *     opening Settings could take the whole TUI down.
+ *   - SCOPE OF THE ROOTS: a raw `process.env` copy is the PRE-scope view, so a
+ *     detached child inside an embedding app resolves the HOST data home.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -19,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ENV_PI_MODELS_SYNC_OFF, syncPiModels } from "../src/lib/embeddedPi.ts";
+import { ENV_ENGINE_SCOPE, runInEngineScope } from "../src/lib/engineScope.ts";
 import { ENV_PI_AGENT_DIR, nativeAgentDir } from "../src/lib/nativeAgentDir.ts";
 
 /** A ChildProcess stand-in: EventEmitter (so `error` behaves for real) + unref. */
@@ -128,5 +131,43 @@ describe("syncPiModels", () => {
       expect(run(r, { ...BASE_ENV, ...env })).toBe(false);
       expect(r.calls.length).toBe(0);
     }
+  });
+
+  test("stacks no second child while one refresh for the persona is in flight", () => {
+    // Settings mounts on every visit: leave and re-enter and each mount used to
+    // spawn another network child for the same persona.
+    const r = recorder();
+    expect(run(r)).toBe(true);
+    expect(run(r)).toBe(false);
+    expect(r.calls.length).toBe(1);
+    // The mark is PER PERSONA: a sibling still refreshes.
+    expect(run(r, BASE_ENV, "lena")).toBe(true);
+    expect(r.calls.length).toBe(2);
+  });
+
+  test("a launch failure clears the in-flight mark so a later visit retries", () => {
+    const r = recorder();
+    expect(run(r)).toBe(true);
+    r.children[0]!.emit("error", new Error("ENOENT: exe vanished"));
+    expect(run(r)).toBe(true);
+    expect(r.calls.length).toBe(2);
+  });
+
+  test("inside an engine scope the child gets the scoped roots, not the host's", () => {
+    const r = recorder();
+    const scope = {
+      configHome: "/embed/config",
+      dataHome: "/embed/data",
+      stateHome: "/embed/state",
+    };
+    runInEngineScope(scope, () => run(r, { ...BASE_ENV, PHANTOMBOT_CONFIG: "/host/config.toml" }));
+    const env = r.calls[0]!.opts.env as Record<string, string>;
+    expect(env[ENV_ENGINE_SCOPE]).toBe("1");
+    expect(env.XDG_DATA_HOME).toBe("/embed/data");
+    expect(env.XDG_CONFIG_HOME).toBe("/embed/config");
+    // A host-location override would aim the child at the HOST's phantombot.
+    expect(env.PHANTOMBOT_CONFIG).toBeUndefined();
+    // The catalog still lands in the selected persona's dir.
+    expect(env[ENV_PI_AGENT_DIR]).toBe(nativeAgentDir(dataHome, "kai"));
   });
 });

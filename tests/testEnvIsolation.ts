@@ -126,4 +126,4 @@ process.on("exit", () => {
 // child that hits the Pi registry: slow, network-dependent, and irrelevant to a
 // test about badge text. The sync itself is covered directly, with an injected
 // spawn, in tests/lib-embeddedPi-syncPiModels.test.ts.
-process.env.PHANTOMBOT_PI_MODELS_SYNC = "1";
+process.env.PHANTOMBOT_PI_MODELS_SYNC_OFF = "1";

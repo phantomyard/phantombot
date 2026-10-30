@@ -99,7 +99,8 @@ dir (`providers.<id>` with `baseUrl`, `api: "openai-completions"`, `apiKey` and
 `$VAR` reference, never a value** — the per-turn relay stays on the existing
 `PI_PROVIDER_CATALOG` env-var contract (#602), so a credential never reaches a
 world-readable agent dir; **an unauthenticated endpoint gets a literal
-placeholder, not an unresolvable reference** — verified against pi 1.0.4, a
+placeholder, not an unresolvable reference** — verified against pi 1.0.4, and
+re-verified at the 1.4.0 pin on 2026-10-30, a
 provider whose `apiKey` cannot be resolved is not merely unauthenticated, it is
 INVISIBLE (`pi --list-models` omits it and the turn dies with "Use /login to log
 into a provider"), which is why "no key" is spelled `no-key-required`; **the

@@ -48,6 +48,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ENV_PI_AGENT_DIR, nativeAgentDir, nativeAgentEnv } from "./nativeAgentDir.ts";
+import { withPersonaEnv } from "./envBootstrap.ts";
 import { phantombotEscortExtension, type ToolCallHookApi } from "./escort.ts";
 
 /** Hidden argv[2] that turns the phantombot binary into the pi CLI. */
@@ -296,7 +297,15 @@ export function embeddedPiChildEnv(dataHome: string): Record<string, string> {
  * Escape hatch that suppresses the settings-entry catalog refresh, so a
  * rendered Settings screen never spawns a network child in tests/CI.
  */
-export const ENV_PI_MODELS_SYNC_OFF = "PHANTOMBOT_PI_MODELS_SYNC";
+export const ENV_PI_MODELS_SYNC_OFF = "PHANTOMBOT_PI_MODELS_SYNC_OFF";
+
+/**
+ * Personas whose catalog refresh is already running in THIS process, keyed
+ * `dataHome\0persona`. Settings is mount/unmount, not a modal: without this the
+ * operator paging in and out of the screen stacks concurrent network children
+ * for the same persona. Cleared on a launch failure so a later visit retries.
+ */
+const piModelsSyncInFlight = new Set<string>();
 
 /** The only part of a spawned child this helper touches. */
 interface DetachedChild {
@@ -319,6 +328,16 @@ interface DetachedChild {
  * all swallowed. The `error` listener is REQUIRED — spawn reports ENOENT
  * asynchronously, and an unhandled `error` event would take the TUI down.
  *
+ * Fires for the NEXT read, not this one: the spawn is detached and nothing
+ * waits on it, so a model list already being fetched by the screen this visit
+ * opened can still be the pre-refresh catalog. Blocking the screen to close
+ * that window is the wrong trade — do not "fix" it that way.
+ *
+ * Child env comes from `withPersonaEnv`, the same helper every harness spawn
+ * uses: it adds the engine-scope `XDG_*` roots plus the `PHANTOMBOT_ENGINE_SCOPE`
+ * marker and drops host-location overrides, so a detached child in an embedding
+ * app resolves that app's data home instead of the host's.
+ *
  * @returns true when a refresh was spawned.
  */
 export function syncPiModels(opts: {
@@ -332,6 +351,8 @@ export function syncPiModels(opts: {
   // Opted out by the caller/test, or pi is told to stay offline: a refresh could
   // only queue a request destined to fail.
   if (on(env[ENV_PI_MODELS_SYNC_OFF]) || on(env.PI_OFFLINE)) return false;
+  const key = `${opts.dataHome ?? ""}\0${opts.persona ?? ""}`;
+  if (piModelsSyncInFlight.has(key)) return false;
 
   try {
     const agentDir = nativeAgentDir(opts.dataHome, opts.persona);
@@ -344,20 +365,27 @@ export function syncPiModels(opts: {
       return false;
     }
     mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-    // Start from the ambient env (PATH/HOME must survive) and ADD the scope.
+    // Start from the ambient env (PATH/HOME must survive) and ADD the scope —
+    // through the shared helper, not a raw copy, so the child resolves the same
+    // roots as its parent (see the docstring).
     const childEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries(env)) if (typeof v === "string") childEnv[k] = v;
-    childEnv[ENV_PI_AGENT_DIR] = agentDir;
-    if (opts.persona) childEnv.PHANTOMBOT_PERSONA = opts.persona;
+    const scoped = withPersonaEnv(childEnv, opts.persona);
+    scoped[ENV_PI_AGENT_DIR] = agentDir;
 
     const cmd = embeddedPiCommand();
     const child = (opts.spawnImpl ?? (spawn as unknown as NonNullable<typeof opts.spawnImpl>))(
       cmd[0]!,
       [...cmd.slice(1), "update", "--models"],
-      { detached: true, stdio: "ignore", windowsHide: true, env: childEnv },
+      { detached: true, stdio: "ignore", windowsHide: true, env: scoped },
     );
-    child.on("error", () => {});
+    child.on("error", () => {
+      // The child never started: clear the mark so a later Settings visit
+      // retries instead of never refreshing again.
+      piModelsSyncInFlight.delete(key);
+    });
     child.unref();
+    piModelsSyncInFlight.add(key);
     return true;
   } catch {
     // Best-effort: a failed catalog refresh is never fatal.
