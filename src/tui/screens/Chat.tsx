@@ -389,6 +389,8 @@ export function ChatScreen(props: {
       };
       try {
         const result = await props.session.command(text);
+        // `/quit` (#731): the same exit `^q` takes, nothing left to show.
+        if (result?.quit) return props.onQuit();
         patch((m) => ({ ...m, text: result?.reply ?? "" }));
         // Strictly after the reply is on screen: /update and /restart end this
         // process, and a heads-up that lands after the process dies is no
@@ -398,7 +400,7 @@ export function ChatScreen(props: {
         patch((m) => ({ ...m, error: (e as Error).message }));
       }
     },
-    [props.session, transcript],
+    [props.session, props.onQuit, transcript],
   );
 
   // The launch prompt (issue #575). Taken exactly once per mount, and the

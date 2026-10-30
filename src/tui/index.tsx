@@ -28,7 +28,7 @@ import { setPromptHost } from "./prompts.ts";
 import { lendStdin } from "./stdinHandover.ts";
 import { setLogSink } from "../lib/logSink.ts";
 import { hostSnapshot, type HostSnapshot } from "./snapshot.ts";
-import { openChat } from "./chatSession.ts";
+import { type ChatSession, openChat } from "./chatSession.ts";
 import type { WizardAnswers } from "./screens/Wizard.tsx";
 import {
   loadConfig,
@@ -538,40 +538,55 @@ export async function runRepl(
     persona,
     workingDir: launchWorkingDir(),
   });
-  out.write(`phantombot — talking to ${persona}. Ctrl-D to exit.\n`);
+  out.write(`phantombot — talking to ${persona}. Ctrl-D or /quit to exit.\n`);
   try {
-    for await (const line of console) {
-      const text = String(line).trim();
-      if (!text) continue;
-      // Same dispatcher as the full-screen screen and as every channel: a
-      // `/stop` typed into line mode must not be prompt text either.
-      const command = await chat.command(text);
-      if (command) {
-        out.write(`${command.reply}\n`);
-        if (command.afterSend) await command.afterSend();
-        continue;
-      }
-      let said = false;
-      for await (const event of chat.send(text)) {
-        if (event.type === "text") {
-          if (event.text !== "") said = true;
-          out.write(event.text);
-        } else if (event.type === "tool") out.write(`\n› ${event.title}\n`);
-        else if (event.type === "error") {
-          said = true;
-          out.write(`\nerror: ${event.message}\n`);
-        }
-      }
-      // Same placeholder as the full-screen chat and as every channel: a turn
-      // that produced nothing must not look like a blank line of output.
-      if (!said) out.write("(no reply)\n");
-      out.write("\n");
-    }
-    return 0;
+    return await replLoop(chat, console, out);
   } catch (e) {
     log.warn("tui: repl failed", { error: (e as Error).message });
     return 1;
   } finally {
     await chat.close();
   }
+}
+
+/**
+ * The line-mode conversation itself: one line in, one reply out, until the
+ * input ends. Separate from `runRepl` so it can be driven without a terminal
+ * or a config file; the caller owns the session and closes it.
+ */
+export async function replLoop(
+  chat: ChatSession,
+  input: AsyncIterable<unknown>,
+  out: { write(chunk: string): void },
+): Promise<number> {
+  for await (const line of input) {
+    const text = String(line).trim();
+    if (!text) continue;
+    // Same dispatcher as the full-screen screen and as every channel: a
+    // `/stop` typed into line mode must not be prompt text either.
+    const command = await chat.command(text);
+    // `/quit` (#731) ends line mode the way the end of input does.
+    if (command?.quit) return 0;
+    if (command) {
+      out.write(`${command.reply}\n`);
+      if (command.afterSend) await command.afterSend();
+      continue;
+    }
+    let said = false;
+    for await (const event of chat.send(text)) {
+      if (event.type === "text") {
+        if (event.text !== "") said = true;
+        out.write(event.text);
+      } else if (event.type === "tool") out.write(`\n› ${event.title}\n`);
+      else if (event.type === "error") {
+        said = true;
+        out.write(`\nerror: ${event.message}\n`);
+      }
+    }
+    // Same placeholder as the full-screen chat and as every channel: a turn
+    // that produced nothing must not look like a blank line of output.
+    if (!said) out.write("(no reply)\n");
+    out.write("\n");
+  }
+  return 0;
 }

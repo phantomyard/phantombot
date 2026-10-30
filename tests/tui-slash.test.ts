@@ -10,7 +10,9 @@
  *
  * The third is drift: the terminal must not grow its own copy of a command
  * list that Telegram and phantomchat can then diverge from, so the advertised
- * set is derived from the shared one.
+ * set is derived from the shared one. The one exception is a command that
+ * only means something in a terminal (`/quit`, #731), and it is listed here
+ * by name so a second one cannot slip in unnoticed.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -21,7 +23,9 @@ import {
   commandName,
   completeCommand,
   isKnownCommand,
+  isQuitCommand,
   isUnknownCommand,
+  TERMINAL_ONLY_COMMANDS,
   TUI_COMMANDS,
   unknownCommandReply,
 } from "../src/tui/slash.ts";
@@ -31,7 +35,17 @@ describe("what the terminal advertises", () => {
     const shared = TELEGRAM_BOT_COMMANDS.map((c) => c.command).filter(
       (c) => c !== "start",
     );
-    expect(TUI_COMMANDS.map((c) => c.name)).toEqual(shared);
+    expect(TUI_COMMANDS.map((c) => c.name)).toEqual([...shared, "quit"]);
+  });
+
+  test("adds exactly one terminal-only command, /quit, which the other channels do not get", () => {
+    expect(TERMINAL_ONLY_COMMANDS.map((c) => c.name)).toEqual(["quit"]);
+    expect(TELEGRAM_BOT_COMMANDS.some((c) => c.command === "quit")).toBe(false);
+  });
+
+  test("says leaving the chat does not stop the service", () => {
+    const quit = TUI_COMMANDS.find((c) => c.name === "quit")!;
+    expect(quit.description).toMatch(/service keeps running/);
   });
 
   test("includes the lifecycle commands — this app runs on the host they act on", () => {
@@ -111,5 +125,27 @@ describe("the type-ahead", () => {
     expect(completeCommand("/usr/bin")).toBe("/usr/bin");
     expect(completeCommand("hello there")).toBe("hello there");
     expect(completeCommand("/zzz")).toBe("/zzz");
+  });
+});
+
+describe("/quit (#731)", () => {
+  test("/quit, /q and /exit all quit, in any case and with stray spaces", () => {
+    for (const text of ["/quit", "/q", "/exit", "/QUIT", "  /Q  ", "/exit now"]) {
+      expect(isQuitCommand(text)).toBe(true);
+      expect(isKnownCommand(text)).toBe(true);
+      expect(isUnknownCommand(text)).toBe(false);
+    }
+  });
+
+  test("a near miss or a path does not", () => {
+    for (const text of ["/quiet", "/question", "/qq", "/exits", "/q/x", "quit", "q"]) {
+      expect(isQuitCommand(text)).toBe(false);
+    }
+    expect(isUnknownCommand("/quiet")).toBe(true);
+  });
+
+  test("/q in the box offers /quit, and tab completes it", () => {
+    expect(commandHints("/q").map((c) => c.name)).toEqual(["quit"]);
+    expect(completeCommand("/q")).toBe("/quit ");
   });
 });
