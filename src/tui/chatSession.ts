@@ -41,9 +41,12 @@ import {
 } from "../channels/commands.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
 import {
+  commandName,
   isKnownCommand,
+  isQuitCommand,
   isUnknownCommand,
   unknownCommandReply,
+  withTerminalCommands,
 } from "./slash.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
@@ -117,6 +120,12 @@ export interface ChatCommandResult {
    * user watches the app die having been told nothing.
    */
   afterSend?: () => Promise<void>;
+  /**
+   * `/quit`, `/q` or `/exit` (#731): the surface ends the conversation, the
+   * full-screen chat as `Ctrl-Q` does and line mode as `Ctrl-D` does. Nothing
+   * is printed and the phantombot service is not touched.
+   */
+  quit?: true;
 }
 
 export interface ChatSession {
@@ -476,6 +485,9 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
     // harness, so a typo gets a list instead of a paragraph of improvisation.
     if (isUnknownCommand(text)) return { reply: unknownCommandReply(text) };
     if (!isKnownCommand(text)) return null;
+    // Terminal-only (#731): there is no conversation to leave on the other
+    // channels, so the shared dispatcher does not know it.
+    if (isQuitCommand(text)) return { reply: "", quit: true };
     const result = await handleSlashCommand(text, {
       // The terminal has no chat id; the conversation key is the only
       // identifier there is, and it is what the logs should name.
@@ -495,7 +507,13 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
     // Advertised but unhandled should be impossible; say so rather than
     // silently falling through to the model with a command the user believes
     // this surface owns.
-    return result ?? { reply: unknownCommandReply(text) };
+    if (!result) return { reply: unknownCommandReply(text) };
+    // The shared list, plus what only the terminal answers.
+    const name = commandName(text);
+    if (name === "help" || name === "start") {
+      return { ...result, reply: withTerminalCommands(result.reply) };
+    }
+    return result;
   }
 
   return {

@@ -29,18 +29,44 @@ export interface TuiCommand {
 }
 
 /**
+ * Commands that only mean something in a terminal, so they are NOT in the
+ * shared list: there is no chat to leave on Telegram (#731). Each one is an
+ * explicit, tested exception to "derived, never retyped"; the session answers
+ * them (`chatSession.command`) and adds them to the terminal's `/help`.
+ */
+export const TERMINAL_ONLY_COMMANDS: TuiCommand[] = [
+  {
+    name: "quit",
+    description:
+      "Leave this chat (also /q, /exit); the phantombot service keeps running",
+  },
+];
+
+/** `/quit` and the names people type for it out of habit. */
+const QUIT_NAMES = new Set(["quit", "q", "exit"]);
+
+/**
  * What the terminal advertises, in menu order.
  *
  * The full shared set, unlike ACP: this app runs ON the host whose service
  * `/update` and `/restart` act on, so they mean here exactly what they mean on
  * Telegram. `/start` is accepted as an alias for `/help` but not advertised —
- * there is nothing to start in a terminal that is already open.
+ * there is nothing to start in a terminal that is already open. The
+ * terminal-only commands come last.
  */
-export const TUI_COMMANDS: TuiCommand[] = TELEGRAM_BOT_COMMANDS.filter(
-  (c) => c.command !== "start",
-).map((c) => ({ name: c.command, description: c.description }));
+export const TUI_COMMANDS: TuiCommand[] = [
+  ...TELEGRAM_BOT_COMMANDS.filter((c) => c.command !== "start").map((c) => ({
+    name: c.command,
+    description: c.description,
+  })),
+  ...TERMINAL_ONLY_COMMANDS,
+];
 
-const KNOWN = new Set<string>([...TUI_COMMANDS.map((c) => c.name), "start"]);
+const KNOWN = new Set<string>([
+  ...TUI_COMMANDS.map((c) => c.name),
+  "start",
+  ...QUIT_NAMES,
+]);
 
 /**
  * The bare command name if `text` opens with something SHAPED like a command,
@@ -65,6 +91,22 @@ export function commandName(text: string): string | undefined {
 export function isKnownCommand(text: string): boolean {
   const name = commandName(text);
   return name !== undefined && KNOWN.has(name);
+}
+
+/** `/quit`, `/q` or `/exit` (#731): the surface ends the conversation. */
+export function isQuitCommand(text: string): boolean {
+  const name = commandName(text);
+  return name !== undefined && QUIT_NAMES.has(name);
+}
+
+/**
+ * The shared `/help` reply with the terminal-only commands added, in the same
+ * `/name — description` form, so the terminal's `/help` lists everything the
+ * terminal answers.
+ */
+export function withTerminalCommands(help: string): string {
+  const lines = TERMINAL_ONLY_COMMANDS.map((c) => `/${c.name} — ${c.description}`);
+  return [help, ...lines].join("\n");
 }
 
 /**

@@ -224,6 +224,8 @@ For the storage model and lifecycle details, see
   service is down.
 - **Terminal** — interactive TUI with Emacs-style editing and drag-in images
   ([keys](docs/reference/tui-keys.md)), plain REPL, or one-shot `ask` calls.
+  Type `/quit` (or `/q`, `/exit`) to leave the TUI or REPL; the Phantombot
+  service keeps running.
 
 Multiple personas can run inside one daemon. Each has isolated identity,
 memory, channels, harness settings, and credentials.

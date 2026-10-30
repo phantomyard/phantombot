@@ -42,7 +42,7 @@ cell at the end of a line. Moving it never re-wraps the text.
 | `Shift-↑` / `Shift-↓` | Scroll the transcript one line. |
 | `Home` / `End` | Jump to the top / the live end of the transcript. |
 | `Ctrl-C` | Stop the running turn (the same as `/stop`). It never quits. |
-| `Ctrl-Q` | Quit. |
+| `Ctrl-Q` | Quit, the same as typing `/quit` (or `/q`, `/exit`). The phantombot service keeps running. |
 | `Ctrl-S` | Open settings. |
 | `Ctrl-K` | Toggle the key inspector: the raw bytes the terminal sent. |
 
