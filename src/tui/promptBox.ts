@@ -112,6 +112,8 @@ export function cursorEnd(state: PromptState): PromptState {
  */
 const WORD_CHAR = /^[\p{L}\p{N}\p{M}]+$/u;
 const isWord = (g: string) => WORD_CHAR.test(g);
+/** Whitespace, "\n" included: what ^w deletes back to, and where wrap breaks. */
+const isSpace = (g: string) => /^\s+$/.test(g);
 
 /** Cursor to the start of the previous word (Alt-b / Alt-←), across lines. */
 export function cursorWordLeft(state: PromptState): PromptState {
@@ -155,6 +157,60 @@ export function cursorLineEnd(state: PromptState): PromptState {
   return { text: state.text, cursor: i === cur ? gs.length : i };
 }
 
+/**
+ * Delete graphemes [from, to) and leave the cursor at `from`. Nothing to
+ * delete returns the state untouched.
+ *
+ * The word and line deletes below are a cursor move plus this (issue #725),
+ * so they can never disagree with the move they mirror; only ^w has a rule
+ * of its own. There is no kill ring: deleted text is gone, and nothing
+ * binds ^y.
+ */
+function deleteRange(state: PromptState, from: number, to: number): PromptState {
+  if (from >= to) return state;
+  const gs = graphemes(state.text);
+  return { text: [...gs.slice(0, from), ...gs.slice(to)].join(""), cursor: from };
+}
+
+/** The cursor clamped into the text. */
+function cursorIn(state: PromptState): number {
+  return Math.max(0, Math.min(state.cursor, graphemeCount(state.text)));
+}
+
+/** Delete back to where Alt-b lands (Alt-Backspace, readline `backward-kill-word`). */
+export function deleteWordLeft(state: PromptState): PromptState {
+  return deleteRange(state, cursorWordLeft(state).cursor, cursorIn(state));
+}
+
+/** Delete forward to where Alt-f lands (Alt-d, readline `kill-word`). */
+export function deleteWordRight(state: PromptState): PromptState {
+  return deleteRange(state, cursorIn(state), cursorWordRight(state).cursor);
+}
+
+/**
+ * Delete back to the previous whitespace (^w, readline `unix-word-rubout`):
+ * any spaces just before the cursor, then the run of non-space before them,
+ * so a path or URL goes in one press where Alt-Backspace stops at each `/`.
+ * "\n" is whitespace, so it crosses lines like the word moves do.
+ */
+export function deleteWhitespaceWordLeft(state: PromptState): PromptState {
+  const gs = graphemes(state.text);
+  const cur = Math.max(0, Math.min(state.cursor, gs.length));
+  let i = cur;
+  while (i > 0 && isSpace(gs[i - 1]!)) i--;
+  while (i > 0 && !isSpace(gs[i - 1]!)) i--;
+  return deleteRange(state, i, cur);
+}
+
+/**
+ * Delete back to where ^a lands (^u, readline `unix-line-discard`): the start
+ * of the current line, and — already there — everything before the cursor,
+ * the same double press as ^a.
+ */
+export function deleteToLineStart(state: PromptState): PromptState {
+  return deleteRange(state, cursorLineStart(state).cursor, cursorIn(state));
+}
+
 /** One drawn segment of a prompt row. */
 export interface PromptSeg {
   text: string;
@@ -180,8 +236,6 @@ function logicalLines(gs: readonly string[]): { start: number; end: number }[] {
   }
   return lines;
 }
-
-const isSpace = (g: string) => /^\s+$/.test(g);
 
 /**
  * One logical line laid out on rows of `budget` columns — independent of the

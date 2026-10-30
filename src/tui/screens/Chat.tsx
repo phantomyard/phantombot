@@ -65,6 +65,11 @@ import {
   cursorUp,
   cursorWordLeft,
   cursorWordRight,
+  deleteAtCursor,
+  deleteToLineStart,
+  deleteWhitespaceWordLeft,
+  deleteWordLeft,
+  deleteWordRight,
   graphemeCount,
   insertAtCursor,
   promptRows,
@@ -510,6 +515,14 @@ export function ChatScreen(props: {
     if ((key.meta && key.rightArrow) || word === "f") {
       return void setInputValue(cursorWordRight(inputRef.current));
     }
+    // Deletes (issue #725): each mirrors a move, so Alt-d deletes to where
+    // Alt-f lands and Alt-Backspace to where Alt-b lands. Alt-Backspace sits
+    // ABOVE the plain Backspace branch: Ink reports ESC DEL as `delete` with
+    // `meta`, and the plain branch would take it as one character.
+    if (word === "d") return void setInputValue(deleteWordRight(inputRef.current));
+    if (key.meta && (key.backspace || key.delete)) {
+      return void setInputValue(deleteWordLeft(inputRef.current));
+    }
     // ←→ and ^b/^f move the cursor one character inside the box — the
     // editing primitive that was missing: without it a typo could only be
     // fixed by deleting back to it.
@@ -530,14 +543,19 @@ export function ChatScreen(props: {
       setInputValue(cursorLineEnd(inputRef.current));
       return;
     }
+    // ^w: back to the previous whitespace (a path goes in one press). ^u: back
+    // to where ^a lands. ^d: the character under the cursor (issue #725).
+    if (key.ctrl && char === "w") return void setInputValue(deleteWhitespaceWordLeft(inputRef.current));
+    if (key.ctrl && char === "u") return void setInputValue(deleteToLineStart(inputRef.current));
+    if (key.ctrl && char === "d") return void setInputValue(deleteAtCursor(inputRef.current));
     if (key.backspace || key.delete) {
       // Both names mean BACKSPACE here. Ink names 0x7f — what the Backspace
       // key sends on essentially every terminal — `delete`, and cannot tell
       // it from the forward-delete key (ESC[3~) by flag. `main` treated the
       // two as one thing and was right to: routing `delete` to forward-delete
-      // made Backspace a silent no-op while typing. Forward-delete stays
-      // unreachable until we sniff the raw sequence (rawKeys inspector sees
-      // ESC[3~); until then this conservative branch matches the bytes.
+      // made Backspace a silent no-op while typing. The Delete key therefore
+      // stays a backspace until we sniff the raw sequence (rawKeys inspector
+      // sees ESC[3~); forward delete is ^d.
       setInputValue(backspaceAtCursor(inputRef.current));
       return;
     }

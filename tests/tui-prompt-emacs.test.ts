@@ -1,7 +1,8 @@
 /**
  * Emacs/readline cursor movement in the chat prompt box (issue #677):
  * character, word and line moves, and the inverse-video cursor that no
- * longer takes a column of its own.
+ * longer takes a column of its own. Plus the deletes that mirror those
+ * moves (issue #725).
  */
 
 import { describe, expect, it } from "bun:test";
@@ -13,6 +14,10 @@ import {
   cursorRight,
   cursorWordLeft,
   cursorWordRight,
+  deleteToLineStart,
+  deleteWhitespaceWordLeft,
+  deleteWordLeft,
+  deleteWordRight,
   graphemeCount,
   MAX_PROMPT_ROWS,
   promptRows,
@@ -114,6 +119,99 @@ describe("line moves (^a / ^e)", () => {
     const w = "x\n🎉👨‍👩‍👧y";
     expect(cursorLineEnd(s(w, 2)).cursor).toBe(5);
     expect(cursorLineStart(s(w, 5)).cursor).toBe(2);
+  });
+});
+
+/** Press a delete until the text stops changing; return each text seen. */
+function press(del: (st: PromptState) => PromptState, start: PromptState): string[] {
+  const seen = [start.text];
+  let st = start;
+  for (;;) {
+    const next = del(st);
+    if (next.text === st.text) return seen;
+    st = next;
+    seen.push(st.text);
+  }
+}
+
+describe("deletes (^w, Alt-Backspace, Alt-d, ^u) — issue #725", () => {
+  const t = "hello, big  world";
+
+  it("Alt-Backspace deletes back to where Alt-b lands", () => {
+    expect(press(deleteWordLeft, s(t, t.length))).toEqual(["hello, big  world", "hello, big  ", "hello, ", ""]);
+    expect(deleteWordLeft(s("hello world", 8))).toEqual(s("hello rld", 6));
+  });
+
+  it("Alt-d deletes forward to where Alt-f lands", () => {
+    expect(press(deleteWordRight, s(t, 0))).toEqual(["hello, big  world", ", big  world", "  world", ""]);
+    expect(deleteWordRight(s("hello world", 2))).toEqual(s("he world", 2));
+  });
+
+  it("^w deletes back to the previous whitespace: a path or URL goes in one press", () => {
+    expect(deleteWhitespaceWordLeft(s("cat ~/a/b.txt  ", 15))).toEqual(s("cat ", 4));
+    expect(deleteWhitespaceWordLeft(s("see https://x.io/a?b=c", 22))).toEqual(s("see ", 4));
+    // Alt-Backspace stops at punctuation; ^w does not.
+    expect(deleteWordLeft(s("foo-bar baz", 7))).toEqual(s("foo- baz", 4));
+    expect(deleteWhitespaceWordLeft(s("foo-bar baz", 7))).toEqual(s(" baz", 0));
+  });
+
+  it("^u deletes back to where ^a lands: the line start, then everything before the cursor", () => {
+    const ml = "one\ntwo three";
+    expect(press(deleteToLineStart, s(ml, ml.length))).toEqual(["one\ntwo three", "one\n", ""]);
+    // Text after the cursor stays, and so does the cursor's line.
+    expect(deleteToLineStart(s("one\ntwo", 6))).toEqual(s("one\no", 4));
+    expect(deleteToLineStart(s("one\no", 4))).toEqual(s("o", 0));
+  });
+
+  it("word deletes cross lines, like the word moves", () => {
+    expect(deleteWordLeft(s("one\ntwo", 4))).toEqual(s("two", 0));
+    expect(deleteWordRight(s("one\ntwo", 3))).toEqual(s("one", 3));
+    expect(deleteWhitespaceWordLeft(s("one\n", 4))).toEqual(s("", 0));
+  });
+
+  it("never splits a grapheme: accents, ZWJ emoji", () => {
+    const accent = "café";
+    expect(graphemeCount(accent)).toBe(4);
+    expect(deleteWordLeft(s(accent, 4))).toEqual(s("", 0));
+    expect(deleteWhitespaceWordLeft(s("a 👨‍👩‍👧", 3))).toEqual(s("a ", 2));
+    expect(deleteToLineStart(s("👨‍👩‍👧x", 1))).toEqual(s("x", 0));
+  });
+
+  it("at the edge there is nothing to delete: the state comes back unchanged", () => {
+    expect(deleteWordLeft(s("abc", 0))).toEqual(s("abc", 0));
+    expect(deleteWhitespaceWordLeft(s("abc", 0))).toEqual(s("abc", 0));
+    expect(deleteToLineStart(s("abc", 0))).toEqual(s("abc", 0));
+    expect(deleteWordRight(s("abc", 3))).toEqual(s("abc", 3));
+    expect(deleteWordLeft(s("", 0))).toEqual(s("", 0));
+  });
+
+  it("a delete removes exactly the span its move covers, and nothing else (every position)", () => {
+    const texts = [t, "one\n\n  two", "café🎉naïve2", "  ,, ", "x\n🎉👨‍👩‍👧y", "a-b c\td"];
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    const gs = (text: string) => [...segmenter.segment(text)].map((x) => x.segment);
+    for (const text of texts) {
+      const g = gs(text);
+      for (let c = 0; c <= g.length; c++) {
+        const st = s(text, c);
+        const back = (del: (st: PromptState) => PromptState, to: number) => {
+          const r = del(st);
+          expect(r.cursor).toBe(to);
+          expect(r.text).toBe(g.slice(0, to).join("") + g.slice(c).join(""));
+        };
+        back(deleteWordLeft, cursorWordLeft(st).cursor);
+        back(deleteToLineStart, cursorLineStart(st).cursor);
+        // ^w has no move of its own: it drops a run of non-space then the
+        // spaces after it, and stops at a space or the start.
+        const w = deleteWhitespaceWordLeft(st);
+        expect(w.text).toBe(g.slice(0, w.cursor).join("") + g.slice(c).join(""));
+        expect(g.slice(w.cursor, c).join("")).toMatch(/^\S*\s*$/u);
+        if (w.cursor > 0) expect(g[w.cursor - 1]!).toMatch(/^\s+$/);
+        if (c > 0) expect(w.cursor).toBeLessThan(c);
+        const fwd = deleteWordRight(st);
+        expect(fwd.cursor).toBe(c);
+        expect(fwd.text).toBe(g.slice(0, c).join("") + g.slice(cursorWordRight(st).cursor).join(""));
+      }
+    }
   });
 });
 

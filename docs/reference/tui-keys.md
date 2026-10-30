@@ -13,6 +13,10 @@ PgUp/PgDn belong to the transcript.
 | `Ctrl-A` / `Ctrl-E` | Start / end of the current line. Pressed again: start / end of the whole input. |
 | `↑` / `↓`, `Ctrl-P` / `Ctrl-N` | One row up / down, as drawn (wrapped rows count). On the first / last row they scroll the transcript instead. |
 | `Backspace` | Delete the character before the cursor. |
+| `Ctrl-D` | Delete the character under the cursor. |
+| `Alt-Backspace` / `Alt-D` | Delete back to where `Alt-B` lands / forward to where `Alt-F` lands. |
+| `Ctrl-W` | Delete back to the previous space, so a path or URL goes in one press. |
+| `Ctrl-U` | Delete back to the start of the line. Pressed again at the line start: everything before the cursor. |
 | `Enter` | Send. |
 | `Shift-Enter`, `Ctrl-Enter`, `Alt-Enter` | New line, in terminals that report modifiers (kitty protocol, CSI-u). |
 | `Ctrl-J` | New line, in every terminal. |
@@ -20,6 +24,11 @@ PgUp/PgDn belong to the transcript.
 
 A word is a run of letters, digits and combining marks. Whitespace,
 punctuation, newlines and emoji separate words.
+
+Deleted text is gone: there is no kill ring, so `Ctrl-Y` does nothing.
+`Ctrl-K` opens the key inspector rather than deleting to the end of the line.
+The `Delete` key acts as `Backspace`, because Ink reports both keys the
+same way; use `Ctrl-D` to delete forward.
 
 The cursor is drawn as the character under it in inverse video, or as a solid
 cell at the end of a line. Moving it never re-wraps the text.
