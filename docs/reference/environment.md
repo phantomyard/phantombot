@@ -37,6 +37,7 @@ service-bootstrap compatibility inputs; new credentials must use the vault.
 | `PHANTOMBOT_CLAUDE_MODEL`, `PHANTOMBOT_CLAUDE_FALLBACK_MODEL`, `PHANTOMBOT_CODEX_MODEL` | Pin harness-specific models. |
 | `PHANTOMBOT_CLAUDE_BIN`, `PHANTOMBOT_CODEX_BIN`, `PHANTOMBOT_PI_BIN`, `PHANTOMBOT_PI_COMMAND` | Override harness executables or the Pi command. |
 | `PHANTOMBOT_PI_PROVIDER`, `PHANTOMBOT_PI_KEY_ENV`, `PHANTOMBOT_PI_MAX_OLD_SPACE_MB`, `PHANTOMBOT_PI_MAX_PAYLOAD` | Configure Pi routing and resource limits. |
+| `PHANTOMBOT_PI_MODELS_SYNC_OFF` | Set to `1` to stop the embedded Pi engine refreshing its model catalog when a persona's Settings screen opens (one network child per persona per process). Honours the usual boolean spelling, as the suffix says. |
 | `PHANTOMBOT_IMAGE_MODEL` | Override the image-capable model. |
 | `PHANTOMBOT_HARNESS_STARTUP_TIMEOUT_MS`, `PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS`, `PHANTOMBOT_HARNESS_SOFT_TIMEOUT_MS`, `PHANTOMBOT_HARNESS_IDLE_TIMEOUT_MS`, `PHANTOMBOT_HARNESS_TOOL_TIMEOUT_MS`, `PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS` | Override watchdog stages. A zero soft timeout disables soft nudges. |
 | `PHANTOMBOT_TICK_WAKE_TIMEOUT_MS` | Total wall-clock budget for one scheduled agent wake, across its whole harness chain (toml `[tick] wake_timeout_s`). Unset: the same as `PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS`. On a wake the soft deadline is fitted under this budget, so the wrap-up nudge fires before the kill. |
