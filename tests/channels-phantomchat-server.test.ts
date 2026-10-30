@@ -3114,3 +3114,234 @@ describe("phantomchat reply modality: voice in → voice out", () => {
     ]);
   });
 });
+
+/**
+ * Turns are serialized PER CONVERSATION, not per sender.
+ *
+ * The promise chain used to key on `msg.senderId`, so a group message from the
+ * same person queued behind that person's DM to the same phantom — the phantom
+ * stayed silent in the group until the DM turn finished, however long that took.
+ * Keying on `msg.conversationId` lets one sender's conversations run at once
+ * while messages WITHIN a conversation stay strictly ordered.
+ */
+describe("phantomchat per-conversation concurrency", () => {
+  /**
+   * Records turn order. Parks the FIRST turn on a gate so a second turn has a
+   * window in which the old (sender-keyed) chain would have made it wait.
+   * `finishedWhenStarted[n]` is how many turns had already finished when turn n
+   * started — the ordering invariant, captured atomically instead of raced
+   * against by the test.
+   */
+  class GatedHarness implements Harness {
+    started: string[] = [];
+    finished: string[] = [];
+    finishedWhenStarted: number[] = [];
+    private release!: () => void;
+    private readonly gate = new Promise<void>((r) => (this.release = r));
+    constructor(public readonly id: string) {}
+    async available(): Promise<boolean> {
+      return true;
+    }
+    async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+      const conversation = req.conversation ?? "unknown";
+      this.finishedWhenStarted.push(this.finished.length);
+      this.started.push(conversation);
+      if (this.started.length === 1) await this.gate;
+      yield { type: "done", finalText: `done ${conversation}` };
+      this.finished.push(conversation);
+    }
+    open(): void {
+      this.release();
+    }
+  }
+
+  /** Boot a persistent (non-oneShot) server so messages can be fed mid-turn,
+   *  with a DM feeder and a group feeder for the SAME sender. */
+  function startServer(opts: {
+    botSk: Uint8Array;
+    allowedHex: string[];
+    harness: Harness;
+    senderSk: Uint8Array;
+    groupId: string;
+    memberHexes: string[];
+    groupPersonaNames?: string[];
+    siblingBotHex?: string[];
+  }): {
+    feedDm: (text: string) => void;
+    feedGroup: (text: string) => void;
+    stop: () => Promise<void>;
+  } {
+    const botHex = getPublicKey(opts.botSk);
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      opts.botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: opts.botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+    const ac = new AbortController();
+    const done = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [opts.harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: opts.botSk,
+      allowedHex: opts.allowedHex,
+      groupPersonaNames: opts.groupPersonaNames,
+      siblingBotHex: opts.siblingBotHex,
+      oneShot: false,
+      signal: ac.signal,
+    });
+    let n = 0;
+    const feedDm = (text: string) => {
+      const envelope = JSON.stringify({
+        id: `dm-${++n}`,
+        from: getPublicKey(opts.senderSk),
+        to: botHex,
+        type: "text",
+        content: text,
+        timestamp: Date.now(),
+      });
+      const { wraps } = wrapNip17Message(opts.senderSk, botHex, envelope);
+      pool.feed(wraps[0] as NTNostrEvent);
+    };
+    const feedGroup = (text: string) => {
+      const payload = JSON.stringify({
+        content: text,
+        type: "text",
+        id: `grp-${++n}`,
+        timestamp: Date.now(),
+      });
+      const { wraps } = wrapGroupMessage(
+        opts.senderSk,
+        opts.memberHexes,
+        payload,
+        opts.groupId,
+      );
+      // Deliver the wrap THIS bot can unwrap, exactly as the relay would.
+      for (const w of wraps) {
+        try {
+          unwrapNip17Message(w as NTNostrEvent, opts.botSk);
+          pool.feed(w as NTNostrEvent);
+          return;
+        } catch {
+          /* not ours */
+        }
+      }
+      throw new Error("no wrap was addressed to the bot");
+    };
+    return {
+      feedDm,
+      feedGroup,
+      stop: async () => {
+        ac.abort();
+        await done;
+      },
+    };
+  }
+
+  test("same sender: a group message runs while that sender's DM turn is still in flight", async () => {
+    const andrewSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const memberSk = generateSecretKey();
+    const andrewHex = getPublicKey(andrewSk);
+    const groupId = "parallel-group";
+
+    const harness = new GatedHarness("fake");
+    const server = startServer({
+      botSk,
+      allowedHex: [andrewHex],
+      harness,
+      senderSk: andrewSk,
+      groupId,
+      memberHexes: [getPublicKey(botSk), getPublicKey(memberSk)],
+    });
+
+    // DM first — its turn parks on the gate.
+    server.feedDm("direct question");
+    await waitUntil(() => harness.started.length === 1, "the DM turn to start");
+
+    // Group message from the SAME sender, while the DM turn is still running.
+    // Before the fix this queued behind the DM turn and never started.
+    server.feedGroup("group question");
+    await waitUntil(
+      () => harness.started.length === 2,
+      "the group turn to start while the DM turn is still in flight",
+      1500,
+    );
+
+    // Ordering invariant: the group turn began with NO finished turn behind it,
+    // i.e. the DM turn was still parked. (Read from inside the harness, so the
+    // assertion can't race the group turn completing.)
+    expect(harness.finishedWhenStarted[1]).toBe(0);
+    expect(harness.started[0]).toBe(`phantomchat:${andrewHex}`);
+    expect(harness.started[1]).toBe(`phantomchat:group:${groupId}`);
+
+    harness.open();
+    await server.stop();
+
+    // Both turns completed, and the DM's reply was not swallowed by the
+    // group's arrival.
+    expect(harness.finished.length).toBe(2);
+    expect(new Set(harness.finished)).toEqual(
+      new Set([`phantomchat:${andrewHex}`, `phantomchat:group:${groupId}`]),
+    );
+  });
+
+  test("same conversation: a queued second group message still waits for the running turn", async () => {
+    const andrewSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const kaiSk = generateSecretKey(); // sibling bot in the group
+    const andrewHex = getPublicKey(andrewSk);
+    const kaiHex = getPublicKey(kaiSk);
+    const groupId = "serialized-group";
+
+    const harness = new GatedHarness("fake");
+    const server = startServer({
+      botSk,
+      allowedHex: [andrewHex],
+      harness,
+      senderSk: andrewSk,
+      groupId,
+      memberHexes: [getPublicKey(botSk), kaiHex],
+      // A sibling bot is present, so a message that names nobody neither
+      // interrupts nor starts a turn of its own — it must QUEUE on this
+      // conversation's chain (the #301 group-scoping rule).
+      groupPersonaNames: ["kai"],
+      siblingBotHex: [kaiHex],
+    });
+
+    server.feedGroup("phantom, take A");
+    await waitUntil(() => harness.started.length === 1, "the first group turn to start");
+
+    server.feedGroup("and also Z");
+    // Settle: the un-named follow-up must NOT start while "take A" is parked.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(harness.started.length).toBe(1);
+
+    harness.open();
+    await waitUntil(
+      () => harness.finished.length === 1,
+      "the first group turn to finish",
+    );
+    await waitUntil(
+      () => harness.started.length === 2,
+      "the queued follow-up to run after the first turn",
+    );
+    await server.stop();
+
+    // Strict ordering within one conversation: turn 2 started only once turn 1
+    // had finished.
+    expect(harness.started).toEqual([
+      `phantomchat:group:${groupId}`,
+      `phantomchat:group:${groupId}`,
+    ]);
+    expect(harness.finishedWhenStarted[1]).toBe(1);
+  });
+});

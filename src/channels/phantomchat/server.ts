@@ -14,7 +14,7 @@
  *     wait. Each bubble is its own NIP-17 wrap.
  *   - Slash commands (/stop, /reset, /status, /harness, /coder, /update,
  *     /restart, /help) work via the shared `handleSlashCommand` dispatcher,
- *     handled inline so /stop reaches a turn hung in the per-peer chain.
+ *     handled inline so /stop reaches a turn hung in the per-conversation chain.
  *     DM-only (group "/…" lines fall through to a normal turn). No Telegram
  *     `setMyCommands` menu — Nostr has no command-registration API.
  *   - No voice or attachments (groups ARE supported).
@@ -279,10 +279,11 @@ export interface RunPhantomchatServerInput {
  * Drive the phantomchat inbound loop until `signal` aborts (or, under
  * `oneShot`, until the stream yields no more immediately-available messages).
  *
- * Concurrency: like Telegram, turns are serialized PER conversation (per peer)
- * so one peer's history can't interleave, while different peers run in
- * parallel. Each turn registers under `activeTurns` so the abort signal can
- * tear it down.
+ * Concurrency: like Telegram, turns are serialized PER conversation — a DM's
+ * key is the sender hex, a group's is `group:<id>` — so one conversation's
+ * history can't interleave, while different conversations run in parallel.
+ * Each turn registers under `activeTurns` so the abort signal can tear it
+ * down.
  */
 export async function runPhantomchatServer(
   input: RunPhantomchatServerInput,
@@ -443,14 +444,18 @@ export async function runPhantomchatServer(
   // the Telegram engine's `activeTurns` map.
   const activeTurns = new Map<string, ActiveTurnHandle>();
 
-  // Per-peer promise chain so messages from one peer stay strictly ordered.
+  // Per-conversation promise chain so messages within one conversation stay
+  // strictly ordered. Keyed on conversationId — NOT senderId: keying on the
+  // sender serialized one person's DM behind their group message (and vice
+  // versa), so a phantom busy coding in a group could not answer a DM from the
+  // same person until that turn finished. Two conversations belong to two
+  // different histories; they must not queue behind each other.
   const chains = new Map<string, Promise<void>>();
   const inFlight = new Set<Promise<void>>();
   // Epoch registry backing interrupt / `/stop` backlog flushes (#301). Keyed by
-  // conversationId — the SAME key as `activeTurns` and the slash context above,
-  // so an interrupt, a `/stop` and a `/status` all address one queue. (The
-  // promise chain itself is keyed by senderId; for DMs, where slash commands
-  // and interrupts live, the two are identical.)
+  // conversationId — the SAME key as `activeTurns`, the promise chain above and
+  // the slash context, so an interrupt, a `/stop` and a `/status` all address
+  // one queue.
   const backlog = new ConversationBacklog();
 
   // ===================== AUTH GATE =====================
@@ -788,7 +793,7 @@ export async function runPhantomchatServer(
     //
     // The conversation key threads the turn. A GROUP message is keyed by the
     // group (so HQ has its own memory/turn-ordering thread, distinct from the
-    // sender's 1:1 DM with the bot); a plain DM keeps the per-peer key. The
+    // sender's 1:1 DM with the bot); a plain DM keys on the sender hex. The
     // channel already set msg.conversationId to `group:<id>` for group messages,
     // so we reuse it — falling back to the sender hex for DMs (whose
     // conversationId equals senderHex).
@@ -1353,7 +1358,7 @@ export async function runPhantomchatServer(
     !msg.groupId && !msg.media && msg.text.trim().startsWith("/");
 
   // Slash commands (/stop, /reset, /status, /harness, /coder, /help, …) are
-  // handled INLINE — bypassing the per-peer turn chain — so /stop can abort a
+  // handled INLINE — bypassing the per-conversation turn chain — so /stop can abort a
   // turn that is currently hung in that chain (a queued /stop would never run
   // until the very turn it is meant to kill had finished). DM-only: group slash
   // semantics (who may /reset the shared thread, /status broadcast noise) are
@@ -1420,9 +1425,12 @@ export async function runPhantomchatServer(
     }
   };
 
-  // Serialize per peer: chain the new work onto that peer's last promise.
+  // Serialize per conversation: chain the new work onto that conversation's
+  // last promise. Keyed on conversationId so a group turn and a DM turn from
+  // the same person run in parallel (which is the point of per-conversation
+  // chains); senderId would serialize them behind each other.
   const enqueue = (msg: ChannelMessage): void => {
-    const key = msg.senderId;
+    const key = msg.conversationId;
 
     // INTERRUPT (#301): a new ordinary message arriving while a turn is running
     // means "stop what you're doing and listen to me." Abort the active turn
@@ -1497,11 +1505,11 @@ export async function runPhantomchatServer(
     void next.finally(() => {
       inFlight.delete(next);
       // Drop the chain entry once it's the tail and settled, so the map doesn't
-      // grow without bound across many peers.
+      // grow without bound across many conversations.
       if (chains.get(key) === next) {
         chains.delete(key);
         // Settled tail for this peer: release its backlog slot as well so
-        // `slots` doesn't accumulate one entry per peer forever. `release`
+        // `slots` doesn't accumulate one entry per conversation forever. `release`
         // no-ops while anything is still pending, so a live epoch is safe.
         backlog.release(msg.conversationId);
       }
@@ -1518,7 +1526,7 @@ export async function runPhantomchatServer(
   // for-await ends naturally and we fall through to draining inFlight.
   for await (const msg of channel.listen(input.signal)) {
     if (msg.reaction) {
-      // EMOJI REACTION (wake-but-silent). Runs off the per-peer chain — a
+      // EMOJI REACTION (wake-but-silent). Runs off the per-conversation chain — a
       // reaction is rare, low-stakes context, so it neither interrupts nor
       // queues behind live turns — but is tracked in inFlight so shutdown /
       // oneShot drains it. Gated by the SAME auth gate as messages: the
@@ -1574,7 +1582,7 @@ export async function runPhantomchatServer(
       inFlight.add(p);
       void p.finally(() => inFlight.delete(p));
     } else if (isControlCommand(msg)) {
-      // Handle inline (off the per-peer chain) but still track it in inFlight
+      // Handle inline (off the per-conversation chain) but still track it in inFlight
       // so oneShot tests and clean shutdown wait for it to settle.
       const p = runSlash(msg);
       inFlight.add(p);
