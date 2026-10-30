@@ -28,7 +28,7 @@
  * which is what `^p` is for.
  */
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 import { Frame, Rule } from "../components/Frame.tsx";
@@ -39,6 +39,7 @@ import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { frameChromeColumns, frameChromeRows } from "../chrome.ts";
 import type { PersonaSnapshot } from "../snapshot.ts";
 import { DECISION_MODEL_STATUS_ROW, type StatusRows } from "../status.ts";
+import { syncPiModels } from "../../lib/embeddedPi.ts";
 
 /** Fixed geometry of a settings row, in terminal columns. */
 const BAR_COLS = 4; // TWO selection bars: Selectable's outer glyph cell and
@@ -156,6 +157,14 @@ export function PersonaDetailScreen(props: {
   onBack: () => void;
 }): React.ReactElement {
   const [cursor, setCursor] = useState(0);
+
+  // Fresh model catalog on entering settings, so a model the engine learned
+  // about since launch is there without an app restart. Best effort: it never
+  // throws and never blocks the screen.
+  useEffect(() => {
+    syncPiModels({ persona: props.persona.name });
+  }, [props.persona.name]);
+
   const p = props.persona;
   const row = ROWS[cursor]!;
 
