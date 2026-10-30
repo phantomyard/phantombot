@@ -212,6 +212,7 @@ guards; see the [recovery contract](docs/contributing/invariants/harnesses.md#co
 - [78](docs/contributing/invariants/cli-tui-and-wizards.md#inv-78) The chat prompt's Emacs keys are matched on what Ink reports, never on the characters macOS types for Option (issue #677).
 - [81](docs/contributing/invariants/cli-tui-and-wizards.md#inv-81) A chat-screen row is a one-row BOX — the layout cannot wrap it, and the width it is laid out at has one source.
 - [84](docs/contributing/invariants/cli-tui-and-wizards.md#inv-84) The root `--help` is GROUPED and BOUNDED — every top-level command sits in exactly one group, and its description fits one short line.
+- [85](docs/contributing/invariants/cli-tui-and-wizards.md#inv-85) A dropped image is a PATH the terminal typed — the chat box copies it to the inbox at drop time and attaches it the way every other channel does (issue #729).
 
 ### Testing — [testing.md](docs/contributing/invariants/testing.md)
 

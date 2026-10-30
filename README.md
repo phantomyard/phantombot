@@ -222,7 +222,7 @@ For the storage model and lifecycle details, see
   one model appears per local persona. It spawns the agent per conversation over
   stdio: no daemon, no port, no token, and it keeps working while the Phantombot
   service is down.
-- **Terminal** — interactive TUI with Emacs-style editing
+- **Terminal** — interactive TUI with Emacs-style editing and drag-in images
   ([keys](docs/reference/tui-keys.md)), plain REPL, or one-shot `ask` calls.
 
 Multiple personas can run inside one daemon. Each has isolated identity,

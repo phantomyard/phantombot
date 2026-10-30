@@ -36,7 +36,7 @@ import React, {
   useState,
   useSyncExternalStore,
 } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, type Key } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { useElapsedSeconds, useSpinnerFrame } from "../components/Spinner.tsx";
@@ -55,6 +55,14 @@ import {
 import type { TranscriptLine } from "../transcript.ts";
 import type { Span } from "../markdown.ts";
 import { commandHints, commandName, completeCommand } from "../slash.ts";
+import { inboxDir } from "../../channels/telegram/parse.ts";
+import {
+  DROP_SETTLE_MS,
+  imageToken,
+  nextImageNumber,
+  stashDroppedImages,
+  withAttachedImages,
+} from "../imageDrop.ts";
 import {
   backspaceAtCursor,
   cursorDown,
@@ -239,6 +247,35 @@ function Activity(props: {
   );
 }
 
+/**
+ * Whether a chunk is plain text that goes into the box as typed: no key with a
+ * meaning of its own, no modifier and no line break. Only such chunks join a
+ * run that may turn out to be a dropped image (#729).
+ */
+function isPlainText(char: string, key: Key): boolean {
+  return (
+    char !== "" &&
+    !/[\r\n]/.test(char) &&
+    !key.ctrl &&
+    !key.meta &&
+    !key.super &&
+    !key.hyper &&
+    !key.return &&
+    !key.escape &&
+    !key.tab &&
+    !key.backspace &&
+    !key.delete &&
+    !key.upArrow &&
+    !key.downArrow &&
+    !key.leftArrow &&
+    !key.rightArrow &&
+    !key.pageUp &&
+    !key.pageDown &&
+    !key.home &&
+    !key.end
+  );
+}
+
 export function ChatScreen(props: {
   session: ChatSession;
   /** Title-bar status: release ring, autostart state. */
@@ -365,6 +402,92 @@ export function ChatScreen(props: {
    * unmounting on any navigation. The screen only dispatches.
    */
   const submit = props.session.submit;
+  /**
+   * Images dropped into the box since the last send, by token number (#729).
+   * The files are already in the inbox; `sendBox` attaches the ones whose
+   * `[Image #n]` token is still in the text. Kept beside the draft it belongs
+   * to, so it lives exactly as long.
+   */
+  const imagesRef = useRef(new Map<number, string>());
+  /**
+   * The text typed since the input was last quiet (#729 review). A dropped
+   * path can arrive over several reads, and where a read ends says nothing
+   * about where the drop ends, so no single chunk is judged. Every chunk of
+   * plain text goes into the box as it comes, so typing is never delayed, and
+   * joins the run. The run is judged once: when the input has been quiet for
+   * `DROP_SETTLE_MS`, or the moment any other key arrives. Only then, if the
+   * whole run is paths to images, is it swapped for `[Image #n]` tokens.
+   */
+  const dropRunRef = useRef<
+    | {
+        /** The box as it was before the run's first chunk. */
+        before: PromptState;
+        /** The box right after the run's last chunk. */
+        after: PromptState;
+        text: string;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    | undefined
+  >(undefined);
+
+  const settleDropRun = useCallback(() => {
+    const run = dropRunRef.current;
+    if (!run) return;
+    dropRunRef.current = undefined;
+    clearTimeout(run.timer);
+    // Something else changed the box since: the run is no longer what is in
+    // it, so there is nothing safe to swap.
+    if (inputRef.current !== run.after) return;
+    const stashed = stashDroppedImages(
+      run.text,
+      inboxDir(props.session.conversation),
+    );
+    if (!stashed) return;
+    const tokens = stashed.map((path) => {
+      const n = nextImageNumber(imagesRef.current);
+      imagesRef.current.set(n, path);
+      return imageToken(n);
+    });
+    setInputValue(insertAtCursor(run.before, `${tokens.join(" ")} `));
+  }, [props.session.conversation, setInputValue]);
+
+  /** Type plain text into the box, as part of the current run. */
+  const typeText = useCallback(
+    (chunk: string) => {
+      const run = dropRunRef.current;
+      const joins = run !== undefined && inputRef.current === run.after;
+      if (run) clearTimeout(run.timer);
+      // A run the box has moved on from is judged (and found stale) first.
+      if (run && !joins) settleDropRun();
+      const before = joins ? run.before : inputRef.current;
+      const after = insertAtCursor(inputRef.current, chunk);
+      setInputValue(after);
+      const next = {
+        before,
+        after,
+        text: joins ? run.text + chunk : chunk,
+        timer: setTimeout(() => {
+          // One more turn of the event loop: after a stall the rest of the
+          // drop can be waiting to be read while this timer is already due,
+          // and which of the two runs first is the runtime's choice.
+          setImmediate(() => {
+            if (dropRunRef.current === next) settleDropRun();
+          });
+        }, DROP_SETTLE_MS),
+      };
+      dropRunRef.current = next;
+    },
+    [setInputValue, settleDropRun],
+  );
+  // A run still open when the screen goes is dropped with it: no timer left
+  // behind, and nothing copied into the inbox for a box that is gone.
+  useEffect(
+    () => () => {
+      clearTimeout(dropRunRef.current?.timer);
+      dropRunRef.current = undefined;
+    },
+    [],
+  );
 
   /**
    * A slash command: answered by phantombot itself, never by the model.
@@ -401,6 +524,21 @@ export function ChatScreen(props: {
     [props.session, transcript],
   );
 
+  /**
+   * Send what was in the box. A command is answered here and a prompt goes
+   * to the harness with its images attached; either way the box is emptied,
+   * so its images go with it and the next drop is `[Image #1]` again.
+   */
+  const sendBox = useCallback(
+    (text: string) => {
+      const images = imagesRef.current;
+      imagesRef.current = new Map();
+      if (commandName(text) !== undefined) void runCommand(text);
+      else void submit(withAttachedImages(text, images));
+    },
+    [runCommand, submit],
+  );
+
   // The launch prompt (issue #575). Taken exactly once per mount, and the
   // owner is told immediately, so a remount (^s then esc) never resends it.
   // Dispatched through the same split as Enter, so it is indistinguishable from
@@ -418,6 +556,10 @@ export function ChatScreen(props: {
   }, []);
 
   useInput((char, key) => {
+    // Any key but plain text ends the run of typed text, so a drop is judged
+    // BEFORE the key acts: Enter right after a drop sends the image, a
+    // Backspace deletes from its token (#729).
+    if (!isPlainText(char, key)) settleDropRun();
     // ^c interrupts the TURN. It never quits: losing an app mid-answer because
     // you wanted the answer to stop is the wrong trade. Reason "stop", the
     // same one `/stop` uses, so both are recorded identically. The controller
@@ -471,10 +613,8 @@ export function ChatScreen(props: {
       // Commands are dispatched ahead of the harness, so they work WHILE a
       // turn is in flight; an ordinary prompt interrupts the running turn
       // (see `submit`).
-      const isCommand = commandName(text) !== undefined;
       setInputValue(promptState(""));
-      if (isCommand) void runCommand(text);
-      else void submit(text);
+      sendBox(text);
       return;
     }
     // ↑↓ move the cursor between the box's VISUAL rows (wrapped rows count),
@@ -579,13 +719,11 @@ export function ChatScreen(props: {
         const atEnd = inputRef.current.cursor >= graphemeCount(inputRef.current.text);
         if (body !== undefined && !body.includes("\n") && atEnd) {
           const text = `${inputRef.current.text}${body}`.trim();
-          const isCommand = commandName(text) !== undefined;
           // Busy or not, this is a submit: a prompt typed during a turn
           // interrupts it, exactly as the plain-Enter branch does.
           if (!text) return;
           setInputValue(promptState(""));
-          if (isCommand) void runCommand(text);
-          else void submit(text);
+          sendBox(text);
           return;
         }
         // Anything with INTERIOR newlines is a paste: in chat a paste is
@@ -596,9 +734,12 @@ export function ChatScreen(props: {
         setInputValue(insertAtCursor(inputRef.current, normalised));
         return;
       }
-      // From the REF: two keystrokes can land between renders, and reading
-      // `input` out of the closure loses the first of them.
-      setInputValue(insertAtCursor(inputRef.current, char));
+      // A dropped file arrives as the path the terminal typed for it, over one
+      // read or several (#729), so this is typed like any other text and the
+      // run is judged once the input goes quiet (`typeText`). It goes through
+      // the REF: two keystrokes can land between renders, and reading `input`
+      // out of the closure loses the first of them.
+      typeText(char);
     }
   });
 
