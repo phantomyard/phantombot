@@ -55,6 +55,13 @@ import {
 import type { TranscriptLine } from "../transcript.ts";
 import type { Span } from "../markdown.ts";
 import { commandHints, commandName, completeCommand } from "../slash.ts";
+import { inboxDir } from "../../channels/telegram/parse.ts";
+import {
+  imageToken,
+  nextImageNumber,
+  stashDroppedImages,
+  withAttachedImages,
+} from "../imageDrop.ts";
 import {
   backspaceAtCursor,
   cursorDown,
@@ -365,6 +372,13 @@ export function ChatScreen(props: {
    * unmounting on any navigation. The screen only dispatches.
    */
   const submit = props.session.submit;
+  /**
+   * Images dropped into the box since the last send, by token number (#729).
+   * The files are already in the inbox; `sendBox` attaches the ones whose
+   * `[Image #n]` token is still in the text. Kept beside the draft it belongs
+   * to, so it lives exactly as long.
+   */
+  const imagesRef = useRef(new Map<number, string>());
 
   /**
    * A slash command: answered by phantombot itself, never by the model.
@@ -399,6 +413,21 @@ export function ChatScreen(props: {
       }
     },
     [props.session, transcript],
+  );
+
+  /**
+   * Send what was in the box. A command is answered here and a prompt goes
+   * to the harness with its images attached; either way the box is emptied,
+   * so its images go with it and the next drop is `[Image #1]` again.
+   */
+  const sendBox = useCallback(
+    (text: string) => {
+      const images = imagesRef.current;
+      imagesRef.current = new Map();
+      if (commandName(text) !== undefined) void runCommand(text);
+      else void submit(withAttachedImages(text, images));
+    },
+    [runCommand, submit],
   );
 
   // The launch prompt (issue #575). Taken exactly once per mount, and the
@@ -471,10 +500,8 @@ export function ChatScreen(props: {
       // Commands are dispatched ahead of the harness, so they work WHILE a
       // turn is in flight; an ordinary prompt interrupts the running turn
       // (see `submit`).
-      const isCommand = commandName(text) !== undefined;
       setInputValue(promptState(""));
-      if (isCommand) void runCommand(text);
-      else void submit(text);
+      sendBox(text);
       return;
     }
     // ↑↓ move the cursor between the box's VISUAL rows (wrapped rows count),
@@ -579,13 +606,11 @@ export function ChatScreen(props: {
         const atEnd = inputRef.current.cursor >= graphemeCount(inputRef.current.text);
         if (body !== undefined && !body.includes("\n") && atEnd) {
           const text = `${inputRef.current.text}${body}`.trim();
-          const isCommand = commandName(text) !== undefined;
           // Busy or not, this is a submit: a prompt typed during a turn
           // interrupts it, exactly as the plain-Enter branch does.
           if (!text) return;
           setInputValue(promptState(""));
-          if (isCommand) void runCommand(text);
-          else void submit(text);
+          sendBox(text);
           return;
         }
         // Anything with INTERIOR newlines is a paste: in chat a paste is
@@ -595,6 +620,24 @@ export function ChatScreen(props: {
         // `textInput.ts`.)
         setInputValue(insertAtCursor(inputRef.current, normalised));
         return;
+      }
+      // A dropped file arrives as the path the terminal typed for it, in one
+      // chunk (#729). Only paths to images become `[Image #n]`; everything
+      // else, a single keystroke included, is typed text.
+      if (char.length > 1) {
+        const stashed = stashDroppedImages(
+          char,
+          inboxDir(props.session.conversation),
+        );
+        if (stashed) {
+          const tokens = stashed.map((path) => {
+            const n = nextImageNumber(imagesRef.current);
+            imagesRef.current.set(n, path);
+            return imageToken(n);
+          });
+          setInputValue(insertAtCursor(inputRef.current, `${tokens.join(" ")} `));
+          return;
+        }
       }
       // From the REF: two keystrokes can land between renders, and reading
       // `input` out of the closure loses the first of them.

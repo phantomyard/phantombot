@@ -55,6 +55,20 @@ on the alternate screen. macOS Terminal.app only does that while the
 application has switched the cursor keys to application mode, as `less` and
 `vim` do, so the TUI switches that mode on while it runs and off again on exit.
 
+## Images
+
+Drag an image file from Finder, or a screenshot thumbnail, onto the window. The
+chat box shows it as `[Image #1]`, `[Image #2]`, … at the cursor, and you can
+type around it. When you send, each image whose token is still in the text is
+attached, so deleting the token removes the image. PNG, JPEG, GIF and WebP up
+to 10 MB are accepted. Anything else you drop, or a path to a file that isn't
+there, is pasted as ordinary text.
+
+The image is copied into the conversation's inbox as soon as you drop it, so a
+screenshot thumbnail that disappears afterwards still gets sent. The model
+receives the copy's path as an `[attached: …]` line, the same way a photo sent
+over Telegram arrives.
+
 ## Alt on macOS: Option as Meta
 
 The `Alt` bindings need the terminal to send Alt as an Esc prefix. Most Linux
