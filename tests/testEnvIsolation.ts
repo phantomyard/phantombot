@@ -120,3 +120,10 @@ process.on("exit", () => {
     // a leaked temp dir is not worth failing a green run over
   }
 });
+
+// `PersonaDetailScreen` fires a best-effort `pi update --models` on mount and
+// every TUI suite mounts that screen. Un-gated, each mount spawns a detached
+// child that hits the Pi registry: slow, network-dependent, and irrelevant to a
+// test about badge text. The sync itself is covered directly, with an injected
+// spawn, in tests/lib-embeddedPi-syncPiModels.test.ts.
+process.env.PHANTOMBOT_PI_MODELS_SYNC = "1";

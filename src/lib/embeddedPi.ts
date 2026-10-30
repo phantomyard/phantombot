@@ -36,6 +36,7 @@
  *      Phantomyard's Phantombot; host harnesses keep their default headers.
  */
 
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -46,7 +47,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ENV_PI_AGENT_DIR, nativeAgentEnv } from "./nativeAgentDir.ts";
+import { ENV_PI_AGENT_DIR, nativeAgentDir, nativeAgentEnv } from "./nativeAgentDir.ts";
 import { phantombotEscortExtension, type ToolCallHookApi } from "./escort.ts";
 
 /** Hidden argv[2] that turns the phantombot binary into the pi CLI. */
@@ -289,6 +290,79 @@ export function embeddedPiChildEnv(dataHome: string): Record<string, string> {
     env.PI_PACKAGE_DIR = ensureEmbeddedPiAssets(embeddedPiPackageDir(dataHome)).dir;
   }
   return env;
+}
+
+/**
+ * Escape hatch that suppresses the settings-entry catalog refresh, so a
+ * rendered Settings screen never spawns a network child in tests/CI.
+ */
+export const ENV_PI_MODELS_SYNC_OFF = "PHANTOMBOT_PI_MODELS_SYNC";
+
+/** The only part of a spawned child this helper touches. */
+interface DetachedChild {
+  on(event: "error", listener: () => void): unknown;
+  unref(): unknown;
+}
+
+/**
+ * Best-effort `__pi update --models` for the persona whose Settings screen is
+ * open, so a model the engine learned about since launch is visible without
+ * restarting phantombot. Deliberately NOT run at startup: a refresh is a
+ * network round trip, and the only moment it matters is while someone is
+ * reading the model list.
+ *
+ * Scoped to that persona's OWN agent dir — pi keeps the catalog per agent dir
+ * and phantombot keeps one per persona, so an unscoped child would refresh
+ * whatever persona the ambient environment happens to name.
+ *
+ * Never fatal: a synchronous throw, a launch failure, or nothing on PATH are
+ * all swallowed. The `error` listener is REQUIRED — spawn reports ENOENT
+ * asynchronously, and an unhandled `error` event would take the TUI down.
+ *
+ * @returns true when a refresh was spawned.
+ */
+export function syncPiModels(opts: {
+  persona?: string;
+  dataHome?: string;
+  env?: NodeJS.ProcessEnv;
+  spawnImpl?: (cmd: string, args: string[], opts: object) => DetachedChild;
+} = {}): boolean {
+  const env = opts.env ?? process.env;
+  const on = (v: string | undefined): boolean => !!v && !/^(0|false|no|off)$/i.test(v.trim());
+  // Opted out by the caller/test, or pi is told to stay offline: a refresh could
+  // only queue a request destined to fail.
+  if (on(env[ENV_PI_MODELS_SYNC_OFF]) || on(env.PI_OFFLINE)) return false;
+
+  try {
+    const agentDir = nativeAgentDir(opts.dataHome, opts.persona);
+    // Creating this dir is what makes a persona's first turn SKIP the legacy
+    // absorb (absorbFileInto ignores existing targets), so on an upgraded host
+    // a refresh-before-first-turn would silently strand the legacy catalog.
+    // Let that persona's first real turn run ensureNativeAgentDir in its
+    // intended order; a later Settings visit refreshes.
+    if (opts.persona && !existsSync(agentDir) && existsSync(nativeAgentDir(opts.dataHome))) {
+      return false;
+    }
+    mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+    // Start from the ambient env (PATH/HOME must survive) and ADD the scope.
+    const childEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(env)) if (typeof v === "string") childEnv[k] = v;
+    childEnv[ENV_PI_AGENT_DIR] = agentDir;
+    if (opts.persona) childEnv.PHANTOMBOT_PERSONA = opts.persona;
+
+    const cmd = embeddedPiCommand();
+    const child = (opts.spawnImpl ?? (spawn as unknown as NonNullable<typeof opts.spawnImpl>))(
+      cmd[0]!,
+      [...cmd.slice(1), "update", "--models"],
+      { detached: true, stdio: "ignore", windowsHide: true, env: childEnv },
+    );
+    child.on("error", () => {});
+    child.unref();
+    return true;
+  } catch {
+    // Best-effort: a failed catalog refresh is never fatal.
+    return false;
+  }
 }
 
 /**
