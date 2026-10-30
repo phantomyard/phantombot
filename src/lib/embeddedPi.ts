@@ -47,7 +47,12 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ENV_PI_AGENT_DIR, nativeAgentDir, nativeAgentEnv } from "./nativeAgentDir.ts";
+import {
+  ENV_PI_AGENT_DIR,
+  nativeAgentDir,
+  nativeAgentEnv,
+  resolveNativeDataHome,
+} from "./nativeAgentDir.ts";
 import { withPersonaEnv } from "./envBootstrap.ts";
 import { phantombotEscortExtension, type ToolCallHookApi } from "./escort.ts";
 
@@ -300,10 +305,24 @@ export function embeddedPiChildEnv(dataHome: string): Record<string, string> {
 export const ENV_PI_MODELS_SYNC_OFF = "PHANTOMBOT_PI_MODELS_SYNC_OFF";
 
 /**
- * Personas whose catalog refresh is already running in THIS process, keyed
- * `dataHome\0persona`. Settings is mount/unmount, not a modal: without this the
- * operator paging in and out of the screen stacks concurrent network children
- * for the same persona. Cleared on a launch failure so a later visit retries.
+ * Personas whose catalog refresh has been started in THIS process, keyed
+ * `<resolved dataHome>\0persona`. Settings is mount/unmount, not a modal:
+ * without this the operator paging in and out of the screen stacks concurrent
+ * network children for the same persona.
+ *
+ * PERMANENT for the lifetime of the process — one spawn per persona per
+ * process, full stop. A refresh that RUNS and fails (non-zero exit, hung
+ * registry, dropped network) is NOT retried until the process restarts: do not
+ * expire the mark on a timer, and do not clear it from an exit listener. A
+ * retry-on-nonzero-exit re-creates the exact mount/unmount stampede this latch
+ * exists to prevent, and does it in the one failure mode where it bites
+ * hardest — an unreachable registry, where every half-zombie
+ * `update --models` child multiplies. The only clear is a LAUNCH failure
+ * (`error` event = ENOENT/EACCES, the child never started), handled below.
+ *
+ * Key on the RESOLVED data home (`resolveNativeDataHome`), never on the raw
+ * `opts.dataHome`: an omitted value and the explicit default name one agent dir,
+ * so keying on the option would give that one persona two marks.
  */
 const piModelsSyncInFlight = new Set<string>();
 
@@ -336,7 +355,11 @@ interface DetachedChild {
  * Child env comes from `withPersonaEnv`, the same helper every harness spawn
  * uses: it adds the engine-scope `XDG_*` roots plus the `PHANTOMBOT_ENGINE_SCOPE`
  * marker and drops host-location overrides, so a detached child in an embedding
- * app resolves that app's data home instead of the host's.
+ * app resolves that app's data home instead of the host's. It ALSO applies
+ * `NON_INTERACTIVE_ENV` (`CI`, `DEBIAN_FRONTEND`, `GIT_TERMINAL_PROMPT`) — that
+ * set is deliberate, a property of the helper, not something inherited from the
+ * parent env by accident. Do not inline a second copy of it here the way the
+ * bundled `spawnPi` extension is forced to (it cannot import the helper).
  *
  * @returns true when a refresh was spawned.
  */
@@ -351,17 +374,18 @@ export function syncPiModels(opts: {
   // Opted out by the caller/test, or pi is told to stay offline: a refresh could
   // only queue a request destined to fail.
   if (on(env[ENV_PI_MODELS_SYNC_OFF]) || on(env.PI_OFFLINE)) return false;
-  const key = `${opts.dataHome ?? ""}\0${opts.persona ?? ""}`;
+  const dataHome = resolveNativeDataHome(opts.dataHome);
+  const key = `${dataHome}\0${opts.persona ?? ""}`;
   if (piModelsSyncInFlight.has(key)) return false;
 
   try {
-    const agentDir = nativeAgentDir(opts.dataHome, opts.persona);
+    const agentDir = nativeAgentDir(dataHome, opts.persona);
     // Creating this dir is what makes a persona's first turn SKIP the legacy
     // absorb (absorbFileInto ignores existing targets), so on an upgraded host
     // a refresh-before-first-turn would silently strand the legacy catalog.
     // Let that persona's first real turn run ensureNativeAgentDir in its
     // intended order; a later Settings visit refreshes.
-    if (opts.persona && !existsSync(agentDir) && existsSync(nativeAgentDir(opts.dataHome))) {
+    if (opts.persona && !existsSync(agentDir) && existsSync(nativeAgentDir(dataHome))) {
       return false;
     }
     mkdirSync(agentDir, { recursive: true, mode: 0o700 });
@@ -380,8 +404,10 @@ export function syncPiModels(opts: {
       { detached: true, stdio: "ignore", windowsHide: true, env: scoped },
     );
     child.on("error", () => {
-      // The child never started: clear the mark so a later Settings visit
-      // retries instead of never refreshing again.
+      // The child never STARTED (ENOENT/EACCES): clear the mark so a later
+      // Settings visit retries instead of never refreshing again. This is the
+      // ONLY clear — see the latch docstring; a child that ran and failed keeps
+      // its mark until the process exits.
       piModelsSyncInFlight.delete(key);
     });
     child.unref();

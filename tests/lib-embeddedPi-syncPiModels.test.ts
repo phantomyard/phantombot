@@ -145,6 +145,22 @@ describe("syncPiModels", () => {
     expect(r.calls.length).toBe(2);
   });
 
+  test("an omitted dataHome and the explicit default share ONE in-flight mark", () => {
+    // Both resolve to the same agent dir, so both must resolve to the same key
+    // (issue #719) — otherwise one persona gets two concurrent children.
+    const r = recorder();
+    const prev = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = dataHome;
+    try {
+      expect(syncPiModels({ persona: "kai", env: BASE_ENV, spawnImpl: r.spawnImpl })).toBe(true);
+      expect(syncPiModels({ persona: "kai", dataHome, env: BASE_ENV, spawnImpl: r.spawnImpl })).toBe(false);
+      expect(r.calls.length).toBe(1);
+    } finally {
+      if (prev === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prev;
+    }
+  });
+
   test("a launch failure clears the in-flight mark so a later visit retries", () => {
     const r = recorder();
     expect(run(r)).toBe(true);
