@@ -250,6 +250,30 @@ describe("chat scrollback", () => {
     }
   });
 
+  test("the wheel's application-mode arrows (ESC O A / ESC O B) scroll too (#727)", async () => {
+    // With `?1h` on (terminal.ts), Terminal.app sends the scroll wheel, and
+    // the arrow keys, as SS3 sequences instead of CSI ones. These are the
+    // exact bytes a trackpad scroll produced there.
+    const { stdin, stdout, instance } = await mount();
+    try {
+      const atBottom = lastFrame(stdout.frames);
+      stdin.write(`${ESC}OA${ESC}OA${ESC}OA`);
+      await sleep(80);
+      const scrolled = lastFrame(stdout.frames);
+      expect(scrolled).toContain("below");
+      const older = history
+        .map((m) => m.text)
+        .filter((t) => !atBottom.includes(t) && scrolled.includes(t));
+      expect(older.length).toBeGreaterThan(0);
+      stdin.write(`${ESC}OB${ESC}OB${ESC}OB`);
+      await sleep(80);
+      expect(lastFrame(stdout.frames)).toContain("turn-19");
+      expect(lastFrame(stdout.frames)).not.toContain("below");
+    } finally {
+      instance.unmount();
+    }
+  });
+
   test("multi-line input: ↑↓ move the cursor first, scroll only from the edge rows (#667)", async () => {
     const { stdin, stdout, instance } = await mount();
     try {

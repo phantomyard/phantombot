@@ -28,6 +28,7 @@ cell at the end of a line. Moving it never re-wraps the text.
 
 | Key | Action |
 | --- | --- |
+| Scroll wheel / trackpad | Scroll the transcript, the same as `↑` / `↓`. |
 | `PgUp` / `PgDn` | Scroll the transcript one page. |
 | `Shift-↑` / `Shift-↓` | Scroll the transcript one line. |
 | `Home` / `End` | Jump to the top / the live end of the transcript. |
@@ -38,6 +39,12 @@ cell at the end of a line. Moving it never re-wraps the text.
 
 While the transcript is scrolled away from the live end, `↑` / `↓` keep
 scrolling it until it is back at the bottom.
+
+The app never captures the mouse, so click-drag selection and copy stay the
+terminal's own. The wheel works because most terminals turn it into `↑` / `↓`
+on the alternate screen. macOS Terminal.app only does that while the
+application has switched the cursor keys to application mode, as `less` and
+`vim` do, so the TUI switches that mode on while it runs and off again on exit.
 
 ## Alt on macOS: Option as Meta
 

@@ -31,6 +31,32 @@ export const ALT_SCREEN_ON = "\x1b[?1049h\x1b[2J\x1b[3J\x1b[H";
 export const ALT_SCREEN_OFF = "\x1b[?1049l";
 
 /**
+ * Application cursor-key mode (DECCKM), on and off.
+ *
+ * ## Why the scroll wheel did nothing on macOS
+ *
+ * The app never enables mouse reporting (see `components/Selectable.tsx`), so
+ * scrolling relies on the terminal turning the wheel into ↑/↓ on the
+ * alternate screen. Terminal.app does that ONLY while the application has
+ * switched the cursor keys to application mode, which is what `less` and
+ * `vim` do via terminfo's `smkx`. On `?1049h` alone a trackpad scroll in
+ * Terminal.app sends no bytes at all; with `?1h` it sends `ESC O A` / `ESC O B`
+ * (measured with a raw byte logger, #727). Ink parses the SS3 form as the
+ * same up/down keys as `ESC [ A`, so nothing downstream changes.
+ *
+ * `?1049l` does not restore this mode, so leaving full screen resets it
+ * explicitly; otherwise the shell would receive `ESC O A` for every ↑.
+ */
+export const CURSOR_KEYS_APP = "\x1b[?1h";
+/** Back to normal cursor keys (`ESC [ A`), what a shell expects. */
+export const CURSOR_KEYS_NORMAL = "\x1b[?1l";
+
+/** What entering full screen writes: the buffer first, then the key mode on it. */
+export const FULL_SCREEN_ON = ALT_SCREEN_ON + CURSOR_KEYS_APP;
+/** What leaving writes: the key mode off first, then the user's screen back. */
+export const FULL_SCREEN_OFF = CURSOR_KEYS_NORMAL + ALT_SCREEN_OFF;
+
+/**
  * Kitty keyboard protocol, flag 1 (disambiguate escape codes).
  *
  * With it on, a supporting terminal reports Shift/Ctrl/Alt+Enter as distinct
@@ -131,12 +157,12 @@ export function enterFullScreen(
   const enter = () => {
     if (active) return;
     active = true;
-    stdout.write(ALT_SCREEN_ON);
+    stdout.write(FULL_SCREEN_ON);
   };
   const restore = () => {
     if (!active) return;
     active = false;
-    stdout.write(ALT_SCREEN_OFF);
+    stdout.write(FULL_SCREEN_OFF);
   };
   enter();
   return { enter, restore };

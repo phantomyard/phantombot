@@ -10,10 +10,10 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  ALT_SCREEN_OFF,
-  ALT_SCREEN_ON,
   DEFAULT_SIZE,
   enterFullScreen,
+  FULL_SCREEN_OFF,
+  FULL_SCREEN_ON,
   gateStdout,
   RESERVED_ROWS,
   terminalSize,
@@ -74,15 +74,43 @@ describe("enterFullScreen", () => {
   test("enters on construction and restores exactly once", () => {
     const { writes, stream } = fakeStdout();
     const screen = enterFullScreen(stream);
-    expect(writes).toEqual([ALT_SCREEN_ON]);
+    expect(writes).toEqual([FULL_SCREEN_ON]);
     screen.restore();
     screen.restore();
     // Idempotent: exit handlers overlap (`exit`, `SIGINT`, and the `finally`
     // all call it), and a second `?1049l` would pop the user's shell out of a
     // screen buffer it never entered.
-    expect(writes).toEqual([ALT_SCREEN_ON, ALT_SCREEN_OFF]);
+    expect(writes).toEqual([FULL_SCREEN_ON, FULL_SCREEN_OFF]);
     screen.enter();
-    expect(writes.at(-1)).toBe(ALT_SCREEN_ON);
+    expect(writes.at(-1)).toBe(FULL_SCREEN_ON);
+  });
+
+  // macOS Terminal.app turns the scroll wheel into ↑/↓ on the alternate screen
+  // ONLY in application cursor-key mode (DECCKM, `?1h`), which is what `less`
+  // and `vim` switch on. Without it the wheel sends nothing at all: a byte log
+  // of a trackpad scroll in Terminal.app captured zero bytes on `?1049h` alone
+  // and a stream of `ESC O A` / `ESC O B` once `?1h` was added (#727).
+  // Literal escapes here, not the module's constants, so a wrong constant
+  // cannot make this pass.
+  test("switches the cursor keys to application mode, and back on restore (#727)", () => {
+    const { writes, stream } = fakeStdout();
+    const screen = enterFullScreen(stream);
+    const entered = writes.join("");
+    expect(entered).toContain("\x1b[?1049h");
+    expect(entered).toContain("\x1b[?1h");
+    // After the buffer switch, so the mode is set on the screen the app uses.
+    expect(entered.indexOf("\x1b[?1h")).toBeGreaterThan(
+      entered.indexOf("\x1b[?1049h"),
+    );
+    writes.length = 0;
+    screen.restore();
+    const left = writes.join("");
+    // `?1049l` does not restore DECCKM, so the shell would otherwise get
+    // `ESC O A` for every ↑ after the app exits.
+    expect(left).toContain("\x1b[?1l");
+    expect(left.indexOf("\x1b[?1l")).toBeLessThan(left.indexOf("\x1b[?1049l"));
+    screen.restore();
+    expect(writes.join("")).toBe(left);
   });
 });
 
