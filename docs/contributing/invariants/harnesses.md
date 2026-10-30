@@ -99,11 +99,12 @@ dir (`providers.<id>` with `baseUrl`, `api: "openai-completions"`, `apiKey` and
 `$VAR` reference, never a value** — the per-turn relay stays on the existing
 `PI_PROVIDER_CATALOG` env-var contract (#602), so a credential never reaches a
 world-readable agent dir; **an unauthenticated endpoint gets a literal
-placeholder, not an unresolvable reference** — verified against pi 1.0.4, and
-re-verified at the 1.4.0 pin on 2026-10-30, a
-provider whose `apiKey` cannot be resolved is not merely unauthenticated, it is
-INVISIBLE (`pi --list-models` omits it and the turn dies with "Use /login to log
-into a provider"), which is why "no key" is spelled `no-key-required`; **the
+placeholder, not an unresolvable reference** — verified against pi 1.0.4 and
+re-verified at the 1.4.0 pin on 2026-10-30 (pi 1.4.0's bundled CLI still prints
+`1.0.4` for `--version`, an upstream artifact — never pin an assertion to that
+output): a provider whose `apiKey` cannot be resolved is not merely
+unauthenticated, it is INVISIBLE (`pi --list-models` omits it and the turn
+dies with "Use /login to log into a provider"), which is why "no key" is spelled `no-key-required`; **the
 merge REFUSES an unparseable or non-object document instead of clobbering it** —
 the agent dir is shared with whatever the operator or a host pi put there, and
 `removeProviderEntry` deletes only phantombot's own id; **models are UNIONED,

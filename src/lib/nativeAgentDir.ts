@@ -98,6 +98,17 @@ import { xdgDataHome } from "../config.ts";
 /** Pi's own env var for relocating its agent dir (pi config.js ENV_AGENT_DIR). */
 export const ENV_PI_AGENT_DIR = "PI_CODING_AGENT_DIR";
 
+/**
+ * The data home a native spawn will actually resolve: the caller's explicit
+ * value, or the SAME default `nativeAgentDir()` applies. Callers that key
+ * per-host state (a coalescing mark, a cache) must key on this and not on the
+ * raw option, or an omitted value and the explicit default hold two keys for
+ * one directory (issue #719).
+ */
+export function resolveNativeDataHome(dataHome?: string): string {
+  return dataHome ?? xdgDataHome();
+}
+
 /** The phantombot-owned root for the embedded engine's files. */
 export function nativeAgentRoot(dataHome: string = xdgDataHome()): string {
   return join(dataHome, "pi-native");
