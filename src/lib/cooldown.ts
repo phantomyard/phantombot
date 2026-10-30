@@ -39,9 +39,15 @@
  * the box comes back. Persisted windows are re-adopted only while still in
  * the future.
  *
- * Concurrency: phantombot serializes turns per conversation, and the
- * orchestrator runs a single turn at a time within one process, so
- * naive in-memory state without locking is safe.
+ * Concurrency: turns are serialized PER conversation, so several turns can be
+ * in flight in this process at once. The store is therefore shared, but each
+ * mutation is a synchronous read-modify-write with no `await` between the read
+ * and the `set` — the single event loop keeps it atomic, so nothing corrupts.
+ * What IS shared, deliberately, is the SEMANTIC state: a 429 in one
+ * conversation benches that harness for every other conversation until the
+ * window expires, and a success in another conversation clears it early. That
+ * is the intended reading (the harness itself is one shared resource), not a
+ * bug to lock around.
  */
 
 /** Base cooldown for the first consecutive failure, in milliseconds. */
