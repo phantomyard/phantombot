@@ -62,11 +62,13 @@ export const DEFAULT_MEDIA_CAPTION_WINDOW_MS = 2_000;
  * interrupted would discard the message the burst just delivered — which is
  * exactly how the typed question was lost when a file trail followed it.
  *
- * A follower is therefore only ever a message from the SAME publish batch as
- * its head: the extra files of one multi-file send, or the tail of one held
- * burst. A message that merely arrives while something is held is a separate
- * action and keeps its normal rights — otherwise a message could lose the
- * ability to interrupt just because it met a hold.
+ * A follower is therefore only ever a message from the SAME arrival as its
+ * head: the extra files of one multi-file send, or the tail of one held burst.
+ * Two things decide "same arrival" where the messages themselves cannot: a hold
+ * only ever contains ONE sender's files, so a message that ends a hold is part
+ * of that arrival exactly when it comes from the same sender. A message from
+ * somebody else is a separate action and keeps its normal rights — otherwise a
+ * named "stop" could lose the ability to interrupt just because it met a hold.
  */
 export interface MediaCaptionDispatchOptions {
   /**
@@ -206,18 +208,28 @@ export class MediaCaptionCoalescer {
 
     if (!canCaption) {
       // Nothing to merge: flush the held attachments in arrival order, then the
-      // message itself. The held attachments are ONE delayed burst, so only
-      // their head interrupts — but `msg` is NOT part of that burst: it is here
-      // precisely because it could not join it, which means it came from a
-      // later publish (a voice note, a file of its own, a slash command) or, in
-      // a group, from a different person. It therefore keeps the channel's
-      // normal interrupt rules. Suppressing them made a named "stop" from one
-      // sender sit behind a turn it was meant to abort, merely because somebody
-      // else's file happened to be held.
+      // message itself. The held attachments are one delayed burst, so only
+      // their head interrupts.
       pending.messages.forEach((held, index) => {
         this.dispatchNow(held, undefined, index === 0 ? undefined : AS_FOLLOWER);
       });
-      this.dispatchNow(msg);
+      // The SENDER decides what `msg` is. Same sender: still one arrival, so it
+      // queues behind the burst it ended — letting it interrupt here would flush
+      // the attachment enqueued a moment earlier, silently losing a file, which
+      // is the very defect this class exists to remove. Different sender: a
+      // separate user action, so it keeps its own interrupt evaluation — a
+      // "lena, stop, do Z instead" that happens to meet somebody else's hold
+      // must still abort the running turn. (Its interrupt then flushes the held
+      // file from the other sender; that is the channel's ordinary
+      // last-message-wins, and it is visible to the sender who interrupted.)
+      //
+      // ACCEPTED GAP, same sender only: a message that cannot take a caption for
+      // a reason other than media of its own — a slash command the server's
+      // predicate refuses — queues rather than interrupts. Control commands never
+      // reach the interrupt path anyway (the server routes them to runSlash,
+      // off-chain), so the cost is a delayed start, never a lost message.
+      const follower = pending.senderId === msg.senderId ? AS_FOLLOWER : undefined;
+      this.dispatchNow(msg, undefined, follower);
       return;
     }
 
