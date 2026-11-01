@@ -32,7 +32,8 @@
  *     as their own (uncaptioned) turns, dispatched immediately behind the
  *     captioned one — queued, not interrupting (see `MediaCaptionDispatchOptions`).
  *   - A caption from a DIFFERENT sender is never merged (two people in a group
- *     sending independent messages) — the held attachment is flushed alone.
+ *     sending independent messages) — the held attachment is flushed alone,
+ *     and the arrival keeps its own interrupt rights (see `accept`).
  *   - A message that carries an ATTACHMENT OF ITS OWN never captures a held
  *     one: an attachment always ends the hold. Otherwise `first.media` would
  *     replace `msg.media` and the second file would vanish without a trace
@@ -60,6 +61,12 @@ export const DEFAULT_MEDIA_CAPTION_WINDOW_MS = 2_000;
  * is queued behind that turn (see ConversationBacklog), so a follower that
  * interrupted would discard the message the burst just delivered — which is
  * exactly how the typed question was lost when a file trail followed it.
+ *
+ * A follower is therefore only ever a message from the SAME publish batch as
+ * its head: the extra files of one multi-file send, or the tail of one held
+ * burst. A message that merely arrives while something is held is a separate
+ * action and keeps its normal rights — otherwise a message could lose the
+ * ability to interrupt just because it met a hold.
  */
 export interface MediaCaptionDispatchOptions {
   /**
@@ -198,12 +205,19 @@ export class MediaCaptionCoalescer {
       this.canCarryCaption(msg);
 
     if (!canCaption) {
-      // Nothing to merge: flush the held attachments in arrival order, then
-      // the message itself. Still ONE arrival, so only the head interrupts.
-      const batch = [...pending.messages, msg];
-      batch.forEach((item, index) => {
-        this.dispatchNow(item, undefined, index === 0 ? undefined : AS_FOLLOWER);
+      // Nothing to merge: flush the held attachments in arrival order, then the
+      // message itself. The held attachments are ONE delayed burst, so only
+      // their head interrupts — but `msg` is NOT part of that burst: it is here
+      // precisely because it could not join it, which means it came from a
+      // later publish (a voice note, a file of its own, a slash command) or, in
+      // a group, from a different person. It therefore keeps the channel's
+      // normal interrupt rules. Suppressing them made a named "stop" from one
+      // sender sit behind a turn it was meant to abort, merely because somebody
+      // else's file happened to be held.
+      pending.messages.forEach((held, index) => {
+        this.dispatchNow(held, undefined, index === 0 ? undefined : AS_FOLLOWER);
       });
+      this.dispatchNow(msg);
       return;
     }
 

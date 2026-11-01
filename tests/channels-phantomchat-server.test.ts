@@ -1692,6 +1692,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       otherMemberHexes: string[],
       text: string,
       groupId: string,
+      extra?: Record<string, unknown>,
     ) => void;
     stop: () => Promise<void>;
   } {
@@ -1738,12 +1739,14 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       otherMemberHexes: string[],
       text: string,
       groupId: string,
+      extra?: Record<string, unknown>,
     ) => {
       const payload = JSON.stringify({
         content: text,
         type: "text",
         id: `g-${++n}`,
         timestamp: Date.now(),
+        ...extra,
       });
       const { wraps } = wrapGroupMessage(
         senderSk,
@@ -2193,6 +2196,86 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await groupSleep(250);
     await srv.stop();
     expect(harness.invocations).toBe(1);
+  });
+
+  /**
+   * REGRESSION (#736 review at d5ca656). The media→caption coalescer holds a
+   * bare attachment for 2s, keyed on the CONVERSATION — so in a group one
+   * person's file can be held when another person's message arrives. That
+   * message then ends the hold, and at d5ca656 it was dispatched as a follower
+   * of the held burst (`interrupt: false`). Two people are not one arrival: a
+   * named "stop" from Andrew lost its right to abort the running turn merely
+   * because Kai's file happened to be in the window, so the stop sat behind a
+   * turn it was meant to kill. The follower mark belongs to the tail of one
+   * publish batch, never to an arrival that meets a hold.
+   */
+  test("interrupt scoping: a named message from another sender ends a held attachment and still interrupts", async () => {
+    const c = cast();
+    const held = encryptFileBytes(Buffer.from("held group png"));
+    const url = "https://blossom.test/held-group";
+    const originalFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      target: string | URL | Request,
+    ) =>
+      String(target) === url
+        ? new Response(held.ciphertext)
+        : new Response("nope", { status: 404 })) as unknown as typeof fetch;
+    const savedDataHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "data-home-held");
+
+    const harness = new GateHarness("fake");
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+
+    try {
+      // Lena is mid-turn...
+      srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "lena, research X", "HQ");
+      await groupSleep(200);
+      expect(harness.invocations).toBe(1);
+
+      // ...when Kai's bare file lands in the same group. It is HELD for its
+      // caption, so it reaches no handler at all yet.
+      srv.feedGroup(c.kaiSk, [c.lenaHex, c.andrewHex], "", "HQ", {
+        type: "image",
+        fileMetadata: {
+          url,
+          sha256: held.sha256Hex,
+          keyHex: held.keyHex,
+          ivHex: held.ivHex,
+          mimeType: "image/png",
+          mediaType: "image",
+          size: held.ciphertext.length,
+        },
+      });
+      await groupSleep(150);
+      expect(harness.invocations).toBe(1);
+      expect(harness.aborted).toBe(0);
+
+      // Andrew names Lena. THIS is the message that must interrupt.
+      srv.feedGroup(
+        c.andrewSk,
+        [c.lenaHex, c.kaiHex],
+        "lena, stop — do Z instead",
+        "HQ",
+      );
+      await groupSleep(300);
+
+      expect(harness.aborted).toBe(1);
+      expect(harness.invocations).toBe(2);
+    } finally {
+      harness.releaseAll();
+      await groupSleep(100);
+      await srv.stop();
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+      if (savedDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedDataHome;
+    }
   });
 
   test("interrupt scoping: handoff-then-unaddressed-follow-up must not kill the active turn", async () => {

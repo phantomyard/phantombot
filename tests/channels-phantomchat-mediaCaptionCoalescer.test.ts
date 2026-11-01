@@ -361,3 +361,134 @@ describe("media caption coalescing", () => {
     expect(coalescer.heldConversations).toBe(0);
   });
 });
+
+/**
+ * ONE ARRIVAL INTERRUPTS ONCE (#736 review at d5ca656).
+ *
+ * `interrupt: false` exists because an interrupt FLUSHES the queue, so a
+ * follower that interrupted would throw away the message its own arrival had
+ * just delivered. The mark must therefore cover exactly the messages of the
+ * SAME publish batch as the head — never a message that merely happened to
+ * arrive while something was held. Over-applying it is the opposite failure:
+ * a named "stop" that cannot abort the turn it was sent to stop.
+ */
+describe("one arrival interrupts once", () => {
+  /** A coalescer that records the dispatch options, not just the messages. */
+  function makeRecordingCoalescer(
+    opts: {
+      windowMs?: number;
+      canCarryCaption?: (m: ChannelMessage) => boolean;
+    } = {},
+  ) {
+    const out: {
+      msg: ChannelMessage;
+      interrupt: boolean | undefined;
+      also: string[] | undefined;
+    }[] = [];
+    const coalescer = new MediaCaptionCoalescer({
+      windowMs: opts.windowMs ?? 30,
+      canCarryCaption: opts.canCarryCaption,
+      dispatch: (m, also, dispatchOpts) =>
+        out.push({
+          msg: m,
+          interrupt: dispatchOpts?.interrupt,
+          also,
+        }),
+    });
+    return { coalescer, out };
+  }
+
+  const interrupts = (entry: { interrupt: boolean | undefined }): boolean =>
+    entry.interrupt !== false;
+
+  test("the merged message interrupts; the burst's extra files do not", () => {
+    const { coalescer, out } = makeRecordingCoalescer();
+    coalescer.accept(attachment({ media: { ...attachment().media!, sha256: "first" } }));
+    coalescer.accept(attachment({ media: { ...attachment().media!, sha256: "second" } }));
+    coalescer.accept(text("what about these?"));
+
+    expect(out).toHaveLength(2);
+    const [merged, extra] = out as [(typeof out)[0], (typeof out)[0]];
+    expect(merged.msg.text).toBe("what about these?");
+    expect(merged.msg.media?.sha256).toBe("first");
+    expect(extra.msg.media?.sha256).toBe("second");
+    expect(interrupts(merged)).toBe(true);
+    expect(extra.interrupt).toBe(false);
+  });
+
+  test("hold expiry: the burst head interrupts, its tail does not", async () => {
+    const { coalescer, out } = makeRecordingCoalescer({ windowMs: 20 });
+    coalescer.accept(attachment({ media: { ...attachment().media!, sha256: "first" } }));
+    coalescer.accept(attachment({ media: { ...attachment().media!, sha256: "second" } }));
+    expect(out).toHaveLength(0);
+
+    await sleep(60);
+
+    expect(out).toHaveLength(2);
+    expect(interrupts(out[0]!)).toBe(true);
+    // Without this, expiry is the same loss vector the merge path just fixed:
+    // the second file's interrupt would flush the first one out of the backlog.
+    expect(out[1]!.interrupt).toBe(false);
+  });
+
+  test("a held burst from one sender, expired, does not demote a later message", async () => {
+    const { coalescer, out } = makeRecordingCoalescer({ windowMs: 20 });
+    coalescer.accept(attachment());
+    await sleep(60);
+    expect(out).toHaveLength(1);
+    expect(interrupts(out[0]!)).toBe(true);
+  });
+
+  test("a message from a DIFFERENT sender ends the hold and keeps its interrupt rights", () => {
+    const { coalescer, out } = makeRecordingCoalescer();
+    // One person's file is held...
+    coalescer.accept(attachment({ senderId: OTHER_SENDER }));
+    // ...when somebody else sends a message that must abort a running turn.
+    coalescer.accept(text("stop — do Z instead"));
+
+    expect(out).toHaveLength(2);
+    expect(out[0]!.msg.media?.sha256).toBe("abc123"); // the held file still goes out
+    expect(out[1]!.msg.text).toBe("stop — do Z instead");
+    // Two people are two arrivals. Suppressing this interrupt made the stop wait
+    // behind the very turn it was meant to abort.
+    expect(interrupts(out[1]!)).toBe(true);
+  });
+
+  test("a same-sender message that cannot take the caption keeps its interrupt rights", () => {
+    const { coalescer, out } = makeRecordingCoalescer();
+    coalescer.accept(attachment());
+    // A voice note: it brings media of its own, so the hold cannot merge into
+    // it. It is a separate publish, not the tail of the burst.
+    coalescer.accept(
+      msg({
+        text: "lena, drop that and look at this",
+        media: {
+          kind: "voice",
+          url: "https://blossom.example/v",
+          sha256: "v",
+          keyHex: "00".repeat(32),
+          ivHex: "11".repeat(12),
+          mimeType: "audio/ogg",
+        },
+      }),
+    );
+
+    expect(out).toHaveLength(2);
+    expect(out[0]!.msg.media?.sha256).toBe("abc123");
+    expect(out[1]!.msg.text).toBe("lena, drop that and look at this");
+    expect(interrupts(out[1]!)).toBe(true);
+  });
+
+  test("a message the caller's predicate refuses keeps its interrupt rights", () => {
+    // The server narrows `canCarryCaption` to exclude control commands.
+    const { coalescer, out } = makeRecordingCoalescer({
+      canCarryCaption: (m) => !m.text.startsWith("/"),
+    });
+    coalescer.accept(attachment());
+    coalescer.accept(text("/stop"));
+
+    expect(out).toHaveLength(2);
+    expect(out[1]!.msg.text).toBe("/stop");
+    expect(interrupts(out[1]!)).toBe(true);
+  });
+});
