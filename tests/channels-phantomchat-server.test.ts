@@ -29,6 +29,7 @@ import {
   type RelayPool,
 } from "../src/channels/phantomchat/transport.ts";
 import {
+  isV2Event,
   unwrapNip17Message,
   unwrapV2,
   wrapGroupMessage,
@@ -45,7 +46,11 @@ function toolCall(title: string) {
 /** A harness that always replies with a fixed final text. */
 class ScriptedHarness implements Harness {
   invocations = 0;
+  /** Turns whose chunk stream ran to completion (i.e. the turn settled). */
+  completed = 0;
   lastRequest?: HarnessRequest;
+  /** Every request, in invocation order — survives the last-turn overwrite. */
+  requests: HarnessRequest[] = [];
   constructor(
     public readonly id: string,
     private readonly script: HarnessChunk[],
@@ -56,7 +61,9 @@ class ScriptedHarness implements Harness {
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
     this.invocations++;
     this.lastRequest = req;
+    this.requests.push(req);
     for (const c of this.script) yield c;
+    this.completed++;
   }
 }
 
@@ -1685,6 +1692,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       otherMemberHexes: string[],
       text: string,
       groupId: string,
+      extra?: Record<string, unknown>,
     ) => void;
     stop: () => Promise<void>;
   } {
@@ -1731,12 +1739,14 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       otherMemberHexes: string[],
       text: string,
       groupId: string,
+      extra?: Record<string, unknown>,
     ) => {
       const payload = JSON.stringify({
         content: text,
         type: "text",
         id: `g-${++n}`,
         timestamp: Date.now(),
+        ...extra,
       });
       const { wraps } = wrapGroupMessage(
         senderSk,
@@ -2186,6 +2196,86 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await groupSleep(250);
     await srv.stop();
     expect(harness.invocations).toBe(1);
+  });
+
+  /**
+   * REGRESSION (#736 review at d5ca656). The media→caption coalescer holds a
+   * bare attachment for 2s, keyed on the CONVERSATION — so in a group one
+   * person's file can be held when another person's message arrives. That
+   * message then ends the hold, and at d5ca656 it was dispatched as a follower
+   * of the held burst (`interrupt: false`). Two people are not one arrival: a
+   * named "stop" from Andrew lost its right to abort the running turn merely
+   * because Kai's file happened to be in the window, so the stop sat behind a
+   * turn it was meant to kill. The follower mark belongs to the tail of one
+   * publish batch, never to an arrival that meets a hold.
+   */
+  test("interrupt scoping: a named message from another sender ends a held attachment and still interrupts", async () => {
+    const c = cast();
+    const held = encryptFileBytes(Buffer.from("held group png"));
+    const url = "https://blossom.test/held-group";
+    const originalFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      target: string | URL | Request,
+    ) =>
+      String(target) === url
+        ? new Response(held.ciphertext)
+        : new Response("nope", { status: 404 })) as unknown as typeof fetch;
+    const savedDataHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "data-home-held");
+
+    const harness = new GateHarness("fake");
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+
+    try {
+      // Lena is mid-turn...
+      srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "lena, research X", "HQ");
+      await groupSleep(200);
+      expect(harness.invocations).toBe(1);
+
+      // ...when Kai's bare file lands in the same group. It is HELD for its
+      // caption, so it reaches no handler at all yet.
+      srv.feedGroup(c.kaiSk, [c.lenaHex, c.andrewHex], "", "HQ", {
+        type: "image",
+        fileMetadata: {
+          url,
+          sha256: held.sha256Hex,
+          keyHex: held.keyHex,
+          ivHex: held.ivHex,
+          mimeType: "image/png",
+          mediaType: "image",
+          size: held.ciphertext.length,
+        },
+      });
+      await groupSleep(150);
+      expect(harness.invocations).toBe(1);
+      expect(harness.aborted).toBe(0);
+
+      // Andrew names Lena. THIS is the message that must interrupt.
+      srv.feedGroup(
+        c.andrewSk,
+        [c.lenaHex, c.kaiHex],
+        "lena, stop — do Z instead",
+        "HQ",
+      );
+      await groupSleep(300);
+
+      expect(harness.aborted).toBe(1);
+      expect(harness.invocations).toBe(2);
+    } finally {
+      harness.releaseAll();
+      await groupSleep(100);
+      await srv.stop();
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+      if (savedDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedDataHome;
+    }
   });
 
   test("interrupt scoping: handoff-then-unaddressed-follow-up must not kill the active turn", async () => {
@@ -3344,4 +3434,583 @@ describe("phantomchat per-conversation concurrency", () => {
     ]);
     expect(harness.finishedWhenStarted[1]).toBe(1);
   });
+});
+
+/**
+ * MEDIA → CAPTION COALESCING (receive side).
+ *
+ * A phantomchat client that publishes the attachment and the typed text as TWO
+ * events used to produce TWO turns: the phantom answered the bare attachment
+ * with no context, then read the question. These drive the real path (inbound
+ * image envelope → Blossom fetch + decrypt → turn) and pin the fix: the
+ * attachment is held briefly and arrives carrying the text as its caption, so
+ * the turn sees file AND instruction together.
+ */
+describe("phantomchat media → caption coalescing", () => {
+  const ATTACHMENT_URL = "https://blossom.test/attachment";
+  const originalFetch = globalThis.fetch;
+  const savedDataHome = process.env.XDG_DATA_HOME;
+  // Encrypt ONCE: the envelope advertises this ciphertext's sha256 and the
+  // stub serves these exact bytes, so the fetch passes its integrity check.
+  const attachment = encryptFileBytes(Buffer.from("fake png bytes"));
+  // A SECOND, distinguishable attachment: the failure this guards against is
+  // one file's media overwriting the other's, so both must be identifiable.
+  const ATTACHMENT_URL_B = "https://blossom.test/attachment-b";
+  const attachmentB = encryptFileBytes(Buffer.from("fake second png bytes"));
+  const VOICE_URL = "https://blossom.test/voice";
+
+  beforeEach(() => {
+    // The attachment lands in the per-chat inbox under XDG_DATA_HOME — keep it
+    // in the test tmpdir, never the real home.
+    process.env.XDG_DATA_HOME = join(workdir, "data-home");
+  });
+  afterEach(() => {
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    if (savedDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = savedDataHome;
+  });
+
+  /** Serve the encrypted attachment; anything else 404s (no server probing). */
+  function stubBlossom(): void {
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+    ) => {
+      if (String(url) === ATTACHMENT_URL) {
+        return new Response(attachment.ciphertext);
+      }
+      if (String(url) === ATTACHMENT_URL_B) {
+        return new Response(attachmentB.ciphertext);
+      }
+      return new Response("nope", { status: 404 });
+    }) as unknown as typeof fetch;
+  }
+
+  /** The DM wire shape the PWA sends for an attachment: metadata as a JSON string. */
+  function imageEnvelope(
+    id: string,
+    opts: { url?: string; att?: typeof attachment; caption?: string } = {},
+  ): unknown {
+    const url = opts.url ?? ATTACHMENT_URL;
+    const att = opts.att ?? attachment;
+    return {
+      id,
+      type: "image",
+      content: JSON.stringify({
+        url,
+        sha256: att.sha256Hex,
+        key: att.keyHex,
+        iv: att.ivHex,
+        mimeType: "image/png",
+        mediaType: "image",
+        size: att.ciphertext.length,
+        ...(opts.caption ? { caption: opts.caption } : {}),
+      }),
+      timestamp: Date.now(),
+    };
+  }
+
+  /** The DM wire shape the PWA sends for a voice note: empty body, audio metadata. */
+  function voiceEnvelope(id: string): unknown {
+    return {
+      id,
+      type: "voice",
+      content: JSON.stringify({
+        url: VOICE_URL,
+        sha256: "0".repeat(64),
+        key: "00".repeat(32),
+        iv: "11".repeat(12),
+        mimeType: "audio/ogg",
+        mediaType: "voice",
+        duration: 3,
+        size: 4_096,
+      }),
+      timestamp: Date.now(),
+    };
+  }
+
+  function textEnvelope(id: string, content: string): unknown {
+    return { id, type: "text", content, timestamp: Date.now() };
+  }
+
+  /**
+   * Feed a sequence of DM envelopes through the real server and return how many
+   * turns ran plus what each one was asked. Waits for the FIRST turn to SETTLE
+   * (not merely to start): aborting mid-download would otherwise kill the
+   * attachment fetch and let a teardown turn overwrite what we assert on.
+   */
+  /**
+   * Every plaintext body published back to the sender — replies and notices.
+   * Replies go out as v2 wraps and legacy notices as NIP-17, so both readers
+   * are tried; a wrap we cannot read (self-copy, receipt, group member) is
+   * simply skipped.
+   */
+  async function publishedTexts(
+    pool: FakePool,
+    recipientSk: Uint8Array,
+  ): Promise<string[]> {
+    const out: string[] = [];
+    for (const event of pool.published) {
+      try {
+        const rumor = isV2Event(event)
+          ? await unwrapV2(event, recipientSk)
+          : unwrapNip17Message(event, recipientSk);
+        let body: string = rumor.content;
+        try {
+          const parsed = JSON.parse(body) as { content?: unknown };
+          if (parsed && typeof parsed.content === "string") body = parsed.content;
+        } catch {
+          // NIP-17-plaintext / v2 body — use it as it stands.
+        }
+        out.push(body);
+      } catch {
+        // Not ours to read — ignore.
+      }
+    }
+    return out;
+  }
+
+  async function runSequence(opts: {
+    envelopes: unknown[];
+    waitForTurnMs?: number;
+    /** How many turns must settle before the sequence is considered done. */
+    waitForTurns?: number;
+    /** Wait until a published body matches (used for notices, not turns). */
+    waitForPublished?: RegExp;
+  }): Promise<{
+    invocations: number;
+    userMessages: string[];
+    receipts: string[];
+    publishedTexts: string[];
+  }> {
+    stubBlossom();
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    // Spy on receipts only. A merged message keeps the CAPTION's id, so the
+    // absorbed attachment's id has to reach the transport some other way —
+    // that is exactly what these assertions watch.
+    const receipts: string[] = [];
+    const spyTransport = Object.create(transport) as SimplePoolPhantomchatTransport;
+    spyTransport.sendDeliveryReceipt = async (_to: string, id: string) => {
+      receipts.push(id);
+    };
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport: spyTransport,
+    });
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    for (const envelope of opts.envelopes) {
+      const { wraps } = wrapNip17Message(
+        senderSk,
+        botHex,
+        JSON.stringify(envelope),
+      );
+      pool.feed(wraps[0] as NTNostrEvent);
+    }
+
+    await waitUntil(
+      () => harness.completed >= (opts.waitForTurns ?? 1),
+      "the expected turn(s) to settle",
+      opts.waitForTurnMs ?? 4_000,
+    );
+
+    if (opts.waitForPublished) {
+      const pattern = opts.waitForPublished;
+      await waitUntil(
+        async () =>
+          (await publishedTexts(pool, senderSk)).some((t) => pattern.test(t)),
+        "the expected notice to be published",
+        opts.waitForTurnMs ?? 4_000,
+      );
+    }
+
+    ac.abort();
+    await serverPromise;
+    return {
+      invocations: harness.invocations,
+      receipts,
+      publishedTexts: await publishedTexts(pool, senderSk),
+      userMessages: harness.requests.map((r) => r.userMessage),
+    };
+  }
+
+  test("an attachment followed by typed text runs ONE turn carrying both", async () => {
+    const { invocations, userMessages } = await runSequence({
+      envelopes: [imageEnvelope("img-1"), textEnvelope("txt-1", "what is this?")],
+    });
+
+    expect(invocations).toBe(1);
+    expect(userMessages[0]).toContain("what is this?");
+    expect(userMessages[0]).toContain("[attached: ");
+    // The text is the caption: it comes BEFORE the attachment marker.
+    expect(userMessages[0]!.indexOf("what is this?")).toBeLessThan(
+      userMessages[0]!.indexOf("[attached: "),
+    );
+  });
+
+  test("an attachment with no following text still runs its own turn (window expiry)", async () => {
+    const { invocations, userMessages } = await runSequence({
+      envelopes: [imageEnvelope("img-2")],
+      // Past the 2s hold window: the attachment is dispatched on expiry.
+      waitForTurnMs: 6_000,
+    });
+
+    expect(invocations).toBe(1);
+    expect(userMessages[0]).toContain("[attached: ");
+    expect(userMessages[0]).not.toContain("what is this?");
+  }, 15_000);
+
+  /**
+   * REGRESSION (#736 review, blockers 1 and 2). The merge path dispatched
+   * `{...msg, media: first.media}`, so a message that brought its OWN attachment
+   * lost that attachment: `first.media` overwrote it and only the held file
+   * reached the turn. A photo followed by a voice note — or a second image with
+   * its own caption — inside the 2s window is ordinary usage.
+   */
+  test("an attachment followed by a captioned image runs TWO turns; neither file is swallowed", async () => {
+    const { invocations, userMessages } = await runSequence({
+      envelopes: [
+        imageEnvelope("img-a"),
+        imageEnvelope("img-b", {
+          url: ATTACHMENT_URL_B,
+          att: attachmentB,
+          caption: "see this",
+        }),
+      ],
+      waitForTurns: 2,
+      waitForTurnMs: 8_000,
+    });
+
+    expect(invocations).toBe(2);
+    // Turn 1 is the held attachment, alone, exactly as before the PR.
+    expect(userMessages[0]).toContain("[attached: ");
+    expect(userMessages[0]).not.toContain("see this");
+    // Turn 2 is the second file carrying its own caption — a DIFFERENT file.
+    expect(userMessages[1]).toContain("see this");
+    expect(userMessages[1]).toContain("[attached: ");
+    const attachedPaths = userMessages.map(
+      (m) => /\[attached: ([^\]]+)\]/.exec(m)?.[1] ?? "",
+    );
+    expect(attachedPaths[0]).not.toBe("");
+    expect(attachedPaths[1]).not.toBe("");
+    expect(attachedPaths[0]).not.toBe(attachedPaths[1]);
+  }, 20_000);
+
+  test("an attachment followed by a voice note still processes the voice note", async () => {
+    const { invocations, userMessages, publishedTexts } = await runSequence({
+      envelopes: [imageEnvelope("img-voice"), voiceEnvelope("voice-1")],
+      waitForPublished: /voice transcription is disabled|voice note/i,
+      waitForTurnMs: 8_000,
+    });
+
+    // Only the image runs a turn: a voice note is never a caption candidate.
+    expect(invocations).toBe(1);
+    expect(userMessages[0]).toContain("[attached: ");
+    expect(userMessages[0]).not.toContain("see this");
+    // And it is not lost either — it reaches the media pipeline on its own.
+    // STT is off in this config, so it surfaces as the standard notice.
+    expect(
+      publishedTexts.some((t) => /voice transcription is disabled/i.test(t)),
+    ).toBe(true);
+  }, 20_000);
+
+  /**
+   * The receipt loop runs AFTER the auth gate, and it also receipts ids the
+   * merge absorbed. Both halves of that sentence are load-bearing: moving the
+   * block above the gate would de-stealth a dropped stranger (a receipt is an
+   * observable ack), and the absorbed id comes from a different message than
+   * the one being handled. This case is what makes the claim executable.
+   */
+  test("a gated-out stranger is never receipted — not even for an absorbed attachment", async () => {
+    stubBlossom();
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const receipts: string[] = [];
+    const spyTransport = Object.create(transport) as SimplePoolPhantomchatTransport;
+    spyTransport.sendDeliveryReceipt = async (_to: string, id: string) => {
+      receipts.push(id);
+    };
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport: spyTransport,
+    });
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      // SOMEONE else is allow-listed: this sender is the stranger to drop.
+      allowedHex: [getPublicKey(generateSecretKey())],
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    for (const envelope of [
+      imageEnvelope("img-stranger"),
+      textEnvelope("txt-stranger", "hello?"),
+    ]) {
+      const { wraps } = wrapNip17Message(senderSk, botHex, JSON.stringify(envelope));
+      pool.feed(wraps[0] as NTNostrEvent);
+    }
+
+    // Long enough for the hold to merge and for a wrongly-placed receipt to fire.
+    await new Promise((r) => setTimeout(r, 300));
+    ac.abort();
+    await serverPromise;
+
+    expect(harness.invocations).toBe(0);
+    expect(receipts).toEqual([]);
+  });
+
+  test("a merged attachment is still acknowledged with a delivery receipt", async () => {
+    const { receipts } = await runSequence({
+      envelopes: [
+        imageEnvelope("img-receipt"),
+        textEnvelope("txt-receipt", "what is this?"),
+      ],
+    });
+
+    // The caption's id rides on the merged message; the attachment's would
+    // otherwise never be acked, so the sender's retry layer would resend it.
+    expect(receipts).toContain("txt-receipt");
+    expect(receipts).toContain("img-receipt");
+  });
+
+  /**
+   * A harness whose FIRST turn parks until it is aborted and whose later turns
+   * answer normally. Reproduces "a turn is already running" — the precondition
+   * for the interrupt/backlog path — while keeping the later turns observable.
+   */
+  class ParkingFirstHarness implements Harness {
+    invocations = 0;
+    requests: HarnessRequest[] = [];
+    constructor(public readonly id: string) {}
+    async available(): Promise<boolean> {
+      return true;
+    }
+    async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+      this.invocations++;
+      this.requests.push(req);
+      if (this.invocations === 1) {
+        await new Promise<void>((resolve) => {
+          if (req.signal?.aborted === true) return resolve();
+          req.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        // Interrupted: no `done`, nothing to finalize.
+        return;
+      }
+      yield { type: "done", finalText: "ok" };
+    }
+  }
+
+  /**
+   * REGRESSION (#736 review at 5a636de). With a turn RUNNING, a burst of two
+   * files plus the question that explained them ran only the extra file: the
+   * merged message was enqueued first, then the extra file's enqueue found an
+   * active turn (the abort had not settled), flushed the queue and discarded
+   * the merged message. The phantom got a bare image and the question was gone
+   * without a trace — the exact failure this PR exists to remove. A burst is
+   * ONE arrival, so it interrupts once and its tail queues.
+   */
+  test("a burst sent while a turn is running keeps its question", async () => {
+    stubBlossom();
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ParkingFirstHarness("fake");
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    const feed = (envelope: unknown): void => {
+      const { wraps } = wrapNip17Message(
+        senderSk,
+        botHex,
+        JSON.stringify(envelope),
+      );
+      pool.feed(wraps[0] as NTNostrEvent);
+    };
+
+    // Turn 1 starts and parks: everything below arrives while it is ACTIVE.
+    feed(textEnvelope("txt-long", "start the long job"));
+    await waitUntil(
+      () => harness.invocations === 1,
+      "the first turn to start",
+      4_000,
+    );
+
+    // Two files and the question, inside the 2s hold window.
+    feed(imageEnvelope("img-burst-a"));
+    feed(
+      imageEnvelope("img-burst-b", { url: ATTACHMENT_URL_B, att: attachmentB }),
+    );
+    feed(textEnvelope("txt-question", "what about these?"));
+
+    await waitUntil(
+      () => harness.invocations >= 2,
+      "the merged turn to run",
+      6_000,
+    );
+    const merged = harness.requests[1]!.userMessage;
+
+    ac.abort();
+    await serverPromise;
+
+    // Turn 2 is the merged file + question, NOT a bare attachment.
+    expect(merged).toContain("what about these?");
+    expect(merged).toContain("[attached: ");
+  }, 20_000);
+
+  test("text BEFORE the attachment is not merged backwards", async () => {
+    const { invocations, userMessages } = await runSequence({
+      envelopes: [textEnvelope("txt-2", "sending you a picture"), imageEnvelope("img-3")],
+      waitForTurnMs: 6_000,
+    });
+
+    // The text runs immediately; the attachment waits out its own window.
+    expect(invocations).toBeGreaterThanOrEqual(1);
+    expect(userMessages[0]).toBe("sending you a picture");
+  }, 15_000);
+
+  /**
+   * The receipt for an absorbed attachment is sent behind the SAME auth gate as
+   * the message itself. Without this case that claim is only a comment on the
+   * loop: nothing would go red if a refactor moved it above the gate.
+   *
+   * The allowlisted sender in the same test is what makes the stranger's empty
+   * result meaningful — it proves the merge and the receipt path both ran.
+   */
+  test("a gated-out sender's merged attachment is not receipted", async () => {
+    stubBlossom();
+    const strangerSk = generateSecretKey();
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const receipts: string[] = [];
+    const spyTransport = Object.create(
+      transport,
+    ) as SimplePoolPhantomchatTransport;
+    spyTransport.sendDeliveryReceipt = async (_to: string, id: string) => {
+      receipts.push(id);
+    };
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport: spyTransport,
+    });
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    const feed = (sk: Uint8Array, envelope: unknown): void => {
+      const { wraps } = wrapNip17Message(
+        sk,
+        botHex,
+        JSON.stringify(envelope),
+      );
+      pool.feed(wraps[0] as NTNostrEvent);
+    };
+
+    // Stranger first: merges, then the gate drops it — nothing goes back.
+    feed(strangerSk, imageEnvelope("img-stranger"));
+    feed(strangerSk, textEnvelope("txt-stranger", "what is this?"));
+    // Allowlisted sender, same shape: merged AND receipted.
+    feed(senderSk, imageEnvelope("img-allowed"));
+    feed(senderSk, textEnvelope("txt-allowed", "and this?"));
+
+    await waitUntil(
+      () => harness.completed >= 1,
+      "the allowlisted turn to settle",
+      6_000,
+    );
+    ac.abort();
+    await serverPromise;
+
+    expect(receipts).toContain("txt-allowed");
+    expect(receipts).toContain("img-allowed");
+    expect(receipts).not.toContain("txt-stranger");
+    expect(receipts).not.toContain("img-stranger");
+  }, 20_000);
 });

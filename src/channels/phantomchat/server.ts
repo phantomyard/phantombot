@@ -90,6 +90,10 @@ import { warmSymmetricKeyCache } from "../../lib/nostrCrypto.ts";
 import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
 import { inboxDir } from "../telegram/parse.ts";
 import { renderRelayMessage } from "./relayEnvelope.ts";
+import {
+  MediaCaptionCoalescer,
+  type MediaCaptionDispatchOptions,
+} from "./mediaCaptionCoalescer.ts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -537,7 +541,10 @@ export async function runPhantomchatServer(
     return "trusted";
   };
 
-  const handle = async (msg: ChannelMessage): Promise<void> => {
+  const handle = async (
+    msg: ChannelMessage,
+    alsoReceipt?: string[],
+  ): Promise<void> => {
     const senderHex = msg.senderId;
 
     const tier = authorize(msg);
@@ -646,8 +653,19 @@ export async function runPhantomchatServer(
     // — closing the "first message ghosts, second works" loop. DM only: group
     // delivery is tracked per-member on the client via a separate mechanism.
     // Fire-and-forget BEFORE the (possibly slow) turn so the tick is prompt.
-    if (!msg.groupId && msg.messageId) {
-      void transport.sendDeliveryReceipt(senderHex, msg.messageId);
+    //
+    // `alsoReceipt` carries the ids of messages the coalescer ABSORBED into this
+    // one (a held attachment whose only trace on the merged message is its
+    // media). They belong to the same sender and the same gate, so they are
+    // acknowledged here rather than lost — an unacked file is one the remote's
+    // retry layer keeps re-publishing.
+    if (!msg.groupId) {
+      const receiptIds = new Set<string>();
+      if (msg.messageId) receiptIds.add(msg.messageId);
+      for (const id of alsoReceipt ?? []) receiptIds.add(id);
+      for (const id of receiptIds) {
+        void transport.sendDeliveryReceipt(senderHex, id);
+      }
     }
 
     // Route a short user-facing notice to the SAME place a reply would go: into
@@ -1429,7 +1447,11 @@ export async function runPhantomchatServer(
   // last promise. Keyed on conversationId so a group turn and a DM turn from
   // the same person run in parallel (which is the point of per-conversation
   // chains); senderId would serialize them behind each other.
-  const enqueue = (msg: ChannelMessage): void => {
+  const enqueue = (
+    msg: ChannelMessage,
+    alsoReceipt?: string[],
+    opts?: MediaCaptionDispatchOptions,
+  ): void => {
     const key = msg.conversationId;
 
     // INTERRUPT (#301): a new ordinary message arriving while a turn is running
@@ -1438,6 +1460,12 @@ export async function runPhantomchatServer(
     // through instructions the user has already superseded. Silent by design:
     // only `/stop` tells the user what it threw away. Gated on an active turn
     // so that a burst of messages sent while idle is still answered in full.
+    //
+    // ONE ARRIVAL, ONE INTERRUPT: the coalescer splits a single user action into
+    // several messages (a held attachment plus its text, then the burst's extra
+    // files). Only the first of them may interrupt, hence `opts.interrupt` — an
+    // interrupt FLUSHES the queue, so a follower interrupting would throw away
+    // the very message the burst just delivered.
     //
     // GROUP SCOPING: in a multi-bot group every bot's instance sees every
     // message over the shared relay, so an unscoped interrupt lets a message
@@ -1462,7 +1490,7 @@ export async function runPhantomchatServer(
     // lastAddressed/buffer mutation; handle() re-decides authoritatively when
     // the message actually runs. A cold profile cache degrades to the old
     // behaviour (interrupt fires), never to a lost interrupt.
-    let interrupt = !isBot(msg.senderId);
+    let interrupt = opts?.interrupt !== false && !isBot(msg.senderId);
     if (interrupt && msg.groupId) {
       const memberHexes = msg.groupMemberHexes ?? [];
       const roster = buildRoster(memberHexes);
@@ -1498,7 +1526,7 @@ export async function runPhantomchatServer(
       .then(async () => {
         // Superseded while queued — evaporate without running.
         if (!backlog.claim(msg.conversationId, epoch)) return;
-        await handle(msg);
+        await handle(msg, alsoReceipt);
       });
     chains.set(key, next);
     inFlight.add(next);
@@ -1520,11 +1548,15 @@ export async function runPhantomchatServer(
     throw new Error("phantomchat channel does not implement listen()");
   }
 
-  // Drive the inbound stream. In production listen() runs until the signal
-  // aborts. Under oneShot, tests feed a fixed set of gift-wraps and then abort
-  // the signal; listen()'s loop drains its queue and completes, so this
-  // for-await ends naturally and we fall through to draining inFlight.
-  for await (const msg of channel.listen(input.signal)) {
+  // Route ONE inbound message to its handler: a reaction turn, an inline slash
+  // command, or a normal turn on the per-conversation chain. Extracted from the
+  // listen() loop so the media→caption coalescer below can dispatch a message it
+  // has been holding (see mediaCaptionCoalescer.ts).
+  const route = (
+    msg: ChannelMessage,
+    alsoReceipt?: string[],
+    opts?: MediaCaptionDispatchOptions,
+  ): void => {
     if (msg.reaction) {
       // EMOJI REACTION (wake-but-silent). Runs off the per-conversation chain — a
       // reaction is rare, low-stakes context, so it neither interrupts nor
@@ -1534,7 +1566,7 @@ export async function runPhantomchatServer(
       // principal may run it. A non-allowed reactor is dropped silently.
       // Trusted-only: a reaction turn writes memory (the capture) and takes no
       // screened input, so a relay bridge never gets one either.
-      if (authorize(msg) !== "trusted") continue;
+      if (authorize(msg) !== "trusted") return;
       const reaction = msg.reaction;
       const conversationKey = `phantomchat:${reaction.conversationId}`;
       const targetText = recentOutbound.lookup(
@@ -1588,9 +1620,47 @@ export async function runPhantomchatServer(
       inFlight.add(p);
       void p.finally(() => inFlight.delete(p));
     } else {
-      enqueue(msg);
+      enqueue(msg, alsoReceipt, opts);
     }
+  };
+
+  // ===================== MEDIA → CAPTION COALESCER =====================
+  // A client that publishes an attachment and its typed text as TWO events
+  // delivers a media-only message followed by the sentence that explains it,
+  // and the server runs a turn per message — so the phantom answers the
+  // attachment with no idea what was asked, then reads the question. Hold a
+  // bare attachment for a short window and merge the text into it when that
+  // text lands, so the attachment arrives carrying its caption — the wire shape
+  // every client already understands. On expiry the attachment is dispatched
+  // alone, exactly as before. See mediaCaptionCoalescer.ts for the contract.
+  const coalescer = new MediaCaptionCoalescer({
+    dispatch: (msg, alsoReceipt, opts) => route(msg, alsoReceipt, opts),
+    // A slash command is handled by runSlash, which never runs a turn, so it
+    // cannot carry a caption: a control command must not absorb an attachment.
+    // The media and non-empty-text clauses repeat the class default rather than
+    // relying on it: this override REPLACES that predicate, and `isControlCommand`
+    // is false for every media message, so leaving them out would make each
+    // incoming attachment a caption candidate. The coalescer also guards the
+    // media case itself (belt and braces — the failure mode is silent data loss).
+    canCarryCaption: (m) =>
+      m.media === undefined && m.text.trim().length > 0 && !isControlCommand(m),
+  });
+
+  // Drive the inbound stream. In production listen() runs until the signal
+  // aborts. Under oneShot, tests feed a fixed set of gift-wraps and then abort
+  // the signal; listen()'s loop drains its queue and completes, so this
+  // for-await ends naturally and we fall through to draining inFlight.
+  for await (const msg of channel.listen(input.signal)) {
+    coalescer.accept(msg);
   }
+
+  // Whatever is still waiting for a caption goes out as-is: a hold must never
+  // swallow a message at shutdown or at the end of a oneShot drain. If the
+  // signal is already aborted the process is tearing down, so dispatching would
+  // only start a turn that cannot finish (and would download nothing) — drain
+  // the hold instead of failing loudly.
+  if (input.signal?.aborted !== true) coalescer.flushAll();
+  else coalescer.discardAll();
 
   // Drain in-flight turns so callers (and tests) can assert on what was sent
   // without racing the workers.
