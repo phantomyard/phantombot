@@ -3733,6 +3733,113 @@ describe("phantomchat media → caption coalescing", () => {
     expect(receipts).toContain("img-receipt");
   });
 
+  /**
+   * A harness whose FIRST turn parks until it is aborted and whose later turns
+   * answer normally. Reproduces "a turn is already running" — the precondition
+   * for the interrupt/backlog path — while keeping the later turns observable.
+   */
+  class ParkingFirstHarness implements Harness {
+    invocations = 0;
+    requests: HarnessRequest[] = [];
+    constructor(public readonly id: string) {}
+    async available(): Promise<boolean> {
+      return true;
+    }
+    async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+      this.invocations++;
+      this.requests.push(req);
+      if (this.invocations === 1) {
+        await new Promise<void>((resolve) => {
+          if (req.signal?.aborted === true) return resolve();
+          req.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        // Interrupted: no `done`, nothing to finalize.
+        return;
+      }
+      yield { type: "done", finalText: "ok" };
+    }
+  }
+
+  /**
+   * REGRESSION (#736 review at 5a636de). With a turn RUNNING, a burst of two
+   * files plus the question that explained them ran only the extra file: the
+   * merged message was enqueued first, then the extra file's enqueue found an
+   * active turn (the abort had not settled), flushed the queue and discarded
+   * the merged message. The phantom got a bare image and the question was gone
+   * without a trace — the exact failure this PR exists to remove. A burst is
+   * ONE arrival, so it interrupts once and its tail queues.
+   */
+  test("a burst sent while a turn is running keeps its question", async () => {
+    stubBlossom();
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ParkingFirstHarness("fake");
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    const feed = (envelope: unknown): void => {
+      const { wraps } = wrapNip17Message(
+        senderSk,
+        botHex,
+        JSON.stringify(envelope),
+      );
+      pool.feed(wraps[0] as NTNostrEvent);
+    };
+
+    // Turn 1 starts and parks: everything below arrives while it is ACTIVE.
+    feed(textEnvelope("txt-long", "start the long job"));
+    await waitUntil(
+      () => harness.invocations === 1,
+      "the first turn to start",
+      4_000,
+    );
+
+    // Two files and the question, inside the 2s hold window.
+    feed(imageEnvelope("img-burst-a"));
+    feed(
+      imageEnvelope("img-burst-b", { url: ATTACHMENT_URL_B, att: attachmentB }),
+    );
+    feed(textEnvelope("txt-question", "what about these?"));
+
+    await waitUntil(
+      () => harness.invocations >= 2,
+      "the merged turn to run",
+      6_000,
+    );
+    const merged = harness.requests[1]!.userMessage;
+
+    ac.abort();
+    await serverPromise;
+
+    // Turn 2 is the merged file + question, NOT a bare attachment.
+    expect(merged).toContain("what about these?");
+    expect(merged).toContain("[attached: ");
+  }, 20_000);
+
   test("text BEFORE the attachment is not merged backwards", async () => {
     const { invocations, userMessages } = await runSequence({
       envelopes: [textEnvelope("txt-2", "sending you a picture"), imageEnvelope("img-3")],
@@ -3743,4 +3850,84 @@ describe("phantomchat media → caption coalescing", () => {
     expect(invocations).toBeGreaterThanOrEqual(1);
     expect(userMessages[0]).toBe("sending you a picture");
   }, 15_000);
+
+  /**
+   * The receipt for an absorbed attachment is sent behind the SAME auth gate as
+   * the message itself. Without this case that claim is only a comment on the
+   * loop: nothing would go red if a refactor moved it above the gate.
+   *
+   * The allowlisted sender in the same test is what makes the stranger's empty
+   * result meaningful — it proves the merge and the receipt path both ran.
+   */
+  test("a gated-out sender's merged attachment is not receipted", async () => {
+    stubBlossom();
+    const strangerSk = generateSecretKey();
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const receipts: string[] = [];
+    const spyTransport = Object.create(
+      transport,
+    ) as SimplePoolPhantomchatTransport;
+    spyTransport.sendDeliveryReceipt = async (_to: string, id: string) => {
+      receipts.push(id);
+    };
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport: spyTransport,
+    });
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    const feed = (sk: Uint8Array, envelope: unknown): void => {
+      const { wraps } = wrapNip17Message(
+        sk,
+        botHex,
+        JSON.stringify(envelope),
+      );
+      pool.feed(wraps[0] as NTNostrEvent);
+    };
+
+    // Stranger first: merges, then the gate drops it — nothing goes back.
+    feed(strangerSk, imageEnvelope("img-stranger"));
+    feed(strangerSk, textEnvelope("txt-stranger", "what is this?"));
+    // Allowlisted sender, same shape: merged AND receipted.
+    feed(senderSk, imageEnvelope("img-allowed"));
+    feed(senderSk, textEnvelope("txt-allowed", "and this?"));
+
+    await waitUntil(
+      () => harness.completed >= 1,
+      "the allowlisted turn to settle",
+      6_000,
+    );
+    ac.abort();
+    await serverPromise;
+
+    expect(receipts).toContain("txt-allowed");
+    expect(receipts).toContain("img-allowed");
+    expect(receipts).not.toContain("txt-stranger");
+    expect(receipts).not.toContain("img-stranger");
+  }, 20_000);
 });

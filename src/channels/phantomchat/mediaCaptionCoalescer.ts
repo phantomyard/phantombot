@@ -30,7 +30,7 @@
  *   - Only the FIRST attachment of a burst is captioned. `ChannelMessage`
  *     carries a single `media`, so a multi-file send still runs its extra files
  *     as their own (uncaptioned) turns, dispatched immediately behind the
- *     captioned one.
+ *     captioned one — queued, not interrupting (see `MediaCaptionDispatchOptions`).
  *   - A caption from a DIFFERENT sender is never merged (two people in a group
  *     sending independent messages) — the held attachment is flushed alone.
  *   - A message that carries an ATTACHMENT OF ITS OWN never captures a held
@@ -50,6 +50,29 @@ import type { ChannelMessage } from "../core/types.ts";
  */
 export const DEFAULT_MEDIA_CAPTION_WINDOW_MS = 2_000;
 
+/**
+ * Per-dispatch instructions.
+ *
+ * ONE USER ACTION CAN PRODUCE SEVERAL MESSAGES. A burst of files, or a held
+ * attachment plus the text that ends its hold, is a single arrival, and the
+ * messages it produced are that arrival's parts. Only the FIRST of them may
+ * interrupt a turn that is already running: interrupting also flushes whatever
+ * is queued behind that turn (see ConversationBacklog), so a follower that
+ * interrupted would discard the message the burst just delivered — which is
+ * exactly how the typed question was lost when a file trail followed it.
+ */
+export interface MediaCaptionDispatchOptions {
+  /**
+   * Set `false` for every message after the first of one arrival, so it QUEUES
+   * behind the turn the burst started instead of superseding it. Omitted on
+   * the first, where the channel's normal interrupt rules apply.
+   */
+  interrupt?: boolean;
+}
+
+/** Shared instance for every message after the first of one arrival. */
+const AS_FOLLOWER: MediaCaptionDispatchOptions = { interrupt: false };
+
 export interface MediaCaptionCoalescerOptions {
   /** Override the hold window (milliseconds). Defaults to the constant above. */
   windowMs?: number;
@@ -62,7 +85,11 @@ export interface MediaCaptionCoalescerOptions {
    * remote's delivery tracker would resend it. The server receipts each id
    * behind the same auth gate it applies to the message itself.
    */
-  dispatch: (msg: ChannelMessage, alsoReceipt?: string[]) => void;
+  dispatch: (
+    msg: ChannelMessage,
+    alsoReceipt?: string[],
+    opts?: MediaCaptionDispatchOptions,
+  ) => void;
   /**
    * Whether `msg` can carry a held attachment as its caption. Defaults to "any
    * message with text of its own and no media". The server narrows this to
@@ -100,6 +127,7 @@ export class MediaCaptionCoalescer {
   private readonly dispatchNow: (
     msg: ChannelMessage,
     alsoReceipt?: string[],
+    opts?: MediaCaptionDispatchOptions,
   ) => void;
   private readonly canCarryCaption: (msg: ChannelMessage) => boolean;
   private readonly held = new Map<string, Held>();
@@ -171,9 +199,11 @@ export class MediaCaptionCoalescer {
 
     if (!canCaption) {
       // Nothing to merge: flush the held attachments in arrival order, then
-      // the message itself.
-      for (const held of pending.messages) this.dispatchNow(held);
-      this.dispatchNow(msg);
+      // the message itself. Still ONE arrival, so only the head interrupts.
+      const batch = [...pending.messages, msg];
+      batch.forEach((item, index) => {
+        this.dispatchNow(item, undefined, index === 0 ? undefined : AS_FOLLOWER);
+      });
       return;
     }
 
@@ -186,8 +216,11 @@ export class MediaCaptionCoalescer {
         : undefined;
     this.dispatchNow({ ...msg, media: first.media }, alsoReceipt);
     // Extra files from the same burst keep today's behaviour — their own
-    // (uncaptioned) turns, queued behind the captioned one.
-    for (const extra of rest) this.dispatchNow(extra);
+    // (uncaptioned) turns, QUEUED behind the captioned one. They must not
+    // interrupt: a follower's interrupt flushes the merged message enqueued a
+    // moment earlier, so the file would run alone and the question just
+    // delivered with it would be dropped without a trace.
+    for (const extra of rest) this.dispatchNow(extra, undefined, AS_FOLLOWER);
   }
 
   /** Dispatch everything still held, oldest first. Call on shutdown. */
@@ -217,6 +250,9 @@ export class MediaCaptionCoalescer {
   private release(key: string): void {
     const pending = this.take(key);
     if (!pending) return;
-    for (const held of pending.messages) this.dispatchNow(held);
+    // One arrival again: the burst interrupts once, its tail queues.
+    pending.messages.forEach((held, index) => {
+      this.dispatchNow(held, undefined, index === 0 ? undefined : AS_FOLLOWER);
+    });
   }
 }

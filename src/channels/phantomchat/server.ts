@@ -90,7 +90,10 @@ import { warmSymmetricKeyCache } from "../../lib/nostrCrypto.ts";
 import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
 import { inboxDir } from "../telegram/parse.ts";
 import { renderRelayMessage } from "./relayEnvelope.ts";
-import { MediaCaptionCoalescer } from "./mediaCaptionCoalescer.ts";
+import {
+  MediaCaptionCoalescer,
+  type MediaCaptionDispatchOptions,
+} from "./mediaCaptionCoalescer.ts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -1444,7 +1447,11 @@ export async function runPhantomchatServer(
   // last promise. Keyed on conversationId so a group turn and a DM turn from
   // the same person run in parallel (which is the point of per-conversation
   // chains); senderId would serialize them behind each other.
-  const enqueue = (msg: ChannelMessage, alsoReceipt?: string[]): void => {
+  const enqueue = (
+    msg: ChannelMessage,
+    alsoReceipt?: string[],
+    opts?: MediaCaptionDispatchOptions,
+  ): void => {
     const key = msg.conversationId;
 
     // INTERRUPT (#301): a new ordinary message arriving while a turn is running
@@ -1453,6 +1460,12 @@ export async function runPhantomchatServer(
     // through instructions the user has already superseded. Silent by design:
     // only `/stop` tells the user what it threw away. Gated on an active turn
     // so that a burst of messages sent while idle is still answered in full.
+    //
+    // ONE ARRIVAL, ONE INTERRUPT: the coalescer splits a single user action into
+    // several messages (a held attachment plus its text, then the burst's extra
+    // files). Only the first of them may interrupt, hence `opts.interrupt` — an
+    // interrupt FLUSHES the queue, so a follower interrupting would throw away
+    // the very message the burst just delivered.
     //
     // GROUP SCOPING: in a multi-bot group every bot's instance sees every
     // message over the shared relay, so an unscoped interrupt lets a message
@@ -1477,7 +1490,7 @@ export async function runPhantomchatServer(
     // lastAddressed/buffer mutation; handle() re-decides authoritatively when
     // the message actually runs. A cold profile cache degrades to the old
     // behaviour (interrupt fires), never to a lost interrupt.
-    let interrupt = !isBot(msg.senderId);
+    let interrupt = opts?.interrupt !== false && !isBot(msg.senderId);
     if (interrupt && msg.groupId) {
       const memberHexes = msg.groupMemberHexes ?? [];
       const roster = buildRoster(memberHexes);
@@ -1539,7 +1552,11 @@ export async function runPhantomchatServer(
   // command, or a normal turn on the per-conversation chain. Extracted from the
   // listen() loop so the media→caption coalescer below can dispatch a message it
   // has been holding (see mediaCaptionCoalescer.ts).
-  const route = (msg: ChannelMessage, alsoReceipt?: string[]): void => {
+  const route = (
+    msg: ChannelMessage,
+    alsoReceipt?: string[],
+    opts?: MediaCaptionDispatchOptions,
+  ): void => {
     if (msg.reaction) {
       // EMOJI REACTION (wake-but-silent). Runs off the per-conversation chain — a
       // reaction is rare, low-stakes context, so it neither interrupts nor
@@ -1603,7 +1620,7 @@ export async function runPhantomchatServer(
       inFlight.add(p);
       void p.finally(() => inFlight.delete(p));
     } else {
-      enqueue(msg, alsoReceipt);
+      enqueue(msg, alsoReceipt, opts);
     }
   };
 
@@ -1617,7 +1634,7 @@ export async function runPhantomchatServer(
   // every client already understands. On expiry the attachment is dispatched
   // alone, exactly as before. See mediaCaptionCoalescer.ts for the contract.
   const coalescer = new MediaCaptionCoalescer({
-    dispatch: (msg, alsoReceipt) => route(msg, alsoReceipt),
+    dispatch: (msg, alsoReceipt, opts) => route(msg, alsoReceipt, opts),
     // A slash command is handled by runSlash, which never runs a turn, so it
     // cannot carry a caption: a control command must not absorb an attachment.
     // The media and non-empty-text clauses repeat the class default rather than
