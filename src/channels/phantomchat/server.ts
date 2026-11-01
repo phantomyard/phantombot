@@ -538,7 +538,10 @@ export async function runPhantomchatServer(
     return "trusted";
   };
 
-  const handle = async (msg: ChannelMessage): Promise<void> => {
+  const handle = async (
+    msg: ChannelMessage,
+    alsoReceipt?: string[],
+  ): Promise<void> => {
     const senderHex = msg.senderId;
 
     const tier = authorize(msg);
@@ -647,8 +650,19 @@ export async function runPhantomchatServer(
     // — closing the "first message ghosts, second works" loop. DM only: group
     // delivery is tracked per-member on the client via a separate mechanism.
     // Fire-and-forget BEFORE the (possibly slow) turn so the tick is prompt.
-    if (!msg.groupId && msg.messageId) {
-      void transport.sendDeliveryReceipt(senderHex, msg.messageId);
+    //
+    // `alsoReceipt` carries the ids of messages the coalescer ABSORBED into this
+    // one (a held attachment whose only trace on the merged message is its
+    // media). They belong to the same sender and the same gate, so they are
+    // acknowledged here rather than lost — an unacked file is one the remote's
+    // retry layer keeps re-publishing.
+    if (!msg.groupId) {
+      const receiptIds = new Set<string>();
+      if (msg.messageId) receiptIds.add(msg.messageId);
+      for (const id of alsoReceipt ?? []) receiptIds.add(id);
+      for (const id of receiptIds) {
+        void transport.sendDeliveryReceipt(senderHex, id);
+      }
     }
 
     // Route a short user-facing notice to the SAME place a reply would go: into
@@ -1430,7 +1444,7 @@ export async function runPhantomchatServer(
   // last promise. Keyed on conversationId so a group turn and a DM turn from
   // the same person run in parallel (which is the point of per-conversation
   // chains); senderId would serialize them behind each other.
-  const enqueue = (msg: ChannelMessage): void => {
+  const enqueue = (msg: ChannelMessage, alsoReceipt?: string[]): void => {
     const key = msg.conversationId;
 
     // INTERRUPT (#301): a new ordinary message arriving while a turn is running
@@ -1499,7 +1513,7 @@ export async function runPhantomchatServer(
       .then(async () => {
         // Superseded while queued — evaporate without running.
         if (!backlog.claim(msg.conversationId, epoch)) return;
-        await handle(msg);
+        await handle(msg, alsoReceipt);
       });
     chains.set(key, next);
     inFlight.add(next);
@@ -1525,7 +1539,7 @@ export async function runPhantomchatServer(
   // command, or a normal turn on the per-conversation chain. Extracted from the
   // listen() loop so the media→caption coalescer below can dispatch a message it
   // has been holding (see mediaCaptionCoalescer.ts).
-  const route = (msg: ChannelMessage): void => {
+  const route = (msg: ChannelMessage, alsoReceipt?: string[]): void => {
     if (msg.reaction) {
       // EMOJI REACTION (wake-but-silent). Runs off the per-conversation chain — a
       // reaction is rare, low-stakes context, so it neither interrupts nor
@@ -1589,7 +1603,7 @@ export async function runPhantomchatServer(
       inFlight.add(p);
       void p.finally(() => inFlight.delete(p));
     } else {
-      enqueue(msg);
+      enqueue(msg, alsoReceipt);
     }
   };
 
@@ -1603,10 +1617,16 @@ export async function runPhantomchatServer(
   // every client already understands. On expiry the attachment is dispatched
   // alone, exactly as before. See mediaCaptionCoalescer.ts for the contract.
   const coalescer = new MediaCaptionCoalescer({
-    dispatch: route,
+    dispatch: (msg, alsoReceipt) => route(msg, alsoReceipt),
     // A slash command is handled by runSlash, which never runs a turn, so it
     // cannot carry a caption: a control command must not absorb an attachment.
-    canCarryCaption: (m) => !isControlCommand(m),
+    // The media and non-empty-text clauses repeat the class default rather than
+    // relying on it: this override REPLACES that predicate, and `isControlCommand`
+    // is false for every media message, so leaving them out would make each
+    // incoming attachment a caption candidate. The coalescer also guards the
+    // media case itself (belt and braces — the failure mode is silent data loss).
+    canCarryCaption: (m) =>
+      m.media === undefined && m.text.trim().length > 0 && !isControlCommand(m),
   });
 
   // Drive the inbound stream. In production listen() runs until the signal

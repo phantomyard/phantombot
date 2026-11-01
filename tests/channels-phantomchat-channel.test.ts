@@ -26,6 +26,7 @@ import {
 } from "../src/channels/phantomchat/transport.ts";
 import {
   wrapNip17Message,
+  wrapV2,
   type NTNostrEvent,
 } from "../src/lib/nostrCrypto.ts";
 
@@ -47,6 +48,8 @@ class FakePool implements RelayPool {
     for (const r of relays) this.connected.set(r, true);
   }
 
+  private eose?: () => void;
+
   subscribeMany(
     _relays: string[],
     _filter: NostrFilter,
@@ -54,6 +57,7 @@ class FakePool implements RelayPool {
   ): { close(): void } {
     this.subscribeCount++;
     this.onevent = params.onevent;
+    this.eose = params.oneose;
     if (this.opts.autoEose !== false) params.oneose?.();
     return {
       close: () => {
@@ -75,6 +79,11 @@ class FakePool implements RelayPool {
 
   feed(event: NTNostrEvent): void {
     this.onevent?.(event);
+  }
+
+  /** Relays finished replaying stored gift-wraps: the live gate opens. */
+  fireEose(): void {
+    this.eose?.();
   }
 
   /** Simulate a relay hard-dropping (deleted from the pool / disconnected). */
@@ -823,5 +832,90 @@ describe("phantomchat channel — serialized ingest", () => {
 
     expect(seen).toEqual(["after"]);
     expect(errors).toEqual(["boom"]);
+  });
+});
+
+/**
+ * INGEST CHAIN — why the channel hands the transport `deliver` rather than
+ * `onWrap`, and why the live gate is captured at ARRIVAL.
+ *
+ * `unwrapV2` is async, so a v2 wrap finishes decryption a microtask (or more)
+ * after it arrived. Two consequences, both real bugs if the chain is missing:
+ *
+ *   1. ORDER. A synchronous legacy wrap arriving just after a v2 wrap used to
+ *      overtake it, so a caption could reach the server before the attachment
+ *      it belonged to.
+ *   2. THE LIVE GATE. `live` read INSIDE onWrap is read when the chained work
+ *      runs, not when the wrap arrived — so a backlog wrap still queued at EOSE
+ *      was admitted as live and the bot re-answered up to 49h of history after
+ *      a restart.
+ *
+ * These tests drive the real channel, so they fail if the callbacks are wired
+ * straight to the transport no matter how correct the helper is.
+ */
+describe("phantomchat channel — ingest chain (arrival order + live gate)", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  async function v2WrapToUs(
+    peerSk: Uint8Array,
+    ourPub: string,
+    text: string,
+  ): Promise<NTNostrEvent> {
+    const { event } = await wrapV2(peerSk, ourPub, text);
+    return event as unknown as NTNostrEvent;
+  }
+
+  test("a backlog wrap still queued when EOSE fires is NOT admitted as live", async () => {
+    const { ourPub, pool, channel } = setup({ autoEose: false });
+    const peerSk = generateSecretKey();
+    const ac = new AbortController();
+    const got: string[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg.text);
+    })();
+    await sleep(10);
+
+    // Built up front so the feed + EOSE below happen in ONE tick: none of these
+    // wraps can have finished decrypting when the gate opens.
+    const backlog = [
+      await v2WrapToUs(peerSk, ourPub, "old-1"),
+      await v2WrapToUs(peerSk, ourPub, "old-2"),
+      await v2WrapToUs(peerSk, ourPub, "old-3"),
+    ];
+    for (const wrap of backlog) pool.feed(wrap);
+    pool.fireEose();
+
+    await sleep(60);
+    // …and a genuinely live wrap is still delivered.
+    pool.feed(await v2WrapToUs(peerSk, ourPub, "new-1"));
+    await sleep(60);
+
+    ac.abort();
+    await pump;
+
+    expect(got).toEqual(["new-1"]);
+  });
+
+  test("a legacy wrap arriving after a v2 wrap does not overtake it", async () => {
+    const { ourPub, pool, channel } = setup();
+    const peerSk = generateSecretKey();
+    const ac = new AbortController();
+    const got: string[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg.text);
+    })();
+    await sleep(10);
+
+    // v2 first (decrypts asynchronously), legacy second (unwraps synchronously).
+    const first = await v2WrapToUs(peerSk, ourPub, "v2-first");
+    const { wraps } = wrapNip17Message(peerSk, ourPub, "legacy-second");
+    pool.feed(first);
+    pool.feed(wraps[0] as unknown as NTNostrEvent);
+
+    await sleep(80);
+    ac.abort();
+    await pump;
+
+    expect(got).toEqual(["v2-first", "legacy-second"]);
   });
 });

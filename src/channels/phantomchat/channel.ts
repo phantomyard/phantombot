@@ -240,12 +240,15 @@ export function createPhantomchatChannel(
         return true;
       };
 
-      const onWrap = async (event: NTNostrEvent): Promise<void> => {
+      const onWrap = async (
+        event: NTNostrEvent,
+        liveAtArrival: boolean,
+      ): Promise<void> => {
         // Emoji reactions (kind 7/5) ride this same `#p` subscription but are
         // plaintext, not gift-wraps — dispatch them and return before the
         // unwrap path (which would try to decrypt a non-wrap and drop it).
         if (event.kind === 7 || event.kind === 5) {
-          handleReaction(event);
+          handleReaction(event, liveAtArrival);
           return;
         }
         // (1) Dedup by wrap event id — relays re-deliver the identical wrap.
@@ -375,7 +378,12 @@ export function createPhantomchatChannel(
         // relays have signalled EOSE. Everything before EOSE is already marked
         // seen above (wrap id + rumor id), so it's silently consumed — never
         // enqueued, never re-ponged, never reprocessed if re-delivered.
-        if (!live) {
+        //
+        // The flag is the one captured at ARRIVAL, not read now: this function
+        // runs when its turn in the ingest chain comes up, so a wrap delivered
+        // before EOSE can still be queued when EOSE fires. Reading `live` here
+        // would admit that backlog as if it had arrived live.
+        if (!liveAtArrival) {
           log.debug("phantomchat: skipping backlog gift-wrap (pre-EOSE)");
           return;
         }
@@ -477,11 +485,15 @@ export function createPhantomchatChannel(
       // overtake the attachment it belongs to (the server coalesces a bare
       // attachment with the text that follows it). Chain the calls instead so
       // the queue sees ARRIVAL order — the order the sender's client published.
-      const ingest = createSerializedIngest(onWrap, (e: unknown) => {
-        log.warn("phantomchat: inbound wrap failed", {
-          error: (e as Error).message,
-        });
-      });
+      const ingest = createSerializedIngest(
+        (arrived: { event: NTNostrEvent; live: boolean }) =>
+          onWrap(arrived.event, arrived.live),
+        (e: unknown) => {
+          log.warn("phantomchat: inbound wrap failed", {
+            error: (e as Error).message,
+          });
+        },
+      );
 
       // The live-gate flag (see onWrap step 6). Flipped true on EOSE — or after
       // a fallback timeout, in case a slow/dead relay never sends EOSE and would
@@ -495,17 +507,31 @@ export function createPhantomchatChannel(
       };
       const liveFallback = setTimeout(goLive, 8000);
 
-      let sub = transport.subscribeGiftWraps(publicKeyHex, ingest, goLive);
+      // ARRIVAL-TIME LIVE SNAPSHOT. Every transport callback (relay push, P2P
+      // sink, catch-up poll) enters here, so `live` is read synchronously in the
+      // frame that delivered the event and handed to the chained work. Reading
+      // it later, inside onWrap, would classify a pre-EOSE wrap as live whenever
+      // EOSE fired while it was still queued — the restart-replays-49h-of-DMs
+      // failure the gate exists to prevent.
+      const deliver = (event: NTNostrEvent): void => {
+        ingest({ event, live });
+      };
+
+      let sub = transport.subscribeGiftWraps(publicKeyHex, deliver, goLive);
 
       // EMOJI REACTIONS. Plaintext NIP-25 kind-7 (added) / NIP-09 kind-5
       // (removed) events p-tagged to us, delivered on the SAME subscription as
       // gift-wraps (see the widened filter in transport.subscribeGiftWraps) and
       // routed here from onWrap's kind branch. Each becomes a ChannelMessage
       // carrying a `reaction` — the server routes THOSE to the wake-but-silent
-      // reaction path instead of a normal turn. Gated on `live` like messages so
-      // a reconnect's small backlog replay doesn't wake stale reaction turns.
-      const handleReaction = (event: NTNostrEvent): void => {
-        if (closed || !live) return;
+      // reaction path instead of a normal turn. Gated on the ARRIVAL-TIME
+      // `live` (same reason as messages: a reaction queued before EOSE must not
+      // wake a turn just because EOSE fired while it waited).
+      const handleReaction = (
+        event: NTNostrEvent,
+        liveAtArrival: boolean,
+      ): void => {
+        if (closed || !liveAtArrival) return;
         if (!remember(seenReactionIds, event.id)) return;
         const tags = (event.tags ?? []) as string[][];
         const eTargets = tags
@@ -570,7 +596,7 @@ export function createPhantomchatChannel(
       // that lands over BOTH transports still runs exactly one turn, and the
       // live-gate applies uniformly. Cleared in `finally` so a stopped listener
       // never receives a frame. No-op when `inboundSink` is absent (relay-only).
-      input.inboundSink?.setSink(ingest);
+      input.inboundSink?.setSink(deliver);
 
       // SELF-HEAL WATCHDOG. `enablePing` (set on the pool) keeps idle sockets
       // warm so they aren't dropped for inactivity — that alone fixes the common
@@ -611,7 +637,7 @@ export function createPhantomchatChannel(
           } catch {
             // already torn down by the hard close — re-arm anyway.
           }
-          sub = transport.subscribeGiftWraps(publicKeyHex, ingest, goLive);
+          sub = transport.subscribeGiftWraps(publicKeyHex, deliver, goLive);
         }
         lastConnected = connected;
       };
@@ -638,7 +664,7 @@ export function createPhantomchatChannel(
           );
           for (const event of events) {
             if (closed) break;
-            ingest(event);
+            deliver(event);
           }
         } catch (e) {
           log.debug("phantomchat: catch-up poll failed", {

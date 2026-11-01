@@ -59,6 +59,18 @@ function makeCoalescer(windowMs = 30) {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** A coalescer whose caption predicate is deliberately permissive (no media or
+ * text clause of its own) — to prove the class does not depend on it. */
+function makeCoalescerWith(predicate: (m: ChannelMessage) => boolean, windowMs = 30) {
+  const out: ChannelMessage[] = [];
+  const coalescer = new MediaCaptionCoalescer({
+    windowMs,
+    dispatch: (m) => out.push(m),
+    canCarryCaption: predicate,
+  });
+  return { coalescer, out };
+}
+
 describe("isBareAttachment", () => {
   test("an attachment with no text is bare", () => {
     expect(isBareAttachment(attachment())).toBe(true);
@@ -270,6 +282,72 @@ describe("media caption coalescing", () => {
 
   test("the default window is the documented 2s", () => {
     expect(DEFAULT_MEDIA_CAPTION_WINDOW_MS).toBe(2_000);
+  });
+
+  /**
+   * A message that brings its OWN attachment must never capture a held one.
+   * The merge dispatches `{...msg, media: first.media}`, so absorbing a second
+   * file would drop it silently — and a photo followed by a voice note inside
+   * the 2s window is ordinary usage. The guard lives in the class itself, so a
+   * caller whose predicate forgets the clause cannot cause the loss.
+   */
+  test("a permissive canCarryCaption still never lets a message absorb an attachment", () => {
+    const { coalescer, out } = makeCoalescerWith(() => true);
+    coalescer.accept(attachment({ messageId: "img-1" }));
+    coalescer.accept(
+      msg({
+        messageId: "voice-1",
+        media: {
+          kind: "voice",
+          url: "https://blossom.example/v",
+          sha256: "voice-bytes",
+          keyHex: "00".repeat(32),
+          ivHex: "11".repeat(12),
+          mimeType: "audio/ogg",
+        },
+      }),
+    );
+
+    expect(out).toHaveLength(2);
+    // The held image first, exactly as before the PR…
+    expect(out[0]!.media?.sha256).toBe("abc123");
+    expect(out[0]!.text).toBe("");
+    // …then the voice note, intact and with its transcript window untouched.
+    expect(out[1]!.media?.kind).toBe("voice");
+    expect(out[1]!.media?.sha256).toBe("voice-bytes");
+    expect(out[1]!.messageId).toBe("voice-1");
+  });
+
+  test("a second attachment with its own caption keeps its own media", () => {
+    const { coalescer, out } = makeCoalescerWith(() => true);
+    coalescer.accept(attachment({ messageId: "img-1" }));
+    coalescer.accept(
+      attachment({
+        messageId: "img-2",
+        text: "see this",
+        media: { ...attachment().media!, sha256: "second-bytes" },
+      }),
+    );
+
+    expect(out).toHaveLength(2);
+    expect(out[0]!.media?.sha256).toBe("abc123");
+    expect(out[1]!.text).toBe("see this");
+    expect(out[1]!.media?.sha256).toBe("second-bytes");
+  });
+
+  test("a merge reports the absorbed attachment's id so it can still be receipted", () => {
+    const dispatched: { msg: ChannelMessage; also?: string[] }[] = [];
+    const coalescer = new MediaCaptionCoalescer({
+      windowMs: 30,
+      dispatch: (m, also) => dispatched.push({ msg: m, also }),
+    });
+
+    coalescer.accept(attachment({ messageId: "img-1" }));
+    coalescer.accept(text("what is this?", { messageId: "txt-1" }));
+
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]!.msg.messageId).toBe("txt-1");
+    expect(dispatched[0]!.also).toEqual(["img-1"]);
   });
 
   test("the window is measured from the FIRST attachment, not the last", async () => {

@@ -29,6 +29,7 @@ import {
   type RelayPool,
 } from "../src/channels/phantomchat/transport.ts";
 import {
+  isV2Event,
   unwrapNip17Message,
   unwrapV2,
   wrapGroupMessage,
@@ -3369,6 +3370,11 @@ describe("phantomchat media → caption coalescing", () => {
   // Encrypt ONCE: the envelope advertises this ciphertext's sha256 and the
   // stub serves these exact bytes, so the fetch passes its integrity check.
   const attachment = encryptFileBytes(Buffer.from("fake png bytes"));
+  // A SECOND, distinguishable attachment: the failure this guards against is
+  // one file's media overwriting the other's, so both must be identifiable.
+  const ATTACHMENT_URL_B = "https://blossom.test/attachment-b";
+  const attachmentB = encryptFileBytes(Buffer.from("fake second png bytes"));
+  const VOICE_URL = "https://blossom.test/voice";
 
   beforeEach(() => {
     // The attachment lands in the per-chat inbox under XDG_DATA_HOME — keep it
@@ -3389,23 +3395,51 @@ describe("phantomchat media → caption coalescing", () => {
       if (String(url) === ATTACHMENT_URL) {
         return new Response(attachment.ciphertext);
       }
+      if (String(url) === ATTACHMENT_URL_B) {
+        return new Response(attachmentB.ciphertext);
+      }
       return new Response("nope", { status: 404 });
     }) as unknown as typeof fetch;
   }
 
   /** The DM wire shape the PWA sends for an attachment: metadata as a JSON string. */
-  function imageEnvelope(id: string): unknown {
+  function imageEnvelope(
+    id: string,
+    opts: { url?: string; att?: typeof attachment; caption?: string } = {},
+  ): unknown {
+    const url = opts.url ?? ATTACHMENT_URL;
+    const att = opts.att ?? attachment;
     return {
       id,
       type: "image",
       content: JSON.stringify({
-        url: ATTACHMENT_URL,
-        sha256: attachment.sha256Hex,
-        key: attachment.keyHex,
-        iv: attachment.ivHex,
+        url,
+        sha256: att.sha256Hex,
+        key: att.keyHex,
+        iv: att.ivHex,
         mimeType: "image/png",
         mediaType: "image",
-        size: attachment.ciphertext.length,
+        size: att.ciphertext.length,
+        ...(opts.caption ? { caption: opts.caption } : {}),
+      }),
+      timestamp: Date.now(),
+    };
+  }
+
+  /** The DM wire shape the PWA sends for a voice note: empty body, audio metadata. */
+  function voiceEnvelope(id: string): unknown {
+    return {
+      id,
+      type: "voice",
+      content: JSON.stringify({
+        url: VOICE_URL,
+        sha256: "0".repeat(64),
+        key: "00".repeat(32),
+        iv: "11".repeat(12),
+        mimeType: "audio/ogg",
+        mediaType: "voice",
+        duration: 3,
+        size: 4_096,
       }),
       timestamp: Date.now(),
     };
@@ -3421,10 +3455,50 @@ describe("phantomchat media → caption coalescing", () => {
    * (not merely to start): aborting mid-download would otherwise kill the
    * attachment fetch and let a teardown turn overwrite what we assert on.
    */
+  /**
+   * Every plaintext body published back to the sender — replies and notices.
+   * Replies go out as v2 wraps and legacy notices as NIP-17, so both readers
+   * are tried; a wrap we cannot read (self-copy, receipt, group member) is
+   * simply skipped.
+   */
+  async function publishedTexts(
+    pool: FakePool,
+    recipientSk: Uint8Array,
+  ): Promise<string[]> {
+    const out: string[] = [];
+    for (const event of pool.published) {
+      try {
+        const rumor = isV2Event(event)
+          ? await unwrapV2(event, recipientSk)
+          : unwrapNip17Message(event, recipientSk);
+        let body: string = rumor.content;
+        try {
+          const parsed = JSON.parse(body) as { content?: unknown };
+          if (parsed && typeof parsed.content === "string") body = parsed.content;
+        } catch {
+          // NIP-17-plaintext / v2 body — use it as it stands.
+        }
+        out.push(body);
+      } catch {
+        // Not ours to read — ignore.
+      }
+    }
+    return out;
+  }
+
   async function runSequence(opts: {
     envelopes: unknown[];
     waitForTurnMs?: number;
-  }): Promise<{ invocations: number; userMessages: string[] }> {
+    /** How many turns must settle before the sequence is considered done. */
+    waitForTurns?: number;
+    /** Wait until a published body matches (used for notices, not turns). */
+    waitForPublished?: RegExp;
+  }): Promise<{
+    invocations: number;
+    userMessages: string[];
+    receipts: string[];
+    publishedTexts: string[];
+  }> {
     stubBlossom();
     const senderSk = generateSecretKey();
     const botSk = generateSecretKey();
@@ -3438,10 +3512,18 @@ describe("phantomchat media → caption coalescing", () => {
       ["wss://test.relay"],
       pool,
     );
+    // Spy on receipts only. A merged message keeps the CAPTION's id, so the
+    // absorbed attachment's id has to reach the transport some other way —
+    // that is exactly what these assertions watch.
+    const receipts: string[] = [];
+    const spyTransport = Object.create(transport) as SimplePoolPhantomchatTransport;
+    spyTransport.sendDeliveryReceipt = async (_to: string, id: string) => {
+      receipts.push(id);
+    };
     const channel = createPhantomchatChannel({
       secretKey: botSk,
       publicKeyHex: botHex,
-      transport,
+      transport: spyTransport,
     });
 
     const ac = new AbortController();
@@ -3468,15 +3550,27 @@ describe("phantomchat media → caption coalescing", () => {
     }
 
     await waitUntil(
-      () => harness.completed >= 1,
-      "the first turn to settle",
+      () => harness.completed >= (opts.waitForTurns ?? 1),
+      "the expected turn(s) to settle",
       opts.waitForTurnMs ?? 4_000,
     );
+
+    if (opts.waitForPublished) {
+      const pattern = opts.waitForPublished;
+      await waitUntil(
+        async () =>
+          (await publishedTexts(pool, senderSk)).some((t) => pattern.test(t)),
+        "the expected notice to be published",
+        opts.waitForTurnMs ?? 4_000,
+      );
+    }
 
     ac.abort();
     await serverPromise;
     return {
       invocations: harness.invocations,
+      receipts,
+      publishedTexts: await publishedTexts(pool, senderSk),
       userMessages: harness.requests.map((r) => r.userMessage),
     };
   }
@@ -3506,6 +3600,74 @@ describe("phantomchat media → caption coalescing", () => {
     expect(userMessages[0]).toContain("[attached: ");
     expect(userMessages[0]).not.toContain("what is this?");
   }, 15_000);
+
+  /**
+   * REGRESSION (#736 review, blockers 1 and 2). The merge path dispatched
+   * `{...msg, media: first.media}`, so a message that brought its OWN attachment
+   * lost that attachment: `first.media` overwrote it and only the held file
+   * reached the turn. A photo followed by a voice note — or a second image with
+   * its own caption — inside the 2s window is ordinary usage.
+   */
+  test("an attachment followed by a captioned image runs TWO turns; neither file is swallowed", async () => {
+    const { invocations, userMessages } = await runSequence({
+      envelopes: [
+        imageEnvelope("img-a"),
+        imageEnvelope("img-b", {
+          url: ATTACHMENT_URL_B,
+          att: attachmentB,
+          caption: "see this",
+        }),
+      ],
+      waitForTurns: 2,
+      waitForTurnMs: 8_000,
+    });
+
+    expect(invocations).toBe(2);
+    // Turn 1 is the held attachment, alone, exactly as before the PR.
+    expect(userMessages[0]).toContain("[attached: ");
+    expect(userMessages[0]).not.toContain("see this");
+    // Turn 2 is the second file carrying its own caption — a DIFFERENT file.
+    expect(userMessages[1]).toContain("see this");
+    expect(userMessages[1]).toContain("[attached: ");
+    const attachedPaths = userMessages.map(
+      (m) => /\[attached: ([^\]]+)\]/.exec(m)?.[1] ?? "",
+    );
+    expect(attachedPaths[0]).not.toBe("");
+    expect(attachedPaths[1]).not.toBe("");
+    expect(attachedPaths[0]).not.toBe(attachedPaths[1]);
+  }, 20_000);
+
+  test("an attachment followed by a voice note still processes the voice note", async () => {
+    const { invocations, userMessages, publishedTexts } = await runSequence({
+      envelopes: [imageEnvelope("img-voice"), voiceEnvelope("voice-1")],
+      waitForPublished: /voice transcription is disabled|voice note/i,
+      waitForTurnMs: 8_000,
+    });
+
+    // Only the image runs a turn: a voice note is never a caption candidate.
+    expect(invocations).toBe(1);
+    expect(userMessages[0]).toContain("[attached: ");
+    expect(userMessages[0]).not.toContain("see this");
+    // And it is not lost either — it reaches the media pipeline on its own.
+    // STT is off in this config, so it surfaces as the standard notice.
+    expect(
+      publishedTexts.some((t) => /voice transcription is disabled/i.test(t)),
+    ).toBe(true);
+  }, 20_000);
+
+  test("a merged attachment is still acknowledged with a delivery receipt", async () => {
+    const { receipts } = await runSequence({
+      envelopes: [
+        imageEnvelope("img-receipt"),
+        textEnvelope("txt-receipt", "what is this?"),
+      ],
+    });
+
+    // The caption's id rides on the merged message; the attachment's would
+    // otherwise never be acked, so the sender's retry layer would resend it.
+    expect(receipts).toContain("txt-receipt");
+    expect(receipts).toContain("img-receipt");
+  });
 
   test("text BEFORE the attachment is not merged backwards", async () => {
     const { invocations, userMessages } = await runSequence({

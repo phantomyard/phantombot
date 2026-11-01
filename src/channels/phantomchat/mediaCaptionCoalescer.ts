@@ -33,6 +33,10 @@
  *     captioned one.
  *   - A caption from a DIFFERENT sender is never merged (two people in a group
  *     sending independent messages) — the held attachment is flushed alone.
+ *   - A message that carries an ATTACHMENT OF ITS OWN never captures a held
+ *     one: an attachment always ends the hold. Otherwise `first.media` would
+ *     replace `msg.media` and the second file would vanish without a trace
+ *     (a photo followed by a voice note inside the window is ordinary usage).
  *
  * The window is measured from the FIRST held attachment, so a burst of files
  * cannot extend the hold indefinitely.
@@ -49,12 +53,24 @@ export const DEFAULT_MEDIA_CAPTION_WINDOW_MS = 2_000;
 export interface MediaCaptionCoalescerOptions {
   /** Override the hold window (milliseconds). Defaults to the constant above. */
   windowMs?: number;
-  /** Called for every message that must be dispatched now, in order. */
-  dispatch: (msg: ChannelMessage) => void;
+  /**
+   * Called for every message that must be dispatched now, in order.
+   *
+   * `alsoReceipt` lists the ORIGINATING message ids of held messages that were
+   * absorbed into this one. A merge keeps only the caption's `messageId`, so
+   * without this the absorbed attachment would never be acknowledged and the
+   * remote's delivery tracker would resend it. The server receipts each id
+   * behind the same auth gate it applies to the message itself.
+   */
+  dispatch: (msg: ChannelMessage, alsoReceipt?: string[]) => void;
   /**
    * Whether `msg` can carry a held attachment as its caption. Defaults to "any
    * message with text of its own and no media". The server narrows this to
    * exclude control commands, whose handler never runs a turn.
+   *
+   * An override can only ever NARROW: this class independently refuses to merge
+   * into a message that has media of its own (see `canCaption`), so a caller
+   * whose predicate forgets that clause cannot make the merge drop a file.
    */
   canCarryCaption?: (msg: ChannelMessage) => boolean;
 }
@@ -81,7 +97,10 @@ export function isBareAttachment(msg: ChannelMessage): boolean {
 
 export class MediaCaptionCoalescer {
   private readonly windowMs: number;
-  private readonly dispatchNow: (msg: ChannelMessage) => void;
+  private readonly dispatchNow: (
+    msg: ChannelMessage,
+    alsoReceipt?: string[],
+  ) => void;
   private readonly canCarryCaption: (msg: ChannelMessage) => boolean;
   private readonly held = new Map<string, Held>();
 
@@ -139,9 +158,14 @@ export class MediaCaptionCoalescer {
     }
 
     const [first, ...rest] = pending.messages;
+    // `msg.media === undefined` is checked here, not only inside the default
+    // predicate: `canCarryCaption` is a caller-supplied override, and the merge
+    // below overwrites `msg.media` with the held one. A message that brought
+    // its own attachment must therefore always flush the hold instead.
     const canCaption =
       first !== undefined &&
       first.media !== undefined &&
+      msg.media === undefined &&
       pending.senderId === msg.senderId &&
       this.canCarryCaption(msg);
 
@@ -154,8 +178,13 @@ export class MediaCaptionCoalescer {
     }
 
     // ONE turn: the attachment carries the typed text as its caption, exactly
-    // as a client-side caption would have arrived.
-    this.dispatchNow({ ...msg, media: first.media });
+    // as a client-side caption would have arrived. The absorbed attachment's
+    // id rides along so the server can still acknowledge it.
+    const alsoReceipt =
+      first.messageId !== undefined && first.messageId !== msg.messageId
+        ? [first.messageId]
+        : undefined;
+    this.dispatchNow({ ...msg, media: first.media }, alsoReceipt);
     // Extra files from the same burst keep today's behaviour — their own
     // (uncaptioned) turns, queued behind the captioned one.
     for (const extra of rest) this.dispatchNow(extra);
