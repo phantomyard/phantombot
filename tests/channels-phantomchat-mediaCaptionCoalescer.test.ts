@@ -454,11 +454,14 @@ describe("one arrival interrupts once", () => {
     expect(interrupts(out[1]!)).toBe(true);
   });
 
-  test("a same-sender message that cannot take the caption keeps its interrupt rights", () => {
+  test("a same-sender message that cannot take the caption queues behind the burst", () => {
     const { coalescer, out } = makeRecordingCoalescer();
     coalescer.accept(attachment());
     // A voice note: it brings media of its own, so the hold cannot merge into
-    // it. It is a separate publish, not the tail of the burst.
+    // it. Same sender, though, so it is still one arrival — and queuing is the
+    // only safe choice: letting it interrupt would flush the attachment queued
+    // a moment earlier and lose the file. ACCEPTED: this message waits for the
+    // turn in front of it instead of aborting it.
     coalescer.accept(
       msg({
         text: "lena, drop that and look at this",
@@ -476,10 +479,10 @@ describe("one arrival interrupts once", () => {
     expect(out).toHaveLength(2);
     expect(out[0]!.msg.media?.sha256).toBe("abc123");
     expect(out[1]!.msg.text).toBe("lena, drop that and look at this");
-    expect(interrupts(out[1]!)).toBe(true);
+    expect(out[1]!.interrupt).toBe(false);
   });
 
-  test("a message the caller's predicate refuses keeps its interrupt rights", () => {
+  test("a message the caller's predicate refuses queues when it is the same sender", () => {
     // The server narrows `canCarryCaption` to exclude control commands.
     const { coalescer, out } = makeRecordingCoalescer({
       canCarryCaption: (m) => !m.text.startsWith("/"),
@@ -489,6 +492,9 @@ describe("one arrival interrupts once", () => {
 
     expect(out).toHaveLength(2);
     expect(out[1]!.msg.text).toBe("/stop");
-    expect(interrupts(out[1]!)).toBe(true);
+    // Moot in practice — the server routes control commands to runSlash,
+    // off-chain, so they never reach the interrupt path at all.
+    expect(out[1]!.interrupt).toBe(false);
   });
+
 });

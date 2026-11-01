@@ -3935,6 +3935,93 @@ describe("phantomchat media → caption coalescing", () => {
   }, 15_000);
 
   /**
+   * REGRESSION (#736 review at d5ca656). The no-merge branch is not only the
+   * different-sender path: a message that brings media OF ITS OWN also lands
+   * there (`msg.media === undefined` fails), and that can be the SAME sender.
+   * Dispatching such a message with its normal interrupt rights flushes the
+   * attachment queued a moment before it — a bare image would vanish and the
+   * captioned one would run alone, which is the loss this PR exists to remove.
+   * Same sender means one arrival: the second file queues behind the first.
+   */
+  test("a held attachment followed by a captioned image from the same sender loses nothing", async () => {
+    stubBlossom();
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ParkingFirstHarness("fake");
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    const feed = (envelope: unknown): void => {
+      const { wraps } = wrapNip17Message(
+        senderSk,
+        botHex,
+        JSON.stringify(envelope),
+      );
+      pool.feed(wraps[0] as NTNostrEvent);
+    };
+
+    // Turn 1 starts and parks: both files below arrive while it is ACTIVE.
+    feed(textEnvelope("txt-long", "start the long job"));
+    await waitUntil(
+      () => harness.invocations === 1,
+      "the first turn to start",
+      4_000,
+    );
+
+    // A bare image stays held, then a captioned image ends the hold without
+    // merging into it (it has media of its own).
+    feed(imageEnvelope("img-bare"));
+    feed(
+      imageEnvelope("img-captioned", {
+        url: ATTACHMENT_URL_B,
+        att: attachmentB,
+        caption: "and this one please",
+      }),
+    );
+
+    await waitUntil(
+      () => harness.invocations >= 3,
+      "both files to run a turn of their own",
+      6_000,
+    );
+    const bare = harness.requests[1]!.userMessage;
+    const captioned = harness.requests[2]!.userMessage;
+
+    ac.abort();
+    await serverPromise;
+
+    // The bare image runs FIRST and is not swallowed by the later interrupt.
+    expect(bare).toContain("[attached: ");
+    expect(bare).not.toContain("and this one please");
+    // The captioned image keeps its own caption.
+    expect(captioned).toContain("and this one please");
+  }, 20_000);
+
+  /**
    * The receipt for an absorbed attachment is sent behind the SAME auth gate as
    * the message itself. Without this case that claim is only a comment on the
    * loop: nothing would go red if a refactor moved it above the gate.
