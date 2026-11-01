@@ -45,7 +45,11 @@ function toolCall(title: string) {
 /** A harness that always replies with a fixed final text. */
 class ScriptedHarness implements Harness {
   invocations = 0;
+  /** Turns whose chunk stream ran to completion (i.e. the turn settled). */
+  completed = 0;
   lastRequest?: HarnessRequest;
+  /** Every request, in invocation order — survives the last-turn overwrite. */
+  requests: HarnessRequest[] = [];
   constructor(
     public readonly id: string,
     private readonly script: HarnessChunk[],
@@ -56,7 +60,9 @@ class ScriptedHarness implements Harness {
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
     this.invocations++;
     this.lastRequest = req;
+    this.requests.push(req);
     for (const c of this.script) yield c;
+    this.completed++;
   }
 }
 
@@ -3344,4 +3350,171 @@ describe("phantomchat per-conversation concurrency", () => {
     ]);
     expect(harness.finishedWhenStarted[1]).toBe(1);
   });
+});
+
+/**
+ * MEDIA → CAPTION COALESCING (receive side).
+ *
+ * A phantomchat client that publishes the attachment and the typed text as TWO
+ * events used to produce TWO turns: the phantom answered the bare attachment
+ * with no context, then read the question. These drive the real path (inbound
+ * image envelope → Blossom fetch + decrypt → turn) and pin the fix: the
+ * attachment is held briefly and arrives carrying the text as its caption, so
+ * the turn sees file AND instruction together.
+ */
+describe("phantomchat media → caption coalescing", () => {
+  const ATTACHMENT_URL = "https://blossom.test/attachment";
+  const originalFetch = globalThis.fetch;
+  const savedDataHome = process.env.XDG_DATA_HOME;
+  // Encrypt ONCE: the envelope advertises this ciphertext's sha256 and the
+  // stub serves these exact bytes, so the fetch passes its integrity check.
+  const attachment = encryptFileBytes(Buffer.from("fake png bytes"));
+
+  beforeEach(() => {
+    // The attachment lands in the per-chat inbox under XDG_DATA_HOME — keep it
+    // in the test tmpdir, never the real home.
+    process.env.XDG_DATA_HOME = join(workdir, "data-home");
+  });
+  afterEach(() => {
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    if (savedDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = savedDataHome;
+  });
+
+  /** Serve the encrypted attachment; anything else 404s (no server probing). */
+  function stubBlossom(): void {
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+    ) => {
+      if (String(url) === ATTACHMENT_URL) {
+        return new Response(attachment.ciphertext);
+      }
+      return new Response("nope", { status: 404 });
+    }) as unknown as typeof fetch;
+  }
+
+  /** The DM wire shape the PWA sends for an attachment: metadata as a JSON string. */
+  function imageEnvelope(id: string): unknown {
+    return {
+      id,
+      type: "image",
+      content: JSON.stringify({
+        url: ATTACHMENT_URL,
+        sha256: attachment.sha256Hex,
+        key: attachment.keyHex,
+        iv: attachment.ivHex,
+        mimeType: "image/png",
+        mediaType: "image",
+        size: attachment.ciphertext.length,
+      }),
+      timestamp: Date.now(),
+    };
+  }
+
+  function textEnvelope(id: string, content: string): unknown {
+    return { id, type: "text", content, timestamp: Date.now() };
+  }
+
+  /**
+   * Feed a sequence of DM envelopes through the real server and return how many
+   * turns ran plus what each one was asked. Waits for the FIRST turn to SETTLE
+   * (not merely to start): aborting mid-download would otherwise kill the
+   * attachment fetch and let a teardown turn overwrite what we assert on.
+   */
+  async function runSequence(opts: {
+    envelopes: unknown[];
+    waitForTurnMs?: number;
+  }): Promise<{ invocations: number; userMessages: string[] }> {
+    stubBlossom();
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    for (const envelope of opts.envelopes) {
+      const { wraps } = wrapNip17Message(
+        senderSk,
+        botHex,
+        JSON.stringify(envelope),
+      );
+      pool.feed(wraps[0] as NTNostrEvent);
+    }
+
+    await waitUntil(
+      () => harness.completed >= 1,
+      "the first turn to settle",
+      opts.waitForTurnMs ?? 4_000,
+    );
+
+    ac.abort();
+    await serverPromise;
+    return {
+      invocations: harness.invocations,
+      userMessages: harness.requests.map((r) => r.userMessage),
+    };
+  }
+
+  test("an attachment followed by typed text runs ONE turn carrying both", async () => {
+    const { invocations, userMessages } = await runSequence({
+      envelopes: [imageEnvelope("img-1"), textEnvelope("txt-1", "what is this?")],
+    });
+
+    expect(invocations).toBe(1);
+    expect(userMessages[0]).toContain("what is this?");
+    expect(userMessages[0]).toContain("[attached: ");
+    // The text is the caption: it comes BEFORE the attachment marker.
+    expect(userMessages[0]!.indexOf("what is this?")).toBeLessThan(
+      userMessages[0]!.indexOf("[attached: "),
+    );
+  });
+
+  test("an attachment with no following text still runs its own turn (window expiry)", async () => {
+    const { invocations, userMessages } = await runSequence({
+      envelopes: [imageEnvelope("img-2")],
+      // Past the 2s hold window: the attachment is dispatched on expiry.
+      waitForTurnMs: 6_000,
+    });
+
+    expect(invocations).toBe(1);
+    expect(userMessages[0]).toContain("[attached: ");
+    expect(userMessages[0]).not.toContain("what is this?");
+  }, 15_000);
+
+  test("text BEFORE the attachment is not merged backwards", async () => {
+    const { invocations, userMessages } = await runSequence({
+      envelopes: [textEnvelope("txt-2", "sending you a picture"), imageEnvelope("img-3")],
+      waitForTurnMs: 6_000,
+    });
+
+    // The text runs immediately; the attachment waits out its own window.
+    expect(invocations).toBeGreaterThanOrEqual(1);
+    expect(userMessages[0]).toBe("sending you a picture");
+  }, 15_000);
 });

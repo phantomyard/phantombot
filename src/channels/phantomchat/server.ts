@@ -90,6 +90,7 @@ import { warmSymmetricKeyCache } from "../../lib/nostrCrypto.ts";
 import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
 import { inboxDir } from "../telegram/parse.ts";
 import { renderRelayMessage } from "./relayEnvelope.ts";
+import { MediaCaptionCoalescer } from "./mediaCaptionCoalescer.ts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -1520,11 +1521,11 @@ export async function runPhantomchatServer(
     throw new Error("phantomchat channel does not implement listen()");
   }
 
-  // Drive the inbound stream. In production listen() runs until the signal
-  // aborts. Under oneShot, tests feed a fixed set of gift-wraps and then abort
-  // the signal; listen()'s loop drains its queue and completes, so this
-  // for-await ends naturally and we fall through to draining inFlight.
-  for await (const msg of channel.listen(input.signal)) {
+  // Route ONE inbound message to its handler: a reaction turn, an inline slash
+  // command, or a normal turn on the per-conversation chain. Extracted from the
+  // listen() loop so the media→caption coalescer below can dispatch a message it
+  // has been holding (see mediaCaptionCoalescer.ts).
+  const route = (msg: ChannelMessage): void => {
     if (msg.reaction) {
       // EMOJI REACTION (wake-but-silent). Runs off the per-conversation chain — a
       // reaction is rare, low-stakes context, so it neither interrupts nor
@@ -1534,7 +1535,7 @@ export async function runPhantomchatServer(
       // principal may run it. A non-allowed reactor is dropped silently.
       // Trusted-only: a reaction turn writes memory (the capture) and takes no
       // screened input, so a relay bridge never gets one either.
-      if (authorize(msg) !== "trusted") continue;
+      if (authorize(msg) !== "trusted") return;
       const reaction = msg.reaction;
       const conversationKey = `phantomchat:${reaction.conversationId}`;
       const targetText = recentOutbound.lookup(
@@ -1590,7 +1591,39 @@ export async function runPhantomchatServer(
     } else {
       enqueue(msg);
     }
+  };
+
+  // ===================== MEDIA → CAPTION COALESCER =====================
+  // A client that publishes an attachment and its typed text as TWO events
+  // delivers a media-only message followed by the sentence that explains it,
+  // and the server runs a turn per message — so the phantom answers the
+  // attachment with no idea what was asked, then reads the question. Hold a
+  // bare attachment for a short window and merge the text into it when that
+  // text lands, so the attachment arrives carrying its caption — the wire shape
+  // every client already understands. On expiry the attachment is dispatched
+  // alone, exactly as before. See mediaCaptionCoalescer.ts for the contract.
+  const coalescer = new MediaCaptionCoalescer({
+    dispatch: route,
+    // A slash command is handled by runSlash, which never runs a turn, so it
+    // cannot carry a caption: a control command must not absorb an attachment.
+    canCarryCaption: (m) => !isControlCommand(m),
+  });
+
+  // Drive the inbound stream. In production listen() runs until the signal
+  // aborts. Under oneShot, tests feed a fixed set of gift-wraps and then abort
+  // the signal; listen()'s loop drains its queue and completes, so this
+  // for-await ends naturally and we fall through to draining inFlight.
+  for await (const msg of channel.listen(input.signal)) {
+    coalescer.accept(msg);
   }
+
+  // Whatever is still waiting for a caption goes out as-is: a hold must never
+  // swallow a message at shutdown or at the end of a oneShot drain. If the
+  // signal is already aborted the process is tearing down, so dispatching would
+  // only start a turn that cannot finish (and would download nothing) — drain
+  // the hold instead of failing loudly.
+  if (input.signal?.aborted !== true) coalescer.flushAll();
+  else coalescer.discardAll();
 
   // Drain in-flight turns so callers (and tests) can assert on what was sent
   // without racing the workers.

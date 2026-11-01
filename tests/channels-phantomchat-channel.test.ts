@@ -14,7 +14,10 @@
 import { describe, expect, test } from "bun:test";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 
-import { createPhantomchatChannel } from "../src/channels/phantomchat/channel.ts";
+import {
+  createPhantomchatChannel,
+  createSerializedIngest,
+} from "../src/channels/phantomchat/channel.ts";
 import type { ChannelMessage } from "../src/channels/core/types.ts";
 import {
   SimplePoolPhantomchatTransport,
@@ -776,5 +779,49 @@ describe("phantomchat channel — emoji reactions", () => {
     await pump;
 
     expect(got.length).toBe(0);
+  });
+});
+
+/**
+ * SERIALIZED INGEST.
+ *
+ * The transport calls the ingest callback without awaiting it. Two events whose
+ * handlers finish in the opposite order to their arrival would otherwise reach
+ * the consumer swapped — which reorders a conversation's turns and can put a
+ * caption ahead of the attachment it belongs to. `createSerializedIngest` chains
+ * the calls so arrival order wins.
+ */
+describe("phantomchat channel — serialized ingest", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  test("a fast second event never overtakes a slow first one", async () => {
+    const seen: string[] = [];
+    const ingest = createSerializedIngest<string>(async (id) => {
+      // The first event is the slow one: without serialization it finishes last.
+      await sleep(id === "first" ? 40 : 0);
+      seen.push(id);
+    }, () => {});
+
+    ingest("first");
+    ingest("second");
+    await sleep(80);
+
+    expect(seen).toEqual(["first", "second"]);
+  });
+
+  test("a failing event is reported and does not wedge the ones behind it", async () => {
+    const seen: string[] = [];
+    const errors: string[] = [];
+    const ingest = createSerializedIngest<string>(async (id) => {
+      if (id === "bad") throw new Error("boom");
+      seen.push(id);
+    }, (e) => errors.push((e as Error).message));
+
+    ingest("bad");
+    ingest("after");
+    await sleep(20);
+
+    expect(seen).toEqual(["after"]);
+    expect(errors).toEqual(["boom"]);
   });
 });

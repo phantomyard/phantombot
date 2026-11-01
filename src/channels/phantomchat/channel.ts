@@ -153,6 +153,25 @@ export interface PhantomchatChannelInput {
 }
 
 /**
+ * SERIALIZED INGEST. Transport callbacks (`subscribeMany`'s `onevent`) cannot be
+ * awaited, so an async handler handed to them directly lets two events race:
+ * whichever finishes first reaches the consumer first, regardless of arrival
+ * order. Chain the calls instead, so a consumer that depends on order (a
+ * conversation's turn sequence, an attachment and the text that captions it)
+ * sees ARRIVAL order. A rejected call is reported and the chain continues —
+ * one bad wrap must not wedge every message behind it.
+ */
+export function createSerializedIngest<T>(
+  work: (arg: T) => Promise<void>,
+  onError: (e: unknown) => void,
+): (arg: T) => void {
+  let chain: Promise<void> = Promise.resolve();
+  return (arg: T): void => {
+    chain = chain.then(() => work(arg)).catch(onError);
+  };
+}
+
+/**
  * Build the phantomchat `Channel`. `listen()` drives the inbound loop:
  * subscribe → unwrap+verify → parse envelope → yield plaintext ChannelMessage.
  *
@@ -450,6 +469,20 @@ export function createPhantomchatChannel(
         wake?.();
       };
 
+      // SERIALIZED INGEST. onWrap can await (a v2 wrap goes through the async
+      // unwrapV2), and a nostr subscription callback cannot be awaited — so
+      // handing `onWrap` straight to the transport lets two wraps race and land
+      // in `queue` in whatever order they finished decrypting. That silently
+      // reorders a conversation: two quick replies can swap, and a caption can
+      // overtake the attachment it belongs to (the server coalesces a bare
+      // attachment with the text that follows it). Chain the calls instead so
+      // the queue sees ARRIVAL order — the order the sender's client published.
+      const ingest = createSerializedIngest(onWrap, (e: unknown) => {
+        log.warn("phantomchat: inbound wrap failed", {
+          error: (e as Error).message,
+        });
+      });
+
       // The live-gate flag (see onWrap step 6). Flipped true on EOSE — or after
       // a fallback timeout, in case a slow/dead relay never sends EOSE and would
       // otherwise wedge the bot in "backlog mode" forever (deaf to new DMs).
@@ -462,7 +495,7 @@ export function createPhantomchatChannel(
       };
       const liveFallback = setTimeout(goLive, 8000);
 
-      let sub = transport.subscribeGiftWraps(publicKeyHex, onWrap, goLive);
+      let sub = transport.subscribeGiftWraps(publicKeyHex, ingest, goLive);
 
       // EMOJI REACTIONS. Plaintext NIP-25 kind-7 (added) / NIP-09 kind-5
       // (removed) events p-tagged to us, delivered on the SAME subscription as
@@ -537,7 +570,7 @@ export function createPhantomchatChannel(
       // that lands over BOTH transports still runs exactly one turn, and the
       // live-gate applies uniformly. Cleared in `finally` so a stopped listener
       // never receives a frame. No-op when `inboundSink` is absent (relay-only).
-      input.inboundSink?.setSink(onWrap);
+      input.inboundSink?.setSink(ingest);
 
       // SELF-HEAL WATCHDOG. `enablePing` (set on the pool) keeps idle sockets
       // warm so they aren't dropped for inactivity — that alone fixes the common
@@ -578,7 +611,7 @@ export function createPhantomchatChannel(
           } catch {
             // already torn down by the hard close — re-arm anyway.
           }
-          sub = transport.subscribeGiftWraps(publicKeyHex, onWrap, goLive);
+          sub = transport.subscribeGiftWraps(publicKeyHex, ingest, goLive);
         }
         lastConnected = connected;
       };
@@ -605,7 +638,7 @@ export function createPhantomchatChannel(
           );
           for (const event of events) {
             if (closed) break;
-            onWrap(event);
+            ingest(event);
           }
         } catch (e) {
           log.debug("phantomchat: catch-up poll failed", {
