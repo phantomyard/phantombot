@@ -3655,6 +3655,70 @@ describe("phantomchat media → caption coalescing", () => {
     ).toBe(true);
   }, 20_000);
 
+  /**
+   * The receipt loop runs AFTER the auth gate, and it also receipts ids the
+   * merge absorbed. Both halves of that sentence are load-bearing: moving the
+   * block above the gate would de-stealth a dropped stranger (a receipt is an
+   * observable ack), and the absorbed id comes from a different message than
+   * the one being handled. This case is what makes the claim executable.
+   */
+  test("a gated-out stranger is never receipted — not even for an absorbed attachment", async () => {
+    stubBlossom();
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const receipts: string[] = [];
+    const spyTransport = Object.create(transport) as SimplePoolPhantomchatTransport;
+    spyTransport.sendDeliveryReceipt = async (_to: string, id: string) => {
+      receipts.push(id);
+    };
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport: spyTransport,
+    });
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      // SOMEONE else is allow-listed: this sender is the stranger to drop.
+      allowedHex: [getPublicKey(generateSecretKey())],
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    for (const envelope of [
+      imageEnvelope("img-stranger"),
+      textEnvelope("txt-stranger", "hello?"),
+    ]) {
+      const { wraps } = wrapNip17Message(senderSk, botHex, JSON.stringify(envelope));
+      pool.feed(wraps[0] as NTNostrEvent);
+    }
+
+    // Long enough for the hold to merge and for a wrongly-placed receipt to fire.
+    await new Promise((r) => setTimeout(r, 300));
+    ac.abort();
+    await serverPromise;
+
+    expect(harness.invocations).toBe(0);
+    expect(receipts).toEqual([]);
+  });
+
   test("a merged attachment is still acknowledged with a delivery receipt", async () => {
     const { receipts } = await runSequence({
       envelopes: [
