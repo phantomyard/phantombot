@@ -10,7 +10,11 @@ import {
   SimplePoolPhantomchatTransport,
   type RelayPool,
 } from "../src/channels/phantomchat/transport.ts";
-import { unwrapV2, type NTNostrEvent } from "../src/lib/nostrCrypto.ts";
+import {
+  unwrapNip17Message,
+  unwrapV2,
+  type NTNostrEvent,
+} from "../src/lib/nostrCrypto.ts";
 import { fetchAndDecryptBlossom } from "../src/channels/phantomchat/blossomFetch.ts";
 
 describe("phantomchat transport — sendVoice", () => {
@@ -153,6 +157,166 @@ describe("phantomchat transport — sendVoice", () => {
       await expect(
         transport.sendVoice(getPublicKey(generateSecretKey()), Buffer.from("x"), "audio/ogg"),
       ).rejects.toThrow(/all blossom servers failed/);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+describe("phantomchat transport — sendGroupVoice", () => {
+  function setup() {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+    const botSk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+    return { published, botSk, transport };
+  }
+
+  test("posts the GroupAPI.sendFile shape to every member, and it decrypts", async () => {
+    const { published, botSk, transport } = setup();
+    const aliceSk = generateSecretKey();
+    const bobSk = generateSecretKey();
+    const aliceHex = getPublicKey(aliceSk);
+    const bobHex = getPublicKey(bobSk);
+
+    let uploadedBody: Buffer | undefined;
+    let uploads = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("blossom.json") || u.endsWith("/relays.json")) {
+        return new Response("nope", { status: 404 });
+      }
+      uploads++;
+      uploadedBody = Buffer.from(init?.body as Uint8Array);
+      const host = u.replace(/\/upload$/, "");
+      return new Response(JSON.stringify({ url: `${host}/abc`, sha256: "abc" }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      const audio = Buffer.from("fake opus voice reply bytes 🎧");
+      // Our own hex and a duplicate in the list must not produce extra wraps.
+      await transport.sendGroupVoice(
+        "hq",
+        [aliceHex, bobHex, bobHex, getPublicKey(botSk)],
+        audio,
+        "audio/ogg",
+      );
+
+      // One wrap per other member plus the self-wrap, in that order.
+      expect(published.length).toBeGreaterThanOrEqual(3);
+      expect(unwrapNip17Message(published[2]!, botSk).tags).toContainEqual([
+        "group",
+        "hq",
+      ]);
+      expect(uploads).toBeGreaterThanOrEqual(2);
+
+      // Each member reads the same rumor, routed by the group tag.
+      const forAlice = unwrapNip17Message(published[0]!, aliceSk);
+      const forBob = unwrapNip17Message(published[1]!, bobSk);
+      expect(forAlice.tags.find((t) => t[0] === "group")).toEqual(["group", "hq"]);
+      expect(forBob.content).toBe(forAlice.content);
+
+      const payload = JSON.parse(forAlice.content) as {
+        id: string;
+        type: string;
+        content: unknown;
+        timestamp: unknown;
+        from?: unknown;
+        to?: unknown;
+        fileMetadata: {
+          url: string;
+          sha256: string;
+          keyHex: string;
+          ivHex: string;
+          mimeType: string;
+          size: number;
+          servers: string[];
+          key?: unknown;
+          iv?: unknown;
+        };
+      };
+      // parseGroupRumorContent drops a rumor with an empty id, and drops the
+      // metadata unless it is an OBJECT with keyHex/ivHex (not the DM's key/iv).
+      expect(payload.id).toMatch(/^grp-\d+-/);
+      expect(payload.type).toBe("voice");
+      expect(payload.content).toBe("");
+      expect(typeof payload.timestamp).toBe("number");
+      expect(payload.from).toBeUndefined();
+      expect(payload.to).toBeUndefined();
+      const fm = payload.fileMetadata;
+      expect(fm.keyHex.length).toBe(64);
+      expect(fm.ivHex.length).toBe(24);
+      expect(fm.key).toBeUndefined();
+      expect(fm.iv).toBeUndefined();
+      expect(fm.mimeType).toBe("audio/ogg");
+      expect(fm.size).toBe(audio.length);
+      expect(fm.servers[0]).toBe(fm.url);
+
+      globalThis.fetch = (async () =>
+        new Response(uploadedBody!, { status: 200 })) as unknown as typeof fetch;
+      const recovered = await fetchAndDecryptBlossom(fm.url, fm.keyHex, fm.ivHex, {
+        expectedSha256Hex: fm.sha256,
+        knownServers: [],
+      });
+      expect(new Uint8Array(recovered)).toEqual(new Uint8Array(audio));
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  test("uploads and publishes nothing when nobody else is in the group", async () => {
+    const { published, botSk, transport } = setup();
+    let fetches = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetches++;
+      return new Response("nope", { status: 500 });
+    }) as unknown as typeof fetch;
+    try {
+      await transport.sendGroupVoice(
+        "hq",
+        [getPublicKey(botSk)],
+        Buffer.from("x"),
+        "audio/ogg",
+      );
+      expect(fetches).toBe(0);
+      expect(published.length).toBe(0);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  test("throws and publishes nothing when the upload fails", async () => {
+    const { published, transport } = setup();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response("nope", { status: 500 })) as unknown as typeof fetch;
+    try {
+      await expect(
+        transport.sendGroupVoice(
+          "hq",
+          [getPublicKey(generateSecretKey())],
+          Buffer.from("x"),
+          "audio/ogg",
+        ),
+      ).rejects.toThrow();
+      expect(published.length).toBe(0);
     } finally {
       globalThis.fetch = origFetch;
     }

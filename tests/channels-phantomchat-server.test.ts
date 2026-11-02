@@ -37,6 +37,7 @@ import {
   type NTNostrEvent,
 } from "../src/lib/nostrCrypto.ts";
 import { npubEncode } from "../src/lib/nostrIdentity.ts";
+import { setReplyModeOverride } from "../src/lib/replyMode.ts";
 
 /** A tool-backed progress chunk payload (#688: only these are tool calls). */
 function toolCall(title: string) {
@@ -3201,6 +3202,344 @@ describe("phantomchat reply modality: voice in → voice out", () => {
     expect(r.replies).toEqual([
       { type: "text", content: "Checking your calendar" },
       { type: "text", content: "You are free at 3pm." },
+    ]);
+  });
+
+  /**
+   * Run one inbound GROUP message through the server. Reports every reply the
+   * sender can read, with its group tag, so a reply that leaked into a DM fails
+   * the assertion instead of being counted.
+   */
+  async function runGroupVoiceCapable(opts: {
+    harness: Harness & { invocations: number };
+    inbound: "voice" | "text";
+    /** A reply-mode override already in force for this group. */
+    override?: "voice" | "text";
+    ttsFails?: boolean;
+    uploadFails?: boolean;
+  }): Promise<{
+    replies: Array<{
+      groupTag: string | undefined;
+      type: string;
+      content: string;
+      fileMetadata?: Record<string, unknown>;
+      payload: Record<string, unknown>;
+    }>;
+    sttCalls: number;
+    ttsCalls: number;
+    /** Reply ids the OTHER member and our own self-wrap can read, respectively. */
+    memberReplyIds: string[];
+    selfReplyIds: string[];
+  }> {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const memberSk = generateSecretKey();
+    const senderHex = getPublicKey(senderSk);
+    const botHex = getPublicKey(botSk);
+    const memberHex = getPublicKey(memberSk);
+    const groupId = "hq-voice-reply";
+
+    if (opts.override) {
+      await setReplyModeOverride({
+        persona: "phantom",
+        conversation: `phantomchat:group:${groupId}`,
+        mode: opts.override,
+      });
+    }
+
+    const note = encryptFileBytes(Buffer.from("fake opus voice note bytes"));
+    let sttCalls = 0;
+    let ttsCalls = 0;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const u = String(url);
+      if (u === VOICE_NOTE_URL) return new Response(note.ciphertext);
+      if (u.includes("audio/transcriptions")) {
+        sttCalls++;
+        return new Response(JSON.stringify({ text: "why is it so cold" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (u.includes("audio/speech")) {
+        ttsCalls++;
+        if (opts.ttsFails) return new Response("no", { status: 400 });
+        return new Response(Buffer.from([1, 2, 3]), {
+          status: 200,
+          headers: { "content-type": "audio/ogg" },
+        });
+      }
+      if (u.endsWith("/upload") && init?.method === "PUT") {
+        if (opts.uploadFails) return new Response("no", { status: 500 });
+        const host = u.replace(/\/upload$/, "");
+        return new Response(
+          JSON.stringify({ url: `${host}/abc`, sha256: "abc" }),
+          { status: 200 },
+        );
+      }
+      return new Response("nope", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    const payload = JSON.stringify(
+      opts.inbound === "voice"
+        ? {
+            content: "",
+            type: "voice",
+            id: `grp-${Date.now()}-voice`,
+            timestamp: Date.now(),
+            fileMetadata: {
+              url: VOICE_NOTE_URL,
+              sha256: note.sha256Hex,
+              keyHex: note.keyHex,
+              ivHex: note.ivHex,
+              mimeType: "audio/ogg",
+              size: note.ciphertext.length,
+              duration: 3,
+            },
+          }
+        : {
+            content: "answer me",
+            type: "text",
+            id: `grp-${Date.now()}-text`,
+            timestamp: Date.now(),
+          },
+    );
+    const { wraps } = wrapGroupMessage(
+      senderSk,
+      [botHex, memberHex],
+      payload,
+      groupId,
+    );
+    const inbound = wraps.find((w) => {
+      try {
+        unwrapNip17Message(w as NTNostrEvent, botSk);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    expect(inbound).toBeDefined();
+
+    const config: Config = {
+      ...baseConfig(),
+      telegramStreaming: STREAM_ONE_PER_SENTENCE,
+      voice: {
+        provider: "openai-compatible",
+        openaiCompatible: {
+          baseUrl: "https://api.openai.com/v1",
+          keyEnv: "PHANTOMBOT_OPENAI_API_KEY",
+          sttModel: "whisper-1",
+          ttsModel: "tts-1",
+          voice: "nova",
+          speed: 1,
+        },
+      },
+    };
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config,
+      memory,
+      harnesses: [opts.harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [senderHex],
+      oneShot: true,
+      signal: ac.signal,
+    });
+    pool.feed(inbound as NTNostrEvent);
+    await waitUntil(
+      () => opts.harness.invocations >= 1,
+      "the harness to be invoked",
+    );
+    ac.abort();
+    await serverPromise;
+
+    const published = pool.published.filter((e) => e.kind === 1059);
+    // The ids one key can read. Deduped: the retry ladder re-publishes a wrap
+    // the fake relay never confirmed, and a retry is not a second reply.
+    const readableBy = (sk: Uint8Array) => {
+      const byId = new Map<string, ReturnType<typeof unwrapNip17Message>>();
+      for (const e of published) {
+        try {
+          const rumor = unwrapNip17Message(e as NTNostrEvent, sk);
+          const id = String((JSON.parse(rumor.content) as { id?: unknown }).id);
+          byId.set(id, rumor);
+        } catch {
+          // addressed to someone else
+        }
+      }
+      return byId;
+    };
+    const replies = [];
+    for (const rumor of readableBy(senderSk).values()) {
+      const parsed = JSON.parse(rumor.content) as Record<string, unknown>;
+      replies.push({
+        groupTag: rumor.tags.find((t) => t[0] === "group")?.[1],
+        type: String(parsed.type),
+        content: String(parsed.content ?? ""),
+        ...(parsed.fileMetadata
+          ? { fileMetadata: parsed.fileMetadata as Record<string, unknown> }
+          : {}),
+        payload: parsed,
+      });
+    }
+    return {
+      replies,
+      sttCalls,
+      ttsCalls,
+      memberReplyIds: [...readableBy(memberSk).keys()],
+      selfReplyIds: [...readableBy(botSk).keys()],
+    };
+  }
+
+  test("a GROUP voice note gets a voice reply posted into the group", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "It dropped at nine." },
+      { type: "done", finalText: "It dropped at nine." },
+    ]);
+
+    const r = await runGroupVoiceCapable({ harness, inbound: "voice" });
+
+    expect(r.sttCalls).toBe(1);
+    expect(r.ttsCalls).toBeGreaterThan(0);
+    expect(r.replies.length).toBe(1);
+    const reply = r.replies[0]!;
+    // Into the group, for everyone: the other member and our self-wrap read the
+    // same reply. A DM to the sender alone has no group tag and reaches neither.
+    expect(reply.groupTag).toBe("hq-voice-reply");
+    expect(r.memberReplyIds).toEqual([String(reply.payload.id)]);
+    expect(r.selfReplyIds).toEqual([String(reply.payload.id)]);
+    expect(reply.type).toBe("voice");
+    expect(reply.fileMetadata).toBeDefined();
+  });
+
+  test("a GROUP voice-out reply speaks only the answer, with no text bubbles", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "Checking Home Assistant. " },
+      { type: "progress", note: "running tool", tool: toolCall("running tool") },
+      { type: "text", text: "It dropped at nine." },
+      {
+        type: "done",
+        finalText: "Checking Home Assistant. It dropped at nine.",
+      },
+    ]);
+
+    const r = await runGroupVoiceCapable({ harness, inbound: "voice" });
+
+    expect(r.replies.filter((x) => x.type !== "voice")).toEqual([]);
+    expect(r.replies.length).toBeGreaterThan(0);
+  });
+
+  test("a typed GROUP message still gets a text reply", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "You are free at 3pm." },
+      { type: "done", finalText: "You are free at 3pm." },
+    ]);
+
+    const r = await runGroupVoiceCapable({ harness, inbound: "text" });
+
+    expect(r.ttsCalls).toBe(0);
+    expect(r.replies.map((x) => x.type)).toEqual(["text"]);
+    expect(r.replies[0]!.groupTag).toBe("hq-voice-reply");
+  });
+
+  test("reply-mode text wins over a GROUP voice note", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "It dropped at nine." },
+      { type: "done", finalText: "It dropped at nine." },
+    ]);
+
+    const r = await runGroupVoiceCapable({
+      harness,
+      inbound: "voice",
+      override: "text",
+    });
+
+    expect(r.sttCalls).toBe(1);
+    expect(r.ttsCalls).toBe(0);
+    expect(r.replies.map((x) => x.type)).toEqual(["text"]);
+  });
+
+  test("reply-mode voice makes a typed GROUP message speak", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "You are free at 3pm." },
+      { type: "done", finalText: "You are free at 3pm." },
+    ]);
+
+    const r = await runGroupVoiceCapable({
+      harness,
+      inbound: "text",
+      override: "voice",
+    });
+
+    expect(r.ttsCalls).toBeGreaterThan(0);
+    expect(r.replies.map((x) => x.type)).toEqual(["voice"]);
+    expect(r.replies[0]!.groupTag).toBe("hq-voice-reply");
+  });
+
+  test("a reply mode the model requests mid-turn applies to THIS group reply", async () => {
+    const harness = new ScriptedHarness("fake", [
+      {
+        type: "done",
+        finalText: "You are free at 3pm.",
+        meta: { replyMode: "voice" },
+      },
+    ]);
+
+    const r = await runGroupVoiceCapable({ harness, inbound: "text" });
+
+    expect(r.replies.map((x) => x.type)).toEqual(["voice"]);
+  });
+
+  test("a failed synth falls back to text IN THE GROUP, never a DM", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "It dropped at nine." },
+      { type: "done", finalText: "It dropped at nine." },
+    ]);
+
+    const r = await runGroupVoiceCapable({
+      harness,
+      inbound: "voice",
+      ttsFails: true,
+    });
+
+    expect(r.ttsCalls).toBeGreaterThan(0);
+    expect(r.replies.map((x) => [x.type, x.groupTag])).toEqual([
+      ["text", "hq-voice-reply"],
+    ]);
+  });
+
+  test("a failed upload falls back to text IN THE GROUP, never a DM", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "It dropped at nine." },
+      { type: "done", finalText: "It dropped at nine." },
+    ]);
+
+    const r = await runGroupVoiceCapable({
+      harness,
+      inbound: "voice",
+      uploadFails: true,
+    });
+
+    expect(r.replies.map((x) => [x.type, x.content, x.groupTag])).toEqual([
+      ["text", "It dropped at nine.", "hq-voice-reply"],
     ]);
   });
 });
