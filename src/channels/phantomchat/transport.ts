@@ -399,9 +399,21 @@ export interface PhantomchatTransport extends ChannelTransport {
    * Send a voice note to a 1:1 DM. `audio` is the synthesized OGG/Opus bytes;
    * the transport AES-256-GCM encrypts them, uploads the ciphertext to Blossom,
    * and gift-wraps a `type:"voice"` envelope so the PWA renders a playable
-   * bubble. DM-only — group voice is not supported.
+   * bubble. For a group, see sendGroupVoice.
    */
   sendVoice(conversationId: string, audio: Buffer, mime: string): Promise<void>;
+  /**
+   * Send a voice note into a GROUP. Same encrypt + Blossom upload as sendVoice,
+   * wrapped in the group payload the PWA's GroupAPI.sendFile uses. `memberHexes`
+   * is the same broadcast set as sendGroupMessage. A no-op when nobody else is
+   * in it. Throws when the upload fails, so the caller can fall back to text.
+   */
+  sendGroupVoice(
+    groupId: string,
+    memberHexes: string[],
+    audio: Buffer,
+    mime: string,
+  ): Promise<void>;
   /** Show a "recording voice" activity indicator (best-effort). */
   sendRecording(conversationId: string): Promise<void>;
   /**
@@ -1220,7 +1232,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   }
 
   /**
-   * Voice egress (1:1 DM). Mirrors the PWA's send-file pipeline in reverse of
+   * Voice egress (1:1 DM; groups use sendGroupVoice). Mirrors the PWA's send-file pipeline in reverse of
    * blossomFetch: AES-256-GCM encrypt the audio, upload the ciphertext to
    * Blossom, then NIP-17-wrap a `type:"voice"` DM envelope whose `content` is
    * the JSON file-metadata blob the PWA's extractFileMetadata reads
@@ -1234,40 +1246,16 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     audio: Buffer,
     mime: string,
   ): Promise<void> {
-    const mimeType = mime || "audio/ogg";
-    const enc = encryptFileBytes(audio);
-    // Multi-mirror write (≥2 when possible). Primary URL + every successful
-    // mirror go on the envelope so the PWA can multi-GET if a host dies.
-    const uploaded = await uploadToBlossom(
-      enc.ciphertext,
-      enc.sha256Hex,
-      this.ourSecretKey,
-      mimeType,
-    );
+    const note = await this.uploadVoiceNote(audio, mime);
     // File metadata travels INSIDE the envelope's `content` (a JSON string), so
     // the recipient JSON.parses the envelope, then JSON.parses content → meta.
-    // `size` is the PLAINTEXT byte count (matches the PWA's blob.size).
-    // Playback duration (seconds) so the recipient's bubble shows the real
-    // length instead of 0:00. 0 ⇒ unparseable; omit and let the player fall
-    // back rather than stamp a bogus length.
-    const durationS = oggOpusDurationSeconds(audio);
-    // Amplitude envelope (base64, 5-bit Telegram packing) so the bubble draws
-    // the little bars. Derived from Opus packet sizes — a cheap container walk,
-    // no decode. "" ⇒ unparseable; omit and let the bubble show length-only.
-    const waveform = oggOpusWaveformBase64(audio);
+    const { keyHex, ivHex, ...shared } = note;
     const fileMeta = JSON.stringify({
-      url: uploaded.url,
-      sha256: enc.sha256Hex,
-      mimeType,
-      size: audio.length,
-      key: enc.keyHex,
-      iv: enc.ivHex,
+      ...shared,
+      key: keyHex,
+      iv: ivHex,
       // Authoritative media class so the receiver never re-guesses voice vs file.
       mediaType: "voice",
-      // Multi-mirror list (phantomchat #88). Primary first; receivers multi-GET.
-      servers: uploaded.mirrors,
-      ...(durationS > 0 ? { duration: durationS } : {}),
-      ...(waveform ? { waveform } : {}),
     });
     const envelope = JSON.stringify({
       id: `pc-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`,
@@ -1286,6 +1274,57 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       label: "voice",
       rewrap: () => rewrapV2(this.ourSecretKey, conversationId, rumor),
     });
+  }
+
+  /**
+   * Encrypt a voice note and upload it to Blossom. Returns the metadata both
+   * wire shapes carry; each sender names the key fields its own shape needs.
+   */
+  private async uploadVoiceNote(
+    audio: Buffer,
+    mime: string,
+  ): Promise<{
+    url: string;
+    sha256: string;
+    mimeType: string;
+    size: number;
+    keyHex: string;
+    ivHex: string;
+    servers: string[];
+    duration?: number;
+    waveform?: string;
+  }> {
+    const mimeType = mime || "audio/ogg";
+    const enc = encryptFileBytes(audio);
+    // Multi-mirror write (≥2 when possible). Primary URL + every successful
+    // mirror go on the envelope so the PWA can multi-GET if a host dies.
+    const uploaded = await uploadToBlossom(
+      enc.ciphertext,
+      enc.sha256Hex,
+      this.ourSecretKey,
+      mimeType,
+    );
+    // Playback duration (seconds) so the recipient's bubble shows the real
+    // length instead of 0:00. 0 ⇒ unparseable; omit and let the player fall
+    // back rather than stamp a bogus length.
+    const durationS = oggOpusDurationSeconds(audio);
+    // Amplitude envelope (base64, 5-bit Telegram packing) so the bubble draws
+    // the little bars. Derived from Opus packet sizes — a cheap container walk,
+    // no decode. "" ⇒ unparseable; omit and let the bubble show length-only.
+    const waveform = oggOpusWaveformBase64(audio);
+    return {
+      url: uploaded.url,
+      sha256: enc.sha256Hex,
+      mimeType,
+      // PLAINTEXT byte count (matches the PWA's blob.size).
+      size: audio.length,
+      keyHex: enc.keyHex,
+      ivHex: enc.ivHex,
+      // Multi-mirror list (phantomchat #88). Primary first; receivers multi-GET.
+      servers: uploaded.mirrors,
+      ...(durationS > 0 ? { duration: durationS } : {}),
+      ...(waveform ? { waveform } : {}),
+    };
   }
 
   /**
@@ -1325,7 +1364,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    *   - `id` is a `grp-<ms>-<rand>` string (the PWA's messageId shape). It MUST
    *     be non-empty: the PWA's `parseGroupRumorContent` returns null (drops the
    *     message) when `id` is falsy.
-   * `type` is always "text" — phantombot only sends text.
+   * `type` is "text" here; voice goes through sendGroupVoice.
    *
    * The `['group', groupId]` rumor tag (added by wrapGroupMessage) is what the
    * PWA's inbound router keys on to thread the reply into the group instead of a
@@ -1337,14 +1376,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     memberHexes: string[],
     text: string,
   ): Promise<void> {
-    // Defensively drop our own hex and dedupe: wrapGroupMessage adds the
-    // self-wrap, and a member list that included us would double-wrap to
-    // ourselves. (callers pass everyone-but-us, but the inbound p-tags are
-    // attacker-adjacent data so we don't trust them to already exclude us.)
-    const ourHexLower = this.ourPubHex.toLowerCase();
-    const others = [
-      ...new Set(memberHexes.map((h) => h.toLowerCase())),
-    ].filter((h) => h !== ourHexLower);
+    const others = this.otherGroupMembers(memberHexes);
 
     // Nobody to reach (we'd only build a self-wrap). Skip — matches the PWA's
     // otherMembers-empty case being a no-broadcast.
@@ -1359,6 +1391,61 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       timestamp: timestampMs,
     });
 
+    await this.publishGroupPayload(groupId, others, payload);
+  }
+
+  /**
+   * Group voice egress. Mirrors the PWA's `GroupAPI.sendFile` wire contract,
+   * which differs from the DM voice envelope in two load-bearing ways:
+   *   - The metadata is a `fileMetadata` OBJECT beside an (empty) caption in
+   *     `content`, not a JSON string inside `content`.
+   *   - Its key fields are `keyHex`/`ivHex`, not `key`/`iv`. The PWA's
+   *     `parseGroupRumorContent` silently drops `fileMetadata` without them.
+   * The receiver takes the media class from the top-level `type`, so there is
+   * no `mediaType` here.
+   */
+  async sendGroupVoice(
+    groupId: string,
+    memberHexes: string[],
+    audio: Buffer,
+    mime: string,
+  ): Promise<void> {
+    const others = this.otherGroupMembers(memberHexes);
+    // Checked before the upload: nobody to reach means nothing worth storing.
+    if (others.length === 0) return;
+
+    const fileMetadata = await this.uploadVoiceNote(audio, mime);
+    const timestampMs = Date.now();
+    const payload = JSON.stringify({
+      content: "",
+      type: "voice",
+      id: `grp-${timestampMs}-${crypto.randomUUID().slice(0, 6)}`,
+      timestamp: timestampMs,
+      fileMetadata,
+    });
+
+    await this.publishGroupPayload(groupId, others, payload);
+  }
+
+  /**
+   * Defensively drop our own hex and dedupe: wrapGroupMessage adds the
+   * self-wrap, and a member list that included us would double-wrap to
+   * ourselves. (callers pass everyone-but-us, but the inbound p-tags are
+   * attacker-adjacent data so we don't trust them to already exclude us.)
+   */
+  private otherGroupMembers(memberHexes: string[]): string[] {
+    const ourHexLower = this.ourPubHex.toLowerCase();
+    return [...new Set(memberHexes.map((h) => h.toLowerCase()))].filter(
+      (h) => h !== ourHexLower,
+    );
+  }
+
+  /** Group-wrap one payload for every member plus ourselves, and publish it. */
+  private async publishGroupPayload(
+    groupId: string,
+    others: string[],
+    payload: string,
+  ): Promise<void> {
     const { wraps, rewraps } = wrapGroupMessage(
       this.ourSecretKey,
       others,

@@ -17,7 +17,7 @@
  *     handled inline so /stop reaches a turn hung in the per-conversation chain.
  *     DM-only (group "/…" lines fall through to a normal turn). No Telegram
  *     `setMyCommands` menu — Nostr has no command-registration API.
- *   - No voice or attachments (groups ARE supported).
+ *   - Voice replies work in DMs and groups. No outbound attachments.
  *   - The trust perimeter gates on the CRYPTOGRAPHIC sender (rumor.pubkey,
  *     surfaced as `senderId`), never on the envelope `from` field.
  */
@@ -862,16 +862,14 @@ export async function runPhantomchatServer(
     // Reply-modality routing (mirrors core/engine.ts). Default: mirror the
     // input — a voice note in → a voice note back, text in → text out. An
     // override set via `phantombot reply-mode text|voice` (10-min idle TTL,
-    // keyed on conversationKey) wins. Voice replies are DM-only: group egress
-    // (sendGroupMessage) is text, and TTS must be configured.
+    // keyed on conversationKey) wins, in a group as in a DM. TTS must be
+    // configured.
     const inputWasVoice = msg.media?.kind === "voice";
-    let modalityOverride: ReplyMode | undefined = msg.groupId
-      ? undefined
-      : await touchReplyModeOverride({
-          persona: input.persona,
-          conversation: conversationKey,
-          ttlMs: DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
-        });
+    let modalityOverride: ReplyMode | undefined = await touchReplyModeOverride({
+      persona: input.persona,
+      conversation: conversationKey,
+      ttlMs: DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
+    });
     // Resolved once per turn: the TTS key is now an async persona-vault read
     // and the provider config cannot change mid-turn, but the closure below is
     // re-evaluated on every reply-mode override and must stay synchronous.
@@ -879,7 +877,6 @@ export async function runPhantomchatServer(
     const resolveWillReplyWithVoice = (
       override: ReplyMode | undefined,
     ): boolean => {
-      if (msg.groupId) return false;
       const wantsVoice =
         override === "voice"
           ? true
@@ -984,8 +981,8 @@ export async function runPhantomchatServer(
 
     // Coalesce progress narration and flush it on a clock (see core/streaming.ts),
     // not on every tool boundary. Driven by both the typing interval below and
-    // the chunk boundaries in the loop. No `suppress` here: unlike Telegram,
-    // PhantomChat voice replies are DM-only and gated elsewhere.
+    // the chunk boundaries in the loop. No `suppress` here: on a voice-out turn
+    // the text loop below never feeds this controller.
     const narration = createNarrationController({
       streaming,
       enabled: narrationEnabled,
@@ -1286,41 +1283,39 @@ export async function runPhantomchatServer(
     }
     // Persist a model-requested reply-mode change (via meta.replyMode) for
     // future turns, mirroring core/engine.ts.
-    if (!msg.groupId) {
-      if (requestedReplyMode === "default") {
-        await clearReplyModeOverride({
-          persona: input.persona,
-          conversation: conversationKey,
-        });
-      } else if (requestedReplyMode) {
-        await setReplyModeOverride({
-          persona: input.persona,
-          conversation: conversationKey,
-          mode: requestedReplyMode,
-        });
-      }
-      // Re-read the override after the harness finishes so a mid-turn
-      // `phantombot reply-mode voice|text` call affects THIS reply too. Never
-      // switch INTO voice once text bubbles have already streamed — that would
-      // mix wire formats and duplicate content for one answer.
-      //
-      // "Already streamed" means bubbles that were PUBLISHED, counted where
-      // they are sent — the same test core/engine.ts applies. It must not be
-      // `consumedReplyChars > 0`: that also counts pre-tool text a voice-out
-      // turn consumed without sending, which silently downgraded a spoken
-      // reply to text whenever the model said a line before running a tool.
-      modalityOverride = await getReplyModeOverride({
+    if (requestedReplyMode === "default") {
+      await clearReplyModeOverride({
         persona: input.persona,
         conversation: conversationKey,
-        ttlMs: DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
       });
-      willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
-      if (
-        willReplyWithVoice &&
-        (narrationBubblesSent > 0 || finalBubblesSent > 0)
-      ) {
-        willReplyWithVoice = false;
-      }
+    } else if (requestedReplyMode) {
+      await setReplyModeOverride({
+        persona: input.persona,
+        conversation: conversationKey,
+        mode: requestedReplyMode,
+      });
+    }
+    // Re-read the override after the harness finishes so a mid-turn
+    // `phantombot reply-mode voice|text` call affects THIS reply too. Never
+    // switch INTO voice once text bubbles have already streamed — that would
+    // mix wire formats and duplicate content for one answer.
+    //
+    // "Already streamed" means bubbles that were PUBLISHED, counted where
+    // they are sent — the same test core/engine.ts applies. It must not be
+    // `consumedReplyChars > 0`: that also counts pre-tool text a voice-out
+    // turn consumed without sending, which silently downgraded a spoken
+    // reply to text whenever the model said a line before running a tool.
+    modalityOverride = await getReplyModeOverride({
+      persona: input.persona,
+      conversation: conversationKey,
+      ttlMs: DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
+    });
+    willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
+    if (
+      willReplyWithVoice &&
+      (narrationBubblesSent > 0 || finalBubblesSent > 0)
+    ) {
+      willReplyWithVoice = false;
     }
 
     // Voice-out: speak only the answer — the text after the last tool, not the
@@ -1340,7 +1335,16 @@ export async function runPhantomchatServer(
         const r = await synthesize(input.config, segment);
         if (r.ok) {
           try {
-            await transport.sendVoice(senderHex, r.audio.data, r.audio.mime);
+            if (msg.groupId) {
+              await transport.sendGroupVoice(
+                msg.groupId,
+                groupTypingMembers!,
+                r.audio.data,
+                r.audio.mime,
+              );
+            } else {
+              await transport.sendVoice(senderHex, r.audio.data, r.audio.mime);
+            }
           } catch (e) {
             log.warn("phantomchat: sendVoice failed; falling back to text", {
               error: (e as Error).message,
