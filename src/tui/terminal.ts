@@ -51,10 +51,33 @@ export const CURSOR_KEYS_APP = "\x1b[?1h";
 /** Back to normal cursor keys (`ESC [ A`), what a shell expects. */
 export const CURSOR_KEYS_NORMAL = "\x1b[?1l";
 
-/** What entering full screen writes: the buffer first, then the key mode on it. */
-export const FULL_SCREEN_ON = ALT_SCREEN_ON + CURSOR_KEYS_APP;
-/** What leaving writes: the key mode off first, then the user's screen back. */
-export const FULL_SCREEN_OFF = CURSOR_KEYS_NORMAL + ALT_SCREEN_OFF;
+/**
+ * Alternate scroll mode (`?1007`), on and off.
+ *
+ * ## Why the trackpad still did nothing in iTerm2
+ *
+ * DECCKM is what Terminal.app keys on; iTerm2 ignores it. iTerm2 turns a
+ * scroll on the alternate screen into ↑/↓ only when the user flipped the
+ * Advanced setting "Scroll wheel sends arrow keys when in alternate screen
+ * mode" (default No) OR the application asked for alternate scroll mode with
+ * `?1007h` (honoured while the profile's "Allow Alternate Mouse Scroll" is on,
+ * which is its default). Measured on iTerm2 with the Advanced setting at No:
+ * `?1049h` alone sent nothing for a trackpad swipe, `?1049h?1007h` sent a
+ * stream of ↑/↓. xterm, kitty, WezTerm and Ghostty honour the same mode;
+ * Terminal.app ignores it, so it changes nothing there.
+ *
+ * Like DECCKM it is not restored by `?1049l`, so leaving resets it first;
+ * otherwise a later `less` in the same window would inherit it.
+ */
+export const ALT_SCROLL_ON = "\x1b[?1007h";
+/** Back to the terminal's own wheel handling. */
+export const ALT_SCROLL_OFF = "\x1b[?1007l";
+
+/** What entering full screen writes: the buffer first, then the modes on it. */
+export const FULL_SCREEN_ON = ALT_SCREEN_ON + CURSOR_KEYS_APP + ALT_SCROLL_ON;
+/** What leaving writes: the modes off first, then the user's screen back. */
+export const FULL_SCREEN_OFF =
+  ALT_SCROLL_OFF + CURSOR_KEYS_NORMAL + ALT_SCREEN_OFF;
 
 /**
  * Kitty keyboard protocol, flag 1 (disambiguate escape codes).

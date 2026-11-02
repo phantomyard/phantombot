@@ -112,6 +112,29 @@ describe("enterFullScreen", () => {
     screen.restore();
     expect(writes.join("")).toBe(left);
   });
+
+  // iTerm2 ignores DECCKM for the wheel: with its Advanced setting "Scroll
+  // wheel sends arrow keys when in alternate screen mode" at the default (No),
+  // a trackpad swipe sent nothing on `?1049h` and ↑/↓ once `?1007h` (alternate
+  // scroll mode) was added. Literal escapes, as above.
+  test("turns on alternate scroll mode for iTerm2, and off before leaving", () => {
+    const { writes, stream } = fakeStdout();
+    const screen = enterFullScreen(stream);
+    const entered = writes.join("");
+    expect(entered).toContain("\x1b[?1007h");
+    expect(entered.indexOf("\x1b[?1007h")).toBeGreaterThan(
+      entered.indexOf("\x1b[?1049h"),
+    );
+    writes.length = 0;
+    screen.restore();
+    const left = writes.join("");
+    // `?1049l` does not restore it either; a later `less` in the same window
+    // would inherit it.
+    expect(left).toContain("\x1b[?1007l");
+    expect(left.indexOf("\x1b[?1007l")).toBeLessThan(
+      left.indexOf("\x1b[?1049l"),
+    );
+  });
 });
 
 describe("gateStdout", () => {
