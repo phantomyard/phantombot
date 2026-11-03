@@ -158,3 +158,16 @@ describe("installJetbrains — no existing file", () => {
     expect(parsed.agent_servers.Phantombot.command).toBe(BIN);
   });
 });
+
+describe("installJetbrains — UTF-8 BOM (#709)", () => {
+  test("a BOM-prefixed acp.json is edited, and the BOM is kept", () => {
+    writeFileSync(configPath, '\uFEFF{ "default_mcp_settings": {} }', "utf8");
+    const result = installJetbrains({ configPath, binaryPath: BIN, out: new Sink(), err: new Sink() });
+    expect(result.code).toBe(0);
+    const updated = readFileSync(configPath, "utf8");
+    expect(updated.startsWith("\uFEFF")).toBe(true);
+    const parsed = parse(updated.slice(1)) as any;
+    expect(parsed.default_mcp_settings).toEqual({});
+    expect(parsed.agent_servers.Phantombot.command).toBe(BIN);
+  });
+});

@@ -335,6 +335,32 @@ export function unwrapNip17Message(
 const symmetricKeyCache: Map<string, CryptoKey> = new Map();
 
 /**
+ * Cache-miss counter per conversation pair: how many times getSymmetricKey
+ * actually ran ECDH + HKDF for it. Monotonic for the process
+ * (clearSymmetricKeyCache does not reset it). It exists to pin the invariant
+ * the old stopwatch benchmark stood in for (#716): ONE derivation per
+ * conversation, not one per message, exact on any machine, unlike a
+ * wall-clock ratio. Per pair, so concurrent work on other peers cannot move it.
+ */
+const symmetricKeyDerivations: Map<string, number> = new Map();
+
+function symmetricCacheKey(localPubHex: string, peerPubHex: string): string {
+  return localPubHex < peerPubHex
+    ? `${localPubHex}:${peerPubHex}`
+    : `${peerPubHex}:${localPubHex}`;
+}
+
+/** Number of symmetric-key derivations (cache misses) for one pair so far. */
+export function symmetricKeyDerivationCount(
+  localSk: Uint8Array,
+  peerPubHex: string,
+): number {
+  return (
+    symmetricKeyDerivations.get(symmetricCacheKey(getPublicKey(localSk), peerPubHex)) ?? 0
+  );
+}
+
+/**
  * Derive or retrieve a cached AES-256-GCM symmetric key for a peer.
  *
  * One ECDH between `localSk` and `peerPubHex`, then HKDF-SHA256 with
@@ -347,14 +373,12 @@ export async function getSymmetricKey(
   peerPubHex: string,
 ): Promise<{ raw: Uint8Array; key: CryptoKey }> {
   const localPubHex = getPublicKey(localSk);
-  const cacheKey =
-    localPubHex < peerPubHex
-      ? `${localPubHex}:${peerPubHex}`
-      : `${peerPubHex}:${localPubHex}`;
+  const cacheKey = symmetricCacheKey(localPubHex, peerPubHex);
 
   const cachedKey = symmetricKeyCache.get(cacheKey);
   if (cachedKey) return { raw: new Uint8Array(0), key: cachedKey };
 
+  symmetricKeyDerivations.set(cacheKey, (symmetricKeyDerivations.get(cacheKey) ?? 0) + 1);
   // ECDH: shared secret from (localSk, peerPub). noble/curves expects
   // compressed pubkey (33 bytes with 02/03 prefix). Nostr x-only keys
   // always use even y → prefix 0x02.

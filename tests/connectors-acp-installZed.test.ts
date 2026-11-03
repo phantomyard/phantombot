@@ -197,3 +197,16 @@ describe("installZed — no existing file", () => {
     expect(parsed.agent_servers.Phantombot.command).toBe(BIN);
   });
 });
+
+describe("installZed — UTF-8 BOM (#709)", () => {
+  test("a BOM-prefixed settings.json is edited, and the BOM is kept", () => {
+    writeFileSync(settingsPath, '\uFEFF{ "theme": "One Dark" }', "utf8");
+    const result = installZed({ settingsPath, binaryPath: BIN, out: new Sink(), err: new Sink() });
+    expect(result.code).toBe(0);
+    const updated = readFileSync(settingsPath, "utf8");
+    expect(updated.startsWith("\uFEFF")).toBe(true);
+    const parsed = parse(updated.slice(1)) as any;
+    expect(parsed.theme).toBe("One Dark");
+    expect(parsed.agent_servers.Phantombot.command).toBe(BIN);
+  });
+});

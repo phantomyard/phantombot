@@ -223,11 +223,16 @@ export class MediaCaptionCoalescer {
       // file from the other sender; that is the channel's ordinary
       // last-message-wins, and it is visible to the sender who interrupted.)
       //
-      // ACCEPTED GAP, same sender only: a message that cannot take a caption for
-      // a reason other than media of its own — a slash command the server's
-      // predicate refuses — queues rather than interrupts. Control commands never
-      // reach the interrupt path anyway (the server routes them to runSlash,
-      // off-chain), so the cost is a delayed start, never a lost message.
+      // DECIDED (#739), same sender only: a message that cannot take a caption
+      // queues behind the burst rather than interrupting it. That covers a
+      // message with media of its own (a voice note naming this bot) and a
+      // "/…" line. Letting it interrupt would flush the held file; dispatching
+      // it AHEAD of the held file would keep both but run a "what is in this
+      // photo?" voice note before the photo it is about. A delayed start is
+      // the cheaper cost. A "/…" line that resolves is handled by runSlash,
+      // off-chain, and never interrupts. One that does NOT resolve falls through
+      // to enqueue, and the server carries this follower mark through that
+      // fall-through (#742), so it cannot flush the held file either.
       const follower = pending.senderId === msg.senderId ? AS_FOLLOWER : undefined;
       this.dispatchNow(msg, undefined, follower);
       return;

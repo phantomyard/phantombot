@@ -67,6 +67,7 @@ import { pathToFileURL } from "node:url";
 import { applyEdits, modify, parse, printParseErrorCode, type ParseError } from "jsonc-parser";
 
 import type { WriteSink } from "../../lib/io.ts";
+import { splitBom } from "./jsoncBom.ts";
 import {
   OPENCODE_PROVIDER_FILENAME,
   OPENCODE_PROVIDER_SHA256,
@@ -663,8 +664,7 @@ export function installOpencode(options: InstallOpencodeOptions): InstallOpencod
     // — including the startup reconcile — into a silent no-op on that machine.
     // Strip it for parsing/editing and restore it on write, so the file keeps
     // the encoding its owner gave it.
-    const bom = text.startsWith("\uFEFF") ? "\uFEFF" : "";
-    const body = bom ? text.slice(1) : text;
+    const { bom, body } = splitBom(text);
     const errors: ParseError[] = [];
     const parsed = parse(body, errors, { allowTrailingComma: true, disallowComments: false });
     if (errors.length > 0) {

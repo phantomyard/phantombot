@@ -31,6 +31,7 @@ import { parse } from "jsonc-parser";
 import { resolvePersonasDirSync } from "../../config.ts";
 import type { WriteSink } from "../../lib/io.ts";
 import { defaultZedSettingsPath, installZed } from "./installZed.ts";
+import { splitBom } from "./jsoncBom.ts";
 import {
   defaultJetbrainsConfigPath,
   installJetbrains,
@@ -146,7 +147,8 @@ function readAgentServerCommand(settingsPath: string): string | undefined {
     // returns a best-effort value or undefined; either way the installer
     // re-parses with error collection and aborts safely, so we never risk data
     // loss here.
-    const parsed = parse(raw) as
+    // BOM-prefixed (Windows-written) files must still read (#709).
+    const parsed = parse(splitBom(raw).body) as
       | { agent_servers?: { Phantombot?: { command?: unknown } } }
       | undefined;
     const cmd = parsed?.agent_servers?.Phantombot?.command;

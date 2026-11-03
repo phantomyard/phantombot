@@ -85,11 +85,10 @@ export async function createBrainOnboardingDeps(
     "../lib/nativeAgentDir.ts"
   );
   const {
-    buildProviderEntry,
     clearCustomProviderEntry,
+    ensureCustomProviderEntry,
     restoreModelsJson,
     snapshotModelsJson,
-    writeCustomProviderEntry,
   } = await import("../lib/piCustomProvider.ts");
   const { probeProviderKey } = await import("../lib/providerKeyProbe.ts");
 
@@ -172,18 +171,15 @@ export async function createBrainOnboardingDeps(
       applyRouting(writeTarget.path, choices, instanceId),
     // Bring-your-own-endpoint providers (issue #694) live in the native agent
     // dir's `models.json` — the SAME dir the spawn path re-asserts, so the entry
-    // the interview writes is the one the first turn reads.
+    // the interview writes is the one the first turn reads. UNIONED, never
+    // replaced (#698): the auto-routing skip path writes `[auto]` after
+    // registration seeded the full list, and a replace-write shrank it.
     writeProviderEntry: (providerId, entry) =>
-      writeCustomProviderEntry(
-        nativeAgentDir(undefined, persona),
-        providerId,
-        buildProviderEntry({
-          id: providerId,
-          baseUrl: entry.baseUrl,
-          models: entry.models,
-          keyAvailable: entry.keyAvailable,
-        }),
-      ),
+      ensureCustomProviderEntry(nativeAgentDir(undefined, persona), providerId, {
+        baseUrl: entry.baseUrl,
+        models: entry.models,
+        keyAvailable: entry.keyAvailable,
+      }),
     clearProviderEntry: (providerId) =>
       clearCustomProviderEntry(nativeAgentDir(undefined, persona), providerId),
     snapshotWrites: () =>

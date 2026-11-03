@@ -23,6 +23,7 @@ import {
   reconcileEditorConnectors,
   type EditorSpec,
 } from "../src/connectors/acp/autoInstall.ts";
+import { ZED_EDITOR } from "../src/connectors/acp/autoInstall.ts";
 import { installZed } from "../src/connectors/acp/installZed.ts";
 
 let workdir: string;
@@ -148,5 +149,17 @@ describe("reconcileEditorConnectors", () => {
     expect(results[0]!.error).toContain("kaboom");
     // The healthy editor after it still got registered.
     expect(results[1]!.action).toBe("registered");
+  });
+});
+
+describe("readAgentServerCommand — UTF-8 BOM (#709)", () => {
+  test("a BOM-prefixed settings file still yields the registered command", () => {
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    writeFileSync(
+      settingsPath,
+      '\uFEFF{ "agent_servers": { "Phantombot": { "command": "/opt/pb" } } }',
+      "utf8",
+    );
+    expect(ZED_EDITOR.currentCommand!(settingsPath)).toBe("/opt/pb");
   });
 });

@@ -1161,11 +1161,17 @@ describe("ClaudeHarness escort", () => {
     expect(argv).toContain("CronCreate");
   });
 
-  test("an unescorted turn gets no hook", async () => {
+  test("an unescorted turn gets no escort hook, only the body-path guard (#718)", async () => {
     const argv = await run("argv", {});
-    expect(argv).not.toContain("PreToolUse");
     expect(argv).not.toContain("__escort");
     expect(argv).not.toContain("disableAllHooks");
+    expect(argv).toContain("__body_guard");
+  });
+
+  test("an escorted turn keeps the body-path guard alongside the escort (#718)", async () => {
+    const argv = await run("argv", { escort: ESCORT });
+    expect(argv).toContain("__escort");
+    expect(argv).toContain("__body_guard");
   });
 
   test("the context reaches the env only when escorted, and an inherited one is cleared", async () => {

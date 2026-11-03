@@ -4361,6 +4361,79 @@ describe("phantomchat media → caption coalescing", () => {
   }, 20_000);
 
   /**
+   * REGRESSION (#742). A "/…" line that is NOT a command takes runSlash, gets
+   * null back from the dispatcher and falls through to enqueue. runSlash used to
+   * drop the coalescer's follower mark on that path, so the line interrupted
+   * with normal rights and flushed the bare image held a moment earlier: the
+   * phantom ran the text alone and the file was gone without a trace.
+   */
+  test("an unrecognized slash line after a held attachment keeps the file (#742)", async () => {
+    stubBlossom();
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ParkingFirstHarness("fake");
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    const feed = (envelope: unknown): void => {
+      const { wraps } = wrapNip17Message(
+        senderSk,
+        botHex,
+        JSON.stringify(envelope),
+      );
+      pool.feed(wraps[0] as NTNostrEvent);
+    };
+
+    feed(textEnvelope("txt-long", "start the long job"));
+    await waitUntil(
+      () => harness.invocations === 1,
+      "the first turn to start",
+      4_000,
+    );
+
+    feed(imageEnvelope("img-held"));
+    feed(textEnvelope("txt-slash", "/notacommand explain this"));
+
+    await waitUntil(
+      () => harness.invocations >= 3,
+      "the held file and the slash line to each run a turn",
+      6_000,
+    );
+    const file = harness.requests[1]!.userMessage;
+    const slash = harness.requests[2]!.userMessage;
+
+    ac.abort();
+    await serverPromise;
+
+    expect(file).toContain("[attached: ");
+    expect(slash).toContain("/notacommand explain this");
+  }, 20_000);
+
+  /**
    * The receipt for an absorbed attachment is sent behind the SAME auth gate as
    * the message itself. Without this case that claim is only a comment on the
    * loop: nothing would go red if a refactor moved it above the gate.

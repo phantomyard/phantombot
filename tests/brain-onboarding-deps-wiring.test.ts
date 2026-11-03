@@ -23,6 +23,12 @@ import {
 } from "../src/lib/piRouting.ts";
 import { openPersonaVault } from "../src/lib/vault.ts";
 import { _resetVaultTrackingForTesting } from "../src/lib/vaultEnvTracking.ts";
+import { nativeAgentDir } from "../src/lib/nativeAgentDir.ts";
+import {
+  PHANTOOPS_AUTO_MODEL,
+  PHANTOOPS_PROVIDER,
+  readCustomProviderEntry,
+} from "../src/lib/piCustomProvider.ts";
 import { createBrainOnboardingDeps } from "../src/tui/brainOnboarding.ts";
 
 const KEYS = [
@@ -106,4 +112,34 @@ test("a config with no routing still yields an empty routing object", async () =
   const deps = await createBrainOnboardingDeps("phantom");
   expect(deps.routing.baseUrl).toBeUndefined();
   expect(deps.routing.provider).toBeUndefined();
+});
+
+/**
+ * REGRESSION (#698). The TUI auto-routing skip path writes `[auto]` after
+ * registration seeded the full model list. The production writeProviderEntry
+ * used to REPLACE the entry, shrinking it to `[auto]`; it must union.
+ */
+test("deps.writeProviderEntry unions models and never shrinks the entry", async () => {
+  const deps = await createBrainOnboardingDeps("phantom");
+  const baseUrl = "https://gateway.example/v1";
+  const seeded = await deps.writeProviderEntry!(PHANTOOPS_PROVIDER, {
+    baseUrl,
+    models: [PHANTOOPS_AUTO_MODEL, "gpt-5.2", "kimi-k3"],
+    keyAvailable: true,
+  });
+  expect(seeded.ok).toBe(true);
+  const again = await deps.writeProviderEntry!(PHANTOOPS_PROVIDER, {
+    baseUrl,
+    models: [PHANTOOPS_AUTO_MODEL],
+    keyAvailable: true,
+  });
+  expect(again.ok).toBe(true);
+
+  const entry = await readCustomProviderEntry(
+    nativeAgentDir(undefined, "phantom"),
+    PHANTOOPS_PROVIDER,
+  );
+  const ids = (entry?.models ?? []).map((m) => m.id);
+  expect(ids[0]).toBe(PHANTOOPS_AUTO_MODEL);
+  expect(ids).toEqual(expect.arrayContaining([PHANTOOPS_AUTO_MODEL, "gpt-5.2", "kimi-k3"]));
 });

@@ -284,3 +284,20 @@ describe("checkProposedApi (doctor --no-repair)", () => {
     expect(r.error).toContain("not parseable");
   });
 });
+
+describe("planProposedApi — UTF-8 BOM (#709)", () => {
+  test("a BOM-prefixed argv.json merges, and the BOM is kept", () => {
+    const plan = planProposedApi('\uFEFF{ "locale": "en" }', EXT);
+    expect(plan.kind).toBe("write");
+    if (plan.kind !== "write") throw new Error("unreachable");
+    expect(plan.updated.startsWith("\uFEFF")).toBe(true);
+    const parsed = parse(plan.updated.slice(1)) as any;
+    expect(parsed.locale).toBe("en");
+    expect(parsed[ENABLE_PROPOSED_API_KEY]).toEqual([EXT]);
+  });
+
+  test("a BOM-prefixed argv.json that already lists us is current", () => {
+    const existing = `\uFEFF{"${ENABLE_PROPOSED_API_KEY}": ["${EXT}"]}`;
+    expect(planProposedApi(existing, EXT).kind).toBe("current");
+  });
+});

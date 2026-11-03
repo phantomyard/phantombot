@@ -164,12 +164,32 @@ export interface PhantomchatChannelInput {
 export function createSerializedIngest<T>(
   work: (arg: T) => Promise<void>,
   onError: (e: unknown) => void,
+  timeoutMs: number = INGEST_UNIT_TIMEOUT_MS,
 ): (arg: T) => void {
   let chain: Promise<void> = Promise.resolve();
+  // A HANGING unit (#737) is worse than a rejected one: the chain is global to
+  // the listener, so a wrap that never settles would silence every peer, with
+  // nothing logged. Race each unit against a timer and report a timeout through
+  // the same onError, so a stuck wrap fails like a rejected one and the chain
+  // moves on. The stuck work is not cancellable; if it settles later its result
+  // is simply out of order, which beats a deaf bot.
+  const bounded = (arg: T): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`ingest unit timed out after ${timeoutMs}ms`)),
+        timeoutMs,
+      );
+    });
+    return Promise.race([work(arg), timeout]).finally(() => clearTimeout(timer));
+  };
   return (arg: T): void => {
-    chain = chain.then(() => work(arg)).catch(onError);
+    chain = chain.then(() => bounded(arg)).catch(onError);
   };
 }
+
+/** Upper bound on one serialized ingest unit (one wrap's unwrap + parse). */
+export const INGEST_UNIT_TIMEOUT_MS = 30_000;
 
 /**
  * Build the phantomchat `Channel`. `listen()` drives the inbound loop:
