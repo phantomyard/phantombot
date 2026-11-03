@@ -124,6 +124,49 @@ export interface PersonaConfig {
   decisionModel?: DecisionModelConfig;
 }
 
+// ─── providers ─────────────────────────────────────────────────────────────
+
+/** One provider the native engine can run (`engine.providers.list()`). */
+export interface ProviderInfo {
+  /** Id to pass as `brain.native.provider`, e.g. "openrouter". */
+  id: string;
+  /** Display name, e.g. "OpenRouter". */
+  label: string;
+  /** The user must supply a base URL (a self-hosted OpenAI-compatible server). */
+  needsBaseUrl: boolean;
+  /** An empty key is a valid configuration (an unauthenticated local server). */
+  keyOptional: boolean;
+  /** The model almost everyone wants, when the provider has one. */
+  defaultModel?: string;
+}
+
+export interface ProviderCheckOptions {
+  /** Endpoint for a provider with `needsBaseUrl` (required there), or an override. */
+  baseUrl?: string;
+}
+
+/** One model from the provider's own catalogue. */
+export interface ProviderModel {
+  /** Id to pass as `brain.native.model`. */
+  id: string;
+  /** The provider says it accepts image input. */
+  supportsImages: boolean;
+}
+
+/** Result of `engine.providers.check()`. */
+export interface ProviderCheck {
+  /**
+   * "verified": the provider accepted the key. "invalid": it explicitly
+   * rejected it (401/403), the only verdict to block on. "unverified": it
+   * could not be checked (no known endpoint, network error, outage).
+   */
+  status: "verified" | "invalid" | "unverified";
+  /** Human-readable evidence (HTTP status or error text). Never contains the key. */
+  detail: string;
+  /** Models this account can use, [] when the list could not be read or the key was rejected. */
+  models: ProviderModel[];
+}
+
 // ─── turns ─────────────────────────────────────────────────────────────────
 
 /**

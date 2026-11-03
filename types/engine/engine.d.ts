@@ -28,7 +28,7 @@
  *
  * Runtime: Bun (the engine uses `bun:sqlite` and `Bun.spawn`, like the CLI).
  */
-import type { CreatePersonaOptions, DecideOptions, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, StructuredResult, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
+import type { CreatePersonaOptions, DecideOptions, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
 /**
  * Open an engine on `options.root`. Rejects with `invalid_root` or
  * `root_locked`. Always `close()` it (or use `await using`).
@@ -41,6 +41,15 @@ export declare class Engine {
         list(): Promise<string[]>;
         exists(name: string): Promise<boolean>;
         create(name: string, options?: CreatePersonaOptions): Promise<Persona>;
+    };
+    /**
+     * Model providers for an app's own setup UI: list them, check a key and read
+     * that account's models. Stores nothing; persist the choice with
+     * `persona.configure({ brain: { native: { provider, model, apiKey } } })`.
+     */
+    readonly providers: {
+        list(): Promise<ProviderInfo[]>;
+        check(provider: string, apiKey: string, options?: ProviderCheckOptions): Promise<ProviderCheck>;
     };
     /** A handle on `name`. Cheap; existence is checked on use. */
     persona(name: string): Persona;

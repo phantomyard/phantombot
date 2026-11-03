@@ -189,6 +189,32 @@ await engine.personas.create("aria", {
 });
 ```
 
+### Providers: `engine.providers`
+
+For an app's own setup screen: list the providers the native engine can run,
+check a key, and read the models that account can use. Nothing is stored; save
+the choice with `persona.configure`.
+
+```ts
+const providers = await engine.providers.list();
+// [{ id: "openrouter", label: "OpenRouter", needsBaseUrl: false, keyOptional: false }, ...]
+
+const check = await engine.providers.check("openrouter", typedKey);
+// { status: "verified" | "invalid" | "unverified", detail, models: [{ id, supportsImages }] }
+if (check.status !== "invalid") {
+  await aria.configure({ brain: { native: { provider: "openrouter", model: picked, apiKey: typedKey } } });
+}
+```
+
+- `status` is `"invalid"` only when the provider explicitly rejected the key
+  (401/403); block on that alone. `"unverified"` means it could not be checked
+  (no known endpoint, network error, outage).
+- `models` is the provider's live list, `[]` when it could not be read or the
+  key was rejected. Fall back to free-text model entry when it is empty.
+- Providers with `needsBaseUrl` (a self-hosted OpenAI-compatible server) need
+  `{ baseUrl }`; for those `keyOptional` means an empty key is valid.
+- `detail` never contains the key.
+
 ### `persona.configure({ brain?, decisionModel? })`
 
 `configure` writes to the persona's **own** `config.toml`, never the root-wide
