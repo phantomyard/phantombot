@@ -356,8 +356,19 @@ describe("parsePiEvent", () => {
     expect(parsePiEvent("string")).toBeUndefined();
     expect(parsePiEvent({})).toBeUndefined();
     expect(parsePiEvent({ type: 42 })).toBeUndefined();
-    // message_update with no assistantMessageEvent
-    expect(parsePiEvent({ type: "message_update" })).toBeUndefined();
+  });
+
+  test("bare message_update (no assistantMessageEvent) is a liveness heartbeat", () => {
+    // VERIFIED against pi 1.4.0: during an SSE stretch carrying only keepalive
+    // comments pi still emits payload-less `message_update` records. They must
+    // feed the idle watchdog — otherwise a long silent server-side tool is
+    // invisible until the client fakes assistant TEXT (phantomops #357).
+    const res = parsePiEvent({
+      type: "message_update",
+      usage: { input: 0, output: 0, totalTokens: 0 },
+    });
+    expect(res).toEqual({ type: "heartbeat" });
+    expect(piActivity({ type: "message_update" }, res as any)).toBe("model");
   });
 });
 

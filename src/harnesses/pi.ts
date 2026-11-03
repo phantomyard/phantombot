@@ -1187,7 +1187,18 @@ export function parsePiEvent(parsed: unknown): ParseEventResult {
   if (obj.type !== "message_update") return undefined;
 
   const ame = obj.assistantMessageEvent;
-  if (!isObject(ame)) return undefined;
+  if (!isObject(ame)) {
+    // Bare `message_update` — payload-less pi liveness. VERIFIED against pi
+    // 1.4.0 on 2026-11-03: while an upstream SSE stream carries only keepalive
+    // comments (a long server-side tool), pi still emits `message_update`
+    // records carrying just usage. Surfacing them as a heartbeat is what keeps
+    // the idle watchdog fed through that silence; dropping them left the ONLY
+    // counted signal as assistant TEXT, which is why phantomops had to fake
+    // blank `content` deltas to look alive (phantomyard/phantomops#357).
+    // Classified "model" by piActivity, so the thinking budget still bounds a
+    // harness that is alive but getting nowhere.
+    return { type: "heartbeat" };
+  }
 
   if (ame.type === "text_delta") {
     const delta = ame.delta;

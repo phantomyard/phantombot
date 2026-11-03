@@ -1612,3 +1612,44 @@ describe("runHarnessProcess — reasoning is progress, payload-less noise is not
     expect(err.killCause).toBe("timeout");
   });
 });
+
+describe("runHarnessProcess — pi's own liveness ticks feed the idle watchdog (phantomops #357)", () => {
+  test("bare message_update records keep a silent turn alive", async () => {
+    // pi 1.4.0 emits payload-less `message_update` records while an upstream
+    // SSE stream carries only keepalive comments (verified 2026-11-03 against
+    // a stub openai-completions server). They must re-arm the idle window:
+    // that is what lets phantomops drop its fake `content: "\n"` heartbeat
+    // without re-exposing a >300s silent server-side tool to the idle kill.
+    const proc = spawnInNewSession(
+      [
+        "sh",
+        "-c",
+        'for i in $(seq 1 20); do echo \'{"type":"message_update","usage":{"input":0,"output":0,"totalTokens":0}}\'; sleep 0.05; done',
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 200,
+        hardTimeoutMs: 4000,
+        workingDir: process.cwd(),
+        persona: "test",
+        trusted: true,
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      parseEvent: parsePiEvent,
+      activity: piActivity,
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.find((c) => c.type === "error")).toBeUndefined();
+  });
+});
