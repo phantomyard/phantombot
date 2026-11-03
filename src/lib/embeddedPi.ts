@@ -55,6 +55,7 @@ import {
 } from "./nativeAgentDir.ts";
 import { withPersonaEnv } from "./envBootstrap.ts";
 import { phantombotEscortExtension, type ToolCallHookApi } from "./escort.ts";
+import { phantombotBodyGuardExtension } from "./bodyPathGuard.ts";
 
 /** Hidden argv[2] that turns the phantombot binary into the pi CLI. */
 export const EMBEDDED_PI_SUBCOMMAND = "__pi";
@@ -142,6 +143,9 @@ export function embeddedPiExtensionFactories(): Array<(pi: never) => unknown> {
   return [
     phantombotAttributionExtension as never,
     ((pi: ToolCallHookApi) => phantombotEscortExtension(pi)) as never,
+    // Always on, every turn (#718): refuses a `gh` call that would publish a
+    // literal `@/path` body. See lib/bodyPathGuard.ts.
+    ((pi: ToolCallHookApi) => phantombotBodyGuardExtension(pi)) as never,
   ];
 }
 

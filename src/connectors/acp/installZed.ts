@@ -35,6 +35,7 @@ import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 
 import { xdgConfigHome } from "../../config.ts";
 import type { WriteSink } from "../../lib/io.ts";
+import { splitBom } from "./jsoncBom.ts";
 
 export interface InstallZedOptions {
   /** Override the settings path (tests). Default: platform Zed settings. */
@@ -138,10 +139,14 @@ export function installZed(options: InstallZedOptions): InstallZedResult {
     }
   }
 
+  // A leading UTF-8 BOM is stripped for parse/edit and restored on write
+  // (#709); `existing` itself stays byte-exact for the backup.
+  const { bom, body } = splitBom(existing);
+
   // ── Parse tolerantly. ANY structural error ⇒ ABORT, write nothing. ──
   if (fileExisted) {
     const errors: ParseError[] = [];
-    parse(existing, errors, {
+    parse(body, errors, {
       allowTrailingComma: true,
       disallowComments: false,
     });
@@ -160,12 +165,12 @@ export function installZed(options: InstallZedOptions): InstallZedResult {
     formattingOptions: { tabSize: 2, insertSpaces: true, eol: "\n" },
   };
   const edits = modify(
-    existing,
+    body,
     ["agent_servers", "Phantombot"],
     block,
     formatting,
   );
-  const updated = applyEdits(existing, edits);
+  const updated = bom + applyEdits(body, edits);
 
   // ── Atomic write: backup original, write temp, rename into place. ──
   mkdirSync(dirname(settingsPath), { recursive: true });

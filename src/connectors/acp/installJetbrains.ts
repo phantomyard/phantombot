@@ -37,6 +37,7 @@ import { dirname, join } from "node:path";
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 
 import type { WriteSink } from "../../lib/io.ts";
+import { splitBom } from "./jsoncBom.ts";
 import { phantombotAgentServerBlock } from "./installZed.ts";
 
 export interface InstallJetbrainsOptions {
@@ -99,10 +100,14 @@ export function installJetbrains(
     }
   }
 
+  // A leading UTF-8 BOM is stripped for parse/edit and restored on write
+  // (#709); `existing` itself stays byte-exact for the backup.
+  const { bom, body } = splitBom(existing);
+
   // ── Parse tolerantly. ANY structural error ⇒ ABORT, write nothing. ──
   if (fileExisted) {
     const errors: ParseError[] = [];
-    parse(existing, errors, {
+    parse(body, errors, {
       allowTrailingComma: true,
       disallowComments: false,
     });
@@ -121,12 +126,12 @@ export function installJetbrains(
     formattingOptions: { tabSize: 2, insertSpaces: true, eol: "\n" },
   };
   const edits = modify(
-    existing,
+    body,
     ["agent_servers", "Phantombot"],
     block,
     formatting,
   );
-  const updated = applyEdits(existing, edits);
+  const updated = bom + applyEdits(body, edits);
 
   // ── Atomic write: backup original, write temp, rename into place. ──
   mkdirSync(dirname(configPath), { recursive: true });

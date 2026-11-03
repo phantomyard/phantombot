@@ -53,6 +53,7 @@ import { loadVaultIntoEnv } from "./lib/vault.ts";
 import { migratePlaintextToVault } from "./lib/vaultMigrate.ts";
 import { EMBEDDED_PI_SUBCOMMAND, runEmbeddedPi } from "./lib/embeddedPi.ts";
 import { ESCORT_SUBCOMMAND, runEscortHook } from "./lib/escort.ts";
+import { BODY_GUARD_SUBCOMMAND, runBodyGuardHook } from "./lib/bodyPathGuard.ts";
 
 if (process.argv[2] === EMBEDDED_PI_SUBCOMMAND) {
   await runEmbeddedPi(process.argv.slice(3));
@@ -64,6 +65,15 @@ if (process.argv[2] === EMBEDDED_PI_SUBCOMMAND) {
   let reason = "";
   const code = await runEscortHook(stdinText, { stderr: (s) => { reason += s; } });
   // Flushed before exit: on a block, this text is what claude shows the model.
+  if (reason) await Bun.write(Bun.stderr, reason);
+  process.exit(code);
+} else if (process.argv[2] === BODY_GUARD_SUBCOMMAND) {
+  // The body-path guard's claude PreToolUse hook (#718, lib/bodyPathGuard.ts).
+  // Pure and offline: dispatched before the CLI bootstrap so it never touches
+  // the vault, and runs before every Bash call of every claude turn.
+  const stdinText = await new Response(Bun.stdin.stream()).text();
+  let reason = "";
+  const code = runBodyGuardHook(stdinText, { stderr: (s) => { reason += s; } });
   if (reason) await Bun.write(Bun.stderr, reason);
   process.exit(code);
 } else {

@@ -47,6 +47,7 @@ import { dirname, join } from "node:path";
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 
 import { VSCODE_EXTENSION_ID } from "../../lib/vscodeExtensionAsset.generated.ts";
+import { splitBom } from "./jsoncBom.ts";
 
 /** The `enable-proposed-api` key VS Code reads out of argv.json. */
 export const ENABLE_PROPOSED_API_KEY = "enable-proposed-api";
@@ -182,8 +183,11 @@ export function planProposedApi(
     return { kind: "write", updated: NEW_FILE_HEADER + body + "\n" };
   }
 
+  // A leading UTF-8 BOM (VS Code on ENCODING_UTF8BOM) is stripped for
+  // parse/edit and restored on write (#709).
+  const { bom, body } = splitBom(existing);
   const errors: ParseError[] = [];
-  const parsed = parse(existing, errors, {
+  const parsed = parse(body, errors, {
     allowTrailingComma: true,
     disallowComments: false,
   }) as Record<string, unknown> | undefined;
@@ -195,10 +199,12 @@ export function planProposedApi(
     : [];
   if (ids.includes(extensionId)) return { kind: "current" };
 
-  const updated = applyEdits(
-    existing,
-    modify(existing, [ENABLE_PROPOSED_API_KEY], [...ids, extensionId], formatting),
-  );
+  const updated =
+    bom +
+    applyEdits(
+      body,
+      modify(body, [ENABLE_PROPOSED_API_KEY], [...ids, extensionId], formatting),
+    );
   return { kind: "write", updated };
 }
 

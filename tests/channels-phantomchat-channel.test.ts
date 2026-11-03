@@ -833,6 +833,26 @@ describe("phantomchat channel — serialized ingest", () => {
     expect(seen).toEqual(["after"]);
     expect(errors).toEqual(["boom"]);
   });
+
+  test("a hanging event times out, is reported, and does not stall the ones behind it (#737)", async () => {
+    const seen: string[] = [];
+    const errors: string[] = [];
+    const ingest = createSerializedIngest<string>(
+      async (id) => {
+        if (id === "stuck") await new Promise(() => {}); // never settles
+        seen.push(id);
+      },
+      (e) => errors.push((e as Error).message),
+      30,
+    );
+
+    ingest("stuck");
+    ingest("after");
+    await sleep(80);
+
+    expect(seen).toEqual(["after"]);
+    expect(errors).toEqual(["ingest unit timed out after 30ms"]);
+  });
 });
 
 /**

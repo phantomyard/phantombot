@@ -1386,8 +1386,15 @@ export async function runPhantomchatServer(
   // semantics (who may /reset the shared thread, /status broadcast noise) are
   // out of scope, so in a group a "/…" line falls through to a normal turn.
   // Unknown commands (handleSlashCommand → null) also fall through to a normal
-  // turn, since some personas treat e.g. /remember as plain input.
-  const runSlash = async (msg: ChannelMessage): Promise<void> => {
+  // turn, since some personas treat e.g. /remember as plain input. That
+  // fall-through keeps the dispatch options the coalescer gave the message
+  // (#742): a follower that only looks like a command must stay a follower,
+  // or its interrupt flushes an attachment enqueued a moment earlier.
+  const runSlash = async (
+    msg: ChannelMessage,
+    alsoReceipt?: string[],
+    opts?: MediaCaptionDispatchOptions,
+  ): Promise<void> => {
     const tier = authorize(msg);
     if (tier === "drop") return;
     const senderHex = msg.senderId;
@@ -1430,8 +1437,9 @@ export async function runPhantomchatServer(
 
     if (result === undefined) return; // errored — already logged
     if (result === null) {
-      // Not a command we own — run it as a normal turn instead.
-      enqueue(msg);
+      // Not a command we own — run it as a normal turn instead, with the same
+      // receipts and follower rights it arrived with (#742).
+      enqueue(msg, alsoReceipt, opts);
       return;
     }
     try {
@@ -1620,7 +1628,7 @@ export async function runPhantomchatServer(
     } else if (isControlCommand(msg)) {
       // Handle inline (off the per-conversation chain) but still track it in inFlight
       // so oneShot tests and clean shutdown wait for it to settle.
-      const p = runSlash(msg);
+      const p = runSlash(msg, alsoReceipt, opts);
       inFlight.add(p);
       void p.finally(() => inFlight.delete(p));
     } else {

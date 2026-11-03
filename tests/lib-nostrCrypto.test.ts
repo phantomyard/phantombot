@@ -171,6 +171,7 @@ function createRumorWithPubkey(
 import {
   getSymmetricKey,
   clearSymmetricKeyCache,
+  symmetricKeyDerivationCount,
   warmSymmetricKeyCache,
   encryptV2,
   decryptV2,
@@ -384,34 +385,28 @@ describe("PhantomChat Protocol v2 — wrapV2 / unwrapV2 roundtrip", () => {
     );
   });
 
-  test("v2 is ~6× faster than NIP-17 (performance sanity check)", async () => {
+  /**
+   * The invariant the old wall-clock benchmark stood in for (#716): v2 derives
+   * the symmetric key ONCE per conversation, not once per message. A count is
+   * exact on any runner; the >3x stopwatch ratio measured 1.99x on CI. Counting
+   * derivations, not `raw.length === 0` at the end, is what makes this fail if
+   * per-message derivation ever comes back.
+   */
+  test("v2 derives one key per conversation, not one per message", async () => {
     clearSymmetricKeyCache();
     const senderSk = generateSecretKey();
-    const recipientSk = generateSecretKey();
-    const recipientHex = getPublicKey(recipientSk);
-    const plaintext = JSON.stringify({ type: "text", content: "benchmark" });
+    const recipientHex = getPublicKey(generateSecretKey());
+    const plaintext = JSON.stringify({ type: "text", content: "count me" });
 
-    // Warm up
-    await wrapV2(senderSk, recipientHex, plaintext);
-    wrapNip17Message(senderSk, recipientHex, plaintext);
-
-    const iterations = 50;
-
-    const t0 = performance.now();
-    for (let i = 0; i < iterations; i++) {
+    const before = symmetricKeyDerivationCount(senderSk, recipientHex);
+    for (let i = 0; i < 50; i++) {
       await wrapV2(senderSk, recipientHex, plaintext);
     }
-    const v2Ms = performance.now() - t0;
+    expect(symmetricKeyDerivationCount(senderSk, recipientHex) - before).toBe(1);
 
-    const t1 = performance.now();
-    for (let i = 0; i < iterations; i++) {
-      wrapNip17Message(senderSk, recipientHex, plaintext);
-    }
-    const nip17Ms = performance.now() - t1;
-
-    const ratio = nip17Ms / v2Ms;
-    // v2 should be at least 3× faster (conservative; actual is ~6×+)
-    expect(ratio).toBeGreaterThan(3);
+    clearSymmetricKeyCache();
+    await wrapV2(senderSk, recipientHex, plaintext);
+    expect(symmetricKeyDerivationCount(senderSk, recipientHex) - before).toBe(2);
   });
 });
 

@@ -419,6 +419,36 @@ describe("writing the entry", () => {
     expect(after?.models.map((m) => m.id)).toEqual(["phantomops/auto", "openrouter/foo"]);
   });
 
+  test("replaceOnMove drops the old endpoint's ids, and only on a move", async () => {
+    const dir = await scratchAgentDir();
+    await ensureCustomProviderEntry(dir, OPENAI_COMPATIBLE_PROVIDER, {
+      baseUrl: "http://old.box/v1",
+      models: ["old-a", "old-b"],
+      keyAvailable: false,
+    });
+    // Same endpoint: still a union, even with replaceOnMove.
+    await ensureCustomProviderEntry(dir, OPENAI_COMPATIBLE_PROVIDER, {
+      baseUrl: "http://old.box/v1",
+      models: ["old-c"],
+      keyAvailable: false,
+      replaceOnMove: true,
+    });
+    const same = await readCustomProviderEntry(dir, OPENAI_COMPATIBLE_PROVIDER);
+    expect(same?.models.map((m) => m.id)).toEqual(expect.arrayContaining(["old-a", "old-b", "old-c"]));
+    // Re-pointed: only the new endpoint's list survives.
+    const moved = await ensureCustomProviderEntry(dir, OPENAI_COMPATIBLE_PROVIDER, {
+      baseUrl: "http://new.box/v1",
+      models: ["new-a"],
+      keyAvailable: false,
+      replaceOnMove: true,
+    });
+    expect(moved.ok && moved.changed).toBe(true);
+    const ids = (await readCustomProviderEntry(dir, OPENAI_COMPATIBLE_PROVIDER))?.models.map((m) => m.id);
+    expect(ids).toContain("new-a");
+    expect(ids).not.toContain("old-a");
+    expect(ids).not.toContain("old-c");
+  });
+
   test("ensure does not touch a foreign provider's entry", async () => {
     const dir = await scratchAgentDir();
     await writeCustomProviderEntry(dir, PHANTOOPS_PROVIDER, {

@@ -179,6 +179,22 @@ describe("embedded pi extensions", () => {
     }
   });
 
+  test("the factory list includes the body-path guard, armed with no escort (#718)", async () => {
+    const prev = process.env.PHANTOMBOT_ESCORT;
+    delete process.env.PHANTOMBOT_ESCORT;
+    try {
+      const handlers: Array<(e: { toolName: string; input: unknown }) => unknown> = [];
+      const api = { on: (_event: string, h: (e: { toolName: string; input: unknown }) => unknown) => { handlers.push(h); } };
+      for (const f of embeddedPiExtensionFactories()) (f as (pi: unknown) => unknown)(api);
+      const results = await Promise.all(
+        handlers.map((h) => h({ toolName: "bash", input: { command: "gh pr review 1 --body @/tmp/r.md" } })),
+      );
+      expect(results.some((r) => (r as { block?: boolean } | undefined)?.block === true)).toBe(true);
+    } finally {
+      if (prev !== undefined) process.env.PHANTOMBOT_ESCORT = prev;
+    }
+  });
+
   test("runEmbeddedPi passes embeddedPiExtensionFactories() to pi", async () => {
     const src = await readFile(join(import.meta.dir, "..", "src", "lib", "embeddedPi.ts"), "utf8");
     const body = src.slice(src.indexOf("export async function runEmbeddedPi("));
