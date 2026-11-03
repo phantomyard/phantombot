@@ -52,7 +52,7 @@ export const CURSOR_KEYS_APP = "\x1b[?1h";
 export const CURSOR_KEYS_NORMAL = "\x1b[?1l";
 
 /**
- * Alternate scroll mode (`?1007`), on and off.
+ * Alternate scroll mode (`?1007`), saved on entry and restored on exit.
  *
  * ## Why the trackpad still did nothing in iTerm2
  *
@@ -66,16 +66,20 @@ export const CURSOR_KEYS_NORMAL = "\x1b[?1l";
  * stream of ↑/↓. xterm, kitty, WezTerm and Ghostty honour the same mode;
  * Terminal.app ignores it, so it changes nothing there.
  *
- * Like DECCKM it is not restored by `?1049l`, so leaving resets it first;
- * otherwise a later `less` in the same window would inherit it.
+ * `?1049l` does not restore this mode. Save it with XTSAVE before enabling
+ * it and use XTRESTORE before leaving, including terminal handovers. Never
+ * force it off: terminals such as Ghostty default it on, and clearing it
+ * breaks wheel scrolling in later alternate-screen apps such as `less`.
+ * Terminals without XTSAVE/XTRESTORE support keep it enabled; that is safer
+ * than disabling a mode the user or terminal may have enabled already.
  */
-export const ALT_SCROLL_ON = "\x1b[?1007h";
-/** Back to the terminal's own wheel handling. */
-export const ALT_SCROLL_OFF = "\x1b[?1007l";
+export const ALT_SCROLL_ON = "\x1b[?1007s\x1b[?1007h";
+/** Restore the saved mode where supported; otherwise leave it enabled. */
+export const ALT_SCROLL_OFF = "\x1b[?1007r";
 
 /** What entering full screen writes: the buffer first, then the modes on it. */
 export const FULL_SCREEN_ON = ALT_SCREEN_ON + CURSOR_KEYS_APP + ALT_SCROLL_ON;
-/** What leaving writes: the modes off first, then the user's screen back. */
+/** What leaving writes: restore scroll mode and cursor keys, then the screen. */
 export const FULL_SCREEN_OFF =
   ALT_SCROLL_OFF + CURSOR_KEYS_NORMAL + ALT_SCREEN_OFF;
 
