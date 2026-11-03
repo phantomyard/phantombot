@@ -4,6 +4,19 @@ This file is for **any agent (human or LLM) working on the phantombot codebase i
 
 > **Naming-collision warning.** This `/AGENTS.md` (project root) is **not the same as** `personas/<name>/AGENTS.md` (a persona-specific tool-hint file phantombot reads when loading that persona). They share a name because OpenClaw uses the same convention for persona files; phantombot's persona loader accepts both `tools.md` and `AGENTS.md` as the persona-tools slot. If a contributor refers to "AGENTS.md" without context, they almost always mean *this* file (the repo-level one). If you're editing a file under `personas/` or `agents/`, you're touching a persona, not the contributor guide.
 
+## HARD RULE — review findings are fixed in the PR, never filed for later
+
+Binding on every agent (Kai, Lena, Omar, Robbie, Atlas, Max, Jake, any other) on every PR. Only the human principal can grant an exception, in writing, on the PR. This rule beats any older habit, template or procedure that says otherwise.
+
+1. **Every review finding gets exactly one of two outcomes.** It's either **blocking**, so it gets fixed in this PR before approval, or it's **dropped**, because it isn't worth fixing. Say that in one line or don't mention it. There is no third outcome. "Non-blocking, follow-up", "filed as #NNN", "parked for a later PR" and "tracked separately" are all forbidden.
+2. **Agents never open an issue without the principal's explicit OK.** This covers reviews, PR descriptions, ticks, pollers and triage. If you find a real bug in existing code outside the PR's scope, ask the principal in chat first, and only open the issue if they say yes.
+3. **Follow-up PRs can't spawn more follow-ups.** Their findings get fixed in them or dropped.
+4. **Nits are never blockers and never issues.** That covers style, naming, wording, comment polish and "could be cleaner". Drop them.
+5. **Don't widen scope during review.** A PR fixes what it says it fixes. A finding that would need a separate change is either blocking, so it gets fixed here, or dropped.
+6. **Only approve when nothing is left open.** An approval that lists leftovers is not an approval.
+
+Why: review leftovers filed as issues turned every feature into a queue of follow-ups. Each one then needed its own PR and review, which filed more follow-ups. Fix it once, in the PR, or let it go.
+
 ## The contributing discipline (READ FIRST)
 
 **Every PR that changes user-facing behavior, architecture, or developer workflow must update `README.md` and the contributor docs it affects in the same PR**: the rule's text in its area file under [`docs/contributing/invariants/`](docs/contributing/invariants/README.md), plus its line in this file's index when a rule is added or retitled. No exceptions. Reviewers should reject PRs where the docs don't match the code.
