@@ -19,7 +19,7 @@
  *   phantombot memory capture "<text>" --tag <tag> [--tag <tag> ...]
  *                              append a tagged line to today's daily file
  *                              and record the capture in capture_log
- *   phantombot memory drawers [--kind <k>] [--limit N] [--sync] [--json]
+ *   phantombot memory drawers [--kind <k>] [--limit N] [--offset N] [--sync] [--json]
  *                              show the RANKED drawer rows the threat judge is
  *                              briefed from, and optionally project the
  *                              markdown drawers into rows first
@@ -73,7 +73,12 @@ import {
 } from "../memory/drawers.ts";
 import { describeIngest } from "../memory/drawerIngest.ts";
 import { openDrawerStore, syncDrawers } from "../memory/drawerSync.ts";
-import { syncDrawerIndex } from "../memory/drawerIndex.ts";
+import {
+  DRAWER_INDEX_PREFIX,
+  readDrawerPath,
+  renderDrawerEntry,
+  syncDrawerIndex,
+} from "../memory/drawerIndex.ts";
 import {
   describeRoundTrip,
   verifyDrawerRoundTrip,
@@ -215,6 +220,25 @@ async function syncDrawersInto(
   }
 }
 
+/** Full text of one drawer row by its index path, or undefined. */
+async function readDrawerEntryText(
+  dbPath: string,
+  persona: string,
+  path: string,
+): Promise<string | undefined> {
+  if (!existsSync(dbPath)) return undefined;
+  let opened: Awaited<ReturnType<typeof openDrawerStore>> | undefined;
+  try {
+    opened = await openDrawerStore(dbPath);
+    const entry = readDrawerPath(opened.store, persona, path);
+    return entry ? renderDrawerEntry(entry) : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    opened?.close();
+  }
+}
+
 export interface RunGetInput extends RunMemoryInput {
   path: string;
   persona?: string;
@@ -224,7 +248,7 @@ export async function runMemoryGet(input: RunGetInput): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
   const config = input.config ?? (await loadConfig());
-  const { dir } = resolvePersonaDir(config, input.persona);
+  const { persona, dir } = resolvePersonaDir(config, input.persona);
 
   const target = safeJoin(dir, input.path);
   if (!target) {
@@ -232,6 +256,16 @@ export async function runMemoryGet(input: RunGetInput): Promise<number> {
     return 2;
   }
   if (!existsSync(target)) {
+    // `drawers/<kind>/<id>.md` is what search returns for a drawer row, and
+    // it exists only in the index — read the row itself (#759 review).
+    const rel = relative(dir, target).replace(/\\/g, "/");
+    if (rel.startsWith(DRAWER_INDEX_PREFIX)) {
+      const text = await readDrawerEntryText(config.memoryDbPath, persona, rel);
+      if (text !== undefined) {
+        out.write(text);
+        return 0;
+      }
+    }
     err.write(`not found: ${relative(dir, target)}\n`);
     return 1;
   }
@@ -829,6 +863,8 @@ export async function runMemoryDrawers(input: {
   persona?: string;
   kind?: string;
   limit?: number;
+  /** Skip this many ranked entries per drawer first — paging with --limit. */
+  offset?: number;
   sync?: boolean;
   force?: boolean;
   /** File one entry into a drawer. Requires --kind. */
@@ -1088,7 +1124,13 @@ export async function runMemoryDrawers(input: {
     const now = new Date();
     const payload = kinds.map((kind) => ({
       kind,
-      entries: store.ranked(persona, kind, { limit: input.limit }).map((e) => ({
+      entries: store
+        .ranked(persona, kind)
+        .slice(
+          input.offset ?? 0,
+          input.limit === undefined ? undefined : (input.offset ?? 0) + input.limit,
+        )
+        .map((e) => ({
         id: e.id,
         content: e.content,
         score: Number(scoreEntry(e, now).toFixed(4)),
@@ -1469,6 +1511,10 @@ const drawersCmd = defineCommand({
       description: `One drawer (${DRAWER_KINDS.join(" | ")}). Default: all five.`,
     },
     limit: { type: "string", description: "Max entries per drawer." },
+    offset: {
+      type: "string",
+      description: "Skip this many ranked entries per drawer (page with --limit).",
+    },
     sync: {
       type: "boolean",
       description: "Project the markdown drawers into rows before listing.",
@@ -1524,6 +1570,7 @@ const drawersCmd = defineCommand({
   },
   async run({ args, rawArgs }) {
     const limit = Number(args.limit);
+    const offset = Number(args.offset);
     // citty's value reader refuses tokens that start with `-` — it takes them
     // for flags — so the documented `-` sentinel never arrives as `-`:
     // `--export -` parsed to "" and the empty path then fell through to
@@ -1553,6 +1600,8 @@ const drawersCmd = defineCommand({
       persona: args.persona ? String(args.persona) : undefined,
       kind: args.kind ? String(args.kind) : undefined,
       limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : undefined,
+      offset:
+        Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : undefined,
       sync: Boolean(args.sync),
       force: Boolean(args.force),
       file: args.file === undefined ? undefined : String(args.file),

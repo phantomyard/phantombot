@@ -30,6 +30,10 @@ people do not decay; their status determines whether they remain active.
 phantombot memory drawers
 phantombot memory drawers --kind norms
 phantombot memory drawers --kind norms --file "Friday deploys are routine."
+phantombot memory drawers --kind commitments --limit 50 --offset 50
+phantombot memory drawers --discharge <id>
+phantombot memory drawers --expire <id>
+phantombot memory get drawers/commitments/<id>.md
 phantombot memory drawers --export ./out
 phantombot memory drawers --export ./out --with-id
 phantombot memory drawers --kind norms --import ./out/norms.md
@@ -45,6 +49,13 @@ Markers are scoped to one persona and kind and must resolve to a real row. An
 invalid marker cannot retire anything: the content files as a new row and the
 CLI reports the rejected marker. Re-importing the same edited file is a no-op.
 Every actual supersession is recorded in that day's journal for auditability.
+
+`--discharge` / `--expire` close one active commitment of the current persona
+as met / missed. A wrong kind, another persona's id or an unknown id is
+refused; closing an already-closed commitment to the same state is a no-op.
+Commitment lines in the listing carry their id so they can be closed by name.
+`--offset` skips that many ranked entries per drawer, so `--limit` and
+`--offset` page a large drawer.
 
 ## Third-party filing
 
@@ -80,6 +91,12 @@ The threat judge receives ranked active rows from decisions, people, and norms
 within a shared byte budget. Superseded and dormant beliefs are excluded. The
 briefing is packed at entry boundaries so a partial ruling is never presented
 as if it were complete.
+
+Ordinary capable turns receive the "Standing memory" block: ranked active
+rows from all five drawers in a 12 KB budget, packed the same way. It is a
+selection — the lowest-ranked entries are cut — and the prompt says so; the
+whole drawer stays reachable through `memory drawers`, `memory search` and
+`memory get drawers/<kind>/<id>.md`.
 
 The heartbeat promotes tagged journal captures into rows. Legacy Markdown
 drawers are ingested idempotently, verified against a regenerated export, then

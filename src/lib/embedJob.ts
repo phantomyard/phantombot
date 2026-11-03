@@ -96,6 +96,9 @@ export async function runEmbedJob(
   // Pull the full file list straight from the FTS index (which has been
   // populated by refreshStale before we get here).
   const files = input.index.allNotePaths().map((path) => ({ path }));
+  // Virtual bodies in ONE query: a per-path virtualText() scans the FTS table
+  // each call, which is O(notes²) once the drawer rows are published (#759).
+  const virtualBodies = input.index.virtualBodies();
   const space = input.space ?? input.embedder.space;
   const report = (path: string) => {
     if (!input.onProgress) return;
@@ -121,7 +124,7 @@ export async function runEmbedJob(
       // Not on disk. Either it is a VIRTUAL note whose text lives in a table
       // (the open journal day, #461) — embed that — or it is a stale row,
       // which refreshStale removes on its next call.
-      const virtual = input.index.virtualText(path);
+      const virtual = virtualBodies.get(path);
       if (virtual === undefined) continue;
       content = virtual;
     }

@@ -178,6 +178,7 @@ guards; see the [recovery contract](docs/contributing/invariants/harnesses.md#co
 - [68](docs/contributing/invariants/memory.md#inv-68) The memory wizard PICKS the embedding model from the endpoint's own catalogue; the typed prompt is the fallback, not the default.
 - [71](docs/contributing/invariants/memory.md#inv-71) Embedding providers are interchangeable transports, not interchangeable vector spaces.
 - [73](docs/contributing/invariants/memory.md#inv-73) The nightly renders the just-closed day BEFORE it builds the sweep queue (issue #633).
+- [86](docs/contributing/invariants/memory.md#inv-86) Drawer rows reach every turn and the index, in BULK — and the prompt never promises the whole drawer (issue #758).
 
 ### Scheduler and concurrency — [scheduler-and-concurrency.md](docs/contributing/invariants/scheduler-and-concurrency.md)
 

@@ -16,7 +16,13 @@
  * Reconciling, not appending: every call converges the index on the table, so
  * a missed call (a crash, a store that was briefly locked) is repaired by the
  * next one rather than leaving a permanent hole. Unchanged rows are skipped by
- * comparing the stored body, so the steady-state cost is one read per row.
+ * comparing against the stored bodies, read in ONE query
+ * (`MemoryIndex.syncVirtualNotesUnder`): a per-row lookup scans the FTS table
+ * each time, which on a real persona made every `memory search` take a
+ * minute (#759 review).
+ *
+ * These paths exist only in the index, so `memory get` resolves them against
+ * the drawer store ({@link readDrawerPath}) — search hits are readable in full.
  */
 
 import type { MemoryIndex } from "../lib/memoryIndex.ts";
@@ -42,26 +48,40 @@ export function syncDrawerIndex(
   store: DrawerStore,
   persona: string,
 ): DrawerIndexSync {
-  const out: DrawerIndexSync = { upserted: 0, removed: 0 };
-  const live = new Set<string>();
+  const desired = new Map<
+    string,
+    { scope: "memory"; title: string; body: string }
+  >();
   for (const entry of store.list(persona)) {
     if (entry.status !== "active") continue;
-    const path = drawerIndexPath(entry.kind, entry.id);
-    live.add(path);
-    const body = bodyFor(entry);
-    if (ix.virtualText(path) === body) continue;
-    ix.upsertVirtualNote({
-      path,
+    desired.set(drawerIndexPath(entry.kind, entry.id), {
       scope: "memory",
       title: `${entry.kind}: ${entry.content.replace(/\s+/g, " ").trim().slice(0, 80)}`,
-      body,
+      body: bodyFor(entry),
     });
-    out.upserted++;
   }
-  for (const path of ix.allNotePaths()) {
-    if (!path.startsWith(DRAWER_INDEX_PREFIX) || live.has(path)) continue;
-    ix.removeVirtualNote(path);
-    out.removed++;
-  }
-  return out;
+  return ix.syncVirtualNotesUnder(DRAWER_INDEX_PREFIX, desired);
+}
+
+/**
+ * Resolve a `drawers/<kind>/<id>.md` path — the form search returns — back to
+ * its row, so `memory get` can print the WHOLE entry rather than the snippet.
+ * Undefined when the path is not a drawer path, or names no row of this
+ * persona (any status: a closed commitment is still readable by id).
+ */
+export function readDrawerPath(
+  store: DrawerStore,
+  persona: string,
+  path: string,
+): DrawerEntry | undefined {
+  const m = /^drawers\/([a-z]+)\/([^/]+)\.md$/.exec(path.replace(/\\/g, "/"));
+  if (!m) return undefined;
+  const entry = store.get(m[2]!);
+  if (!entry || entry.persona !== persona || entry.kind !== m[1]) return undefined;
+  return entry;
+}
+
+/** What `memory get drawers/<kind>/<id>.md` prints. */
+export function renderDrawerEntry(entry: DrawerEntry): string {
+  return `${bodyFor(entry).trimEnd()}\n\nstatus: ${entry.status}\n`;
 }

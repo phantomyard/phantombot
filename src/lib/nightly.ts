@@ -671,9 +671,12 @@ now, so do not touch kb/ files.
    drawer first to avoid duplicates — but do keep each entry short and
    self-contained, because entries are ranked and injected individually.
    \`phantombot memory drawers --kind <kind>\` shows what is already filed.
-3. CLOSE COMMITMENTS. Run \`phantombot memory drawers --kind commitments\`
-   (each line shows its id). Every open commitment is injected into every
-   turn until it is closed, so for each one the daily file or your own memory
+3. CLOSE COMMITMENTS. Run
+   \`phantombot memory drawers --kind commitments --limit 50\` (each line
+   shows its id); for more, page with \`--offset 50\`, \`--offset 100\`, and
+   stop after four pages — later nights reach the rest. The top-ranked open
+   commitments are injected into every turn, so a finished one left open
+   crowds out a live one. For each one the daily file or your own memory
    shows is settled:
      - met, done or no longer wanted → \`phantombot memory drawers --discharge <id>\`
      - its date or window passed unmet → \`phantombot memory drawers --expire <id>\`

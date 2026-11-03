@@ -13,11 +13,22 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runMemoryDrawers, runMemorySearch } from "../src/cli/memory.ts";
+import {
+  runMemoryDrawers,
+  runMemoryGet,
+  runMemorySearch,
+} from "../src/cli/memory.ts";
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { MemoryIndex } from "../src/lib/memoryIndex.ts";
-import { nightlyConversationKey } from "../src/lib/nightly.ts";
-import { drawerIndexPath, syncDrawerIndex } from "../src/memory/drawerIndex.ts";
+import {
+  buildNightlyStagePrompt,
+  nightlyConversationKey,
+} from "../src/lib/nightly.ts";
+import {
+  drawerIndexPath,
+  readDrawerPath,
+  syncDrawerIndex,
+} from "../src/memory/drawerIndex.ts";
 import { openDrawerStore } from "../src/memory/drawerSync.ts";
 import {
   buildStandingMemory,
@@ -242,6 +253,56 @@ describe("syncDrawerIndex", () => {
     }
   });
 
+  test("scale: thousands of rows sync in bulk, not one FTS scan per row (#759)", async () => {
+    // The per-row version did a full FTS5 scan per active row (WHERE path = ?
+    // cannot use an index on a virtual table): 146 s cold, 57 s with nothing
+    // changed, on 8,535 rows. Bulk reconcile must keep both far from that.
+    const N = 3000;
+    const ix = await MemoryIndex.open(join(root, "index.sqlite"));
+    const { store, close } = await openDrawerStore(dbPath);
+    try {
+      for (let i = 0; i < N; i++) {
+        store.file({
+          persona: PERSONA,
+          kind: i % 2 ? "commitments" : "lessons",
+          content: `scale entry ${i} about relay ${i * 7} and nothing else`,
+        });
+      }
+      let t = performance.now();
+      expect(syncDrawerIndex(ix, store, PERSONA)).toEqual({ upserted: N, removed: 0 });
+      const cold = performance.now() - t;
+      t = performance.now();
+      expect(syncDrawerIndex(ix, store, PERSONA)).toEqual({ upserted: 0, removed: 0 });
+      const steady = performance.now() - t;
+      // Bounds sit well under the per-row version at this size (~2.3 s cold,
+      // ~1.0 s steady on a dev laptop) and well over the bulk one (~0.2 s, ~7 ms).
+      expect(cold).toBeLessThan(1_500);
+      expect(steady).toBeLessThan(300);
+      expect(ix.virtualBodies("drawers/").size).toBe(N);
+    } finally {
+      close();
+      ix.close();
+    }
+  }, 30_000);
+
+  test("a changed body is rewritten in place, never duplicated", async () => {
+    const ix = await MemoryIndex.open(join(root, "index.sqlite"));
+    const { store, close } = await openDrawerStore(dbPath);
+    try {
+      const e = store.file({ persona: PERSONA, kind: "norms", content: "yakbird norm" });
+      syncDrawerIndex(ix, store, PERSONA);
+      const path = drawerIndexPath("norms", e.id);
+      // Simulate a stale body (an older renderer) and converge again.
+      ix.upsertVirtualNote({ path, scope: "memory", title: "t", body: "stale yakbird" });
+      expect(syncDrawerIndex(ix, store, PERSONA)).toEqual({ upserted: 1, removed: 0 });
+      expect(ix.search("yakbird").filter((h) => h.path === path)).toHaveLength(1);
+      expect(ix.virtualText(path)).toContain("yakbird norm");
+    } finally {
+      close();
+      ix.close();
+    }
+  });
+
   test("survives a rebuild (virtual notes are carried across)", async () => {
     const ix = await MemoryIndex.open(join(root, "index.sqlite"));
     const { store, close } = await openDrawerStore(dbPath);
@@ -372,6 +433,87 @@ describe("CLI: --discharge / --expire and search", () => {
     expect(out.text).toContain(`${id} call the dentist`);
   });
 
+  test("search -> memory get reads a row-only drawer entry in FULL (#759)", async () => {
+    const tail = "the detail past the snippet: " + "quillback ".repeat(60);
+    const { store, close } = await openDrawerStore(cliDb);
+    const id = store.file({
+      persona: PERSONA,
+      kind: "lessons",
+      content: `marmotfin relay lesson. ${tail}`,
+    }).id;
+    close();
+    const found = new Sink();
+    await runMemorySearch({ query: "marmotfin", persona: PERSONA, indexPath, out: found });
+    const hit = (JSON.parse(found.text).results as Array<{ path: string }>).find((h) =>
+      h.path.startsWith("drawers/lessons/"),
+    );
+    expect(hit?.path).toBe(drawerIndexPath("lessons", id));
+
+    const out = new Sink();
+    const err = new Sink();
+    expect(await runMemoryGet({ path: hit!.path, persona: PERSONA, out, err })).toBe(0);
+    expect(out.text).toContain(tail.trim());
+    expect(out.text).toContain("status: active");
+
+    // Wrong kind in the path, or an unknown id, is still "not found".
+    expect(
+      await runMemoryGet({
+        path: drawerIndexPath("norms", id),
+        persona: PERSONA,
+        out: new Sink(),
+        err: new Sink(),
+      }),
+    ).toBe(1);
+    expect(
+      await runMemoryGet({
+        path: "drawers/lessons/nope.md",
+        persona: PERSONA,
+        out: new Sink(),
+        err: new Sink(),
+      }),
+    ).toBe(1);
+  });
+
+  test("readDrawerPath refuses another persona's row", async () => {
+    const { store, close } = await openDrawerStore(cliDb);
+    try {
+      const other = store.file({ persona: "robbie", kind: "lessons", content: "x" });
+      expect(
+        readDrawerPath(store, PERSONA, drawerIndexPath("lessons", other.id)),
+      ).toBeUndefined();
+      expect(
+        readDrawerPath(store, "robbie", drawerIndexPath("lessons", other.id))?.id,
+      ).toBe(other.id);
+    } finally {
+      close();
+    }
+  });
+
+  test("--limit / --offset page a drawer", async () => {
+    for (let i = 0; i < 5; i++) await fileCommitment(`paged commitment ${i}`);
+    const page = async (offset?: number) => {
+      const out = new Sink();
+      await runMemoryDrawers({
+        persona: PERSONA,
+        kind: "commitments",
+        limit: 2,
+        offset,
+        json: true,
+        out,
+      });
+      return (JSON.parse(out.text).drawers[0].entries as Array<{ id: string }>).map(
+        (e) => e.id,
+      );
+    };
+    const a = await page();
+    const b = await page(2);
+    const c = await page(4);
+    expect(a).toHaveLength(2);
+    expect(b).toHaveLength(2);
+    expect(c).toHaveLength(1);
+    expect(new Set([...a, ...b, ...c]).size).toBe(5);
+  });
+
   test("memory search finds a drawer row with no file behind it", async () => {
     const { store, close } = await openDrawerStore(cliDb);
     store.file({ persona: PERSONA, kind: "lessons", content: "narwhalbyte relay lesson" });
@@ -382,6 +524,25 @@ describe("CLI: --discharge / --expire and search", () => {
     ).toBe(0);
     const hits = JSON.parse(out.text).results as Array<{ path: string }>;
     expect(hits.some((h) => h.path.startsWith("drawers/lessons/"))).toBe(true);
+  });
+});
+
+describe("prompt text never promises the whole drawer (#759)", () => {
+  test("the persona prompt says the block is a top-ranked selection", () => {
+    const p = buildSystemPrompt(
+      { boot: "I am max" } as never,
+      { channel: "cli", conversationId: "cli:x", timestamp: new Date() },
+    );
+    expect(p).not.toMatch(/stays in every prompt|every open commitment is/i);
+    expect(p).toContain("TOP-RANKED open commitments");
+    expect(p).toContain("memory get drawers/<kind>/<id>.md");
+  });
+
+  test("the nightly closes commitments in bounded pages", () => {
+    const p = buildNightlyStagePrompt(PERSONA, "2026-11-03", "distill");
+    expect(p).not.toMatch(/every open commitment is injected/i);
+    expect(p).toContain("--kind commitments --limit 50");
+    expect(p).toContain("--offset 50");
   });
 });
 

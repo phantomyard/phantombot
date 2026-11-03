@@ -355,9 +355,14 @@ THE FIVE DRAWERS ARE ROWS, NOT FILES. \`people\`, \`decisions\`, \`lessons\`,
     \`memory drawers --kind <k>\` lists a whole drawer, and \`memory search\`
     covers every active entry (each is indexed as \`drawers/<kind>/<id>.md\`).
   - CLOSE commitments. When one is met, \`memory drawers --discharge <id>\`;
-    when its window passed unmet, \`memory drawers --expire <id>\`. An open
-    commitment stays in every prompt until it is closed — that is the point,
-    and it is also why a finished one must not be left open.
+    when its window passed unmet, \`memory drawers --expire <id>\`. Only the
+    TOP-RANKED open commitments fit in "Standing memory" — an obligation you
+    cannot see there may still be open, so check
+    \`memory drawers --kind commitments\` or \`memory search\` before
+    concluding it does not exist. Closing finished ones keeps that block
+    meaningful.
+  - \`memory get drawers/<kind>/<id>.md\` prints a whole entry when a search
+    snippet is cut short.
   - Filing the same entry twice is a no-op: ids are derived from the entry
     text, so you never have to read a drawer first just to avoid duplicates.
   - \`norms\` briefs the threat judge so it doesn't cry wolf on normal
