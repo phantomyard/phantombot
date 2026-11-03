@@ -663,3 +663,32 @@ describe("runMemoryCapture — one row per capture (#461)", () => {
     );
   });
 });
+
+describe("runMemoryCapture — conversation provenance (#761)", () => {
+  test("defaults to PHANTOMBOT_CONVERSATION so a tick: capture is recognisable", async () => {
+    const saved = process.env.PHANTOMBOT_CONVERSATION;
+    process.env.PHANTOMBOT_CONVERSATION = "tick:4242";
+    try {
+      await runMemoryCapture({
+        config,
+        text: "poller saw nothing new",
+        tags: ["commitment"],
+        date: "2026-06-06",
+        skipIndex: true,
+        out: new CaptureStream(),
+        err: new CaptureStream(),
+      });
+    } finally {
+      if (saved === undefined) delete process.env.PHANTOMBOT_CONVERSATION;
+      else process.env.PHANTOMBOT_CONVERSATION = saved;
+    }
+    const { store, close } = await openJournalStore(config.memoryDbPath);
+    try {
+      expect(store.listDay(config.defaultPersona, "2026-06-06")[0]!.conversation).toBe(
+        "tick:4242",
+      );
+    } finally {
+      close();
+    }
+  });
+});

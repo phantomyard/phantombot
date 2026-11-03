@@ -659,7 +659,11 @@ export interface RunCaptureInput extends RunMemoryInput {
   text: string;
   tags: string[];
   persona?: string;
-  /** Conversation key the capture belongs to. Default: cli:default. */
+  /**
+   * Conversation key the capture belongs to. Default: the harness's
+   * PHANTOMBOT_CONVERSATION (so a scheduled turn's capture carries its
+   * `tick:` key, #761), else cli:default.
+   */
   conversation?: string;
   /** Override "today" for testing. ISO date YYYY-MM-DD. */
   date?: string;
@@ -673,6 +677,16 @@ export interface RunCaptureInput extends RunMemoryInput {
   skipIndex?: boolean;
   /** Override the index path (testing). */
   indexPath?: string;
+}
+
+/**
+ * Where a capture came from: the explicit flag, else the turn that ran the
+ * command (PHANTOMBOT_CONVERSATION, as `reply-mode` reads it), else
+ * cli:default. Without this every poller turn's capture read as an
+ * interactive one and could not be kept out of the commitments drawer (#761).
+ */
+function captureConversation(explicit: string | undefined): string {
+  return explicit || process.env.PHANTOMBOT_CONVERSATION?.trim() || "cli:default";
 }
 
 /**
@@ -742,7 +756,7 @@ export async function runMemoryCapture(
       content: text,
       tags,
       source: "self",
-      conversation: input.conversation ?? "cli:default",
+      conversation: captureConversation(input.conversation),
       createdAt: now,
     },
     { indexPath: input.indexPath, skipIndex: input.skipIndex },
@@ -759,7 +773,7 @@ export async function runMemoryCapture(
   }
 
   // Record the capture so the nudge counter and `doctor` can see it.
-  const conversation = input.conversation ?? "cli:default";
+  const conversation = captureConversation(input.conversation);
   const store = await openMemoryStore(config.memoryDbPath);
   try {
     await store.appendCapture({ persona, conversation, tags });

@@ -769,6 +769,7 @@ async function* runTurnBody(
       standingMemory = await buildStandingMemory({
         dbPath: input.memory.dbPath,
         persona: input.persona,
+        query: input.userMessage,
       });
     } catch {
       standingMemory = undefined;

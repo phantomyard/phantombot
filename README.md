@@ -219,6 +219,12 @@ not need to hand-maintain drawer files. The top-ranked active entries of all
 five drawers reach every capable turn in a bounded "Standing memory" block,
 every active entry is searchable as `drawers/<kind>/<id>.md` (and readable in
 full with `memory get`), and the nightly closes commitments that are settled.
+Commitments in that block are ordered by relevance: the ones matching the
+current message come first, then the usual ranking. Commitment-tagged captures
+made by scheduled turns (`tick:` conversations) and the scheduler's own `task N:
+… fires …` lines are not promoted to the commitments drawer; they stay
+searchable in the journal, and their other tags still promote. The heartbeat
+expires scheduler-format commitments filed before this rule existed.
 
 For the storage model and lifecycle details, see
 [`docs/concepts/memory-lifecycle.md`](docs/concepts/memory-lifecycle.md).

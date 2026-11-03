@@ -1564,6 +1564,35 @@ export class MemoryIndex {
   }
 
   /**
+   * Paths under `prefix` matching ANY term of `query`, best BM25 first (#761).
+   * OR, not the AND `search` uses: a whole user message as an AND query
+   * matches almost nothing. Terms under 3 characters are dropped.
+   */
+  matchPathsUnder(prefix: string, query: string, limit = 20): string[] {
+    const terms = [
+      ...new Set(
+        query
+          .replace(/[^A-Za-z0-9_\- ]+/g, " ")
+          .split(/\s+/)
+          .filter((t) => t.length >= 3),
+      ),
+    ].slice(0, 32);
+    if (terms.length === 0) return [];
+    const rows = this.db
+      .query(
+        `SELECT path FROM notes WHERE notes MATCH ? ` +
+          `AND substr(path, 1, ?) = ? ORDER BY bm25(notes, ${NOTE_FIELD_WEIGHTS.join(", ")}) LIMIT ?`,
+      )
+      .all(
+        terms.map((t) => `"${t}"`).join(" OR "),
+        prefix.length,
+        prefix,
+        limit,
+      ) as Array<{ path: string }>;
+    return rows.map((r) => r.path);
+  }
+
+  /**
    * BM25F search PLUS OKF link-graph expansion — the no-embeddings superpower.
    *
    * Runs the normal fielded BM25 search, then walks the link graph one or more
