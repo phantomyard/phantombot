@@ -18,6 +18,7 @@ import {
   runMemoryGet,
   runMemorySearch,
 } from "../src/cli/memory.ts";
+import { memoryIndexPath } from "../src/config.ts";
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { MemoryIndex } from "../src/lib/memoryIndex.ts";
 import {
@@ -606,5 +607,84 @@ describe("runTurn wiring", () => {
     expect(
       await turn("cli:default", { skipDailyRecall: true }),
     ).not.toContain("TURN-LESSON-MARKER");
+  });
+});
+
+describe("commitments ranked by relevance to the turn (#761)", () => {
+  async function seedCommitments(): Promise<string> {
+    await seed((s) => {
+      s.file({ persona: PERSONA, kind: "commitments", content: "renew the kospel boiler warranty", assertedAt: new Date("2026-01-01T00:00:00Z") });
+      for (let i = 0; i < 5; i++) {
+        s.file({ persona: PERSONA, kind: "commitments", content: `newer obligation number ${i}`, assertedAt: new Date(`2026-02-0${i + 1}T00:00:00Z`) });
+      }
+    });
+    const indexPath = join(root, "index.sqlite");
+    const { store, close } = await openDrawerStore(dbPath);
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      syncDrawerIndex(ix, store, PERSONA);
+    } finally {
+      ix.close();
+      close();
+    }
+    return indexPath;
+  }
+  const commitmentLines = (block: string) =>
+    block.split("\n").filter((l) => /^- \[[0-9a-f]+\]/.test(l));
+
+  test("a matching older commitment ranks above newer ones", async () => {
+    const indexPath = await seedCommitments();
+    const plain = commitmentLines((await buildStandingMemory({ dbPath, persona: PERSONA, indexPath }))!);
+    expect(plain[0]).toContain("newer obligation");
+    const block = (await buildStandingMemory({
+      dbPath,
+      persona: PERSONA,
+      indexPath,
+      query: "What's the status of the Kospel warranty?",
+    }))!;
+    const lines = commitmentLines(block);
+    expect(lines[0]).toContain("kospel boiler warranty");
+    expect(lines).toHaveLength(plain.length);
+  });
+
+  test("runTurn passes the user message, so the turn sees the match first", async () => {
+    await seed((s) => {
+      s.file({ persona: PERSONA, kind: "commitments", content: "renew the kospel boiler warranty", assertedAt: new Date("2026-01-01T00:00:00Z") });
+      s.file({ persona: PERSONA, kind: "commitments", content: "newer obligation", assertedAt: new Date("2026-02-01T00:00:00Z") });
+    });
+    const { store, close } = await openDrawerStore(dbPath);
+    const ix = await MemoryIndex.open(memoryIndexPath(PERSONA));
+    try {
+      syncDrawerIndex(ix, store, PERSONA);
+    } finally {
+      ix.close();
+      close();
+    }
+    const memory = await openMemoryStore(dbPath);
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "BOOT.md"), "# I am max", "utf8");
+    let prompt = "";
+    try {
+      for await (const _ of runTurn({
+        persona: PERSONA, conversation: "cli:default", agentDir, workingDir: agentDir, memory,
+        idleTimeoutMs: 1_000, hardTimeoutMs: 5_000,
+        screen: async () => ({ action: "pass" as const, score: 0, reason: "test" }),
+        userMessage: "kospel warranty?",
+        harnesses: [{ id: "fake", available: async () => true, async *invoke(req: HarnessRequest) { prompt = req.systemPrompt; yield { type: "done", finalText: "ok" } as HarnessChunk; } }],
+      } as never)) {
+        // drain
+      }
+    } finally {
+      await memory.close();
+    }
+    expect(commitmentLines(prompt)[0]).toContain("kospel");
+  });
+
+  test("no query, or no match, leaves the order exactly as today", async () => {
+    const indexPath = await seedCommitments();
+    const plain = await buildStandingMemory({ dbPath, persona: PERSONA, indexPath });
+    expect(await buildStandingMemory({ dbPath, persona: PERSONA, indexPath, query: "" })).toBe(plain);
+    expect(await buildStandingMemory({ dbPath, persona: PERSONA, indexPath, query: "zebra xylophone" })).toBe(plain);
   });
 });

@@ -10,6 +10,7 @@ import { rmrf } from "./fixtures/rmrf.ts";
 import {
   checkStaleness,
   extractRecentSection,
+  expireSchedulerCommitments,
   promoteTaggedLines,
   runHeartbeat,
 } from "../src/lib/heartbeat.ts";
@@ -527,6 +528,51 @@ describe("promoteTaggedLines from journal rows (#461)", () => {
           journal,
         }),
       ).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+});
+
+describe("commitments: no scheduler/tick bookkeeping (#761)", () => {
+  test("task-source and tick: commitment rows are not filed; self is; other tags still file", async () => {
+    const { store: drawers, db, close } = await openDrawerStore(
+      join(workdir, "memory.sqlite"),
+    );
+    try {
+      const journal = new JournalStore(db);
+      const at = new Date("2026-05-02T10:00:00.000Z");
+      const base = { persona: "robbie", date: "2026-05-02", createdAt: at };
+      journal.append({ ...base, content: "task 9: poll — fires 2026-05-02T11:00:00Z (one-off)", tags: ["commitment"], source: "task" });
+      journal.append({ ...base, content: "inbox poll cleared", tags: ["commitment", "decision"], conversation: "tick:77" });
+      journal.append({ ...base, content: "send Andrew the report", tags: ["commitment"], conversation: "telegram:1" });
+      await promoteTaggedLines(personaDir, "2026-05-02", { store: drawers, persona: "robbie", journal });
+      expect(drawers.list("robbie", "commitments").map((e) => e.content)).toEqual([
+        "[commitment] send Andrew the report · 10:00Z",
+      ]);
+      expect(drawers.list("robbie", "decisions").map((e) => e.content)).toEqual([
+        "[decision] inbox poll cleared · 10:00Z",
+      ]);
+    } finally {
+      close();
+    }
+  });
+
+  test("cleanup expires only scheduler-format commitments, and is idempotent", async () => {
+    const { store: drawers, close } = await openDrawerStore(join(workdir, "memory.sqlite"));
+    try {
+      const mk = (content: string) =>
+        drawers.file({ persona: "robbie", kind: "commitments", content }).id;
+      const a = mk("[commitment] task 1649: Robbie inbox poll (pkg) — fires 2026-11-03T00:06:24.931Z (one-off) · 00:05Z");
+      const b = mk("task 12: nightly — fires 2026-05-02T02:00:00Z (recurring, 0 2 * * *)");
+      const keep1 = mk("[commitment] task 12 is done, tell Andrew — fires tomorrow");
+      const keep2 = mk("[commitment] PR #761: build task 3: fix — and report");
+      expect(expireSchedulerCommitments(drawers, "robbie")).toBe(2);
+      expect(drawers.get(a)!.status).toBe("expired");
+      expect(drawers.get(b)!.status).toBe("expired");
+      expect(drawers.get(keep1)!.status).toBe("active");
+      expect(drawers.get(keep2)!.status).toBe("active");
+      expect(expireSchedulerCommitments(drawers, "robbie")).toBe(0);
     } finally {
       close();
     }
