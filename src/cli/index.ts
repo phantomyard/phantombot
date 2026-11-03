@@ -53,6 +53,7 @@ import jevCmd from "./jev.ts";
 import decisionModelCmd from "./decision-model.ts";
 import replyModeCmd from "./replyMode.ts";
 import p2pCmd from "./p2p.ts";
+import deviceCmd from "./device.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -95,6 +96,7 @@ export const mainCommand = defineCommand({
     jev: jevCmd, // deprecated alias for `decision-model`
     "reply-mode": replyModeCmd,
     p2p: p2pCmd,
+    device: deviceCmd,
     workspace: workspaceCmd,
   },
 });

@@ -339,6 +339,28 @@ describe("persona.phantomchat channel", () => {
     expect(ana.phantomchat.status().state).toBe("running");
   });
 
+  test("Local PC tools control rumors never become a turn, even with a plain-text body", async () => {
+    const e = await openEngine();
+    const ana = await e.personas.create("ana");
+    const owner = generateIdentity();
+    const { npub } = await ana.phantomchat.allow(owner.npub, { relays: RELAYS });
+    await ana.phantomchat.start();
+    const pool = FakePool.all[0]!;
+    await until(() => pool.subscribers.length > 0);
+    const personaHex = (await import("../src/lib/nostrIdentity.ts")).decodeNpubToHex(npub);
+    const { createGiftWrap, createRumor, createSeal } = await import("../src/lib/nostrCrypto.ts");
+    const { LOCAL_TOOLS_TAG, CONTROL_TAG } = await import("../src/channels/phantomchat/localTools.ts");
+    const tagged = (content: string) => {
+      const rumor = createRumor(content, owner.secretKey, [["p", personaHex], [...LOCAL_TOOLS_TAG], [...CONTROL_TAG]]);
+      return createGiftWrap(createSeal(rumor, owner.secretKey, personaHex), personaHex) as unknown as NTNostrEvent;
+    };
+    pool.deliver(tagged("please run this as a turn"));
+    pool.deliver(tagged(JSON.stringify({ type: "phantomchat-local-tools", t: "capability" })));
+    pool.deliver(dm(owner, personaHex, "ping"));
+    await until(async () => (await repliesTo(pool, owner)).includes("pong"));
+    expect(harness.requests.map((r) => r.userMessage)).toEqual(["ping"]);
+  });
+
   test("engine.close() stops a running channel", async () => {
     const e = await openEngine();
     const ana = await e.personas.create("ana");

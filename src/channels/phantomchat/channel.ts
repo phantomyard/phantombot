@@ -25,6 +25,7 @@
  */
 
 import { log } from "../../lib/logger.ts";
+import { isLocalToolsRumor } from "./localTools.ts";
 import type {
   Channel,
   ChannelCapabilities,
@@ -302,6 +303,11 @@ export function createPhantomchatChannel(
         // cryptographic rumor.pubkey.
         const senderHex = rumor.pubkey.toLowerCase();
         if (senderHex === publicKeyHex.toLowerCase()) return;
+
+        // Local PC tools control traffic (#747) is read by `phantombot device`,
+        // never by the turn pipeline. Dropped on the TAGS, before any parse, so
+        // a malformed body can't fall through to the plain-text path.
+        if (isLocalToolsRumor(rumor)) return;
 
         // (4) Dedup by rumor id — the SAME logical message can arrive via more
         // than one wrap; the rumor id is stable across them.

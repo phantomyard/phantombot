@@ -40,7 +40,7 @@ export const HELP_GROUPS: readonly HelpGroup[] = [
   },
   {
     title: "CHANNELS",
-    commands: ["telegram", "phantomchat", "p2p", "voice", "notify", "reply-mode"],
+    commands: ["telegram", "phantomchat", "device", "p2p", "voice", "notify", "reply-mode"],
   },
   {
     title: "EDITORS & SCRIPTS",

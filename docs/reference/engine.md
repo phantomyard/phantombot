@@ -172,8 +172,14 @@ groups to die, closes the database and releases the root. It is idempotent.
 await engine.personas.list();                    // string[]
 await engine.personas.exists("aria");            // boolean
 await engine.personas.create("aria", { identity, tone, expertise, owner, hardRules, soul });
+await engine.personas.delete("aria");            // true if it existed
 const aria = engine.persona("aria");             // cheap handle; existence checked on use
 ```
+
+`delete` stops the persona's PhantomChat channel, cancels its running turns and
+waits for them to unwind, then removes its memory rows, search index and
+directory (vault and identity included). A turn started on a deleted persona
+ends with `persona_not_found`. Other personas are untouched.
 
 A persona is two files the loader concatenates at every turn. `identity`,
 `tone`, `expertise`, `owner` and `hardRules` become **IDENTITY.md** (who it
@@ -228,7 +234,7 @@ if (check.status !== "invalid") {
   you do not trust.
 - `detail` never contains the key.
 
-### `persona.configure({ brain?, decisionModel? })`
+### `persona.configure({ brain?, decisionModel?, embeddings? })`
 
 `configure` writes to the persona's **own** `config.toml`, never the root-wide
 file, so one persona's settings cannot leak into another's. Keys go to the
@@ -253,8 +259,17 @@ await aria.configure({
     judge?: boolean | { threshold?, timeoutMs? },  // screen untrusted turns
     router?: boolean | { timeoutMs? },             // pick primary vs coder per turn
   },
+  embeddings: { provider: "gemini", apiKey, model?, dims? }
+            | { provider: "openai-compatible", baseUrl, model, apiKey?, dims? }
+            | { provider: "none" },                // hybrid memory search
 });
 ```
+
+Settings apply live: the next search and the next turn read them, and a
+running PhantomChat channel is restarted to pick them up. If that restart
+fails, `configure` still resolves (the settings are saved) and the channel's
+status turns `"failed"`. An `openai-compatible` call without `apiKey` removes
+any stored key, so a key for the previous endpoint is never sent to the new one.
 
 Other secret helpers: `persona.secrets.set(name, value)`, `.has(name)` and
 `.delete(name)`.
@@ -362,6 +377,33 @@ d.answers.urgency; // { type: "score", score: 2.1, probabilities, confidence }
 - Failures reject with `not_configured` or `decision_unavailable`. The engine
   never guesses an answer.
 
+### PhantomChat channel: `persona.phantomchat`
+
+The engine can host a persona's PhantomChat channel in-process: its own npub,
+answering the allowed npubs over NIP-17 DMs, like the daemon's channel.
+
+```ts
+await aria.phantomchat.info();          // { npub | null, configured, allowedNpubs } — never mints a key
+const r = await aria.phantomchat.allow(principalNpub, { relays? });
+// { npub, added, restart: "none" | "restarted" | "failed", error? }
+await aria.phantomchat.disallow(npub);  // { removed, restart, error? }; refuses the last npub
+await aria.phantomchat.start({ displayName? });   // resolves when running
+aria.phantomchat.status();              // { state: "stopped"|"starting"|"running"|"failed", npub?, relays?, error? }
+const off = aria.phantomchat.onStatus((s) => render(s));
+await aria.phantomchat.stop();
+```
+
+- `allow` creates the identity and channel file on first use. A channel with
+  an empty allowlist never starts: an app-hosted persona always has a principal.
+- `allow`/`disallow` restart a running channel so it reads the new list. They
+  never reject once the change is saved: a failed restart is
+  `restart: "failed"` with `error`, and status `"failed"`. Show "restart
+  needed" and call `start()` again.
+- Messages from allowed npubs are trusted (principal) turns. Inside the
+  engine, `/update` and `/restart` are refused, and so are `/model <slug>` and
+  `/model clear`, since they would restart the host; `/model` and
+  `/model list` still answer.
+
 ### Memory
 
 ```ts
@@ -417,7 +459,7 @@ chat channel's history.
   router still record their fallbacks, and `phantombot doctor` reports them.
   A failed `decide()` rejects to your application instead of falling back,
   and it is not recorded there.
-- **Chat channels.** Telegram and PhantomChat stay in the daemon.
+- **Telegram.** It stays in the daemon. PhantomChat can be hosted; see above.
 - **Node and Deno.**
 
 ## Credentials and `process.env`

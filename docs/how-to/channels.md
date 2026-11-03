@@ -29,6 +29,36 @@ encrypted NIP-17 direct messages and supports text and voice. With an empty
 nobody is an owner, the same rule as Telegram's empty allowlist: see the
 slash-command rule under [Run continuously](#run-continuously).
 
+For a desktop app's Scan button there is a non-interactive form:
+
+```bash
+phantombot phantomchat --list --json             # personas on this machine, with npubs
+phantombot phantomchat --allow <npub> --persona <name>
+```
+
+`--list` never creates a key. `--allow` takes effect when the persona's
+channel restarts (`phantombot restart`).
+
+### Tools on the principal's PC
+
+When the principal turns a persona's **Local tools** switch ON in the
+PhantomChat desktop app, the persona can run tools on that PC:
+
+```bash
+phantombot device list                           # online PCs and their tools
+phantombot device call Desk bash --args '{"command":"ls ~"}'
+phantombot device call Desk read --args '{"path":"notes.txt"}' --timeout 30
+```
+
+Tools are `bash`, `read`, `write`, `edit`, `ls`, `find` and `grep`. A PC shows
+up only while the app is running with the switch ON. Silence means no device,
+and `call` exits 3 when the device doesn't answer. The command speaks as the
+persona's own npub to its allowed npubs only, and reads answers only from them.
+It works with or without a running daemon. Called from a PhantomChat group
+turn, a call carries that group's id, and the app runs it only in a Session
+with this persona. Untrusted (escorted) turns are refused. The protocol is
+phantomchat's `docs/EXTERNAL-AI.md`.
+
 ## Run continuously
 
 ```bash

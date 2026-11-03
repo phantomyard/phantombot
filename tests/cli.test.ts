@@ -24,6 +24,7 @@ describe("phantombot CLI dispatcher", () => {
       "ask",
       "backfill-identity",
       "decision-model",
+      "device",
       "doctor",
       "embedding",
       "env",
