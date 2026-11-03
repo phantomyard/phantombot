@@ -19,6 +19,7 @@ import {
   runHarnessProcess,
 } from "../src/lib/harnessRunner.ts";
 import { spawnInNewSession } from "../src/lib/processGroup.ts";
+import { parsePiEvent, piActivity } from "../src/harnesses/pi.ts";
 
 const trackedPids: number[] = [];
 afterEach(() => {
@@ -330,9 +331,9 @@ describe("createKillCoordinator — thinking budget (issue #641)", () => {
   });
 
   test("without a thinking budget, 'model' heartbeats re-arm the idle window forever (legacy)", async () => {
-    // The PRODUCTION default since 2026-11-03: no thinking budget is wired
-    // unless configured, so heartbeats keep the process alive indefinitely
-    // (up to the hard cap). The budget is opt-in via harness_thinking_timeout_s.
+    // Regression guard for the LEGACY shape: thinkingTimeoutMs omitted means
+    // heartbeats keep the process alive indefinitely (up to the hard cap).
+    // Only the default-wired runHarnessProcess path gets the 600s budget.
     const proc = spawnInNewSession(["sleep", "30"], {
       stdin: "ignore",
       stdout: "pipe",
@@ -1498,5 +1499,116 @@ describe("createKillCoordinator — soft deadline (#639)", () => {
     });
     expect(chunk!.error).toBe("pi soft deadline after 3000000ms (soft deadline)");
     expect(SOFT_CAP_ERROR_SUFFIX).toBe("(soft deadline)");
+  });
+});
+
+describe("runHarnessProcess — reasoning is progress, payload-less noise is not (2026-11-03)", () => {
+  // The 2026-11-03 failure: a model streaming chain-of-thought for >10 min was
+  // classified "model" (liveness), so the thinking budget killed it mid-thought
+  // and the chain failed over. phantomops worked around it by faking `content`.
+  // These tests pin the real wiring end to end — a mutant that reclassifies
+  // reasoning as "model" (or re-inserts a small default budget) turns them red.
+
+  const piReq = {
+    workingDir: process.cwd(),
+    persona: "test",
+    trusted: true,
+    conversation: "test",
+    userMessage: "test",
+  } as any;
+
+  test("reasoning deltas keep a turn alive past the thinking budget", async () => {
+    // pi-style thinking deltas every 100ms for ~900ms. With a 300ms budget,
+    // classifying them "model" kills the turn at ~300ms; "productive" survives.
+    const proc = spawnInNewSession(
+      [
+        "sh",
+        "-c",
+        'for i in $(seq 1 9); do echo \'{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"step \'$i\'"}}\'; sleep 0.1; done',
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const start = Date.now();
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: { ...piReq, idleTimeoutMs: 200, thinkingTimeoutMs: 300, hardTimeoutMs: 4000 },
+      parseEvent: parsePiEvent,
+      activity: piActivity,
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.find((c) => c.type === "error")).toBeUndefined();
+    // Survived well past lastProductiveAt + 300ms.
+    expect(Date.now() - start).toBeGreaterThan(700);
+  });
+
+  test("payload-less heartbeats still die at the thinking budget", async () => {
+    // Whitespace-only thinking deltas and bare events produce no reasoning
+    // text, so they stay "model": a stream of them must still be killed.
+    const proc = spawnInNewSession(
+      [
+        "sh",
+        "-c",
+        'for i in $(seq 1 40); do echo \'{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"   "}}\'; sleep 0.05; done',
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const start = Date.now();
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: { ...piReq, idleTimeoutMs: 200, thinkingTimeoutMs: 300, hardTimeoutMs: 5000 },
+      parseEvent: parsePiEvent,
+      activity: piActivity,
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.killCause).toBe("idle");
+    expect(Date.now() - start).toBeLessThan(1500);
+  });
+
+  test("runHarnessProcess wires the 10-minute default, not a small one (Kai's mutant)", async () => {
+    // A liveness-only stream with NO thinkingTimeoutMs supplied must survive
+    // its short idle window and be stopped by the hard cap instead. Any
+    // re-introduced default below the hard cap flips the kill cause to "idle".
+    const proc = spawnInNewSession(
+      [
+        "sh",
+        "-c",
+        'for i in $(seq 1 60); do echo \'{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"  "}}\'; sleep 0.05; done',
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: { ...piReq, idleTimeoutMs: 200, hardTimeoutMs: 1200 },
+      parseEvent: parsePiEvent,
+      activity: piActivity,
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.error).toContain("hard wall-clock");
+    expect(err.killCause).toBe("timeout");
   });
 });

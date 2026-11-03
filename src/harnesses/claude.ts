@@ -840,6 +840,26 @@ function claudeActivity(
     return chunk.type === "heartbeat" ? "model" : "productive";
   }
   const obj = parsed as Record<string, unknown>;
+  // Reasoning is PROGRESS, not just liveness (2026-11-03, mirrors pi/codex).
+  // With --include-partial-messages a thinking_delta arrives as a raw
+  // `stream_event` envelope with no `message`, so the content loop below never
+  // sees it; a non-empty delta here re-arms the full idle window instead of
+  // only buying the thinking budget. The chunk stays a payload-less heartbeat.
+  if (obj.type === "stream_event") {
+    const event = obj.event;
+    const delta =
+      typeof event === "object" && event !== null
+        ? (event as Record<string, unknown>).delta
+        : undefined;
+    if (
+      typeof delta === "object" && delta !== null &&
+      (delta as Record<string, unknown>).type === "thinking_delta" &&
+      typeof (delta as Record<string, unknown>).thinking === "string" &&
+      ((delta as Record<string, unknown>).thinking as string).trim().length > 0
+    ) {
+      return "productive";
+    }
+  }
   const message = obj.message as Record<string, unknown> | undefined;
   const content = message?.content;
   if (Array.isArray(content)) {

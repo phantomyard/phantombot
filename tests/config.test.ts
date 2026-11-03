@@ -288,9 +288,9 @@ describe("loadConfig — tool timeout", () => {
 });
 
 describe("loadConfig — thinking timeout", () => {
-  test("is off by default", async () => {
+  test("defaults to 10 minutes", async () => {
     delete process.env.PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS;
-    expect((await loadConfig()).harnessThinkingTimeoutMs).toBeUndefined();
+    expect((await loadConfig()).harnessThinkingTimeoutMs).toBe(600_000);
   });
 
   test("reads TOML seconds", async () => {

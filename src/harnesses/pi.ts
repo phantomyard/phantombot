@@ -1261,6 +1261,19 @@ export function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivit
   }
   const ame = obj.assistantMessageEvent;
   if (isObject(ame) && typeof ame.type === "string") {
+    // Reasoning is PROGRESS, not just liveness (2026-11-03). A model that
+    // streams chain-of-thought for longer than the thinking budget is
+    // mid-thought, not wedged: the failure this fixes was a >10-min reasoning
+    // stream classified "model", killed at the 600s ceiling and failed over,
+    // which phantomops worked around by faking text. Classify a non-empty
+    // reasoning delta "productive" so the full idle window re-arms. The chunk
+    // itself stays a payload-less heartbeat, so nothing reaches the user.
+    if (ame.type === "thinking_delta") {
+      const delta = ame.delta;
+      if (typeof delta === "string" && delta.trim().length > 0) {
+        return "productive";
+      }
+    }
     // pi 0.79.x: `tool_use_*` → `toolcall_*`. Accept both.
     //
     // ALL of these records are the MODEL composing a tool call inside its

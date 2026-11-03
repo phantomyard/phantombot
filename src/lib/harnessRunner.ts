@@ -103,17 +103,22 @@ export interface KillCoordinatorOpts {
    */
   toolTimeoutMs?: number;
   /**
-   * Cap on how long MODEL activity alone (thinking deltas, payload-less
-   * heartbeats) may keep deferring the idle kill, measured from the last
-   * PRODUCTIVE output (text, tool start/result, done). Model activity extends
+   * Cap on how long PAYLOAD-LESS MODEL activity alone (bare heartbeats,
+   * nameless `toolcall_*` noise) may keep deferring the idle kill, measured
+   * from the last PRODUCTIVE output (text, tool start/result, done, and —
+   * since 2026-11-03 — a non-empty reasoning delta). Model activity extends
    * the idle deadline to at most `lastProductiveAt + thinkingTimeoutMs`; it can
    * never shorten a deadline already armed. The idle window is a FLOOR, not
    * something this budget overrides: a heartbeat-only stream dies at
    * `lastProductiveAt + max(idleTimeoutMs, thinkingTimeoutMs)`, so a budget
-   * below the idle timeout simply means "heartbeats buy nothing extra". Omit for the legacy behaviour
-   * where every heartbeat re-arms the full idle window forever — the shape
-   * that let a fallback harness sit on "Thinking..." for 40 minutes with
-   * neither the 5-min idle nor the 20-min tool timer firing (2026-09-16).
+   * below the idle timeout simply means "heartbeats buy nothing extra".
+   *
+   * Defaults to `DEFAULT_THINKING_TIMEOUT_MS` (10 min) in runHarnessProcess,
+   * because a liveness-only stream that is never killed is exactly the
+   * 2026-09-16 hang (40 min on "Thinking...") and issue #641 (873s of nameless
+   * `toolcall_*` noise). Genuine long reasoning is unaffected: a non-empty
+   * reasoning delta is classified `"productive"` by every adapter and re-arms
+   * the full idle window on its own.
    */
   thinkingTimeoutMs?: number;
   /** External abort, e.g. user typed /stop. */
@@ -637,14 +642,22 @@ export function defaultToolTimeoutMs(
   );
 }
 
-// NOTE: there is no default thinking budget. Model-only activity (thinking
-// deltas, payload-less heartbeats) re-arms the idle window indefinitely unless
-// a request explicitly supplies `thinkingTimeoutMs` (config
-// harness_thinking_timeout_s / PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS). The
-// 2026-09-16 hang was first answered with a 10-minute default, but that killed
-// legitimate long-reasoning turns: a model streaming reasoning for >10 min is
-// making progress a harness cannot tell apart from noise. Off by default;
-// silent turns are still bounded by the idle timeout and the hard cap.
+/**
+ * Default thinking budget: how long PAYLOAD-LESS model activity (bare
+ * heartbeats, nameless `toolcall_*` noise) may keep a turn alive with no
+ * productive output. 10 minutes: long enough that a truly wedged harness is
+ * caught well before the 60-min hard cap, and harmless to long reasoning
+ * because a NON-EMPTY reasoning delta is classified `"productive"` by every
+ * harness adapter (pi `thinking_delta`, claude `thinking_delta`, codex
+ * `reasoning` item) and so re-arms the full idle window on its own.
+ *
+ * Do not "fix" a long-reasoning kill by removing this budget — that also lets
+ * the 2026-09-16 hang (40 min on "Thinking..." with only liveness pings) and
+ * issue #641 (873s of nameless `toolcall_*` noise) run to the hard cap.
+ * Classify reasoning as progress instead; keep the guard for noise.
+ * Override: req.thinkingTimeoutMs / config harness_thinking_timeout_s.
+ */
+export const DEFAULT_THINKING_TIMEOUT_MS = 600_000;
 
 export const harnessDefaults = {
   defaultToolTimeoutMs,
@@ -676,7 +689,7 @@ export async function* runHarnessProcess(
     softTimeoutMs: req.softTimeoutMs,
     startupTimeoutMs: req.startupTimeoutMs,
     toolTimeoutMs,
-    thinkingTimeoutMs: req.thinkingTimeoutMs,
+    thinkingTimeoutMs: req.thinkingTimeoutMs ?? DEFAULT_THINKING_TIMEOUT_MS,
     signal: req.signal,
     harnessId,
   });
