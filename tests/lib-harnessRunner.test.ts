@@ -330,9 +330,9 @@ describe("createKillCoordinator — thinking budget (issue #641)", () => {
   });
 
   test("without a thinking budget, 'model' heartbeats re-arm the idle window forever (legacy)", async () => {
-    // Regression guard for the LEGACY shape: thinkingTimeoutMs omitted means
-    // heartbeats keep the process alive indefinitely (up to the hard cap).
-    // Only the default-wired runHarnessProcess path gets the 600s budget.
+    // The PRODUCTION default since 2026-11-03: no thinking budget is wired
+    // unless configured, so heartbeats keep the process alive indefinitely
+    // (up to the hard cap). The budget is opt-in via harness_thinking_timeout_s.
     const proc = spawnInNewSession(["sleep", "30"], {
       stdin: "ignore",
       stdout: "pipe",

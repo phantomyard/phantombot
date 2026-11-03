@@ -637,15 +637,14 @@ export function defaultToolTimeoutMs(
   );
 }
 
-/**
- * Default thinking budget: how long model-only activity (heartbeats, thinking
- * deltas) may keep a turn alive with no productive output. 10 minutes — long
- * enough for genuine deep reasoning, short enough that a harness streaming
- * nothing but liveness pings gets killed (and failed over) instead of holding
- * "Thinking..." until the 60-min hard cap. Override: req.thinkingTimeoutMs /
- * config harness_thinking_timeout_s.
- */
-export const DEFAULT_THINKING_TIMEOUT_MS = 600_000;
+// NOTE: there is no default thinking budget. Model-only activity (thinking
+// deltas, payload-less heartbeats) re-arms the idle window indefinitely unless
+// a request explicitly supplies `thinkingTimeoutMs` (config
+// harness_thinking_timeout_s / PHANTOMBOT_HARNESS_THINKING_TIMEOUT_MS). The
+// 2026-09-16 hang was first answered with a 10-minute default, but that killed
+// legitimate long-reasoning turns: a model streaming reasoning for >10 min is
+// making progress a harness cannot tell apart from noise. Off by default;
+// silent turns are still bounded by the idle timeout and the hard cap.
 
 export const harnessDefaults = {
   defaultToolTimeoutMs,
@@ -677,7 +676,7 @@ export async function* runHarnessProcess(
     softTimeoutMs: req.softTimeoutMs,
     startupTimeoutMs: req.startupTimeoutMs,
     toolTimeoutMs,
-    thinkingTimeoutMs: req.thinkingTimeoutMs ?? DEFAULT_THINKING_TIMEOUT_MS,
+    thinkingTimeoutMs: req.thinkingTimeoutMs,
     signal: req.signal,
     harnessId,
   });
