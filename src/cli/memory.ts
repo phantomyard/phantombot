@@ -19,10 +19,12 @@
  *   phantombot memory capture "<text>" --tag <tag> [--tag <tag> ...]
  *                              append a tagged line to today's daily file
  *                              and record the capture in capture_log
- *   phantombot memory drawers [--kind <k>] [--limit N] [--sync] [--json]
+ *   phantombot memory drawers [--kind <k>] [--limit N] [--offset N] [--sync] [--json]
  *                              show the RANKED drawer rows the threat judge is
  *                              briefed from, and optionally project the
  *                              markdown drawers into rows first
+ *   phantombot memory drawers --discharge <id> | --expire <id>
+ *                              close a commitment as met / missed
  *   phantombot memory drawers --export <dir|-> [--with-id]
  *                              render rows back to markdown; --with-id tags
  *                              every entry with its row id so the file can be
@@ -67,9 +69,16 @@ import {
   isDrawerKind,
   scoreEntry,
   type DrawerKind,
+  type DrawerStore,
 } from "../memory/drawers.ts";
 import { describeIngest } from "../memory/drawerIngest.ts";
 import { openDrawerStore, syncDrawers } from "../memory/drawerSync.ts";
+import {
+  DRAWER_INDEX_PREFIX,
+  readDrawerPath,
+  renderDrawerEntry,
+  syncDrawerIndex,
+} from "../memory/drawerIndex.ts";
 import {
   describeRoundTrip,
   verifyDrawerRoundTrip,
@@ -149,6 +158,8 @@ export async function runMemorySearch(
   const ix = await MemoryIndex.open(input.indexPath ?? memoryIndexPath(persona));
   try {
     await ix.refreshStale(dir);
+    // Drawer rows are not files, so refreshStale cannot see them (#758).
+    await syncDrawersInto(ix, config.memoryDbPath, persona);
 
     // If a query embedder is configured AND there are stored vectors, do a
     // hybrid search. Otherwise fall back to FTS-only.
@@ -191,6 +202,43 @@ export async function runMemorySearch(
   return 0;
 }
 
+/** Reconcile drawer rows into an open index. Never throws. */
+async function syncDrawersInto(
+  ix: MemoryIndex,
+  dbPath: string,
+  persona: string,
+): Promise<void> {
+  if (!existsSync(dbPath)) return;
+  let opened: Awaited<ReturnType<typeof openDrawerStore>> | undefined;
+  try {
+    opened = await openDrawerStore(dbPath);
+    syncDrawerIndex(ix, opened.store, persona);
+  } catch {
+    // Search still runs over files and turns.
+  } finally {
+    opened?.close();
+  }
+}
+
+/** Full text of one drawer row by its index path, or undefined. */
+async function readDrawerEntryText(
+  dbPath: string,
+  persona: string,
+  path: string,
+): Promise<string | undefined> {
+  if (!existsSync(dbPath)) return undefined;
+  let opened: Awaited<ReturnType<typeof openDrawerStore>> | undefined;
+  try {
+    opened = await openDrawerStore(dbPath);
+    const entry = readDrawerPath(opened.store, persona, path);
+    return entry ? renderDrawerEntry(entry) : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    opened?.close();
+  }
+}
+
 export interface RunGetInput extends RunMemoryInput {
   path: string;
   persona?: string;
@@ -200,7 +248,7 @@ export async function runMemoryGet(input: RunGetInput): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
   const config = input.config ?? (await loadConfig());
-  const { dir } = resolvePersonaDir(config, input.persona);
+  const { persona, dir } = resolvePersonaDir(config, input.persona);
 
   const target = safeJoin(dir, input.path);
   if (!target) {
@@ -208,6 +256,16 @@ export async function runMemoryGet(input: RunGetInput): Promise<number> {
     return 2;
   }
   if (!existsSync(target)) {
+    // `drawers/<kind>/<id>.md` is what search returns for a drawer row, and
+    // it exists only in the index — read the row itself (#759 review).
+    const rel = relative(dir, target).replace(/\\/g, "/");
+    if (rel.startsWith(DRAWER_INDEX_PREFIX)) {
+      const text = await readDrawerEntryText(config.memoryDbPath, persona, rel);
+      if (text !== undefined) {
+        out.write(text);
+        return 0;
+      }
+    }
     err.write(`not found: ${relative(dir, target)}\n`);
     return 1;
   }
@@ -772,6 +830,28 @@ export async function indexAfterCapture(
 
 // ---------------------------------------------------------------------------
 /**
+ * Converge the search index on the drawer rows after a CLI write (#758), so a
+ * filed entry is searchable — and a closed commitment unsearchable — in the
+ * same minute rather than at the next heartbeat. Never fails the write.
+ */
+async function publishDrawerIndex(
+  store: DrawerStore,
+  persona: string,
+  opts: { indexPath?: string; skipIndex?: boolean },
+): Promise<void> {
+  if (opts.skipIndex) return;
+  let ix: MemoryIndex | undefined;
+  try {
+    ix = await MemoryIndex.open(opts.indexPath ?? memoryIndexPath(persona));
+    syncDrawerIndex(ix, store, persona);
+  } catch {
+    // The heartbeat reconciles the index on its next cycle.
+  } finally {
+    ix?.close();
+  }
+}
+
+/**
  * Show the ranked drawer rows — the projection the threat judge actually reads.
  *
  * This is the operator's answer to "is #410 live on this box, or is the table
@@ -783,10 +863,16 @@ export async function runMemoryDrawers(input: {
   persona?: string;
   kind?: string;
   limit?: number;
+  /** Skip this many ranked entries per drawer first — paging with --limit. */
+  offset?: number;
   sync?: boolean;
   force?: boolean;
   /** File one entry into a drawer. Requires --kind. */
   file?: string;
+  /** Close a commitment as MET, by id (#758). */
+  discharge?: string;
+  /** Close a commitment as MISSED — its window passed unmet — by id (#758). */
+  expire?: string;
   /** Render drawers back to markdown: a directory, or `-` for stdout. */
   export?: string;
   /**
@@ -852,6 +938,31 @@ export async function runMemoryDrawers(input: {
         origin: "cli",
       });
       write(`filed ${entry.kind} ${entry.id}\n`);
+      await publishDrawerIndex(store, persona, input);
+      return 0;
+    }
+
+    if (input.discharge !== undefined || input.expire !== undefined) {
+      if (input.discharge !== undefined && input.expire !== undefined) {
+        write("--discharge and --expire are exclusive: a commitment is met or missed\n");
+        return 1;
+      }
+      const status = input.discharge !== undefined ? "discharged" : "expired";
+      const id = (input.discharge ?? input.expire ?? "").trim();
+      const entry = id ? store.get(id) : undefined;
+      // Scoped to THIS persona's commitments: an id is opaque, and a wrong-kind
+      // or another persona's id must miss rather than close something else.
+      if (!entry || entry.persona !== persona || entry.kind !== "commitments") {
+        write(`no commitment '${id}' for persona '${persona}'\n`);
+        return 1;
+      }
+      if (entry.status !== "active") {
+        write(`commitment ${id} is already ${entry.status}\n`);
+        return entry.status === status ? 0 : 1;
+      }
+      store.setStatus(id, status);
+      write(`${status} commitment ${id}\n`);
+      await publishDrawerIndex(store, persona, input);
       return 0;
     }
 
@@ -971,6 +1082,7 @@ export async function runMemoryDrawers(input: {
           { indexPath: input.indexPath, skipIndex: input.skipIndex },
         );
       }
+      await publishDrawerIndex(store, persona, input);
       return 0;
     }
 
@@ -1012,7 +1124,13 @@ export async function runMemoryDrawers(input: {
     const now = new Date();
     const payload = kinds.map((kind) => ({
       kind,
-      entries: store.ranked(persona, kind, { limit: input.limit }).map((e) => ({
+      entries: store
+        .ranked(persona, kind)
+        .slice(
+          input.offset ?? 0,
+          input.limit === undefined ? undefined : (input.offset ?? 0) + input.limit,
+        )
+        .map((e) => ({
         id: e.id,
         content: e.content,
         score: Number(scoreEntry(e, now).toFixed(4)),
@@ -1036,7 +1154,11 @@ export async function runMemoryDrawers(input: {
         `## ${drawer.kind} — ${drawer.entries.length} injectable of ${drawer.total} filed\n`,
       );
       for (const e of drawer.entries) {
-        write(`  [${e.score.toFixed(3)}] ${e.content.replace(/\s*\n\s*/g, " ")}\n`);
+        // Commitments print their id: it is what --discharge / --expire take.
+        const id = drawer.kind === "commitments" ? `${e.id} ` : "";
+        write(
+          `  [${e.score.toFixed(3)}] ${id}${e.content.replace(/\s*\n\s*/g, " ")}\n`,
+        );
       }
       write("\n");
     }
@@ -1380,7 +1502,7 @@ const drawersCmd = defineCommand({
   meta: {
     name: "drawers",
     description:
-      "Show the ranked drawer rows the threat judge is briefed from (--sync to project the markdown drawers into rows first).",
+      "Show the ranked drawer rows every turn is shown; file, close (--discharge/--expire), export or import entries.",
   },
   args: {
     persona: { type: "string", description: "Persona name." },
@@ -1389,6 +1511,10 @@ const drawersCmd = defineCommand({
       description: `One drawer (${DRAWER_KINDS.join(" | ")}). Default: all five.`,
     },
     limit: { type: "string", description: "Max entries per drawer." },
+    offset: {
+      type: "string",
+      description: "Skip this many ranked entries per drawer (page with --limit).",
+    },
     sync: {
       type: "boolean",
       description: "Project the markdown drawers into rows before listing.",
@@ -1403,6 +1529,16 @@ const drawersCmd = defineCommand({
       type: "string",
       description:
         "File one entry into the drawer named by --kind. Idempotent: re-filing the same text reaffirms it.",
+    },
+    discharge: {
+      type: "string",
+      description:
+        "Close the commitment with this id as MET. It stays queryable but stops being injected.",
+    },
+    expire: {
+      type: "string",
+      description:
+        "Close the commitment with this id as MISSED (its window passed unmet).",
     },
     export: {
       type: "string",
@@ -1434,6 +1570,7 @@ const drawersCmd = defineCommand({
   },
   async run({ args, rawArgs }) {
     const limit = Number(args.limit);
+    const offset = Number(args.offset);
     // citty's value reader refuses tokens that start with `-` — it takes them
     // for flags — so the documented `-` sentinel never arrives as `-`:
     // `--export -` parsed to "" and the empty path then fell through to
@@ -1463,9 +1600,14 @@ const drawersCmd = defineCommand({
       persona: args.persona ? String(args.persona) : undefined,
       kind: args.kind ? String(args.kind) : undefined,
       limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : undefined,
+      offset:
+        Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : undefined,
       sync: Boolean(args.sync),
       force: Boolean(args.force),
       file: args.file === undefined ? undefined : String(args.file),
+      discharge:
+        args.discharge === undefined ? undefined : String(args.discharge),
+      expire: args.expire === undefined ? undefined : String(args.expire),
       export: stdioSentinel(
         "export",
         args.export === undefined ? undefined : String(args.export),

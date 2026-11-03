@@ -30,6 +30,7 @@ import { join } from "node:path";
 
 import type { TelegramTransport } from "../channels/telegram.ts";
 import type { Config } from "../config.ts";
+import { syncDrawerIndex } from "../memory/drawerIndex.ts";
 import { log } from "./logger.ts";
 import { MemoryIndex } from "./memoryIndex.ts";
 import {
@@ -340,6 +341,10 @@ async function drawersStep(
           since: held[0]?.heldSince,
         });
       }
+      // Drawer rows into the search index (#758), AFTER this cycle's
+      // promotion so a line captured since the last heartbeat is findable by
+      // the end of this one. Reconciling, so a skipped cycle self-heals.
+      await indexDrawers(input, store);
       return { promoted, drawerSync, drawerRetirement, journalIngest };
     } finally {
       close();
@@ -349,6 +354,28 @@ async function drawersStep(
       error: (e as Error).message,
     });
     return { promoted: [] };
+  }
+}
+
+/** Publish active drawer rows to the search index. Never throws. */
+async function indexDrawers(
+  input: RunHeartbeatInput,
+  store: DrawerStore,
+): Promise<void> {
+  if (!input.persona || (!input.index && !input.indexPath)) return;
+  let opened: MemoryIndex | undefined;
+  try {
+    const ix = input.index ?? (opened = await MemoryIndex.open(input.indexPath!));
+    const r = syncDrawerIndex(ix, store, input.persona);
+    if (r.upserted > 0 || r.removed > 0) {
+      log.info("heartbeat: drawer index synced", { persona: input.persona, ...r });
+    }
+  } catch (e) {
+    log.warn("heartbeat: drawer index sync failed", {
+      error: (e as Error).message,
+    });
+  } finally {
+    opened?.close();
   }
 }
 

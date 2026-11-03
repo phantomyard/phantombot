@@ -19,7 +19,11 @@
  *   finish. A date recorded `ok` with both stages done has already been
  *   promoted into the drawers, MEMORY.md and kb/ — injecting the raw file on
  *   top of that is duplication, and the version in the drawers is the better
- *   one (deduplicated, weighted, linked). A date that is missing from the
+ *   one (deduplicated, weighted, linked). That holds only because the drawers
+ *   REACH the turn: their top-ranked entries ride every prompt as "Standing
+ *   memory" (memory/standingMemory.ts, #758) and every active entry is in the
+ *   search index. Before #758 neither was true, and dropping the raw day took
+ *   its lessons and commitments out of the persona's view entirely. A date that is missing from the
  *   ledger, `partial`, `error`, or short a stage has NOT been promoted, and
  *   dropping it would silently lose a day.
  *

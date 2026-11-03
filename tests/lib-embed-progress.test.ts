@@ -18,6 +18,7 @@ function fakeIndex(paths: string[]) {
   return {
     allNotePaths: () => paths,
     virtualText: () => undefined,
+    virtualBodies: () => new Map<string, string>(),
     pruneNoteEmbeddingChunks: () => {},
     embeddingSha: () => undefined,
     upsertEmbedding: (path: string, i: number) => embeddings.set(`${path}:${i}`, 1),
