@@ -114,9 +114,84 @@ export interface DecisionModelConfig {
         timeoutMs?: number;
     };
 }
+/**
+ * Semantic memory search. Without it memory search is field-weighted BM25
+ * with link-graph expansion; with it, hybrid BM25 + vectors.
+ */
+export type EmbeddingsConfig = {
+    provider: "none";
+} | {
+    provider: "gemini";
+    /** Stored in the persona's vault, never in config.toml. */
+    apiKey: string;
+    /** Default "gemini-embedding-001". */
+    model?: string;
+    /** Default 1536. */
+    dims?: number;
+} | {
+    provider: "openai-compatible";
+    /** http(s) endpoint of an OpenAI-compatible /embeddings server. */
+    baseUrl: string;
+    model: string;
+    /** Omit for an unauthenticated server; any stored key is then removed. */
+    apiKey?: string;
+    /** 0 or omitted: the server's native size. */
+    dims?: number;
+};
 export interface PersonaConfig {
     brain?: BrainConfig;
     decisionModel?: DecisionModelConfig;
+    embeddings?: EmbeddingsConfig;
+}
+/** A persona's PhantomChat identity and allowlist (`persona.phantomchat.info()`). */
+export interface PhantomchatInfo {
+    /** The persona's npub, or null when it has no Nostr identity yet. */
+    npub: string | null;
+    /** The persona has a phantomchat.json (an allowlist has been set). */
+    configured: boolean;
+    /** npubs answered as the principal. */
+    allowedNpubs: string[];
+}
+export interface PhantomchatStartOptions {
+    /** Relays to use instead of the persona's cached list. wss:// or ws:// URLs. */
+    relays?: string[];
+    /** Name published in the persona's profile. Default: the persona name, capitalised. */
+    displayName?: string;
+}
+/** Where a persona's hosted PhantomChat channel is. */
+/**
+ * What an allowlist change did to the channel (`allow`/`disallow`). The change
+ * itself is on disk either way; `restart` says whether the listener took it.
+ *   - "none":      no restart was needed — nothing changed, or the channel is
+ *                  stopped and reads the list when started.
+ *   - "restarted": the running channel was restarted and is up again.
+ *   - "failed":    the restart failed; the channel is stopped (status
+ *                  "failed", same `error`). The app should show
+ *                  "restart needed" and call `start()` again.
+ */
+export type PhantomchatRestart = "none" | "restarted" | "failed";
+export interface PhantomchatAllowResult {
+    npub: string;
+    /** False when `npub` was already allowed (nothing written, no restart). */
+    added: boolean;
+    restart: PhantomchatRestart;
+    /** Why the restart failed (restart "failed"). */
+    error?: string;
+}
+export interface PhantomchatDisallowResult {
+    /** False when `npub` was not on the list (nothing written, no restart). */
+    removed: boolean;
+    restart: PhantomchatRestart;
+    error?: string;
+}
+export interface PhantomchatStatus {
+    state: "stopped" | "starting" | "running" | "failed";
+    /** Set once the channel has an identity. */
+    npub?: string;
+    /** Relays in use while running. */
+    relays?: number;
+    /** Why it failed (state "failed"). */
+    error?: string;
 }
 /** One provider the native engine can run (`engine.providers.list()`). */
 export interface ProviderInfo {

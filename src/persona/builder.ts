@@ -124,6 +124,7 @@ function buildStableSections(
   sections.push(MEMORY_TOOLS_SECTION);
   sections.push(SCHEDULING_TOOLS_SECTION);
   sections.push(buildMcpToolsSection(persona.mcpServers));
+  if (persona.phantomchatPrincipal) sections.push(DEVICE_TOOLS_SECTION);
   sections.push(NOTIFICATION_SECTION);
   sections.push(WORKSPACE_LOCK_SECTION);
   sections.push(LOCAL_HYGIENE_SECTION);
@@ -670,6 +671,20 @@ export const LOCAL_HYGIENE_SECTION =
 - One canonical place per thing — one credential, one setting, one rule.
   A second copy elsewhere will quietly win one day and you won't know which.
 `;
+
+/** Shown only to a persona with a PhantomChat principal (issue #747). */
+export const DEVICE_TOOLS_SECTION = `# Your principal's PC
+
+If your principal has switched Local tools ON for you in the PhantomChat
+desktop app, you can run tools on that PC while it is online:
+
+  phantombot device list                         # online PCs and their tools
+  phantombot device call <pc> bash --args '{"command":"..."}'
+
+Tools: bash, read, write, edit, ls, find, grep; \`phantombot device call
+--help\` lists each one's args. Exit 3 means the PC is not available. Use it when the task is about
+their PC, not this host. It is their own machine: act as carefully as you
+would in their home directory.`;
 
 export const NOTIFICATION_SECTION =
   `# Surfacing things to the user

@@ -28,7 +28,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
@@ -36,7 +36,13 @@ import { runMemoryCapture, runMemorySearch } from "../cli/memory.ts";
 import { applyPersona } from "../cli/create-persona.ts";
 import { runNotify } from "../cli/notify.ts";
 import { validPersonaName } from "../cli/persona-new.ts";
-import { type Config, loadConfig, personaDir } from "../config.ts";
+import {
+  type Config,
+  DEFAULT_OPENAI_COMPATIBLE_MAX_CHUNK_CHARS,
+  loadConfig,
+  memoryIndexPath,
+  personaDir,
+} from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
 import {
@@ -68,6 +74,14 @@ import { runTurn } from "../orchestrator/turn.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 import { EngineError } from "./errors.ts";
 import { toEngineEvent } from "./events.ts";
+import {
+  allowNpub,
+  checkRelays,
+  disallowNpub,
+  type HostedChannel,
+  phantomchatInfo,
+  startHostedChannel,
+} from "./phantomchat.ts";
 import { checkProvider, listProviders } from "./providers.ts";
 import {
   parseJsonReply,
@@ -87,6 +101,12 @@ import type {
   MemoryHit,
   MemorySearchOptions,
   PersonaConfig,
+  PhantomchatAllowResult,
+  PhantomchatDisallowResult,
+  PhantomchatInfo,
+  PhantomchatRestart,
+  PhantomchatStartOptions,
+  PhantomchatStatus,
   StructuredResult,
   ProviderCheck,
   ProviderCheckOptions,
@@ -106,6 +126,16 @@ const READ_ONLY_TOOLLESS: ReadonlySet<string> = new Set(["codex"]);
 const CONVERSATION_PREFIX = APP_CONVERSATION_PREFIX;
 const MAX_CONVERSATION_KEY = 200;
 const DEFAULT_DECIDE_TIMEOUT_MS = 5000;
+
+/** Test seam: the hosted channel's relay pool. Not exported from `index.ts`. */
+let channelPoolForTesting: ((secretKey: Uint8Array) => unknown) | undefined;
+
+/** @internal Tests only. Pass undefined to restore real relays. */
+export function _setChannelPoolForTesting(
+  factory: ((secretKey: Uint8Array) => unknown) | undefined,
+): void {
+  channelPoolForTesting = factory;
+}
 
 /**
  * Test seam: replaces harness discovery + chain building. Deliberately NOT
@@ -193,6 +223,13 @@ export class Engine {
     list(): Promise<string[]>;
     exists(name: string): Promise<boolean>;
     create(name: string, options?: CreatePersonaOptions): Promise<Persona>;
+    /**
+     * Delete a persona for good: stop its PhantomChat channel, then remove its
+     * directory (identity, vault, config, memory files), its search index and
+     * every memory-database row it owns. Its npub cannot be recovered.
+     * Resolves false when there was no such persona.
+     */
+    delete(name: string): Promise<boolean>;
   };
   /**
    * Model providers for an app's own setup UI: list them, check a key and read
@@ -211,7 +248,9 @@ export class Engine {
   #closed = false;
   #memory: Promise<MemoryStore> | undefined;
   #handles = new Map<string, Persona>();
-  #active = new Set<{ controller: AbortController; done: Promise<void> }>();
+  #active = new Set<{ controller: AbortController; done: Promise<void>; persona?: string }>();
+  /** Personas being deleted: no new turn may start for them. */
+  #deleting = new Set<string>();
 
   /** @internal Use `createEngine`. */
   constructor(root: string, scope: EngineScope, lock: LockHandle) {
@@ -226,6 +265,7 @@ export class Engine {
           return existsSync(personaDir(await loadConfig(), name));
         }),
       create: (name, options) => this.#createPersona(name, options ?? {}),
+      delete: (name) => this.#deletePersona(name),
     };
     this.providers = {
       list: () => this.run(async () => listProviders()),
@@ -326,11 +366,20 @@ export class Engine {
     return this.#memory;
   }
 
-  /** @internal Track a turn so close() can cancel and await it. */
-  track(controller: AbortController): () => void {
+  /** @internal True while `personas.delete(name)` is running. */
+  isDeleting(persona: string): boolean {
+    return this.#deleting.has(persona);
+  }
+
+  /**
+   * @internal Track a turn so close() — and, for `persona`, personas.delete()
+   * — can cancel and await it.
+   */
+  track(controller: AbortController, persona?: string): () => void {
     let finish!: () => void;
     const entry = {
       controller,
+      persona,
       done: new Promise<void>((r) => {
         finish = r;
       }),
@@ -344,6 +393,53 @@ export class Engine {
 
   #assertOpen(): void {
     if (this.#closed) throw new EngineError("engine_closed", "engine is closed");
+  }
+
+  async #deletePersona(name: string): Promise<boolean> {
+    if (typeof name !== "string" || !validPersonaName(name)) {
+      throw new EngineError("invalid_argument", "persona names are lowercase letters, digits, '-' or '_'", {
+        name,
+      });
+    }
+    this.#assertOpen();
+    if (this.#deleting.has(name)) {
+      throw new EngineError("invalid_argument", `persona '${name}' is already being deleted`, { name });
+    }
+    this.#deleting.add(name);
+    try {
+      // Order matters: stop the channel (no new inbound turns), then cancel
+      // and await this persona's running turns (they hold the store and
+      // would write rows for a persona about to vanish), then delete.
+      const handle = this.#handles.get(name);
+      if (handle) await handle.phantomchat.stop();
+      const mine = [...this.#active].filter((turn) => turn.persona === name);
+      for (const turn of mine) this.enter(() => turn.controller.abort(), name);
+      await Promise.allSettled(mine.map((turn) => turn.done));
+      return await this.#deletePersonaFiles(name);
+    } finally {
+      this.#deleting.delete(name);
+    }
+  }
+
+  #deletePersonaFiles(name: string): Promise<boolean> {
+    return this.run(async () => {
+      const config = await loadConfig();
+      const dir = personaDir(config, name);
+      if (!existsSync(dir)) return false;
+      try {
+        // Rows first: a failure here leaves the persona whole and retryable,
+        // where a removed directory with live rows would be an orphan.
+        const memory = await this.memoryStore(config);
+        await memory.deletePersona(name);
+        await rm(memoryIndexPath(name), { force: true });
+        await rm(dir, { recursive: true, force: true });
+      } catch (e) {
+        throw new EngineError("write_failed", `cannot delete persona '${name}': ${(e as Error).message}`);
+      }
+      this.#handles.delete(name);
+      this.#scopes.delete(name);
+      return true;
+    });
   }
 
   async #createPersona(name: string, options: CreatePersonaOptions): Promise<Persona> {
@@ -403,9 +499,41 @@ export class Persona {
     /** Record a note in today's journal; indexed immediately. */
     capture(text: string, options?: { tags?: string[]; conversation?: string }): Promise<void>;
   };
+  /**
+   * This persona's PhantomChat channel, hosted by the engine: its own npub,
+   * answering the allowed npubs over NIP-17 DMs. See `phantomchat.ts`.
+   */
+  readonly phantomchat: {
+    /** The npub and allowlist. Read-only; never creates a key. */
+    info(): Promise<PhantomchatInfo>;
+    /**
+     * Answer `npub` as the principal. Creates the identity and channel file
+     * on first use; restarts a running channel. `relays` seeds a new file's
+     * relay list instead of fetching the canonical one.
+     */
+    allow(npub: string, options?: { relays?: string[] }): Promise<PhantomchatAllowResult>;
+    /**
+     * Stop answering `npub`. Refuses to remove the last one. Restarts a running
+     * channel. A failed restart never rejects: the change landed, so it is
+     * reported as `restart: "failed"` (and on `status()`/`onStatus`).
+     */
+    disallow(npub: string): Promise<PhantomchatDisallowResult>;
+    /** Start listening. Resolves when running; idempotent while running. */
+    start(options?: PhantomchatStartOptions): Promise<PhantomchatStatus>;
+    /** Stop listening and wait for in-flight work to unwind. Idempotent. */
+    stop(): Promise<void>;
+    status(): PhantomchatStatus;
+    /** Called on every status change. Returns an unsubscribe function. */
+    onStatus(listener: (status: PhantomchatStatus) => void): () => void;
+  };
 
   #engine: Engine;
   #runtime: Promise<PersonaRuntime> | undefined;
+  #channel: HostedChannel | undefined;
+  #channelStart: Promise<PhantomchatStatus> | undefined;
+  #channelOptions: PhantomchatStartOptions = {};
+  #channelStatus: PhantomchatStatus = { state: "stopped" };
+  #statusListeners = new Set<(status: PhantomchatStatus) => void>();
 
   /** @internal Use `engine.persona(name)`. */
   constructor(engine: Engine, name: string) {
@@ -437,6 +565,110 @@ export class Persona {
       search: (query, options) => this.#search(query, options ?? {}),
       capture: (text, options) => this.#capture(text, options ?? {}),
     };
+    this.phantomchat = {
+      info: () => this.#run(async () => phantomchatInfo(await this.#dir())),
+      allow: async (npub, options) => {
+        const relays = checkRelays(options?.relays);
+        const r = await this.#run(async () => allowNpub(await this.#dir(), npub, relays));
+        if (!r.added) return { ...r, restart: "none" };
+        return { ...r, ...(await this.#restartChannel()) };
+      },
+      disallow: async (npub) => {
+        const removed = await this.#run(async () => disallowNpub(await this.#dir(), npub));
+        if (!removed) return { removed, restart: "none" };
+        return { removed, ...(await this.#restartChannel()) };
+      },
+      start: (options) => this.#startChannel(options ?? {}),
+      stop: () => this.#stopChannel(),
+      status: () => ({ ...this.#channelStatus }),
+      onStatus: (listener) => {
+        this.#statusListeners.add(listener);
+        return () => {
+          this.#statusListeners.delete(listener);
+        };
+      },
+    };
+  }
+
+  // ── phantomchat channel ────────────────────────────────────────────────
+
+  #setChannelStatus(status: PhantomchatStatus): void {
+    this.#channelStatus = status;
+    for (const listener of [...this.#statusListeners]) {
+      try {
+        listener({ ...status });
+      } catch {
+        // A throwing listener must never take the channel down.
+      }
+    }
+  }
+
+  #startChannel(options: PhantomchatStartOptions): Promise<PhantomchatStatus> {
+    if (this.#engine.closed) return Promise.reject(new EngineError("engine_closed", "engine is closed"));
+    if (this.#channel) return Promise.resolve({ ...this.#channelStatus });
+    if (this.#channelStart) return this.#channelStart;
+    checkRelays(options.relays);
+    this.#channelOptions = { ...options };
+    this.#setChannelStatus({ state: "starting" });
+    const starting = (async () => {
+      try {
+        this.#channel = await this.#run(async () => {
+          const runtime = await this.#loadRuntime();
+          const memory = await this.#engine.memoryStore(runtime.config);
+          const agentDir = await this.#dir();
+          return startHostedChannel({
+            persona: this.name,
+            agentDir,
+            config: runtime.config,
+            memory,
+            harnesses: runtime.harnesses,
+            options,
+            run: (fn) => this.#run(fn),
+            track: (controller) => this.#engine.track(controller, this.name),
+            sink: logSinkWriter(),
+            makePool: channelPoolForTesting,
+            onStatus: (status) => {
+              if (status.state === "stopped" || status.state === "failed") this.#channel = undefined;
+              this.#setChannelStatus(status);
+            },
+          });
+        });
+        return { ...this.#channelStatus };
+      } catch (e) {
+        const err = asEngineError(e, "not_configured");
+        this.#setChannelStatus({ state: "failed", error: err.message });
+        throw err;
+      } finally {
+        this.#channelStart = undefined;
+      }
+    })();
+    this.#channelStart = starting;
+    return starting;
+  }
+
+  async #stopChannel(): Promise<void> {
+    await this.#channelStart?.catch(() => {});
+    const channel = this.#channel;
+    this.#channel = undefined;
+    if (channel) await channel.stop();
+    if (this.#channelStatus.state !== "stopped") this.#setChannelStatus({ state: "stopped" });
+  }
+
+  /**
+   * Re-read the persona's settings by restarting a RUNNING channel; a stopped
+   * one stays stopped. Never rejects: the caller's change already landed, so a
+   * failed restart is a result (and status "failed"), not an error.
+   */
+  async #restartChannel(): Promise<{ restart: PhantomchatRestart; error?: string }> {
+    await this.#channelStart?.catch(() => {});
+    if (!this.#channel) return { restart: "none" };
+    try {
+      await this.#stopChannel();
+      await this.#startChannel(this.#channelOptions);
+      return { restart: "restarted" };
+    } catch (e) {
+      return { restart: "failed", error: (e as Error).message };
+    }
   }
 
   // ── configuration ──────────────────────────────────────────────────────
@@ -446,6 +678,12 @@ export class Persona {
    * `config.toml` (never the root's global file, so one persona's settings
    * cannot leak into another's) and its keys into its encrypted vault.
    * Only the keys you pass are changed.
+   *
+   * Applied live: the next search and the next turn use the new settings
+   * (including embeddings — config and the vault key are re-read per call),
+   * and a running phantomchat channel is restarted to pick them up. If that
+   * restart fails, `configure` still resolves (the settings are saved) and
+   * the channel's status turns "failed".
    */
   async configure(settings: PersonaConfig): Promise<void> {
     await this.#run(async () => {
@@ -578,8 +816,69 @@ export class Persona {
         }
       }
 
+      const em = settings.embeddings;
+      let embeddingKey: { name: string; value: string | undefined } | undefined;
+      if (em) {
+        const block = table(toml, "embeddings");
+        if (em.provider === "none") {
+          // Keeps the provider blocks so re-enabling needs no re-entry.
+          block.provider = "none";
+        } else if (em.provider === "gemini") {
+          if (typeof em.apiKey !== "string" || em.apiKey.trim() === "") {
+            throw new EngineError("invalid_argument", "embeddings.apiKey is required for gemini");
+          }
+          block.provider = "gemini";
+          const g = table(block, "gemini");
+          delete g.api_key; // the key lives in the vault only
+          g.model = em.model?.trim() || "gemini-embedding-001";
+          g.dims = em.dims === undefined ? 1536 : positiveInt(em.dims, "embeddings.dims");
+          embeddingKey = { name: "PHANTOMBOT_GEMINI_API_KEY", value: em.apiKey };
+        } else if (em.provider === "openai-compatible") {
+          const baseUrl = typeof em.baseUrl === "string" ? em.baseUrl.trim() : "";
+          if (!/^https?:\/\/[^\s/]+/i.test(baseUrl)) {
+            throw new EngineError("invalid_argument", "embeddings.baseUrl must start with http:// or https://");
+          }
+          if (typeof em.model !== "string" || em.model.trim() === "") {
+            throw new EngineError("invalid_argument", "embeddings.model is required for openai-compatible");
+          }
+          if (em.dims !== undefined && (!Number.isInteger(em.dims) || em.dims < 0)) {
+            throw new EngineError("invalid_argument", "embeddings.dims must be a non-negative integer");
+          }
+          if (em.apiKey !== undefined && (typeof em.apiKey !== "string" || em.apiKey === "")) {
+            throw new EngineError("invalid_argument", "embeddings.apiKey must be non-empty when given");
+          }
+          block.provider = "openai-compatible";
+          const o = table(block, "openai_compatible");
+          delete o.api_key;
+          o.base_url = baseUrl;
+          o.model = em.model.trim();
+          o.dims = em.dims ?? 0;
+          if (typeof o.max_chunk_chars !== "number") {
+            o.max_chunk_chars = DEFAULT_OPENAI_COMPATIBLE_MAX_CHUNK_CHARS;
+          }
+          // No key = remove any stored one: a key for the previous endpoint
+          // must never be sent to this one (AGENTS invariant 63).
+          embeddingKey = { name: "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY", value: em.apiKey };
+        } else {
+          throw new EngineError(
+            "invalid_argument",
+            "embeddings.provider must be one of: none, gemini, openai-compatible",
+          );
+        }
+      }
+
       // Secrets FIRST: a config naming a key that never landed in the vault
       // is a persona that looks configured and fails on its first turn.
+      if (embeddingKey?.value !== undefined) {
+        await this.#setSecret(embeddingKey.name, embeddingKey.value);
+      } else if (embeddingKey) {
+        const vault = await openPersonaVault(dir);
+        try {
+          vault.unset(embeddingKey.name);
+        } finally {
+          vault.close();
+        }
+      }
       if (brain?.native?.apiKey !== undefined) {
         await this.#setSecret(ENV_PI_API_KEY, brain.native.apiKey);
       }
@@ -594,6 +893,10 @@ export class Persona {
       }
       this.#runtime = undefined;
     });
+    // Searches and new turns re-read config + vault, so they see the change
+    // at once. A running channel holds the runtime it started with, so it is
+    // restarted; a failed restart shows on status() as "failed".
+    await this.#restartChannel();
   }
 
   // ── turns ──────────────────────────────────────────────────────────────
@@ -674,7 +977,11 @@ export class Persona {
       yield { type: "error", code: "engine_closed", message: "engine is closed" };
       return;
     }
-    const untrack = this.#engine.track(controller);
+    if (this.#engine.isDeleting(this.name)) {
+      yield { type: "error", code: "persona_not_found", message: `persona '${this.name}' is being deleted` };
+      return;
+    }
+    const untrack = this.#engine.track(controller, this.name);
     try {
       let runtime: PersonaRuntime;
       let memory: MemoryStore;
@@ -688,6 +995,13 @@ export class Persona {
       }
       const { config } = runtime;
       const agentDir = personaDir(config, this.name);
+      if (!existsSync(agentDir)) {
+        // The cached runtime outlives personas.delete(); the directory doesn't.
+        this.#runtime = undefined;
+        const err = notFound(this.name);
+        yield { type: "error", code: err.code, message: err.message };
+        return;
+      }
       const trusted = options.source === "principal";
       const history = options.history ?? options.conversation !== undefined;
       const tools = options.tools ?? "none";

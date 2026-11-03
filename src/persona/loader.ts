@@ -62,6 +62,11 @@ export interface PersonaFiles {
   tools?: string;
   /** Registered MCP server IDs (from mcp.json). */
   mcpServers?: string[];
+  /**
+   * True when phantomchat.json lists at least one principal npub, i.e. a
+   * principal's desktop app can lend this persona tools (`phantombot device`).
+   */
+  phantomchatPrincipal?: boolean;
 
   /** Filename the identity content was loaded from (diagnostic). */
   identitySource: string;
@@ -108,6 +113,18 @@ export async function loadPersona(agentDir: string): Promise<PersonaFiles> {
     // Best-effort: corrupt mcp.json is flagged by doctor / mcp commands
   }
 
+  // A cheap JSON read (no identity/vault open): does this persona have a
+  // PhantomChat principal whose desktop could lend it tools?
+  let phantomchatPrincipal: boolean | undefined;
+  try {
+    const pc = JSON.parse(await readFile(join(agentDir, "phantomchat.json"), "utf8")) as {
+      allowed_npubs?: unknown;
+    };
+    if (Array.isArray(pc.allowed_npubs) && pc.allowed_npubs.length > 0) phantomchatPrincipal = true;
+  } catch {
+    // No channel, or unreadable: the doctor and the channel itself report it.
+  }
+
   return {
     boot: parts.join("\n\n"),
     identitySource: sources.join("+"),
@@ -116,6 +133,7 @@ export async function loadPersona(agentDir: string): Promise<PersonaFiles> {
     tools: tools?.content,
     toolsSource: tools?.source,
     mcpServers,
+    phantomchatPrincipal,
   };
 }
 

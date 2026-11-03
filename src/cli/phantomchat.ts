@@ -26,6 +26,8 @@ import { defineCommand } from "citty";
 import * as p from "@clack/prompts";
 
 import { pickChannelPersona } from "./channelPersona.ts";
+import { listExistingPersonas as listExistingPersonasSync } from "./persona.ts";
+import { validPersonaName } from "./persona-new.ts";
 
 import {
   DEFAULT_PHANTOMCHAT_RELAYS,
@@ -152,10 +154,12 @@ export async function savePhantomchatAllowlist(input: {
   allowedNpubs: string[];
   save?: typeof savePhantomchatPersonaConfig;
   load?: typeof loadPhantomchatPersonaConfig;
+  /** Test seam: the canonical /relays.json fetch. */
+  fetchRelays?: typeof fetchCanonicalRelays;
 }): Promise<{ path: string; relays: number; tofu: boolean }> {
   const existing = (input.load ?? loadPhantomchatPersonaConfig)(input.agentDir);
   const relays =
-    (await fetchCanonicalRelays()) ??
+    (await (input.fetchRelays ?? fetchCanonicalRelays)()) ??
     existing?.relays ??
     [...DEFAULT_PHANTOMCHAT_RELAYS];
   const save = input.save ?? savePhantomchatPersonaConfig;
@@ -167,6 +171,96 @@ export async function savePhantomchatAllowlist(input: {
     greeted: existing?.greeted,
   });
   return { path, relays: relays.length, tofu: input.allowedNpubs.length === 0 };
+}
+
+/** One persona as the non-interactive `--list` reports it. */
+export interface PhantomchatPersonaListing {
+  persona: string;
+  /** The persona's npub, or null when it has no Nostr identity yet. */
+  npub: string | null;
+  /** True when the persona has a phantomchat.json (the channel is set up). */
+  phantomchat: boolean;
+  allowedNpubs: string[];
+}
+
+/**
+ * `phantombot phantomchat --list --json`: every persona on this host with its
+ * npub. Read-only; never mints a key (a persona with no identity reports
+ * `npub: null`). This is what a desktop app's Scan reads — the nsec never
+ * leaves the persona directory.
+ */
+export function listPhantomchatPersonaListings(
+  config: Config,
+  load: typeof loadPhantomchatPersonaConfig = loadPhantomchatPersonaConfig,
+): PhantomchatPersonaListing[] {
+  const out: PhantomchatPersonaListing[] = [];
+  for (const persona of listExistingPersonasSync(config)) {
+    const agentDir = personaDir(config, persona);
+    const pc = load(agentDir);
+    if (pc) {
+      out.push({
+        persona,
+        npub: pc.identity.npub,
+        phantomchat: true,
+        allowedNpubs: [...pc.allowedNpubs],
+      });
+      continue;
+    }
+    let npub: string | null = null;
+    try {
+      const nsec = readPersonaIdentityNsec(agentDir);
+      if (nsec) npub = identityFromNsec(nsec).npub;
+    } catch {
+      npub = null; // unreadable identity: report it as absent, never mint
+    }
+    out.push({ persona, npub, phantomchat: false, allowedNpubs: [] });
+  }
+  return out;
+}
+
+/**
+ * `phantombot phantomchat --persona <p> --allow <npub>`: add one npub to the
+ * persona's allowlist, setting the channel up (identity + phantomchat.json)
+ * when it is not yet. Idempotent. Like every allowlist change, the running
+ * daemon picks it up on its next start — the caller restarts it.
+ */
+export async function allowPhantomchatNpub(input: {
+  agentDir: string;
+  npub: string;
+  generate?: typeof generateIdentity;
+  load?: typeof loadPhantomchatPersonaConfig;
+  save?: typeof savePhantomchatPersonaConfig;
+  fetchRelays?: typeof fetchCanonicalRelays;
+}): Promise<{ npub: string; added: boolean; path: string }> {
+  const load = input.load ?? loadPhantomchatPersonaConfig;
+  const candidate = input.npub.trim();
+  const parsed = parseAllowedNpubs(candidate);
+  if (parsed.length !== 1 || parsed[0] !== candidate || !candidate.startsWith("npub1")) {
+    throw new Error(`not a valid npub: ${candidate || "(empty)"}`);
+  }
+  const hex = decodeNpubToHex(candidate).toLowerCase();
+  const id = await ensurePhantomchatIdentity(
+    input.agentDir,
+    input.generate ?? generateIdentity,
+    load,
+  );
+  const existing = load(input.agentDir);
+  const current = existing?.allowedNpubs ?? [];
+  const already = (existing?.allowedHex ?? []).includes(hex);
+  if (already && existing) {
+    return { npub: id.npub, added: false, path: existing.path };
+  }
+  const saved = await savePhantomchatAllowlist({
+    agentDir: input.agentDir,
+    nsec: id.nsec,
+    allowedNpubs: [...current, candidate],
+    save: input.save,
+    load,
+    // An existing file keeps its relays (the daemon refreshes them from the
+    // canonical list on every start); only a NEW file needs a list now.
+    fetchRelays: existing ? async () => existing.relays : input.fetchRelays,
+  });
+  return { npub: id.npub, added: true, path: saved.path };
 }
 
 export async function runPhantomchat(input: RunInput = {}): Promise<number> {
@@ -425,11 +519,100 @@ export default defineCommand({
       description:
         "Persona to configure. Defaults to the resolved default persona.",
     },
+    list: {
+      type: "boolean",
+      description:
+        "Print every persona with its npub and allowlist, then exit (non-interactive). Never creates a key.",
+    },
+    allow: {
+      type: "string",
+      description:
+        "Add this npub to --persona's allowlist (sets the channel up if needed), then exit. Restart phantombot to apply.",
+    },
+    json: {
+      type: "boolean",
+      description: "With --list or --allow: print JSON.",
+    },
   },
   async run({ args }) {
+    if (args.list || args.allow !== undefined) {
+      process.exitCode = await runPhantomchatScripted({
+        list: Boolean(args.list),
+        allow: args.allow === undefined ? undefined : String(args.allow),
+        persona: args.persona ? String(args.persona) : undefined,
+        json: Boolean(args.json),
+      });
+      return;
+    }
     const code = await runPhantomchat({
       persona: args.persona ? String(args.persona) : undefined,
     });
     process.exitCode = code;
   },
 });
+
+/**
+ * The non-interactive `--list` / `--allow` modes. Exit 0 on success, 2 on a
+ * usage error (missing/unknown persona, bad npub), 1 on a write failure.
+ */
+export async function runPhantomchatScripted(input: {
+  list: boolean;
+  allow?: string;
+  persona?: string;
+  json: boolean;
+  config?: Config;
+  out?: WriteSink;
+  err?: WriteSink;
+  fetchRelays?: typeof fetchCanonicalRelays;
+}): Promise<number> {
+  const out = input.out ?? process.stdout;
+  const err = input.err ?? process.stderr;
+  const config = input.config ?? (await loadConfig());
+  if (input.list && input.allow !== undefined) {
+    err.write("phantomchat: --list and --allow cannot be combined\n");
+    return 2;
+  }
+  if (input.list) {
+    const rows = listPhantomchatPersonaListings(config);
+    if (input.json) {
+      out.write(JSON.stringify(rows) + "\n");
+    } else {
+      for (const r of rows) {
+        out.write(`${r.persona}\t${r.npub ?? "-"}\t${r.phantomchat ? "phantomchat" : "no channel"}\n`);
+      }
+    }
+    return 0;
+  }
+  const persona = input.persona;
+  if (!persona) {
+    err.write("phantomchat: --allow needs --persona <name>\n");
+    return 2;
+  }
+  const agentDir = personaDir(config, persona);
+  if (!validPersonaName(persona) || !listExistingPersonasSync(config).includes(persona)) {
+    err.write(`phantomchat: no persona '${persona}'\n`);
+    return 2;
+  }
+  let result: Awaited<ReturnType<typeof allowPhantomchatNpub>>;
+  try {
+    result = await allowPhantomchatNpub({
+      agentDir,
+      npub: input.allow ?? "",
+      fetchRelays: input.fetchRelays,
+    });
+  } catch (e) {
+    const message = (e as Error).message;
+    err.write(`phantomchat: ${message}\n`);
+    return message.startsWith("not a valid npub") ? 2 : 1;
+  }
+  if (input.json) {
+    out.write(JSON.stringify({ persona, npub: result.npub, added: result.added }) + "\n");
+  } else {
+    out.write(
+      result.added
+        ? `allowed ${input.allow} on '${persona}' — restart phantombot to apply\n`
+        : `${input.allow} is already allowed on '${persona}'\n`,
+    );
+  }
+  return 0;
+}

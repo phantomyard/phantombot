@@ -336,6 +336,14 @@ export interface MemoryStore {
    */
   deleteConversation(persona: string, conversation: string): Promise<number>;
   /**
+   * Hard-delete EVERY row this persona owns, in every table of this database
+   * that has a `persona` column (turns, facts, extractor state, journal,
+   * drawers, tasks, … — found from the schema, so a table added later is
+   * covered without touching this). One transaction; returns rows deleted.
+   * Only for deleting the persona itself (`engine.personas.delete`).
+   */
+  deletePersona(persona: string): Promise<number>;
+  /**
    * NON-DESTRUCTIVE /reset: advance this conversation's live-context
    * watermark to its newest turn, so `recentTurns` replays nothing until new
    * turns arrive. Turns, their embeddings, durable facts and extractor state
@@ -1743,6 +1751,33 @@ class SqliteMemoryStore implements MemoryStore {
     // leases in one transaction; persona-wide durable facts survive. Returns
     // the turn count. Not called by /reset — see resetConversationContext.
     return this.deleteConversationTxn(persona, conversation) as number;
+  }
+
+  async deletePersona(persona: string): Promise<number> {
+    const tables = (
+      this.db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .all() as Array<{ name: string }>
+    ).map((r) => r.name);
+    const owned = tables.filter((name) =>
+      (
+        this.db.prepare(`PRAGMA table_info("${name.replace(/"/g, '""')}")`).all() as Array<{
+          name: string;
+        }>
+      ).some((c) => c.name === "persona"),
+    );
+    const txn = this.db.transaction((who: string): number => {
+      let n = 0;
+      for (const name of owned) {
+        n += this.db
+          .prepare(`DELETE FROM "${name.replace(/"/g, '""')}" WHERE persona = ?`)
+          .run(who).changes;
+      }
+      return n;
+    });
+    return txn(persona) as number;
   }
 
   async resetConversationContext(

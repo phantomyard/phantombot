@@ -273,6 +273,8 @@ export interface RunPhantomchatServerInput {
    * input seam.
    */
   serviceControl?: ServiceControl;
+  /** Hosted by the embeddable engine: refuse process-level slash commands. */
+  embedded?: boolean;
   /** Signal to stop the loop cleanly (Ctrl-C / SIGTERM). */
   signal?: AbortSignal;
   out?: WriteSink;
@@ -1421,6 +1423,7 @@ export async function runPhantomchatServer(
       runningPersonas: input.runningPersonas,
       lifecycleAccounts: input.lifecycleAccounts,
       serviceControl: input.serviceControl,
+      embedded: input.embedded,
       // /stop flushes the same per-conversation backlog an interrupt does.
       flushBacklog: () => backlog.flush(msg.conversationId, "stop"),
       // Our own PhantomChat address, for the /status `phantomchat:` line.

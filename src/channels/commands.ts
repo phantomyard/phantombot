@@ -198,6 +198,14 @@ export interface SlashCommandContext {
    * the /status line is simply omitted in that case.
    */
   phantomchatNpub?: string;
+  /**
+   * The channel is hosted by the embeddable engine inside another app (the
+   * desktop app's bundled phantombot), not by the `phantombot run` service.
+   * Commands that act on the PROCESS (/update, /restart, /model's restart)
+   * would bounce the host's own service or, on Windows, exit the embedding
+   * app, so they are refused with a plain reply instead.
+   */
+  embedded?: boolean;
 }
 
 export interface SlashCommandResult {
@@ -307,6 +315,15 @@ export function slashCommandTarget(text: string): string | undefined {
  * applied when `ctx.botUsername` is known; otherwise we keep the legacy
  * behavior of stripping the suffix and handling the command.
  */
+/** Process-level commands an engine-hosted channel refuses (see `embedded`). */
+const EMBEDDED_REFUSED: ReadonlySet<string> = new Set(["/update", "/restart", "/model"]);
+
+/** True when a `/model` argument would change the model (and restart). */
+function isModelMutation(arg: string): boolean {
+  const kind = parseModelRequest(arg).kind;
+  return kind === "set" || kind === "clear";
+}
+
 export async function handleSlashCommand(
   text: string,
   ctx: SlashCommandContext,
@@ -345,6 +362,18 @@ export async function handleSlashCommand(
   const head = parts[0]!;
   const cmd = head.split("@")[0]!.toLowerCase();
   const arg = parts.slice(1).join(" ").trim();
+
+  // `/model` alone, `/model list` and a malformed `/model …` are read-only;
+  // only set/clear end in `selfRestart`, so only those are refused.
+  if (
+    ctx.embedded &&
+    EMBEDDED_REFUSED.has(cmd) &&
+    (cmd !== "/model" || isModelMutation(arg))
+  ) {
+    return {
+      reply: `${cmd} isn't available in the app's built-in phantombot. Change settings in the app instead.`,
+    };
+  }
 
   switch (cmd) {
     case "/stop":
@@ -639,11 +668,24 @@ async function handleUpdateResign(
  * race the relaunch — see selfRestart). The restart is fired via `afterSend`
  * so the channel layer sends the heads-up message FIRST, then we go down.
  */
-function handleRestart(ctx: SlashCommandContext): SlashCommandResult {
-  const svc = ctx.serviceControl ?? defaultServiceControl();
+/**
+ * The one door to `selfRestart` from a slash command. An engine-hosted channel
+ * (`embedded`) never restarts: on Windows `selfRestart` bypasses
+ * `serviceControl` and exits the process, which would close the host app.
+ */
+export async function restartSelf(
+  ctx: Pick<SlashCommandContext, "embedded" | "serviceControl">,
+  restart: typeof selfRestart = selfRestart,
+): Promise<{ ok: boolean; stderr?: string }> {
+  if (ctx.embedded) {
+    return { ok: false, stderr: "restart is not available in the embedded engine" };
+  }
+  return restart({ serviceControl: ctx.serviceControl ?? defaultServiceControl() });
+}
 
+function handleRestart(ctx: SlashCommandContext): SlashCommandResult {
   const afterSend = async (): Promise<void> => {
-    const r = await selfRestart({ serviceControl: svc });
+    const r = await restartSelf(ctx);
     if (!r.ok) {
       log.error("commands: /restart failed", {
         chatId: ctx.chatId,
@@ -1171,9 +1213,8 @@ async function handleModel(
     request: req,
   });
 
-  const svc = ctx.serviceControl ?? defaultServiceControl();
   const afterSend = async (): Promise<void> => {
-    const r = await selfRestart({ serviceControl: svc });
+    const r = await restartSelf(ctx);
     if (!r.ok) {
       log.error("commands: /model restart failed", {
         chatId: ctx.chatId,

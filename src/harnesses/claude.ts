@@ -232,6 +232,7 @@ export class ClaudeHarness implements Harness {
       req.conversation,
       req.turnId,
       req.scratchDir,
+      req.trusted,
     );
     // The escort hook reads its context from the env claude hands it (set or
     // CLEARED here, never inherited — see applyEscortEnv).

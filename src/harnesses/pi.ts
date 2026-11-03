@@ -570,7 +570,7 @@ export class PiHarness implements Harness {
     // unsets any stale ambient value rather than leaking it into the subtree.
     // withPersonaEnv returns a fresh copy with turn context and non-interactive defaults;
     // the spread guarantees we can freely assign child-specific vars without mutating parent state.
-    const childEnv = { ...withPersonaEnv(spawnEnv, req.persona, req.conversation, req.turnId, req.scratchDir) };
+    const childEnv = { ...withPersonaEnv(spawnEnv, req.persona, req.conversation, req.turnId, req.scratchDir, req.trusted) };
     if (
       this.config.mode === "host" &&
       this.config.maxOldSpaceMb !== undefined

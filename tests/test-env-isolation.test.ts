@@ -101,8 +101,12 @@ test("saveState REFUSES to write outside the isolation root", async () => {
       /refusing to write state\.json outside test isolation/,
     );
   } finally {
-    process.env.PHANTOMBOT_STATE = saved;
-    process.env.XDG_DATA_HOME = savedXdg;
+    // Assigning undefined to process.env stores the STRING "undefined",
+    // which then points every later suite's state at ./undefined.
+    if (saved === undefined) delete process.env.PHANTOMBOT_STATE;
+    else process.env.PHANTOMBOT_STATE = saved;
+    if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = savedXdg;
   }
 });
 
@@ -116,7 +120,8 @@ test("a test's own temp state path is still allowed", async () => {
     const written = await saveState({ default_persona: "lena" });
     expect(JSON.parse(await readFile(written, "utf8")).default_persona).toBe("lena");
   } finally {
-    process.env.PHANTOMBOT_STATE = saved;
+    if (saved === undefined) delete process.env.PHANTOMBOT_STATE;
+    else process.env.PHANTOMBOT_STATE = saved;
     await rm(dir, { recursive: true, force: true });
   }
 });
