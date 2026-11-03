@@ -18,8 +18,14 @@ import { PI_PROVIDER_CATALOG } from "../lib/piModels.ts";
 import {
   customProviderAllowsKeyless,
   customProviderSpec,
+  normalizeBaseUrl,
+  usesAutoRouting,
 } from "../lib/piCustomProvider.ts";
-import { probeProviderKey, type KeyProbeResult } from "../lib/providerKeyProbe.ts";
+import {
+  probeProviderKey,
+  providerKeyCheckable,
+  type KeyProbeResult,
+} from "../lib/providerKeyProbe.ts";
 import { fetchProviderModels } from "../lib/providerModelCatalog.ts";
 import type { PiModel } from "../lib/piModels.ts";
 import type {
@@ -56,7 +62,10 @@ export function listProviders(): ProviderInfo[] {
       label: p.label,
       needsBaseUrl: custom?.needsBaseUrl ?? false,
       keyOptional: customProviderAllowsKeyless(p.id),
+      checkable: providerKeyCheckable(p.id),
+      autoModel: usesAutoRouting(p.id),
       ...(custom?.defaultModel ? { defaultModel: custom.defaultModel } : {}),
+      ...(custom?.keyLabel ? { keyLabel: custom.keyLabel } : {}),
     };
   });
 }
@@ -89,22 +98,41 @@ export async function checkProvider(
     throw new EngineError("invalid_argument", "baseUrl must be a string");
   }
   const spec = customProviderSpec(providerId);
-  if (spec?.needsBaseUrl && !baseUrl?.trim()) {
+  let normalized: string | undefined;
+  if (baseUrl !== undefined && baseUrl.trim() !== "") {
+    // Only bring-your-own-endpoint providers honour a base URL; anywhere else
+    // the probe would silently send the key to the provider's own host while
+    // the caller believes it chose the endpoint.
+    if (!spec) {
+      throw new EngineError("invalid_argument", `provider '${providerId}' does not take a baseUrl`, {
+        provider: providerId,
+      });
+    }
+    // Same predicate as the wizard (#694): a malformed URL is reported as
+    // malformed, not as missing.
+    const norm = normalizeBaseUrl(baseUrl);
+    if (!norm.ok) {
+      throw new EngineError("invalid_argument", norm.error, { provider: providerId });
+    }
+    normalized = norm.value;
+  }
+  if (spec?.needsBaseUrl && normalized === undefined) {
     throw new EngineError("invalid_argument", `provider '${providerId}' needs a baseUrl`, {
       provider: providerId,
     });
   }
   const b = backendsForTesting ?? realBackends;
-  const opts = baseUrl?.trim() ? { baseUrl: baseUrl.trim() } : {};
+  const opts = normalized !== undefined ? { baseUrl: normalized } : {};
   const [probe, rows] = await Promise.all([
     b.probe(providerId, apiKey, opts),
     b.models(providerId, apiKey, opts).catch(() => [] as PiModel[]),
   ]);
-  // A rejected key lists nothing, even when the catalogue is public
-  // (OpenRouter): showing models for a key the provider refused invites the
-  // user to save it.
+  // No models for a key the provider refused, nor for a key the caller never
+  // supplied where one is required, even when the catalogue is public
+  // (OpenRouter): a list there reads as proof the key is fine.
+  const noKey = apiKey.trim() === "" && !customProviderAllowsKeyless(providerId);
   const models: ProviderModel[] =
-    probe.status === "invalid"
+    probe.status === "invalid" || noKey
       ? []
       : rows.map((m) => ({ id: m.model, supportsImages: m.supportsImages }));
   return { status: probe.status, detail: probe.detail, models };
