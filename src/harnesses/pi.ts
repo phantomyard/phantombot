@@ -1188,13 +1188,20 @@ export function parsePiEvent(parsed: unknown): ParseEventResult {
 
   const ame = obj.assistantMessageEvent;
   if (!isObject(ame)) {
-    // Bare `message_update` — payload-less pi liveness. VERIFIED against pi
-    // 1.4.0 on 2026-11-03: while an upstream SSE stream carries only keepalive
-    // comments (a long server-side tool), pi still emits `message_update`
-    // records carrying just usage. Surfacing them as a heartbeat is what keeps
-    // the idle watchdog fed through that silence; dropping them left the ONLY
-    // counted signal as assistant TEXT, which is why phantomops had to fake
-    // blank `content` deltas to look alive (phantomyard/phantomops#357).
+    // Bare `message_update` — pi's only non-content record. Counted as a
+    // liveness heartbeat, but this rule is INERT during silence, and it must
+    // not be relied on to keep a long server-side tool alive (issue #750).
+    // Timed pi 1.4.0 run, 2026-11-03: over a 340 s SSE stream carrying only
+    // `: keepalive` comments (68 of them, the shape a long server-side tool
+    // produces) pi emitted no records of any type between t=0.35 s and
+    // t=340.39 s, where the three `message_update`s landed together as the
+    // `text_start`/`text_delta`/`text_end` trio of real content arriving. A
+    // shorter window made those same three look like unevenly spaced ticks.
+    // So: a bare update is genuine model activity when it fires, but it does
+    // not fire while the wire is silent — liveness ACROSS silence needs a
+    // `tool`/productive signal on this side (the follow-up to #750), not a
+    // client-side tick. phantomops dropped its fake blank `content` deltas for
+    // its own reasons (phantomyard/phantomops#357), which is unaffected.
     // Classified "model" by piActivity, so the thinking budget still bounds a
     // harness that is alive but getting nowhere.
     return { type: "heartbeat" };
