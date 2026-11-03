@@ -174,11 +174,15 @@ export async function createBrainOnboardingDeps(
     // the interview writes is the one the first turn reads. UNIONED, never
     // replaced (#698): the auto-routing skip path writes `[auto]` after
     // registration seeded the full list, and a replace-write shrank it.
+    // Same endpoint = union; moved endpoint = the new list only.
     writeProviderEntry: (providerId, entry) =>
       ensureCustomProviderEntry(nativeAgentDir(undefined, persona), providerId, {
         baseUrl: entry.baseUrl,
         models: entry.models,
         keyAvailable: entry.keyAvailable,
+        // The interview just fetched THIS endpoint's list: a re-pointed
+        // baseUrl must not keep the old endpoint's ids (PR #754 review, Kai).
+        replaceOnMove: true,
       }),
     clearProviderEntry: (providerId) =>
       clearCustomProviderEntry(nativeAgentDir(undefined, persona), providerId),

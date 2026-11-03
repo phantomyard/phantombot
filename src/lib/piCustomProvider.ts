@@ -609,7 +609,8 @@ export function entryMatches(
  *     the operator — it is there to refresh the ENDPOINT and the key
  *     availability).
  *
- * Models are UNIONED, never replaced: the provider's defaults come first (so
+ * Models are UNIONED, never replaced (except `replaceOnMove`, below): the
+ * provider's defaults come first (so
  * `phantomops/auto` is always resolvable), then what the entry already had, then
  * the caller's additions. Dropping a model the operator can still select in
  * `pi --list-models` is how a turn fails at the one moment nobody is watching.
@@ -617,11 +618,22 @@ export function entryMatches(
 export async function ensureCustomProviderEntry(
   agentDir: string,
   id: string,
-  opts: { baseUrl: string; models?: readonly string[]; keyAvailable?: boolean },
+  opts: {
+    baseUrl: string;
+    models?: readonly string[];
+    keyAvailable?: boolean;
+    replaceOnMove?: boolean;
+  },
 ): Promise<CustomProviderWriteResult> {
   const existing = await readCustomProviderEntry(agentDir, id);
+  // `replaceOnMove`: a caller that holds the NEW endpoint's full list (the
+  // wizard, right after it fetched it) drops the old endpoint's ids when the
+  // baseUrl moves; they are unresolvable there and would stay selectable in
+  // `pi --list-models` only to fail at spawn (PR #754 review, Kai). Spawn-time
+  // refreshes do not pass it: a turn never shrinks the list.
+  const keepExisting = !(opts.replaceOnMove && existing && existing.baseUrl !== opts.baseUrl);
   const models = [
-    ...(existing?.models ?? []).map((m) => m.id),
+    ...(keepExisting ? (existing?.models ?? []) : []).map((m) => m.id),
     ...(opts.models ?? []),
   ];
   const want = buildProviderEntry({

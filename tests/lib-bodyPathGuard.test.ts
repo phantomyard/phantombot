@@ -31,6 +31,11 @@ describe("findLiteralBodyPath", () => {
     'gh pr review 419 --body "@review.md"',
     "gh pr comment 1 --body @scratch/r754.md && echo ok",
     "gh api repos/o/r/issues/1/comments -f body=@reply.md",
+    // Review of #754: path-qualified gh (Kai).
+    "/usr/local/bin/gh pr review 1 --body @/tmp/x.md",
+    "./gh pr comment 1 --body @/tmp/x.md",
+    "/opt/homebrew/bin/gh api -f body=@/tmp/x.md repos/o/r/issues/1/comments",
+    "$(which gh) pr review 1 --body @/tmp/x.md",
   ];
   for (const cmd of BLOCKED) {
     test(`blocks: ${cmd}`, () => {
@@ -49,6 +54,10 @@ describe("findLiteralBodyPath", () => {
     "gh pr comment 1 --body-file -",
     "curl -d @/tmp/payload.json https://example.com --body @/tmp/x",
     "echo --body @/tmp/x",
+    // Review of #754: a dotted handle as the WHOLE body is a mention (Lena).
+    'gh pr comment 1 --body "@kai.eriksen"',
+    "gh pr comment 1 --body @kai.eriksen",
+    "gh-pages deploy --body @/tmp/x.md",
   ];
   for (const cmd of ALLOWED) {
     test(`allows: ${cmd}`, () => {

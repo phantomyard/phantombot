@@ -803,6 +803,8 @@ async function configureNative(
         baseUrl,
         models: seeded.map((m) => m.model),
         keyAvailable: Boolean(effectiveKey),
+        // Fresh list for THIS endpoint: a moved baseUrl drops the old ids.
+        replaceOnMove: true,
       },
     );
     if (!write.ok) {

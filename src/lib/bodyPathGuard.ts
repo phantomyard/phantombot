@@ -28,8 +28,13 @@ export const BODY_GUARD_SUBCOMMAND = "__body_guard";
 
 /** `@/x`, `@~/x`, `@./x`, `@../x`: path-shaped however the value goes on. */
 const ROOTED_PATH = String.raw`['"]?@(?:/|~/|\./|\.\./)[^\s'"]*`;
-/** `review.md`, `dir/r.md`: needs an extension or a slash, so `@lena` is not one. */
-const REL_PATH = String.raw`[\w-][\w.-]*(?:\.[A-Za-z0-9]{1,8}|/[^\s'"]*)`;
+/**
+ * `review.md`, `dir/r.md`: needs a slash or a FILE extension from a fixed list,
+ * so `@lena` and a dotted handle like `@kai.eriksen` are mentions, not paths
+ * (PR #754 review, Lena). A bare `@notes.md` with an unlisted extension is
+ * still missed: that boundary is the price of never refusing a mention body.
+ */
+const REL_PATH = String.raw`[\w-][\w.-]*(?:\.(?:md|markdown|txt|json|ya?ml|html?|log|diff|patch)|/[^\s'"]*)`;
 /** A bare relative path only counts as the WHOLE value, so `"@kai.e thanks"` is a mention. */
 const PATH_VALUE =
   String.raw`(?:${ROOTED_PATH}|'@${REL_PATH}'|"@${REL_PATH}"|@${REL_PATH}(?=[\s;&|)]|$))`;
@@ -45,8 +50,11 @@ const LITERAL_PATH_FLAG = new RegExp(
     PATH_VALUE,
 );
 
-/** True when the command invokes `gh` anywhere (pipelines, `&&`, subshells). */
-const INVOKES_GH = /(?:^|[\s;&|(`$])gh\s/;
+/**
+ * True when the command invokes `gh`: bare or path-qualified (`/usr/bin/gh`,
+ * `./gh`), in pipelines, `&&`, subshells and `$(which gh)`. Not `gh-pages`.
+ */
+const INVOKES_GH = /(?:^|[\s;&|(`$/])gh(?![\w.-])/;
 
 /**
  * The offending fragment when `command` would publish a literal `@path` body
