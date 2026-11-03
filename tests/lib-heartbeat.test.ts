@@ -250,6 +250,15 @@ describe("runHeartbeat (integration)", () => {
 `,
     );
     await file("kb/Note.md", "indexable");
+    // #761: scheduler bookkeeping already filed as a commitment on an existing
+    // install must be expired by the heartbeat run itself, not just the helper.
+    const pre = await openDrawerStore(join(workdir, "memory.sqlite"));
+    const sched = pre.store.file({
+      persona: "robbie",
+      kind: "commitments",
+      content: "[commitment] task 12: x — fires 2026-05-02T10:00:00Z",
+    });
+    pre.close();
     const ix = await MemoryIndex.open(":memory:");
     const r = await runHeartbeat({
       personaDir,
@@ -264,6 +273,10 @@ describe("runHeartbeat (integration)", () => {
     expect(r.indexedFiles).toBeGreaterThan(0);
     // Without config/currentVersion, the update check is skipped.
     expect(r.updateCheck).toBeUndefined();
+    const post = await openDrawerStore(join(workdir, "memory.sqlite"));
+    const row = post.store.list("robbie", "commitments").find((e) => e.id === sched.id);
+    post.close();
+    expect(row?.status).toBe("expired");
     ix.close();
   });
 });
