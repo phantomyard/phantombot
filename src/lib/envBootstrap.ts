@@ -30,6 +30,9 @@ import {
 } from "./engineScope.ts";
 import { SCRATCH_ENV_VAR } from "./scratch.ts";
 
+/** Set to "1" in a harness turn's env only when that turn is trusted (see withPersonaEnv). */
+export const TRUSTED_ENV_VAR = "PHANTOMBOT_TRUSTED";
+
 export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = Object.freeze({
   CI: "true",
   DEBIAN_FRONTEND: "noninteractive",
@@ -50,6 +53,7 @@ export function withPersonaEnv<T extends NodeJS.ProcessEnv>(
   conversation?: string,
   turnId?: string,
   scratchDir?: string,
+  trusted?: boolean,
 ): T {
   const env = {
     ...NON_INTERACTIVE_ENV,
@@ -68,10 +72,18 @@ export function withPersonaEnv<T extends NodeJS.ProcessEnv>(
     // no scratch dir) so an inherited PHANTOMBOT_SCRATCH can never point a turn
     // at someone else's tree.
     ...(scratchDir ? { PHANTOMBOT_SCRATCH: scratchDir } : {}),
+    // PHANTOMBOT_TRUSTED states this turn's tier POSITIVELY: "1" only when the
+    // orchestrator says the turn is trusted, and deleted otherwise (including
+    // an inherited value), with the same discipline as PHANTOMBOT_SCRATCH.
+    // Commands that must refuse untrusted turns (`phantombot device`) read
+    // this instead of inferring the tier from side effects like the scratch
+    // path, which is provisioned fail-open.
+    ...(trusted === true ? { [TRUSTED_ENV_VAR]: "1" } : {}),
   } as T;
   if (!scratchDir) {
     for (const name of [SCRATCH_ENV_VAR]) delete env[name];
   }
+  if (trusted !== true) delete env[TRUSTED_ENV_VAR];
   if (currentEngineScope()) {
     // The host's own location overrides would point the child at the HOST's
     // phantombot, not the embedding app's root (see hostLocationEnv).

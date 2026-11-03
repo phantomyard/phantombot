@@ -32,6 +32,7 @@ import {
   type ToolResult,
 } from "../channels/phantomchat/localTools.ts";
 import { npubEncode } from "../lib/nostrIdentity.ts";
+import { TRUSTED_ENV_VAR } from "../lib/envBootstrap.ts";
 
 export const EXIT_UNAVAILABLE = 3;
 
@@ -52,11 +53,19 @@ export interface DeviceRunInput {
   graceMs?: number;
 }
 
-/** Why this turn may not use the principal's PC, or undefined when it may. */
+/**
+ * Why this caller may not use the principal's PC, or undefined when it may.
+ *
+ * Fail-closed inside a harness turn: the tier must be stated POSITIVELY by the
+ * orchestrator (PHANTOMBOT_TRUSTED=1, set by withPersonaEnv only for trusted
+ * turns). Missing evidence of untrust is not trust: scratch is provisioned
+ * fail-open and PHANTOMBOT_ESCORT marks only the escorted subset. A plain human
+ * shell carries no turn context, so it still works from a terminal.
+ */
 export function untrustedReason(env: NodeJS.ProcessEnv): string | undefined {
   if (env.PHANTOMBOT_ESCORT) return "this is an escorted (untrusted) turn";
-  const scratch = env.PHANTOMBOT_SCRATCH ?? "";
-  if (/[\\/]scratch[\\/]untrusted[\\/]/.test(scratch)) return "this is an untrusted turn";
+  const inTurn = !!(env.PHANTOMBOT_TURN_ID || env.PHANTOMBOT_CONVERSATION);
+  if (inTurn && env[TRUSTED_ENV_VAR] !== "1") return "this is not a trusted turn";
   return undefined;
 }
 

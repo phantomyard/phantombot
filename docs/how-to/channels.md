@@ -56,7 +56,8 @@ and `call` exits 3 when the device doesn't answer. The command speaks as the
 persona's own npub to its allowed npubs only, and reads answers only from them.
 It works with or without a running daemon. Called from a PhantomChat group
 turn, a call carries that group's id, and the app runs it only in a Session
-with this persona. Untrusted (escorted) turns are refused. The protocol is
+with this persona. Untrusted turns are refused: inside a turn the command runs only when the
+runtime marks that turn trusted. The protocol is
 phantomchat's `docs/EXTERNAL-AI.md`.
 
 ## Run continuously

@@ -82,6 +82,12 @@ export interface HarnessRequest {
    */
   scratchDir?: string;
   /**
+   * The turn's trust tier, from the orchestrator. Exposed to the subprocess as
+   * `PHANTOMBOT_TRUSTED=1` only when true (see withPersonaEnv, which deletes
+   * any inherited value otherwise). Absent = not trusted.
+   */
+  trusted?: boolean;
+  /**
    * Idle timeout: kill the subprocess if no chunk lands on stdout for this
    * long. Resets on every emitted chunk. This is the right knob for
    * "subprocess is wedged" (e.g. a tool call hanging on a TCP read) —

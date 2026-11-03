@@ -1129,6 +1129,9 @@ async function* runTurnBody(
           // This turn's scratch workspace (issue #661) — the harness passes it
           // on as PHANTOMBOT_SCRATCH (runtime-owned, see withPersonaEnv).
           ...(scratch ? { scratchDir: scratch.dir } : {}),
+          // The tier, stated positively to the subprocess as PHANTOMBOT_TRUSTED
+          // (withPersonaEnv). Not inferred from scratch, which is fail-open.
+          trusted: input.trusted === true,
           idleTimeoutMs: input.idleTimeoutMs,
           hardTimeoutMs: input.hardTimeoutMs,
           ...(softArmed ? { softTimeoutMs: effectiveSoftTimeoutMs } : {}),

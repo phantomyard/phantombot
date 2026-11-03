@@ -395,6 +395,8 @@ describe("runTurn integration", () => {
       );
       const req = harness.captured!;
       expect(req.scratchDir).toContain(join("scratch", "untrusted", scratchDirName("telegram:123")));
+      // The tier reaches the harness positively (PHANTOMBOT_TRUSTED, #760).
+      expect(req.trusted).toBe(false);
       const prompt = `${req.systemPrompt}\n${req.turnContext ?? ""}`;
       expect(prompt).toContain("Scratch workspace");
       expect(prompt).toContain("EPHEMERAL");
@@ -429,6 +431,7 @@ describe("runTurn integration", () => {
       );
       const req = harness.captured!;
       expect(req.scratchDir).toContain(join("scratch", "trusted", scratchDirName("telegram:123")));
+      expect(req.trusted).toBe(true);
       expect(req.turnContext).toContain("Scratch workspace");
       expect(req.turnContext).toContain("Kept across turns");
       expect(req.systemPrompt).not.toContain("Scratch workspace");

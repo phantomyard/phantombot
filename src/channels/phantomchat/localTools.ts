@@ -265,6 +265,9 @@ export interface LocalToolsClientOptions {
   now?: () => number;
 }
 
+/** How far behind our clock a device's capability/revoked may be stamped (seconds). */
+export const FRESHNESS_WINDOW_S = 5 * 60;
+
 /**
  * One short-lived session as the persona: subscribe to our inbox, address the
  * principals' apps, read their answers. Close it when done.
@@ -275,6 +278,8 @@ export class LocalToolsClient {
   #sub: { close(): void } | undefined;
   #principals: Set<string>;
   #since: number;
+  /** Newest capability/revoked time seen per device, so a late older one can't undo a newer one. */
+  #deviceAt = new Map<string, { at: number; revoked: boolean }>();
   #seen = new Set<string>();
   #results = new Map<
     string,
@@ -285,9 +290,13 @@ export class LocalToolsClient {
   constructor(opts: LocalToolsClientOptions) {
     this.#opts = opts;
     this.#principals = new Set(opts.principalsHex.map((h) => h.toLowerCase()));
-    // Only answers to THIS session count: a capability from an older hello
-    // could describe a device whose switch has since gone OFF.
-    this.#since = Math.floor((opts.now?.() ?? Date.now()) / 1000) - 5;
+    // Capability/revoked rumors are stamped by the DEVICE's clock, so the
+    // window must tolerate clock skew (and a laptop just out of sleep): a
+    // minutes-scale cutoff, not seconds. Old sessions beyond it are ignored;
+    // within it, per-device ordering (#deviceAt) keeps a newer revoked from
+    // being undone by an older capability. Results need no time check: they
+    // are bound to a live random callId and to the device that was called.
+    this.#since = Math.floor((opts.now?.() ?? Date.now()) / 1000) - FRESHNESS_WINDOW_S;
   }
 
   open(): void {
@@ -315,9 +324,16 @@ export class LocalToolsClient {
     const sender = rumor.pubkey.toLowerCase();
     if (!this.#principals.has(sender)) return;
     if (!isLocalToolsRumor(rumor)) return;
-    if (rumor.created_at < this.#since) return;
     const msg = parseAppMessage(rumor.content);
     if (!msg) return;
+    if (msg.t === "capability" || msg.t === "revoked") {
+      if (rumor.created_at < this.#since) return;
+      const key = `${sender}\0${msg.deviceId}`;
+      const last = this.#deviceAt.get(key);
+      // Same-second tie: a revoke wins, so the switch going OFF is never lost.
+      if (last && (rumor.created_at < last.at || (rumor.created_at === last.at && last.revoked))) return;
+      this.#deviceAt.set(key, { at: rumor.created_at, revoked: msg.t === "revoked" });
+    }
     if (msg.t === "capability") {
       this.devices.set(msg.deviceId, {
         ownerHex: sender,

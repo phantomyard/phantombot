@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runDeviceCall, runDeviceList, untrustedReason } from "../src/cli/device.ts";
+import { withPersonaEnv } from "../src/lib/envBootstrap.ts";
 import type { Config } from "../src/config.ts";
 import {
   buildCall,
@@ -19,6 +20,7 @@ import {
   isLocalToolsRumor,
   LOCAL_TOOLS_TAG,
   LOCAL_TOOLS_TYPE,
+  LocalToolsClient,
   parseAppMessage,
   parseToolResult,
 } from "../src/channels/phantomchat/localTools.ts";
@@ -39,11 +41,19 @@ const DEVICE = "0123456789abcdef0123456789abcdef";
 const RELAYS = ["wss://relay.test"];
 
 /** An app → phantom wrap, exactly as the desktop sends it. */
-function appWrap(from: Id, toHex: string, body: Record<string, unknown>, tags = true): NTNostrEvent {
-  const rumor = createRumor(JSON.stringify({ type: LOCAL_TOOLS_TYPE, ...body }), from.secretKey, [
+function appWrap(from: Id, toHex: string, body: Record<string, unknown>, tags = true, skewMs = 0): NTNostrEvent {
+  // skewMs stamps the rumor with the DEVICE's (skewed) clock, as the app does.
+  const realNow = Date.now;
+  if (skewMs) Date.now = () => realNow() + skewMs;
+  let rumor: ReturnType<typeof createRumor>;
+  try {
+    rumor = createRumor(JSON.stringify({ type: LOCAL_TOOLS_TYPE, ...body }), from.secretKey, [
     ["p", toHex],
     ...(tags ? [[...LOCAL_TOOLS_TAG], [...CONTROL_TAG]] : []),
   ]);
+  } finally {
+    Date.now = realNow;
+  }
   return createGiftWrap(createSeal(rumor, from.secretKey, toHex), toHex) as unknown as NTNostrEvent;
 }
 
@@ -58,6 +68,8 @@ class FakeApp {
   received: Array<{ to: string; tags: string[][]; body: Record<string, unknown> }> = [];
   published = 0;
   switchOn = true;
+  /** The device's clock offset from ours, in ms (negative = behind). */
+  skewMs = 0;
   /** Answer calls (false = the PC went away mid-call). */
   answerCalls = true;
   constructor(
@@ -83,7 +95,8 @@ class FakeApp {
     const body = JSON.parse(rumor.content) as Record<string, unknown>;
     this.received.push({ to: event.tags[0]![1]!, tags: rumor.tags, body });
     if (!this.switchOn) return;
-    const reply = (b: Record<string, unknown>) => this.deliver(appWrap(this.identity, this.personaHex(), b));
+    const reply = (b: Record<string, unknown>) =>
+      this.deliver(appWrap(this.identity, this.personaHex(), b, true, this.skewMs));
     if (body.t === "hello") {
       reply({ t: "capability", deviceId: DEVICE, deviceName: "Desk", platform: "linux", tools: ["bash", "read"] });
     } else if (body.t === "call" && this.answerCalls) {
@@ -222,7 +235,7 @@ describe("phantombot device call", () => {
   });
 
   test("a group turn's call carries the group id", async () => {
-    const env = { ...ENV, PHANTOMBOT_CONVERSATION: "phantomchat:group:g123" };
+    const env = { ...ENV, PHANTOMBOT_CONVERSATION: "phantomchat:group:g123", PHANTOMBOT_TRUSTED: "1" };
     await runDeviceCall({ ...base(), env, device: DEVICE, tool: "read", args: '{"path":"/x"}', out: sink() });
     expect(app.received.find((r) => r.body.t === "call")!.body.groupId).toBe("g123");
   });
@@ -287,14 +300,79 @@ describe("phantombot device call", () => {
     expect(app.received.find((r) => r.body.t === "cancel")?.body.callId).toBe(call.callId);
   });
 
-  test("refuses an untrusted or escorted turn before touching the relays", async () => {
-    expect(untrustedReason({ PHANTOMBOT_ESCORT: "1" })).toBeDefined();
-    expect(untrustedReason({ PHANTOMBOT_SCRATCH: "/p/scratch/untrusted/x/y" })).toBeDefined();
-    expect(untrustedReason({ PHANTOMBOT_SCRATCH: "/p/scratch/trusted/x" })).toBeUndefined();
-    const env = { ...ENV, PHANTOMBOT_SCRATCH: "/p/scratch/untrusted/conv/turn" };
+  test("inside a turn, refuses unless the runtime marked the turn trusted", async () => {
+    // Plain human shell: no turn context, allowed.
+    expect(untrustedReason({})).toBeUndefined();
+    // A harness turn with NO evidence either way (e.g. scratch provisioning
+    // failed, not escorted) must fail CLOSED.
+    expect(untrustedReason({ PHANTOMBOT_TURN_ID: "t-1", PHANTOMBOT_PERSONA: "ana" })).toBeDefined();
+    expect(untrustedReason({ PHANTOMBOT_CONVERSATION: "telegram:1" })).toBeDefined();
+    expect(untrustedReason({ PHANTOMBOT_TURN_ID: "t-1", PHANTOMBOT_TRUSTED: "0" })).toBeDefined();
+    expect(untrustedReason({ PHANTOMBOT_TURN_ID: "t-1", PHANTOMBOT_TRUSTED: "1" })).toBeUndefined();
+    expect(untrustedReason({ PHANTOMBOT_TURN_ID: "t-1", PHANTOMBOT_TRUSTED: "1", PHANTOMBOT_ESCORT: "1" })).toBeDefined();
+    const env = { ...ENV, PHANTOMBOT_TURN_ID: "t-1" };
     const err = sink();
     expect(await runDeviceCall({ ...base(), env, device: "desk", tool: "bash", args: "{}", err })).toBe(1);
     expect(err.text).toContain("refused");
     expect(app.published).toBe(0);
   });
+
+  test("withPersonaEnv sets the trusted marker only for trusted turns and clears an inherited one", () => {
+    const inherited = { PHANTOMBOT_TRUSTED: "1", PATH: "/bin" } as NodeJS.ProcessEnv;
+    expect(withPersonaEnv(inherited, "ana", "c", "t", undefined, true).PHANTOMBOT_TRUSTED).toBe("1");
+    expect(withPersonaEnv(inherited, "ana", "c", "t", undefined, false).PHANTOMBOT_TRUSTED).toBeUndefined();
+    expect(withPersonaEnv(inherited, "ana", "c", "t").PHANTOMBOT_TRUSTED).toBeUndefined();
+    // A trusted turn's env passes the gate; an untrusted one does not.
+    expect(untrustedReason(withPersonaEnv({}, "ana", "c", "t", undefined, true))).toBeUndefined();
+    expect(untrustedReason(withPersonaEnv(inherited, "ana", "c", "t", undefined, false))).toBeDefined();
+  });
+
+});
+
+describe("device clock skew", () => {
+  test("a PC 60s behind our clock is listed and its results arrive", async () => {
+    app.skewMs = -60_000;
+    const out = sink();
+    expect(await runDeviceList({ ...base(), json: true, out })).toBe(0);
+    expect(JSON.parse(out.text).devices).toHaveLength(1);
+    const callOut = sink();
+    expect(
+      await runDeviceCall({ ...base(), device: "desk", tool: "bash", args: '{"command":"ls"}', out: callOut }),
+    ).toBe(0);
+    expect(callOut.text).toContain("ran");
+  });
+
+  test("ignores a session older than the window, and an older capability can't undo a newer revoke", async () => {
+    let onevent: OnEvent = () => {};
+    const pool = {
+      subscribeMany: (_r: string[], _f: unknown, p: { onevent?: OnEvent }) => {
+        if (p.onevent) onevent = p.onevent;
+        return { close() {} };
+      },
+      publish: () => [Promise.resolve("ok")],
+      close() {},
+    };
+    const client = new LocalToolsClient({
+      secretKey: persona.secretKey,
+      publicKeyHex: persona.publicKeyHex,
+      relays: RELAYS,
+      principalsHex: [owner.publicKeyHex],
+      pool: pool as never,
+    });
+    client.open();
+    const feed = async (body: Record<string, unknown>, skewMs: number) => {
+      onevent(appWrap(owner, persona.publicKeyHex, body, true, skewMs));
+      await new Promise((r) => setTimeout(r, 5));
+    };
+    const cap = { t: "capability", deviceId: DEVICE, deviceName: "Desk", platform: "linux", tools: ["bash"] };
+    await feed(cap, -10 * 60_000); // an older session, outside the window
+    expect(client.devices.size).toBe(0);
+    await feed({ t: "revoked", deviceId: DEVICE }, -30_000);
+    await feed(cap, -90_000); // older than the revoke, delivered after it
+    expect(client.devices.size).toBe(0);
+    await feed(cap, -10_000); // genuinely newer
+    expect(client.devices.size).toBe(1);
+    client.close();
+  });
+
 });
