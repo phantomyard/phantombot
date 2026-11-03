@@ -65,6 +65,7 @@ import {
 } from "../lib/scratch.ts";
 import { loadPersona } from "../persona/loader.ts";
 import { buildDailyRecall } from "../lib/dailyRecall.ts";
+import { buildStandingMemory } from "../memory/standingMemory.ts";
 import { isNightlyConversation } from "../lib/nightly.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { PromptEpochTurn } from "../harnesses/payload.ts";
@@ -751,6 +752,29 @@ async function* runTurnBody(
     }
   }
 
+  // Standing memory (#758): the ranked drawers — norms, decisions, lessons,
+  // open commitments, people — on every turn that gets the daily journal.
+  // Same gate and same reasoning as the journal above: this is the memory
+  // system's own read path, not a caller hook, and it is the ONLY place a
+  // distilled entry reaches a turn once its raw day has been swept out of
+  // the journal block. Rows only — a store with no dbPath has no drawers.
+  // Never throws.
+  let standingMemory: string | undefined;
+  if (
+    !input.skipDailyRecall &&
+    !isNightlyConversation(input.conversation) &&
+    input.memory.dbPath
+  ) {
+    try {
+      standingMemory = await buildStandingMemory({
+        dbPath: input.memory.dbPath,
+        persona: input.persona,
+      });
+    } catch {
+      standingMemory = undefined;
+    }
+  }
+
   const channelCtx = {
     channel: "cli",
     conversationId: input.conversation,
@@ -764,6 +788,7 @@ async function* runTurnBody(
     baseSystemPrompt = buildStableSystemPrompt(persona, channelCtx);
     turnContext = buildTurnContext({
       durableFacts,
+      standingMemory,
       retrievedMemory,
       dailyRecall,
       scratch: scratch?.notice,
@@ -777,6 +802,7 @@ async function* runTurnBody(
       durableFacts,
       dailyRecall,
       scratch?.notice,
+      standingMemory,
     );
   }
   // Channel-layer overlays in append order:
@@ -952,6 +978,7 @@ async function* runTurnBody(
         durableFacts,
         dailyRecall,
         scratch?.notice,
+        standingMemory,
       );
       turnContext = undefined;
       systemPrompt =

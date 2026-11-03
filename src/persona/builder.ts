@@ -37,6 +37,7 @@ export function buildSystemPrompt(
   durableFacts?: string,
   dailyRecall?: string,
   scratch?: string,
+  standingMemory?: string,
 ): string {
   const sections = buildStableSections(persona, channelCtx);
 
@@ -47,6 +48,13 @@ export function buildSystemPrompt(
   // the originating messages have scrolled out of the verbatim window.
   if (durableFacts && durableFacts.trim().length > 0) {
     sections.push("# Durable facts\n\n" + durableFacts.trim());
+  }
+
+  // Standing memory (#758): the ranked drawers, selected and packed in code
+  // (memory/standingMemory.ts). Changes only when an entry is filed, closed
+  // or decays past another, so it sits above the per-message retrieval.
+  if (standingMemory && standingMemory.trim().length > 0) {
+    sections.push("# Standing memory\n\n" + standingMemory.trim());
   }
 
   if (retrievedMemory && retrievedMemory.trim().length > 0) {
@@ -323,9 +331,11 @@ commands you can run from your Bash tool:
   phantombot memory list <persona-relative-dir>   # ls a dir
   phantombot memory index [--rebuild]             # refresh search index
   phantombot memory capture "<text>" --tag <tag>  # record a tagged note
-  phantombot memory drawers [--kind <k>]           # ranked drawer entries as
-                                                  # the threat judge sees them
+  phantombot memory drawers [--kind <k>]           # ranked drawer entries
+                                                  # (commitments show their id)
   phantombot memory drawers --kind <k> --file "<entry>"   # file one entry
+  phantombot memory drawers --discharge <id>       # close a commitment: met
+  phantombot memory drawers --expire <id>          # close a commitment: missed
   phantombot memory drawers --export <dir>         # drawers back out as markdown
   phantombot memory journal [--date <YYYY-MM-DD>]  # one day from the journal
                                                   # table; --export <dir> writes
@@ -340,9 +350,14 @@ THE FIVE DRAWERS ARE ROWS, NOT FILES. \`people\`, \`decisions\`, \`lessons\`,
     the heartbeat files it, or file it directly with
     \`memory drawers --kind decisions --file "…"\`. Do NOT create
     \`memory/decisions.md\`; nothing reads it.
-  - To READ a drawer, run \`memory drawers --kind <k>\` — that is exactly what
-    the threat judge is briefed from, ranked and decayed. \`memory search\`
-    covers them too.
+  - The top-ranked entries of all five reach EVERY turn under the "Standing
+    memory" heading, selected in code; the cut falls on the weakest entries.
+    \`memory drawers --kind <k>\` lists a whole drawer, and \`memory search\`
+    covers every active entry (each is indexed as \`drawers/<kind>/<id>.md\`).
+  - CLOSE commitments. When one is met, \`memory drawers --discharge <id>\`;
+    when its window passed unmet, \`memory drawers --expire <id>\`. An open
+    commitment stays in every prompt until it is closed — that is the point,
+    and it is also why a finished one must not be left open.
   - Filing the same entry twice is a no-op: ids are derived from the entry
     text, so you never have to read a drawer first just to avoid duplicates.
   - \`norms\` briefs the threat judge so it doesn't cry wolf on normal
@@ -380,7 +395,8 @@ prompt already carries today's journal under the "Daily journal" heading,
 and it carries YESTERDAY'S too whenever the nightly ledger shows that day's
 sweep did not finish. When yesterday is absent from the prompt, that is not
 an omission: it means the sweep completed and the day's content is already
-in the drawers, MEMORY.md and kb/, where the deduplicated version lives.
+in the drawers (whose top entries are in "Standing memory"), MEMORY.md and
+kb/, where the deduplicated version lives.
 Reading the raw file back would just duplicate it, staler. This selection is
 made in code on every turn — it is not a habit you have to keep, and it is
 not something a prompt or a file can talk you out of. Reach for
