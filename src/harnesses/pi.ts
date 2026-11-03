@@ -1187,7 +1187,18 @@ export function parsePiEvent(parsed: unknown): ParseEventResult {
   if (obj.type !== "message_update") return undefined;
 
   const ame = obj.assistantMessageEvent;
-  if (!isObject(ame)) return undefined;
+  if (!isObject(ame)) {
+    // Bare `message_update` — payload-less pi liveness. VERIFIED against pi
+    // 1.4.0 on 2026-11-03: while an upstream SSE stream carries only keepalive
+    // comments (a long server-side tool), pi still emits `message_update`
+    // records carrying just usage. Surfacing them as a heartbeat is what keeps
+    // the idle watchdog fed through that silence; dropping them left the ONLY
+    // counted signal as assistant TEXT, which is why phantomops had to fake
+    // blank `content` deltas to look alive (phantomyard/phantomops#357).
+    // Classified "model" by piActivity, so the thinking budget still bounds a
+    // harness that is alive but getting nowhere.
+    return { type: "heartbeat" };
+  }
 
   if (ame.type === "text_delta") {
     const delta = ame.delta;
@@ -1261,6 +1272,19 @@ export function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivit
   }
   const ame = obj.assistantMessageEvent;
   if (isObject(ame) && typeof ame.type === "string") {
+    // Reasoning is PROGRESS, not just liveness (2026-11-03). A model that
+    // streams chain-of-thought for longer than the thinking budget is
+    // mid-thought, not wedged: the failure this fixes was a >10-min reasoning
+    // stream classified "model", killed at the 600s ceiling and failed over,
+    // which phantomops worked around by faking text. Classify a non-empty
+    // reasoning delta "productive" so the full idle window re-arms. The chunk
+    // itself stays a payload-less heartbeat, so nothing reaches the user.
+    if (ame.type === "thinking_delta") {
+      const delta = ame.delta;
+      if (typeof delta === "string" && delta.trim().length > 0) {
+        return "productive";
+      }
+    }
     // pi 0.79.x: `tool_use_*` → `toolcall_*`. Accept both.
     //
     // ALL of these records are the MODEL composing a tool call inside its

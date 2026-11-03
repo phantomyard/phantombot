@@ -322,7 +322,20 @@ function codexActivity(
     return chunk.type === "heartbeat" ? "model" : "productive";
   }
   const obj = parsed as Record<string, unknown>;
+  // Reasoning is PROGRESS, not just liveness (2026-11-03, mirrors pi/claude):
+  // a `reasoning` item completes with real summary text, so it re-arms the
+  // full idle window instead of only buying the thinking budget. Empty or
+  // payload-less items stay "model".
   const item = obj.item;
+  if (
+    obj.type === "item.completed" &&
+    typeof item === "object" && item !== null &&
+    (item as Record<string, unknown>).type === "reasoning" &&
+    typeof (item as Record<string, unknown>).text === "string" &&
+    ((item as Record<string, unknown>).text as string).trim().length > 0
+  ) {
+    return "productive";
+  }
   const itemType =
     typeof item === "object" && item !== null
       ? (item as Record<string, unknown>).type
