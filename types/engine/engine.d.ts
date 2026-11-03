@@ -28,7 +28,7 @@
  *
  * Runtime: Bun (the engine uses `bun:sqlite` and `Bun.spawn`, like the CLI).
  */
-import type { CreatePersonaOptions, DecideOptions, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
+import type { CreatePersonaOptions, DecideOptions, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
 /**
  * Open an engine on `options.root`. Rejects with `invalid_root` or
  * `root_locked`. Always `close()` it (or use `await using`).
@@ -41,6 +41,13 @@ export declare class Engine {
         list(): Promise<string[]>;
         exists(name: string): Promise<boolean>;
         create(name: string, options?: CreatePersonaOptions): Promise<Persona>;
+        /**
+         * Delete a persona for good: stop its PhantomChat channel, then remove its
+         * directory (identity, vault, config, memory files), its search index and
+         * every memory-database row it owns. Its npub cannot be recovered.
+         * Resolves false when there was no such persona.
+         */
+        delete(name: string): Promise<boolean>;
     };
     /**
      * Model providers for an app's own setup UI: list them, check a key and read
@@ -79,6 +86,34 @@ export declare class Persona {
             tags?: string[];
             conversation?: string;
         }): Promise<void>;
+    };
+    /**
+     * This persona's PhantomChat channel, hosted by the engine: its own npub,
+     * answering the allowed npubs over NIP-17 DMs. See `phantomchat.ts`.
+     */
+    readonly phantomchat: {
+        /** The npub and allowlist. Read-only; never creates a key. */
+        info(): Promise<PhantomchatInfo>;
+        /**
+         * Answer `npub` as the principal. Creates the identity and channel file
+         * on first use; restarts a running channel. `relays` seeds a new file's
+         * relay list instead of fetching the canonical one.
+         */
+        allow(npub: string, options?: {
+            relays?: string[];
+        }): Promise<{
+            npub: string;
+            added: boolean;
+        }>;
+        /** Stop answering `npub`. Refuses to remove the last one. Restarts a running channel. */
+        disallow(npub: string): Promise<boolean>;
+        /** Start listening. Resolves when running; idempotent while running. */
+        start(options?: PhantomchatStartOptions): Promise<PhantomchatStatus>;
+        /** Stop listening and wait for in-flight work to unwind. Idempotent. */
+        stop(): Promise<void>;
+        status(): PhantomchatStatus;
+        /** Called on every status change. Returns an unsubscribe function. */
+        onStatus(listener: (status: PhantomchatStatus) => void): () => void;
     };
     /**
      * Write this persona's brain and decision-model settings into ITS OWN

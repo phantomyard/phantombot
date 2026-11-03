@@ -256,7 +256,9 @@ export async function allowPhantomchatNpub(input: {
     allowedNpubs: [...current, candidate],
     save: input.save,
     load,
-    fetchRelays: input.fetchRelays,
+    // An existing file keeps its relays (the daemon refreshes them from the
+    // canonical list on every start); only a NEW file needs a list now.
+    fetchRelays: existing ? async () => existing.relays : input.fetchRelays,
   });
   return { npub: id.npub, added: true, path: saved.path };
 }

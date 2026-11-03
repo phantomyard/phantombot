@@ -198,6 +198,14 @@ export interface SlashCommandContext {
    * the /status line is simply omitted in that case.
    */
   phantomchatNpub?: string;
+  /**
+   * The channel is hosted by the embeddable engine inside another app (the
+   * desktop app's bundled phantombot), not by the `phantombot run` service.
+   * Commands that act on the PROCESS (/update, /restart, /model's restart)
+   * would bounce the host's own service or, on Windows, exit the embedding
+   * app, so they are refused with a plain reply instead.
+   */
+  embedded?: boolean;
 }
 
 export interface SlashCommandResult {
@@ -307,6 +315,9 @@ export function slashCommandTarget(text: string): string | undefined {
  * applied when `ctx.botUsername` is known; otherwise we keep the legacy
  * behavior of stripping the suffix and handling the command.
  */
+/** Process-level commands an engine-hosted channel refuses (see `embedded`). */
+const EMBEDDED_REFUSED: ReadonlySet<string> = new Set(["/update", "/restart", "/model"]);
+
 export async function handleSlashCommand(
   text: string,
   ctx: SlashCommandContext,
@@ -345,6 +356,12 @@ export async function handleSlashCommand(
   const head = parts[0]!;
   const cmd = head.split("@")[0]!.toLowerCase();
   const arg = parts.slice(1).join(" ").trim();
+
+  if (ctx.embedded && EMBEDDED_REFUSED.has(cmd)) {
+    return {
+      reply: `${cmd} isn't available in the app's built-in phantombot. Change settings in the app instead.`,
+    };
+  }
 
   switch (cmd) {
     case "/stop":
