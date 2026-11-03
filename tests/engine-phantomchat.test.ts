@@ -27,11 +27,25 @@ import { Database } from "bun:sqlite";
 class FakeHarness implements Harness {
   readonly id = "fake";
   requests: HarnessRequest[] = [];
+  /** When set, invoke() parks until its signal aborts (an in-flight turn). */
+  hang = false;
+  started = 0;
+  aborted = 0;
   async available(): Promise<boolean> {
     return true;
   }
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
     this.requests.push(req);
+    this.started++;
+    if (this.hang) {
+      const signal = req.signal;
+      await new Promise<void>((resolve) => {
+        if (!signal || signal.aborted) return resolve();
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      this.aborted++;
+      return;
+    }
     yield { type: "text", text: "pong" };
     yield { type: "done", finalText: "pong" };
   }
@@ -42,10 +56,16 @@ type OnEvent = (event: NTNostrEvent) => void;
 /** Relay pool double: records subscriptions and publishes; `deliver` plays a relay. */
 class FakePool {
   static all: FakePool[] = [];
+  /** When set, the next constructed pool throws (relays unreachable). */
+  static failNext = false;
   subscribers: OnEvent[] = [];
   published: NTNostrEvent[] = [];
   closed = false;
   constructor(readonly secretKey: Uint8Array) {
+    if (FakePool.failNext) {
+      FakePool.failNext = false;
+      throw new Error("relays refused");
+    }
     FakePool.all.push(this);
   }
   subscribeMany(_relays: string[], filter: { ids?: string[] }, params: { onevent?: OnEvent; oneose?: () => void }) {
@@ -86,6 +106,7 @@ beforeEach(() => {
   harness = new FakeHarness();
   _setHarnessFactoryForTesting(() => [harness]);
   FakePool.all = [];
+  FakePool.failNext = false;
   _setChannelPoolForTesting((sk) => new FakePool(sk));
 });
 
@@ -158,7 +179,7 @@ describe("persona.phantomchat allowlist", () => {
     const first = await ana.phantomchat.allow(owner.npub, { relays: RELAYS });
     expect(first.added).toBe(true);
     expect(first.npub).toMatch(/^npub1/);
-    expect(await ana.phantomchat.allow(owner.npub)).toEqual({ npub: first.npub, added: false });
+    expect(await ana.phantomchat.allow(owner.npub)).toEqual({ npub: first.npub, added: false, restart: "none" });
     await ana.phantomchat.allow(other.npub);
     expect(await ana.phantomchat.info()).toEqual({
       npub: first.npub,
@@ -166,8 +187,8 @@ describe("persona.phantomchat allowlist", () => {
       allowedNpubs: [owner.npub, other.npub],
     });
 
-    expect(await ana.phantomchat.disallow(other.npub)).toBe(true);
-    expect(await ana.phantomchat.disallow(other.npub)).toBe(false);
+    expect(await ana.phantomchat.disallow(other.npub)).toEqual({ removed: true, restart: "none" });
+    expect(await ana.phantomchat.disallow(other.npub)).toEqual({ removed: false, restart: "none" });
     await rejectsWith(ana.phantomchat.disallow(owner.npub), "invalid_argument");
     expect((await ana.phantomchat.info()).allowedNpubs).toEqual([owner.npub]);
 
@@ -245,7 +266,7 @@ describe("persona.phantomchat channel", () => {
     const second = generateIdentity();
     const { npub } = await ana.phantomchat.allow(owner.npub, { relays: RELAYS });
     await ana.phantomchat.start();
-    await ana.phantomchat.allow(second.npub);
+    expect(await ana.phantomchat.allow(second.npub)).toMatchObject({ added: true, restart: "restarted" });
     expect(FakePool.all.length).toBe(2);
     expect(FakePool.all[0]!.closed).toBe(true);
     expect(ana.phantomchat.status().state).toBe("running");
@@ -254,6 +275,68 @@ describe("persona.phantomchat channel", () => {
     const personaHex = (await import("../src/lib/nostrIdentity.ts")).decodeNpubToHex(npub);
     pool.deliver(dm(second, personaHex, "hi"));
     await until(async () => (await repliesTo(pool, second)).includes("pong"));
+  });
+
+  test("a failed restart after allow/disallow resolves as restart 'failed', the change kept", async () => {
+    const e = await openEngine();
+    const ana = await e.personas.create("ana");
+    const owner = generateIdentity();
+    const second = generateIdentity();
+    await ana.phantomchat.allow(owner.npub, { relays: RELAYS });
+    await ana.phantomchat.start();
+
+    FakePool.failNext = true;
+    const r = await ana.phantomchat.allow(second.npub);
+    expect(r).toMatchObject({ added: true, restart: "failed" });
+    expect(r.error).toContain("relays refused");
+    expect(ana.phantomchat.status().state).toBe("failed");
+    expect((await ana.phantomchat.info()).allowedNpubs).toEqual([owner.npub, second.npub]);
+
+    // A stopped (failed) channel needs no restart; start() brings it back.
+    expect(await ana.phantomchat.disallow(second.npub)).toEqual({ removed: true, restart: "none" });
+    expect((await ana.phantomchat.start()).state).toBe("running");
+    await ana.phantomchat.allow(second.npub);
+    FakePool.failNext = true;
+    const d = await ana.phantomchat.disallow(second.npub);
+    expect(d).toMatchObject({ removed: true, restart: "failed" });
+    expect((await ana.phantomchat.info()).allowedNpubs).toEqual([owner.npub]);
+  });
+
+  test("embedded /model: show and list answer, set and clear are refused", async () => {
+    const e = await openEngine();
+    const ana = await e.personas.create("ana");
+    const owner = generateIdentity();
+    const { npub } = await ana.phantomchat.allow(owner.npub, { relays: RELAYS });
+    await ana.phantomchat.start();
+    const pool = FakePool.all[0]!;
+    await until(() => pool.subscribers.length > 0);
+    const personaHex = (await import("../src/lib/nostrIdentity.ts")).decodeNpubToHex(npub);
+    const refused = (t: string) => t.includes("isn't available");
+
+    pool.deliver(dm(owner, personaHex, "/model"));
+    await until(async () => (await repliesTo(pool, owner)).length >= 1);
+    expect(refused((await repliesTo(pool, owner))[0]!)).toBe(false);
+
+    pool.deliver(dm(owner, personaHex, "/model some/other-model"));
+    await until(async () => (await repliesTo(pool, owner)).length >= 2);
+    const second = (await repliesTo(pool, owner))[1]!;
+    expect(refused(second)).toBe(true);
+    expect(second.includes("restarting")).toBe(false);
+
+    pool.deliver(dm(owner, personaHex, "/model clear"));
+    await until(async () => (await repliesTo(pool, owner)).length >= 3);
+    expect(refused((await repliesTo(pool, owner))[2]!)).toBe(true);
+  });
+
+  test("configure() restarts a running channel so it runs with the new settings", async () => {
+    const e = await openEngine();
+    const ana = await e.personas.create("ana");
+    await ana.phantomchat.allow(generateIdentity().npub, { relays: RELAYS });
+    await ana.phantomchat.start();
+    await ana.configure({ embeddings: { provider: "none" } });
+    expect(FakePool.all.length).toBe(2);
+    expect(FakePool.all[0]!.closed).toBe(true);
+    expect(ana.phantomchat.status().state).toBe("running");
   });
 
   test("engine.close() stops a running channel", async () => {
@@ -304,6 +387,31 @@ describe("personas.delete", () => {
     } finally {
       db.close();
     }
+  });
+  test("cancels and awaits the persona's in-flight turn first; other personas' turns run on", async () => {
+    const e = await openEngine();
+    const ana = await e.personas.create("ana");
+    const bob = await e.personas.create("bob");
+    harness.hang = true;
+    const anaTurn = ana.ask({ message: "long job", source: "principal", conversation: "c1" }).catch((x) => x);
+    await until(() => harness.started === 1);
+    const bobTurn = bob.ask({ message: "bob job", source: "principal", conversation: "c2" }).catch((x) => x);
+    await until(() => harness.started === 2);
+
+    expect(await e.personas.delete("ana")).toBe(true);
+    // ana's turn was aborted and unwound before the delete resolved; bob's was not touched.
+    expect(harness.aborted).toBe(1);
+    await anaTurn;
+    expect(existsSync(join(root, "data", "phantombot", "personas", "ana"))).toBe(false);
+
+    harness.hang = false;
+    const late = await ana.ask({ message: "after", source: "principal", conversation: "c1" }).catch((x) => x);
+    expect(late).toBeInstanceOf(EngineError);
+    expect((late as EngineError).code).toBe("persona_not_found");
+    await e.close();
+    engine = undefined;
+    expect(harness.aborted).toBe(2);
+    await bobTurn;
   });
 });
 

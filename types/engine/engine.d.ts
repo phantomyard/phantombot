@@ -28,7 +28,7 @@
  *
  * Runtime: Bun (the engine uses `bun:sqlite` and `Bun.spawn`, like the CLI).
  */
-import type { CreatePersonaOptions, DecideOptions, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
+import type { CreatePersonaOptions, DecideOptions, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
 /**
  * Open an engine on `options.root`. Rejects with `invalid_root` or
  * `root_locked`. Always `close()` it (or use `await using`).
@@ -101,12 +101,13 @@ export declare class Persona {
          */
         allow(npub: string, options?: {
             relays?: string[];
-        }): Promise<{
-            npub: string;
-            added: boolean;
-        }>;
-        /** Stop answering `npub`. Refuses to remove the last one. Restarts a running channel. */
-        disallow(npub: string): Promise<boolean>;
+        }): Promise<PhantomchatAllowResult>;
+        /**
+         * Stop answering `npub`. Refuses to remove the last one. Restarts a running
+         * channel. A failed restart never rejects: the change landed, so it is
+         * reported as `restart: "failed"` (and on `status()`/`onStatus`).
+         */
+        disallow(npub: string): Promise<PhantomchatDisallowResult>;
         /** Start listening. Resolves when running; idempotent while running. */
         start(options?: PhantomchatStartOptions): Promise<PhantomchatStatus>;
         /** Stop listening and wait for in-flight work to unwind. Idempotent. */
@@ -120,6 +121,12 @@ export declare class Persona {
      * `config.toml` (never the root's global file, so one persona's settings
      * cannot leak into another's) and its keys into its encrypted vault.
      * Only the keys you pass are changed.
+     *
+     * Applied live: the next search and the next turn use the new settings
+     * (including embeddings — config and the vault key are re-read per call),
+     * and a running phantomchat channel is restarted to pick them up. If that
+     * restart fails, `configure` still resolves (the settings are saved) and
+     * the channel's status turns "failed".
      */
     configure(settings: PersonaConfig): Promise<void>;
     /**

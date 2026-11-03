@@ -101,7 +101,10 @@ import type {
   MemoryHit,
   MemorySearchOptions,
   PersonaConfig,
+  PhantomchatAllowResult,
+  PhantomchatDisallowResult,
   PhantomchatInfo,
+  PhantomchatRestart,
   PhantomchatStartOptions,
   PhantomchatStatus,
   StructuredResult,
@@ -245,7 +248,9 @@ export class Engine {
   #closed = false;
   #memory: Promise<MemoryStore> | undefined;
   #handles = new Map<string, Persona>();
-  #active = new Set<{ controller: AbortController; done: Promise<void> }>();
+  #active = new Set<{ controller: AbortController; done: Promise<void>; persona?: string }>();
+  /** Personas being deleted: no new turn may start for them. */
+  #deleting = new Set<string>();
 
   /** @internal Use `createEngine`. */
   constructor(root: string, scope: EngineScope, lock: LockHandle) {
@@ -361,11 +366,20 @@ export class Engine {
     return this.#memory;
   }
 
-  /** @internal Track a turn so close() can cancel and await it. */
-  track(controller: AbortController): () => void {
+  /** @internal True while `personas.delete(name)` is running. */
+  isDeleting(persona: string): boolean {
+    return this.#deleting.has(persona);
+  }
+
+  /**
+   * @internal Track a turn so close() — and, for `persona`, personas.delete()
+   * — can cancel and await it.
+   */
+  track(controller: AbortController, persona?: string): () => void {
     let finish!: () => void;
     const entry = {
       controller,
+      persona,
       done: new Promise<void>((r) => {
         finish = r;
       }),
@@ -387,8 +401,27 @@ export class Engine {
         name,
       });
     }
-    const handle = this.#handles.get(name);
-    if (handle) await handle.phantomchat.stop();
+    this.#assertOpen();
+    if (this.#deleting.has(name)) {
+      throw new EngineError("invalid_argument", `persona '${name}' is already being deleted`, { name });
+    }
+    this.#deleting.add(name);
+    try {
+      // Order matters: stop the channel (no new inbound turns), then cancel
+      // and await this persona's running turns (they hold the store and
+      // would write rows for a persona about to vanish), then delete.
+      const handle = this.#handles.get(name);
+      if (handle) await handle.phantomchat.stop();
+      const mine = [...this.#active].filter((turn) => turn.persona === name);
+      for (const turn of mine) this.enter(() => turn.controller.abort(), name);
+      await Promise.allSettled(mine.map((turn) => turn.done));
+      return await this.#deletePersonaFiles(name);
+    } finally {
+      this.#deleting.delete(name);
+    }
+  }
+
+  #deletePersonaFiles(name: string): Promise<boolean> {
     return this.run(async () => {
       const config = await loadConfig();
       const dir = personaDir(config, name);
@@ -404,6 +437,7 @@ export class Engine {
         throw new EngineError("write_failed", `cannot delete persona '${name}': ${(e as Error).message}`);
       }
       this.#handles.delete(name);
+      this.#scopes.delete(name);
       return true;
     });
   }
@@ -477,9 +511,13 @@ export class Persona {
      * on first use; restarts a running channel. `relays` seeds a new file's
      * relay list instead of fetching the canonical one.
      */
-    allow(npub: string, options?: { relays?: string[] }): Promise<{ npub: string; added: boolean }>;
-    /** Stop answering `npub`. Refuses to remove the last one. Restarts a running channel. */
-    disallow(npub: string): Promise<boolean>;
+    allow(npub: string, options?: { relays?: string[] }): Promise<PhantomchatAllowResult>;
+    /**
+     * Stop answering `npub`. Refuses to remove the last one. Restarts a running
+     * channel. A failed restart never rejects: the change landed, so it is
+     * reported as `restart: "failed"` (and on `status()`/`onStatus`).
+     */
+    disallow(npub: string): Promise<PhantomchatDisallowResult>;
     /** Start listening. Resolves when running; idempotent while running. */
     start(options?: PhantomchatStartOptions): Promise<PhantomchatStatus>;
     /** Stop listening and wait for in-flight work to unwind. Idempotent. */
@@ -532,13 +570,13 @@ export class Persona {
       allow: async (npub, options) => {
         const relays = checkRelays(options?.relays);
         const r = await this.#run(async () => allowNpub(await this.#dir(), npub, relays));
-        if (r.added) await this.#restartChannel();
-        return r;
+        if (!r.added) return { ...r, restart: "none" };
+        return { ...r, ...(await this.#restartChannel()) };
       },
       disallow: async (npub) => {
         const removed = await this.#run(async () => disallowNpub(await this.#dir(), npub));
-        if (removed) await this.#restartChannel();
-        return removed;
+        if (!removed) return { removed, restart: "none" };
+        return { removed, ...(await this.#restartChannel()) };
       },
       start: (options) => this.#startChannel(options ?? {}),
       stop: () => this.#stopChannel(),
@@ -586,7 +624,7 @@ export class Persona {
             harnesses: runtime.harnesses,
             options,
             run: (fn) => this.#run(fn),
-            track: (controller) => this.#engine.track(controller),
+            track: (controller) => this.#engine.track(controller, this.name),
             sink: logSinkWriter(),
             makePool: channelPoolForTesting,
             onStatus: (status) => {
@@ -616,12 +654,21 @@ export class Persona {
     if (this.#channelStatus.state !== "stopped") this.#setChannelStatus({ state: "stopped" });
   }
 
-  /** Re-read the allowlist by restarting a RUNNING channel; a stopped one stays stopped. */
-  async #restartChannel(): Promise<void> {
+  /**
+   * Re-read the persona's settings by restarting a RUNNING channel; a stopped
+   * one stays stopped. Never rejects: the caller's change already landed, so a
+   * failed restart is a result (and status "failed"), not an error.
+   */
+  async #restartChannel(): Promise<{ restart: PhantomchatRestart; error?: string }> {
     await this.#channelStart?.catch(() => {});
-    if (!this.#channel) return;
-    await this.#stopChannel();
-    await this.#startChannel(this.#channelOptions);
+    if (!this.#channel) return { restart: "none" };
+    try {
+      await this.#stopChannel();
+      await this.#startChannel(this.#channelOptions);
+      return { restart: "restarted" };
+    } catch (e) {
+      return { restart: "failed", error: (e as Error).message };
+    }
   }
 
   // ── configuration ──────────────────────────────────────────────────────
@@ -631,6 +678,12 @@ export class Persona {
    * `config.toml` (never the root's global file, so one persona's settings
    * cannot leak into another's) and its keys into its encrypted vault.
    * Only the keys you pass are changed.
+   *
+   * Applied live: the next search and the next turn use the new settings
+   * (including embeddings — config and the vault key are re-read per call),
+   * and a running phantomchat channel is restarted to pick them up. If that
+   * restart fails, `configure` still resolves (the settings are saved) and
+   * the channel's status turns "failed".
    */
   async configure(settings: PersonaConfig): Promise<void> {
     await this.#run(async () => {
@@ -840,6 +893,10 @@ export class Persona {
       }
       this.#runtime = undefined;
     });
+    // Searches and new turns re-read config + vault, so they see the change
+    // at once. A running channel holds the runtime it started with, so it is
+    // restarted; a failed restart shows on status() as "failed".
+    await this.#restartChannel();
   }
 
   // ── turns ──────────────────────────────────────────────────────────────
@@ -920,7 +977,11 @@ export class Persona {
       yield { type: "error", code: "engine_closed", message: "engine is closed" };
       return;
     }
-    const untrack = this.#engine.track(controller);
+    if (this.#engine.isDeleting(this.name)) {
+      yield { type: "error", code: "persona_not_found", message: `persona '${this.name}' is being deleted` };
+      return;
+    }
+    const untrack = this.#engine.track(controller, this.name);
     try {
       let runtime: PersonaRuntime;
       let memory: MemoryStore;
@@ -934,6 +995,13 @@ export class Persona {
       }
       const { config } = runtime;
       const agentDir = personaDir(config, this.name);
+      if (!existsSync(agentDir)) {
+        // The cached runtime outlives personas.delete(); the directory doesn't.
+        this.#runtime = undefined;
+        const err = notFound(this.name);
+        yield { type: "error", code: err.code, message: err.message };
+        return;
+      }
       const trusted = options.source === "principal";
       const history = options.history ?? options.conversation !== undefined;
       const tools = options.tools ?? "none";

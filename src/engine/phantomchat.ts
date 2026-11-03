@@ -132,8 +132,12 @@ function decodeSafe(npub: string): string | undefined {
 }
 
 /**
- * Second guard behind `embedded`: if any path still reaches for the service
- * supervisor, it gets a refusal instead of the host's `phantombot run`.
+ * Belt-and-braces for the POSIX supervisor only: a path that reaches
+ * `serviceControl` gets a refusal instead of bouncing the host's
+ * `phantombot run`. It does NOT cover Windows, where `selfRestart` exits the
+ * process without consulting `serviceControl`. The real guarantee is
+ * `embedded`: `handleSlashCommand` refuses the lifecycle commands, and
+ * `restartSelf` (the only slash-command route to `selfRestart`) refuses too.
  */
 const NO_SERVICE_CONTROL = new Proxy(
   {},

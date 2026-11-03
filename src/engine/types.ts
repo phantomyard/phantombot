@@ -171,6 +171,34 @@ export interface PhantomchatStartOptions {
 }
 
 /** Where a persona's hosted PhantomChat channel is. */
+/**
+ * What an allowlist change did to the channel (`allow`/`disallow`). The change
+ * itself is on disk either way; `restart` says whether the listener took it.
+ *   - "none":      no restart was needed — nothing changed, or the channel is
+ *                  stopped and reads the list when started.
+ *   - "restarted": the running channel was restarted and is up again.
+ *   - "failed":    the restart failed; the channel is stopped (status
+ *                  "failed", same `error`). The app should show
+ *                  "restart needed" and call `start()` again.
+ */
+export type PhantomchatRestart = "none" | "restarted" | "failed";
+
+export interface PhantomchatAllowResult {
+  npub: string;
+  /** False when `npub` was already allowed (nothing written, no restart). */
+  added: boolean;
+  restart: PhantomchatRestart;
+  /** Why the restart failed (restart "failed"). */
+  error?: string;
+}
+
+export interface PhantomchatDisallowResult {
+  /** False when `npub` was not on the list (nothing written, no restart). */
+  removed: boolean;
+  restart: PhantomchatRestart;
+  error?: string;
+}
+
 export interface PhantomchatStatus {
   state: "stopped" | "starting" | "running" | "failed";
   /** Set once the channel has an identity. */
