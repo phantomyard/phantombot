@@ -1189,8 +1189,8 @@ export function parsePiEvent(parsed: unknown): ParseEventResult {
   const ame = obj.assistantMessageEvent;
   if (!isObject(ame)) {
     // Bare `message_update` — no `assistantMessageEvent`, so no content: the
-    // only `message_update` variant that carries nothing, and the one pi stops
-    // emitting while the wire is silent. Counted as a liveness heartbeat, but
+    // only `message_update` variant that carries nothing, and the variant that
+    // stops when the wire goes silent. Counted as a liveness heartbeat, but
     // this rule is INERT during silence, and it must not be relied on to keep
     // a long server-side tool alive (issue #750).
     // Timed pi 1.4.0 run, 2026-11-03: over a 340 s SSE stream carrying only
