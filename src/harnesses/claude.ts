@@ -410,6 +410,31 @@ export class ClaudeHarness implements Harness {
 }
 
 /**
+ * The per-invocation --settings object: the injected policy, the body-path
+ * guard on every turn (#718), and the escort hook on an escorted one (#702).
+ */
+export function claudeTurnSettings(
+  self: string[],
+  escorted: boolean,
+): Record<string, unknown> {
+  const guard = claudeBodyGuardHookEntry(self);
+  if (!escorted) {
+    return {
+      ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
+      hooks: { PreToolUse: [guard] },
+    };
+  }
+  const escort = claudeEscortSettings(self) as {
+    hooks: { PreToolUse: unknown[] };
+  };
+  return {
+    ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
+    ...escort,
+    hooks: { ...escort.hooks, PreToolUse: [...escort.hooks.PreToolUse, guard] },
+  };
+}
+
+/**
  * Settings injected into every `claude --print` invocation via `--settings`.
  *
  * The Claude Code harness ships a small set of "deferred" tools the model can
@@ -457,31 +482,6 @@ export class ClaudeHarness implements Harness {
  *
  * Exported for testing and so the doc-string above is greppable.
  */
-/**
- * The per-invocation --settings object: the injected policy, the body-path
- * guard on every turn (#718), and the escort hook on an escorted one (#702).
- */
-export function claudeTurnSettings(
-  self: string[],
-  escorted: boolean,
-): Record<string, unknown> {
-  const guard = claudeBodyGuardHookEntry(self);
-  if (!escorted) {
-    return {
-      ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
-      hooks: { PreToolUse: [guard] },
-    };
-  }
-  const escort = claudeEscortSettings(self) as {
-    hooks: { PreToolUse: unknown[] };
-  };
-  return {
-    ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
-    ...escort,
-    hooks: { ...escort.hooks, PreToolUse: [...escort.hooks.PreToolUse, guard] },
-  };
-}
-
 export const PHANTOMBOT_INJECTED_CLAUDE_SETTINGS = {
   permissions: {
     deny: [

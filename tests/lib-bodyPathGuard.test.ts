@@ -24,6 +24,13 @@ describe("findLiteralBodyPath", () => {
     "gh issue comment 9 -b @~/r.md",
     "gh api --raw-field body=@/tmp/x.md repos/o/r/pulls/1/reviews",
     "cd /tmp && gh pr review 1 --approve --body @/tmp/r.md",
+    // Review of #754: joined shorthand and bare relative paths.
+    "gh pr comment 419 -b@/tmp/x.md",
+    "gh pr comment 419 -b=@/tmp/x.md",
+    "gh pr review 419 --body @review.md",
+    'gh pr review 419 --body "@review.md"',
+    "gh pr comment 1 --body @scratch/r754.md && echo ok",
+    "gh api repos/o/r/issues/1/comments -f body=@reply.md",
   ];
   for (const cmd of BLOCKED) {
     test(`blocks: ${cmd}`, () => {
@@ -36,6 +43,9 @@ describe("findLiteralBodyPath", () => {
     "gh api -F body=@/tmp/review.md repos/o/r/issues/1/comments",
     'gh pr comment 1 --body "@kaieriksen thanks, fixed in abc123"',
     "gh api -f body=@lena repos/o/r/issues/1/comments",
+    'gh pr comment 1 --body "@andrew please look"',
+    'gh pr comment 1 --body "@kai.eriksen thanks"',
+    "gh pr comment 1 -b@kaieriksen",
     "gh pr comment 1 --body-file -",
     "curl -d @/tmp/payload.json https://example.com --body @/tmp/x",
     "echo --body @/tmp/x",

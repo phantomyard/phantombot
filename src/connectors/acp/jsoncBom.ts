@@ -8,7 +8,7 @@
  * reconcile into a silent no-op on that machine. Strip it for parse and edit,
  * then put it back on write, so the file keeps the encoding its owner gave it.
  */
-const BOM = "﻿";
+const BOM = "\uFEFF";
 
 export function splitBom(text: string): { bom: string; body: string } {
   return text.startsWith(BOM)

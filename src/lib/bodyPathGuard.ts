@@ -12,8 +12,10 @@
  * DETERMINISTIC AND ALWAYS ON, unlike the escort: no model is asked, and every
  * turn gets it, trusted or not. A false positive costs one retry with the
  * right flag; a miss costs a review nobody can read. It only matches a value
- * that is PATH-SHAPED (`@/`, `@~/`, `@./`, `@../`), so a body that merely
- * opens with an `@mention` is untouched.
+ * that is PATH-SHAPED: `@/`, `@~/`, `@./`, `@../`, or a bare relative path
+ * (`@review.md`, `@dir/r.md`) that has an extension or a slash AND is the whole
+ * value. So a body that merely opens with an `@mention` (`"@kai thanks"`,
+ * `-f body=@lena`) is untouched.
  *
  * WHERE IT HOOKS: the same two seams as the escort (lib/escort.ts). On native
  * it is an inline pi extension on `tool_call`. On claude it is a `PreToolUse`
@@ -24,15 +26,22 @@
 /** Hidden argv[2] that runs the claude PreToolUse hook (src/index.ts). */
 export const BODY_GUARD_SUBCOMMAND = "__body_guard";
 
-const PATH_VALUE = String.raw`['"]?@(?:/|~/|\./|\.\./)[^\s'"]*`;
+/** `@/x`, `@~/x`, `@./x`, `@../x`: path-shaped however the value goes on. */
+const ROOTED_PATH = String.raw`['"]?@(?:/|~/|\./|\.\./)[^\s'"]*`;
+/** `review.md`, `dir/r.md`: needs an extension or a slash, so `@lena` is not one. */
+const REL_PATH = String.raw`[\w-][\w.-]*(?:\.[A-Za-z0-9]{1,8}|/[^\s'"]*)`;
+/** A bare relative path only counts as the WHOLE value, so `"@kai.e thanks"` is a mention. */
+const PATH_VALUE =
+  String.raw`(?:${ROOTED_PATH}|'@${REL_PATH}'|"@${REL_PATH}"|@${REL_PATH}(?=[\s;&|)]|$))`;
 
 /**
- * `--body @/x`, `--body=@/x`, `-b @/x`, and the raw-field forms
- * `-f body=@/x`, `--raw-field body=@/x`, `-fbody=@/x`. Any raw field counts:
- * `-f` never reads a file, so a path-shaped value is always literal.
+ * `--body @/x`, `--body=@/x`, `-b @/x`, the joined shorthand `-b@/x` (pflag
+ * accepts it), and the raw-field forms `-f body=@/x`, `--raw-field body=@/x`,
+ * `-fbody=@/x`. Any raw field counts: `-f` never reads a file, so a
+ * path-shaped value is always literal.
  */
 const LITERAL_PATH_FLAG = new RegExp(
-  String.raw`(?:^|\s)(?:--body(?:=|\s+)|-b\s+|(?:-f|--raw-field)(?:=|\s+)?['"]?[A-Za-z_][\w.\[\]]*=)` +
+  String.raw`(?:^|\s)(?:--body(?:=|\s+)|-b(?:=|\s+)?|(?:-f|--raw-field)(?:=|\s+)?['"]?[A-Za-z_][\w.\[\]]*=)` +
     PATH_VALUE,
 );
 
