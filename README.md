@@ -81,6 +81,12 @@ Run the unified setup app:
 phantombot
 ```
 
+The terminal app enables trackpad/wheel scrolling in iTerm2 without changing
+its Advanced settings (the profile’s default “Allow Alternate Mouse Scroll”
+setting must remain enabled). It restores the previous alternate-scroll mode
+on exit and terminal handover where supported; terminals without mode
+save/restore support keep alternate scrolling enabled.
+
 Or configure each part directly:
 
 ```bash

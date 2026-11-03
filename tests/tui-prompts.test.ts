@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { enterFullScreen } from "../src/tui/terminal.ts";
 
 const { setPromptHost, withPromptTerminal } =
   await import("../src/tui/prompts.ts");
@@ -46,3 +47,76 @@ describe("the prompt host", () => {
     expect(await withPromptTerminal(async () => "ran")).toBe("ran");
   });
 });
+
+// Model only the terminal's documented private-mode operations, independently
+// of the application's constants. In particular, DECRST must not masquerade
+// as restoring a terminal whose alternate-scroll mode was initially enabled.
+for (const initial of [false, true]) {
+  for (const saveRestoreSupported of [false, true]) {
+    test(`handovers preserve alternate scrolling (initial=${initial}, save/restore=${saveRestoreSupported})`, async () => {
+      let alternateScroll = initial;
+      let saved = initial;
+      const writes: string[] = [];
+      const stdout = {
+        write(chunk: string) {
+          writes.push(chunk);
+          for (const match of chunk.matchAll(/\x1b\[\?1007([hlsr])/g)) {
+            switch (match[1]) {
+              case "h":
+                alternateScroll = true;
+                break;
+              case "l":
+                alternateScroll = false;
+                break;
+              case "s":
+                if (saveRestoreSupported) saved = alternateScroll;
+                break;
+              case "r":
+                if (saveRestoreSupported) alternateScroll = saved;
+                break;
+            }
+          }
+          return true;
+        },
+      } as unknown as NodeJS.WriteStream;
+      const screen = enterFullScreen(stdout);
+      const restoreHost = setPromptHost(async (fn) => {
+        screen.restore();
+        try {
+          return await fn();
+        } finally {
+          screen.enter();
+        }
+      });
+      const restored = saveRestoreSupported ? initial : true;
+      try {
+        expect(alternateScroll).toBe(true);
+        for (let i = 0; i < 2; i++) {
+          expect(
+            await withPromptTerminal(async () => {
+              expect(alternateScroll).toBe(restored);
+              return "borrowed";
+            }),
+          ).toBe("borrowed");
+          expect(alternateScroll).toBe(true);
+        }
+        await expect(
+          withPromptTerminal(async () => {
+            expect(alternateScroll).toBe(restored);
+            throw new Error("borrower failed");
+          }),
+        ).rejects.toThrow("borrower failed");
+        expect(alternateScroll).toBe(true);
+      } finally {
+        restoreHost();
+        screen.restore();
+      }
+      expect(alternateScroll).toBe(restored);
+      // Overlapping exit handlers must not overwrite or re-restore the slot.
+      const count = writes.length;
+      screen.restore();
+      expect(writes.length).toBe(count);
+      expect(writes.join("")).not.toContain("\x1b[?1007l");
+    });
+  }
+}
