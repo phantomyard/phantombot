@@ -189,6 +189,45 @@ await engine.personas.create("aria", {
 });
 ```
 
+### Providers: `engine.providers`
+
+For an app's own setup screen: list the providers the native engine can run,
+check a key, and read the models that account can use. Nothing is stored; save
+the choice with `persona.configure`.
+
+```ts
+const providers = await engine.providers.list();
+// [{ id: "openrouter", label: "OpenRouter", needsBaseUrl: false, keyOptional: false,
+//    checkable: true, autoModel: false }, ...]
+
+const check = await engine.providers.check("openrouter", typedKey);
+// { status: "verified" | "invalid" | "unverified", detail, models: [{ id, supportsImages }] }
+if (check.status !== "invalid") {
+  await aria.configure({ brain: { native: { provider: "openrouter", model: picked, apiKey: typedKey } } });
+}
+```
+
+- `status` is `"invalid"` only when the provider explicitly rejected the key
+  (401/403); block on that alone. `"unverified"` means it could not be checked
+  (no known endpoint, network error, outage).
+- `checkable: false` means `check` has no endpoint for that provider and will
+  always answer `"unverified"`; say "cannot verify", not "failed".
+- `models` is the provider's live list, `[]` when it could not be read, the
+  key was rejected, or no key was given where one is required. Fall back to
+  free-text model entry when it is empty.
+- `autoModel: true` (PhantomOps) means show no model picker and use
+  `defaultModel`. `keyLabel`, when present, is the prompt copy for the key field.
+- Providers with `needsBaseUrl` (a self-hosted OpenAI-compatible server) need
+  `{ baseUrl }`; for those `keyOptional` means an empty key is valid. A
+  `baseUrl` must start with `http://` or `https://`, is an override only for
+  PhantomOps, and is rejected with `invalid_argument` for any other provider.
+- **`check` is caller-directed egress:** it makes the host issue
+  `GET {baseUrl}/models` and reports a verdict from the status code or
+  transport error, so it reveals whether any address the machine can route to
+  answers. Intended for a local setup screen; do not expose it to a renderer
+  you do not trust.
+- `detail` never contains the key.
+
 ### `persona.configure({ brain?, decisionModel? })`
 
 `configure` writes to the persona's **own** `config.toml`, never the root-wide

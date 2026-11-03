@@ -118,6 +118,62 @@ export interface PersonaConfig {
     brain?: BrainConfig;
     decisionModel?: DecisionModelConfig;
 }
+/** One provider the native engine can run (`engine.providers.list()`). */
+export interface ProviderInfo {
+    /** Id to pass as `brain.native.provider`, e.g. "openrouter". */
+    id: string;
+    /** Display name, e.g. "OpenRouter". */
+    label: string;
+    /** The user must supply a base URL (a self-hosted OpenAI-compatible server). */
+    needsBaseUrl: boolean;
+    /** An empty key is a valid configuration (an unauthenticated local server). */
+    keyOptional: boolean;
+    /**
+     * `check` can give this provider a verdict. When false it always answers
+     * "unverified": show "cannot verify this provider", not "verification failed".
+     */
+    checkable: boolean;
+    /**
+     * The provider routes models itself (PhantomOps `phantomops/auto`): show no
+     * model picker and use `defaultModel`.
+     */
+    autoModel: boolean;
+    /** The model almost everyone wants, when the provider has one. */
+    defaultModel?: string;
+    /** Prompt copy for the credential field, when the provider has its own. */
+    keyLabel?: string;
+}
+export interface ProviderCheckOptions {
+    /**
+     * Endpoint for a bring-your-own provider: required where `needsBaseUrl`,
+     * an override for PhantomOps. Must start with http:// or https://. Any other
+     * provider rejects it with `invalid_argument`.
+     */
+    baseUrl?: string;
+}
+/** One model from the provider's own catalogue. */
+export interface ProviderModel {
+    /** Id to pass as `brain.native.model`. */
+    id: string;
+    /** The provider says it accepts image input. */
+    supportsImages: boolean;
+}
+/** Result of `engine.providers.check()`. */
+export interface ProviderCheck {
+    /**
+     * "verified": the provider accepted the key. "invalid": it explicitly
+     * rejected it (401/403), the only verdict to block on. "unverified": it
+     * could not be checked (no known endpoint, network error, outage).
+     */
+    status: "verified" | "invalid" | "unverified";
+    /** Human-readable evidence (HTTP status or error text). Never contains the key. */
+    detail: string;
+    /**
+     * Models this account can use; [] when the list could not be read, the key
+     * was rejected, or no key was supplied for a provider that needs one.
+     */
+    models: ProviderModel[];
+}
 /**
  * Who authored the message. REQUIRED, with no default, because it is the
  * security boundary:

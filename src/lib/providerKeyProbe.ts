@@ -74,6 +74,19 @@ const SPECIAL: Record<string, (key: string) => { url: string; headers: Record<st
   }),
 };
 
+/**
+ * Can `probeProviderKey` give a verdict for this provider at all? Derived from
+ * the same tables the probe dispatches on, so the two cannot disagree. A
+ * provider that is not checkable always answers `unverified`.
+ */
+export function providerKeyCheckable(providerId: string): boolean {
+  return (
+    customProviderSpec(providerId) !== undefined ||
+    Object.hasOwn(SPECIAL, providerId) ||
+    Object.hasOwn(OPENAI_COMPATIBLE_BASES, providerId)
+  );
+}
+
 export const BROWSER_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 

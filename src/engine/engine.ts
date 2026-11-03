@@ -68,6 +68,7 @@ import { runTurn } from "../orchestrator/turn.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 import { EngineError } from "./errors.ts";
 import { toEngineEvent } from "./events.ts";
+import { checkProvider, listProviders } from "./providers.ts";
 import {
   parseJsonReply,
   structuredOutputInstruction,
@@ -87,6 +88,9 @@ import type {
   MemorySearchOptions,
   PersonaConfig,
   StructuredResult,
+  ProviderCheck,
+  ProviderCheckOptions,
+  ProviderInfo,
   StructuredTurnOptions,
   TurnOptions,
   TurnResult,
@@ -190,6 +194,15 @@ export class Engine {
     exists(name: string): Promise<boolean>;
     create(name: string, options?: CreatePersonaOptions): Promise<Persona>;
   };
+  /**
+   * Model providers for an app's own setup UI: list them, check a key and read
+   * that account's models. Stores nothing; persist the choice with
+   * `persona.configure({ brain: { native: { provider, model, apiKey } } })`.
+   */
+  readonly providers: {
+    list(): Promise<ProviderInfo[]>;
+    check(provider: string, apiKey: string, options?: ProviderCheckOptions): Promise<ProviderCheck>;
+  };
 
   #scope: EngineScope;
   /** `#scope` plus `persona`, one per persona handle (identity-stable). */
@@ -213,6 +226,11 @@ export class Engine {
           return existsSync(personaDir(await loadConfig(), name));
         }),
       create: (name, options) => this.#createPersona(name, options ?? {}),
+    };
+    this.providers = {
+      list: () => this.run(async () => listProviders()),
+      check: (provider, apiKey, options) =>
+        this.run(() => checkProvider(provider, apiKey, options ?? {})),
     };
   }
 
