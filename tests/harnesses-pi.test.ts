@@ -359,10 +359,11 @@ describe("parsePiEvent", () => {
   });
 
   test("bare message_update (no assistantMessageEvent) is a liveness heartbeat", () => {
-    // VERIFIED against pi 1.4.0: during an SSE stretch carrying only keepalive
-    // comments pi still emits payload-less `message_update` records. They must
-    // feed the idle watchdog — otherwise a long silent server-side tool is
-    // invisible until the client fakes assistant TEXT (phantomops #357).
+    // A bare `message_update` (usage only, no assistantMessageEvent) is model
+    // activity and feeds the idle watchdog. Timed pi 1.4.0 measurement (#750)
+    // shows pi emits none of these during a comment-only stretch — the rule is
+    // inert while the wire is silent, so it does NOT cover a long silent
+    // server-side tool; that needs a tool/productive signal here (#750).
     const res = parsePiEvent({
       type: "message_update",
       usage: { input: 0, output: 0, totalTokens: 0 },
