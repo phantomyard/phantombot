@@ -1188,15 +1188,18 @@ export function parsePiEvent(parsed: unknown): ParseEventResult {
 
   const ame = obj.assistantMessageEvent;
   if (!isObject(ame)) {
-    // Bare `message_update` — pi's only non-content record. Counted as a
-    // liveness heartbeat, but this rule is INERT during silence, and it must
-    // not be relied on to keep a long server-side tool alive (issue #750).
+    // Bare `message_update` — no `assistantMessageEvent`, so no content: the
+    // only `message_update` variant that carries nothing, and the one pi stops
+    // emitting while the wire is silent. Counted as a liveness heartbeat, but
+    // this rule is INERT during silence, and it must not be relied on to keep
+    // a long server-side tool alive (issue #750).
     // Timed pi 1.4.0 run, 2026-11-03: over a 340 s SSE stream carrying only
     // `: keepalive` comments (68 of them, the shape a long server-side tool
     // produces) pi emitted no records of any type between t=0.35 s and
-    // t=340.39 s, where the three `message_update`s landed together as the
-    // `text_start`/`text_delta`/`text_end` trio of real content arriving. A
-    // shorter window made those same three look like unevenly spaced ticks.
+    // t=340.39 s, where three `message_update`s landed together carrying the
+    // `text_start`/`text_delta`/`text_end` trio of real content — they had an
+    // `assistantMessageEvent`, so they never reach this branch. A shorter
+    // window made those same three look like unevenly spaced ticks.
     // So: a bare update is genuine model activity when it fires, but it does
     // not fire while the wire is silent — liveness ACROSS silence needs a
     // `tool`/productive signal on this side (the follow-up to #750), not a
