@@ -1564,6 +1564,35 @@ export class MemoryIndex {
   }
 
   /**
+   * Paths under `prefix` matching ANY term of `query`, best BM25 first (#761).
+   * OR, not the AND `search` uses: a whole user message as an AND query
+   * matches almost nothing. Terms under 3 characters are dropped.
+   */
+  matchPathsUnder(prefix: string, query: string, limit = 20): string[] {
+    const terms = [
+      ...new Set(
+        query
+          .replace(/[^A-Za-z0-9_\- ]+/g, " ")
+          .split(/\s+/)
+          .filter((t) => t.length >= 3),
+      ),
+    ].slice(0, 32);
+    if (terms.length === 0) return [];
+    const rows = this.db
+      .query(
+        `SELECT path FROM notes WHERE notes MATCH ? ` +
+          `AND substr(path, 1, ?) = ? ORDER BY bm25(notes, ${NOTE_FIELD_WEIGHTS.join(", ")}) LIMIT ?`,
+      )
+      .all(
+        terms.map((t) => `"${t}"`).join(" OR "),
+        prefix.length,
+        prefix,
+        limit,
+      ) as Array<{ path: string }>;
+    return rows.map((r) => r.path);
+  }
+
+  /**
    * BM25F search PLUS OKF link-graph expansion — the no-embeddings superpower.
    *
    * Runs the normal fielded BM25 search, then walks the link graph one or more
@@ -2066,6 +2095,128 @@ export class MemoryIndex {
     return row?.body ?? undefined;
   }
 
+  /**
+   * Every virtual note's body in ONE query, keyed by path, optionally limited
+   * to a path prefix.
+   *
+   * `notes` is FTS5, and FTS5 cannot serve `WHERE path = ?` from an index —
+   * every {@link virtualText} call scans the table. Anything that walks many
+   * virtual notes (the drawer sync, the embed job) must read them in bulk
+   * here instead, or the cost is O(notes × rows) (#759 review).
+   */
+  virtualBodies(prefix?: string): Map<string, string> {
+    const rows = (
+      prefix === undefined
+        ? this.db
+            .query(
+              "SELECT n.path AS path, n.body AS body FROM files f " +
+                "JOIN notes n ON n.path = f.path WHERE f.virtual = 1",
+            )
+            .all()
+        : this.db
+            .query(
+              "SELECT n.path AS path, n.body AS body FROM files f " +
+                "JOIN notes n ON n.path = f.path " +
+                "WHERE f.virtual = 1 AND f.path >= ? AND f.path < ?",
+            )
+            .all(prefix, prefixUpperBound(prefix))
+    ) as Array<{ path: string; body: string }>;
+    const out = new Map<string, string>();
+    for (const r of rows) out.set(r.path, r.body);
+    return out;
+  }
+
+  /**
+   * Converge every virtual note under `prefix` on `desired`, in ONE write
+   * transaction: insert or rewrite the notes whose body differs, and drop the
+   * virtual notes under the prefix that `desired` no longer names.
+   *
+   * Built for bulk publishers (the drawer rows, #758). It reads the existing
+   * notes once and deletes FTS rows by rowid, so neither the steady state (no
+   * changes) nor a cold publish of thousands of rows pays a table scan per
+   * row. A real, on-disk note at a desired path is left alone — only virtual
+   * rows are this method's to manage.
+   */
+  syncVirtualNotesUnder(
+    prefix: string,
+    desired: Map<string, { scope: Scope; title: string; body: string }>,
+  ): { upserted: number; removed: number } {
+    const out = { upserted: 0, removed: 0 };
+    const upper = prefixUpperBound(prefix);
+    const filesRows = this.db
+      .query("SELECT path, virtual FROM files WHERE path >= ? AND path < ?")
+      .all(prefix, upper) as Array<{ path: string; virtual: number }>;
+    const virtualPaths = new Set<string>();
+    const realPaths = new Set<string>();
+    for (const r of filesRows) {
+      (r.virtual === 1 ? virtualPaths : realPaths).add(r.path);
+    }
+    const noteRows = this.db
+      .query(
+        "SELECT rowid AS rowid, path, body FROM notes WHERE path >= ? AND path < ?",
+      )
+      .all(prefix, upper) as Array<{ rowid: number; path: string; body: string }>;
+    const rowids = new Map<string, number[]>();
+    const bodies = new Map<string, string>();
+    for (const r of noteRows) {
+      const list = rowids.get(r.path);
+      if (list) list.push(r.rowid);
+      else rowids.set(r.path, [r.rowid]);
+      if (virtualPaths.has(r.path)) bodies.set(r.path, r.body);
+    }
+
+    const upserts: Array<[string, { scope: Scope; title: string; body: string }]> = [];
+    for (const [path, note] of desired) {
+      if (!path.startsWith(prefix) || realPaths.has(path)) continue;
+      if (bodies.get(path) === note.body) continue;
+      upserts.push([path, note]);
+    }
+    const removes: string[] = [];
+    for (const path of virtualPaths) {
+      if (!desired.has(path)) removes.push(path);
+    }
+    if (upserts.length === 0 && removes.length === 0) return out;
+
+    const delNote = this.db.prepare("DELETE FROM notes WHERE rowid = ?");
+    const delFile = this.db.prepare("DELETE FROM files WHERE path = ?");
+    const delLinks = this.db.prepare("DELETE FROM note_links WHERE src_path = ?");
+    const delEmb = this.db.prepare("DELETE FROM note_embeddings WHERE path = ?");
+    const insNote = this.db.prepare(
+      "INSERT INTO notes (path, scope, type, title, tags, aliases, headings, body) " +
+        "VALUES (?, ?, ?, ?, '', '', '', ?)",
+    );
+    const insFile = this.db.prepare(
+      "INSERT INTO files (path, scope, mtime_ms, size, title, aliases, indexed_at, virtual) " +
+        "VALUES (?, ?, -1, ?, ?, '', ?, 1)",
+    );
+    const drop = (path: string) => {
+      for (const id of rowids.get(path) ?? []) delNote.run(id);
+      delFile.run(path);
+      delLinks.run(path);
+      delEmb.run(path);
+    };
+    const now = new Date().toISOString();
+    this.inWriteTx(() => {
+      for (const [path, note] of upserts) {
+        drop(path);
+        insNote.run(path, note.scope, "journal", note.title, note.body);
+        insFile.run(
+          path,
+          note.scope,
+          Buffer.byteLength(note.body, "utf8"),
+          note.title,
+          now,
+        );
+        out.upserted++;
+      }
+      for (const path of removes) {
+        drop(path);
+        out.removed++;
+      }
+    });
+    return out;
+  }
+
   private snippetForPath(path: string): string {
     const isTurn = path.startsWith("turns/");
     const sql = isTurn
@@ -2088,6 +2239,20 @@ export class MemoryIndex {
     this.db.prepare("DELETE FROM turn_docs WHERE path = ?").run(path);
     this.db.prepare("DELETE FROM turn_embeddings WHERE path = ?").run(path);
   }
+}
+
+/**
+ * Exclusive upper bound for a `path >= prefix AND path < bound` range scan:
+ * the prefix with its last code unit bumped by one. A range on the `files`
+ * primary key is index-served; `LIKE 'prefix%'` is not (case-insensitive
+ * LIKE defeats the index).
+ */
+function prefixUpperBound(prefix: string): string {
+  if (prefix.length === 0) return "\uffff";
+  return (
+    prefix.slice(0, -1) +
+    String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1)
+  );
 }
 
 function blobToFloat32(blob: Buffer | Uint8Array): Float32Array {

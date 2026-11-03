@@ -30,6 +30,7 @@ import { join } from "node:path";
 
 import type { TelegramTransport } from "../channels/telegram.ts";
 import type { Config } from "../config.ts";
+import { syncDrawerIndex } from "../memory/drawerIndex.ts";
 import { log } from "./logger.ts";
 import { MemoryIndex } from "./memoryIndex.ts";
 import {
@@ -312,6 +313,13 @@ async function drawersStep(
         now,
         journal,
       });
+      const expired = expireSchedulerCommitments(store, input.persona);
+      if (expired > 0) {
+        log.info("heartbeat: expired scheduler commitments", {
+          persona: input.persona,
+          expired,
+        });
+      }
       const drawerRetirement = await retireDrawers({
         store,
         db,
@@ -340,6 +348,10 @@ async function drawersStep(
           since: held[0]?.heldSince,
         });
       }
+      // Drawer rows into the search index (#758), AFTER this cycle's
+      // promotion so a line captured since the last heartbeat is findable by
+      // the end of this one. Reconciling, so a skipped cycle self-heals.
+      await indexDrawers(input, store);
       return { promoted, drawerSync, drawerRetirement, journalIngest };
     } finally {
       close();
@@ -349,6 +361,28 @@ async function drawersStep(
       error: (e as Error).message,
     });
     return { promoted: [] };
+  }
+}
+
+/** Publish active drawer rows to the search index. Never throws. */
+async function indexDrawers(
+  input: RunHeartbeatInput,
+  store: DrawerStore,
+): Promise<void> {
+  if (!input.persona || (!input.index && !input.indexPath)) return;
+  let opened: MemoryIndex | undefined;
+  try {
+    const ix = input.index ?? (opened = await MemoryIndex.open(input.indexPath!));
+    const r = syncDrawerIndex(ix, store, input.persona);
+    if (r.upserted > 0 || r.removed > 0) {
+      log.info("heartbeat: drawer index synced", { persona: input.persona, ...r });
+    }
+  } catch (e) {
+    log.warn("heartbeat: drawer index sync failed", {
+      error: (e as Error).message,
+    });
+  } finally {
+    opened?.close();
   }
 }
 
@@ -416,9 +450,13 @@ export async function promoteTaggedLines(
     // brand-new entries sitting next to their own duplicates.
     for (const entry of target.journal.taggedForDay(target.persona, today)) {
       const stamp = ` · ${entry.createdAt.toISOString().slice(11, 16)}Z`;
+      const machine = isMachineRow(entry);
       for (const tag of entry.tags) {
         const kind = TAG_TO_DRAWER[tag];
         if (!kind) continue;
+        // Scheduler bookkeeping and poller-turn chatter stay searchable in the
+        // journal but never become commitments (#761). Other tags still file.
+        if (kind === "commitments" && machine) continue;
         file(`[${tag}] ${entry.content}${stamp}`, kind);
       }
     }
@@ -439,6 +477,29 @@ export async function promoteTaggedLines(
     file(raw.trim().replace(/^[-*]\s+/, ""), kind);
   }
   return promoted;
+}
+
+/** A journal row the scheduler wrote, or one captured by a scheduled (`tick:`) turn. */
+function isMachineRow(entry: { source: string; conversation?: string }): boolean {
+  return entry.source === "task" || (entry.conversation ?? "").startsWith("tick:");
+}
+
+/** The exact line `task add` journals (src/cli/task.ts writeCommitmentToDaily). */
+const SCHEDULER_COMMITMENT = /^(\[commitment\] )?task \d+: .* — fires \d{4}-/;
+
+/**
+ * Expire the scheduler bookkeeping already filed as commitments before #761
+ * stopped filing it. Status `expired`, never deleted; only the exact
+ * scheduler format is touched, and a second run finds nothing.
+ */
+export function expireSchedulerCommitments(store: DrawerStore, persona: string): number {
+  let n = 0;
+  for (const e of store.list(persona, "commitments")) {
+    if (e.status !== "active" || !SCHEDULER_COMMITMENT.test(e.content)) continue;
+    store.setStatus(e.id, "expired");
+    n++;
+  }
+  return n;
 }
 
 /** Midnight UTC for a `YYYY-MM-DD` daily-file name, or undefined if unparseable. */

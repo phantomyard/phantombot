@@ -133,6 +133,7 @@ import {
   personaDir,
 } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
+import { packDrawerSections } from "../memory/standingMemory.ts";
 import { log } from "../lib/logger.ts";
 import {
   buildSystemPrompt,
@@ -1052,45 +1053,7 @@ export function packBriefing(
   sections: DrawerBriefingSection[],
   capBytes: number,
 ): string | undefined {
-  if (sections.length === 0) return undefined;
-  const rendered = sections.map((s) => `## ${s.kind}\n\n${s.text}`);
-  const total = rendered.reduce((n, t) => n + Buffer.byteLength(t, "utf8"), 0);
-  const joinCost = 2 * (rendered.length - 1);
-  if (total + joinCost <= capBytes) return rendered.join("\n\n");
-
-  const budget = capBytes - joinCost;
-  const even = Math.floor(budget / rendered.length);
-  const sizes = rendered.map((t) => Buffer.byteLength(t, "utf8"));
-  // Give-back pass: everything under its share frees the difference, and the
-  // over-share sections split the freed bytes evenly.
-  const spare = sizes.reduce((n, size) => n + Math.max(0, even - size), 0);
-  const overflowing = sizes.filter((size) => size > even).length;
-  const bonus = overflowing > 0 ? Math.floor(spare / overflowing) : 0;
-
-  const out = rendered.map((text, i) =>
-    sizes[i]! <= even ? text : trimToBytes(text, even + bonus),
-  );
-  return out.join("\n\n");
-}
-
-/**
- * Trim text to `limit` bytes on a LINE boundary, marking the cut.
- *
- * Never returns a partial line: a half-entry reads to the judge as a complete
- * one, which is worse than a shorter briefing. If even the header line does
- * not fit, the section is dropped to its header alone plus the marker.
- */
-function trimToBytes(text: string, limit: number): string {
-  const marker = "\n[drawer trimmed at cap]";
-  const room = limit - Buffer.byteLength(marker, "utf8");
-  const lines = text.split("\n");
-  const kept: string[] = [];
-  let used = 0;
-  for (const line of lines) {
-    const cost = Buffer.byteLength(line, "utf8") + (kept.length > 0 ? 1 : 0);
-    if (used + cost > room) break;
-    kept.push(line);
-    used += cost;
-  }
-  return kept.join("\n") + marker;
+  // One packer for the judge and the standing-memory block (#758), so both
+  // trim the same entries the same way.
+  return packDrawerSections(sections, capBytes);
 }

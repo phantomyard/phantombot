@@ -204,6 +204,9 @@ The useful commands are deliberately small:
 phantombot memory search "deployment rollback"
 phantombot memory capture "Production uses blue-green deploys" --tag decision
 phantombot memory drawers --kind decisions
+phantombot memory drawers --kind commitments --limit 20   # ids shown for closing
+phantombot memory drawers --discharge <id>                # commitment met
+phantombot memory drawers --expire <id>                   # commitment missed
 phantombot memory journal --date 2026-10-04
 phantombot memory index
 phantombot memory backup
@@ -212,7 +215,16 @@ phantombot doctor
 
 Five capture tags are supported: `decision`, `lesson`, `person`, `commitment`,
 and `norm`. The heartbeat and nightly sweep promote and distil them; agents do
-not need to hand-maintain drawer files.
+not need to hand-maintain drawer files. The top-ranked active entries of all
+five drawers reach every capable turn in a bounded "Standing memory" block,
+every active entry is searchable as `drawers/<kind>/<id>.md` (and readable in
+full with `memory get`), and the nightly closes commitments that are settled.
+Commitments in that block are ordered by relevance: the ones matching the
+current message come first, then the usual ranking. Commitment-tagged captures
+made by scheduled turns (`tick:` conversations) and the scheduler's own `task N:
+… fires …` lines are not promoted to the commitments drawer; they stay
+searchable in the journal, and their other tags still promote. The heartbeat
+expires scheduler-format commitments filed before this rule existed.
 
 For the storage model and lifecycle details, see
 [`docs/concepts/memory-lifecycle.md`](docs/concepts/memory-lifecycle.md).

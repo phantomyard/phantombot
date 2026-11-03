@@ -671,14 +671,24 @@ now, so do not touch kb/ files.
    drawer first to avoid duplicates — but do keep each entry short and
    self-contained, because entries are ranked and injected individually.
    \`phantombot memory drawers --kind <kind>\` shows what is already filed.
-3. MAINTAIN MEMORY.md — the always-in-context orientation layer. Fill AND trim:
+3. CLOSE COMMITMENTS. Run
+   \`phantombot memory drawers --kind commitments --limit 50\` (each line
+   shows its id); for more, page with \`--offset 50\`, \`--offset 100\`, and
+   stop after four pages — later nights reach the rest. The top-ranked open
+   commitments are injected into every turn, so a finished one left open
+   crowds out a live one. For each one the daily file or your own memory
+   shows is settled:
+     - met, done or no longer wanted → \`phantombot memory drawers --discharge <id>\`
+     - its date or window passed unmet → \`phantombot memory drawers --expire <id>\`
+   Leave a commitment open when you cannot tell; never close one on a guess.
+4. MAINTAIN MEMORY.md — the always-in-context orientation layer. Fill AND trim:
      - FILL: add a few SHORT one-line bullets under "## Recent" for durable,
        still-relevant facts worth having in context every turn. Summarise and
        point at the drawer or KB note holding the detail; never paste entries.
      - TRIM: remove "## Recent" bullets that are stale or now have a permanent
        home. If a section has bloated into prose, move the detail into a KB
        note and leave a one-line pointer.
-Finish with a one-line summary of what you filed.`,
+Finish with a one-line summary of what you filed and closed.`,
 
   kb: (today) => `STAGE: KB (durable knowledge)
 

@@ -45,10 +45,35 @@ rows with ranking, decay, and supersession. The heartbeat promotes tagged
 captures into them. They are not Markdown files and should not be hand-edited.
 Norms and prior rulings also brief the threat judge.
 
+Every capable turn gets a "Standing memory" block: the top-ranked active
+entries of all five drawers, packed at entry boundaries under a 12 KB cap with
+a per-drawer share (`src/memory/standingMemory.ts`, the same packer the judge
+uses). It is a ranked selection, not the whole drawer. Every active entry is
+also published to the search index as a virtual note at
+`drawers/<kind>/<id>.md`, reconciled in one pass by the heartbeat, by every
+`memory search` and by every CLI drawer write; `memory get` resolves those
+paths back to the row. Commitments leave both when they are closed —
+`discharged` (met) or `expired` (missed) — and the nightly's distil stage
+closes the ones that are settled.
+
+Commitments are kept to obligations a person or an interactive turn took on
+(#761). `memory capture` records the turn's conversation
+(`PHANTOMBOT_CONVERSATION`, else `cli:default`), and the heartbeat does not
+promote a `commitment` tag from a scheduler row (`source = task`, the `task N:
+… — fires …` line `task add` journals) or from a scheduled turn (`tick:`
+conversation). Those rows stay in the journal and the index, and their other
+tags still promote. Each heartbeat also expires active commitments in the exact
+scheduler format that were filed before the rule; nothing else is touched and
+nothing is deleted. In the standing-memory block, commitments that match the
+turn's user message in the search index (any term of 3+ characters, best BM25
+first) come first, followed by the rest in normal ranked order. With no
+message, no index, no match or an index error, the order is unchanged.
+
 ## Nightly distillation
 
 After day rollover, the cognitive sweep processes closed journal days into the
-drawers, a lean `MEMORY.md`, and linked Open Knowledge Format notes under `kb/`.
+drawers, a lean `MEMORY.md`, and linked Open Knowledge Format notes under `kb/`,
+and closes settled commitments (paged, at most four pages of 50 a night).
 It is checkpointed and idempotent: a healthy completed day is not repeatedly
 reprocessed, while a changed or incomplete day is retried.
 
