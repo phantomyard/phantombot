@@ -542,14 +542,16 @@ CREATE TABLE IF NOT EXISTS turn_index_state (
 );
 `;
 
-/** matchPathsUnder (#763): words too common to say what a message is about. */
-const MATCH_STOPWORDS: ReadonlySet<string> = new Set([
-  "the", "and", "you", "your", "that", "this", "with", "from", "have", "will",
-  "what", "when", "then", "them", "they", "there", "here", "been", "were",
-  "about", "into", "just", "like", "also", "only", "some", "more", "than",
-  "very", "does", "done", "want", "need", "okay", "yeah", "please", "robbie",
-]);
-const MATCH_MIN_TERM_LENGTH = 4;
+/**
+ * matchPathsUnder: a term stops counting once it appears in more than this
+ * share of the rows under the prefix. Measured per persona and per call, so
+ * each persona's own filler ("the", "que", "het", a capture label, a project
+ * name on every row) drops out in any language, with no word list.
+ */
+const MATCH_MAX_DOC_FRACTION = 0.1;
+/** ...but a term in this many rows or fewer always counts (tiny drawers). */
+const MATCH_MIN_DOC_CAP = 2;
+const MATCH_MIN_TERM_LENGTH = 3;
 const MATCH_MIN_SHARED_TERMS = 2;
 
 export class MemoryIndex {
@@ -1574,43 +1576,52 @@ export class MemoryIndex {
   }
 
   /**
-   * Paths under `prefix` sharing at least 2 distinct real terms with `query`,
-   * best BM25 first (#761, #763). The query is lowercased, stopwords and terms
-   * under 4 characters are dropped; an OR query finds the candidates and a
-   * per-term pass counts how many distinct terms each one shares. Fewer than
-   * 2 usable terms: no hits.
+   * Paths under `prefix` sharing at least 2 distinct distinctive terms with
+   * `query`, best BM25 first (#761, #763). A term is distinctive when it
+   * appears in at most max(MATCH_MIN_DOC_CAP, 10%) of the rows under `prefix`:
+   * words that are on most rows say nothing about which row a message is
+   * about, whatever the language. Letters are matched as Unicode, so accented
+   * and non-Latin words survive tokenization. Fewer than 2 distinctive terms
+   * in the query: no hits.
    */
   matchPathsUnder(prefix: string, query: string, limit = 20): string[] {
     const terms = [
       ...new Set(
         query
           .toLowerCase()
-          .replace(/[^a-z0-9_\- ]+/g, " ")
+          .normalize("NFKC")
+          .replace(/[^\p{L}\p{N}_\- ]+/gu, " ")
           .split(/\s+/)
-          .filter((t) => t.length >= MATCH_MIN_TERM_LENGTH && !MATCH_STOPWORDS.has(t)),
+          .filter((t) => [...t].length >= MATCH_MIN_TERM_LENGTH && /[\p{L}\p{N}]/u.test(t)),
       ),
     ].slice(0, 32);
     if (terms.length < MATCH_MIN_SHARED_TERMS) return [];
     const scoped = `AND substr(path, 1, ?) = ?`;
-    const candidates = (
+    const { n } = this.db
+      .query(`SELECT count(*) AS n FROM notes WHERE substr(path, 1, ?) = ?`)
+      .get(prefix.length, prefix) as { n: number };
+    const cap = Math.max(MATCH_MIN_DOC_CAP, Math.floor(n * MATCH_MAX_DOC_FRACTION));
+    const perTerm = this.db.query(`SELECT path FROM notes WHERE notes MATCH ? ${scoped}`);
+    const distinctive: string[] = [];
+    const shared = new Map<string, number>();
+    for (const t of terms) {
+      const rows = perTerm.all(`"${t}"`, prefix.length, prefix) as Array<{ path: string }>;
+      if (rows.length === 0 || rows.length > cap) continue;
+      distinctive.push(t);
+      for (const r of rows) shared.set(r.path, (shared.get(r.path) ?? 0) + 1);
+    }
+    if (distinctive.length < MATCH_MIN_SHARED_TERMS) return [];
+    return (
       this.db
         .query(
           `SELECT path FROM notes WHERE notes MATCH ? ${scoped} ` +
             `ORDER BY bm25(notes, ${NOTE_FIELD_WEIGHTS.join(", ")})`,
         )
-        .all(terms.map((t) => `"${t}"`).join(" OR "), prefix.length, prefix) as Array<{
+        .all(distinctive.map((t) => `"${t}"`).join(" OR "), prefix.length, prefix) as Array<{
         path: string;
       }>
-    ).map((r) => r.path);
-    if (candidates.length === 0) return [];
-    const shared = new Map<string, number>();
-    const perTerm = this.db.query(`SELECT path FROM notes WHERE notes MATCH ? ${scoped}`);
-    for (const t of terms) {
-      for (const r of perTerm.all(`"${t}"`, prefix.length, prefix) as Array<{ path: string }>) {
-        shared.set(r.path, (shared.get(r.path) ?? 0) + 1);
-      }
-    }
-    return candidates
+    )
+      .map((r) => r.path)
       .filter((p) => (shared.get(p) ?? 0) >= MATCH_MIN_SHARED_TERMS)
       .slice(0, limit);
   }

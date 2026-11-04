@@ -146,16 +146,6 @@ export const STANDING_MEMORY_PREAMBLE =
   "it with `phantombot memory drawers --discharge <id>`; when its window has " +
   "passed unmet, `--expire <id>`.";
 
-/**
- * Drop "commit"-family words from the query before matching. Most rows carry a
- * "[commitment]" capture label, and porter stems commitment, commitments,
- * committed and commits alike to "commit", so the word would count as a shared
- * term on nearly every row in a drawer that is all commitments anyway.
- */
-function withoutCommitWords(query: string): string {
-  return query.replace(/\bcommit(?:s|ted|ting|ment|ments)?\b/gi, " ");
-}
-
 /** Move commitments the query matches to the front, in match order. Never throws. */
 async function relevanceFirst<T extends DrawerEntry>(
   entries: T[],
@@ -167,7 +157,7 @@ async function relevanceFirst<T extends DrawerEntry>(
   try {
     ix = await MemoryIndex.open(path);
     const order = new Map<string, number>();
-    for (const p of ix.matchPathsUnder(`${DRAWER_INDEX_PREFIX}commitments/`, withoutCommitWords(input.query!))) {
+    for (const p of ix.matchPathsUnder(`${DRAWER_INDEX_PREFIX}commitments/`, input.query!)) {
       const id = /\/([^/]+)\.md$/.exec(p)?.[1];
       if (id && !order.has(id)) order.set(id, order.size);
     }
