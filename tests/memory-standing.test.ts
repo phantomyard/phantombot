@@ -688,3 +688,50 @@ describe("commitments ranked by relevance to the turn (#761)", () => {
     expect(await buildStandingMemory({ dbPath, persona: PERSONA, indexPath, query: "zebra xylophone" })).toBe(plain);
   });
 });
+
+describe("commitment relevance needs 2 real shared terms (#763)", () => {
+  async function seedAndIndex(): Promise<string> {
+    await seed((s) => {
+      s.file({ persona: PERSONA, kind: "commitments", content: "renew the kospel boiler warranty", assertedAt: new Date("2026-01-01T00:00:00Z") });
+      s.file({ persona: PERSONA, kind: "commitments", content: "chase the kospel installer about your quote", assertedAt: new Date("2026-01-02T00:00:00Z") });
+      for (let i = 0; i < 4; i++) {
+        s.file({ persona: PERSONA, kind: "commitments", content: `newer obligation number ${i} that you have from this`, assertedAt: new Date(`2026-02-0${i + 1}T00:00:00Z`) });
+      }
+    });
+    const indexPath = join(root, "index.sqlite");
+    const { store, close } = await openDrawerStore(dbPath);
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      syncDrawerIndex(ix, store, PERSONA);
+    } finally {
+      ix.close();
+      close();
+    }
+    return indexPath;
+  }
+  const commitmentLines = (block: string) =>
+    block.split("\n").filter((l) => /^- \[[0-9a-f]+\]/.test(l));
+
+  test("stopwords and short words match nothing", async () => {
+    const indexPath = await seedAndIndex();
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      expect(ix.matchPathsUnder("drawers/commitments/", "what have you done with this from that? ok it is")).toEqual([]);
+    } finally {
+      ix.close();
+    }
+  });
+
+  test("1 shared real term is not a hit; 2 is, and ranks first", async () => {
+    const indexPath = await seedAndIndex();
+    const plain = await buildStandingMemory({ dbPath, persona: PERSONA, indexPath });
+    // Only "kospel" is shared with any commitment: no hits, order unchanged.
+    expect(await buildStandingMemory({ dbPath, persona: PERSONA, indexPath, query: "Kospel?" })).toBe(plain);
+    expect(await buildStandingMemory({ dbPath, persona: PERSONA, indexPath, query: "kospel zebra" })).toBe(plain);
+    // "kospel" + "warranty": only the warranty row shares both.
+    const lines = commitmentLines((await buildStandingMemory({ dbPath, persona: PERSONA, indexPath, query: "Is the Kospel warranty sorted?" }))!);
+    expect(lines[0]).toContain("kospel boiler warranty");
+    expect(lines[1]).toContain("newer obligation");
+    expect(lines).toHaveLength(commitmentLines(plain!).length);
+  });
+});

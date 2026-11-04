@@ -101,3 +101,55 @@ describe("runMemoryMaintenance", () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+describe("commitment hygiene (#763)", () => {
+  test("expires empty, scheduler-format and duplicate commitments only, never deletes", async () => {
+    const dir = await workdir();
+    const dbPath = join(dir, "memory.sqlite");
+    const { store, close } = await openDrawerStore(dbPath);
+    const at = (d: string) => new Date(`2026-${d}T00:00:00Z`);
+    const f = (content: string, d: string, kind: "commitments" | "lessons" = "commitments") =>
+      store.file({ persona: PERSONA, kind, content, assertedAt: at(d) }).id;
+    const ids = {
+      empty: f("", "10-01"),
+      blank: f("  -- ?! ", "10-01"),
+      stampOnly: f("[commitment]  · 09:31Z", "10-01"),
+      scheduler: f("[commitment] task 42: check the inbox — fires 2026-10-02T09:00:00Z", "10-01"),
+      dupOld: f("[commitment] Renew the Kospel warranty · 08:00Z", "10-01"),
+      dupMid: f("renew   the kospel WARRANTY", "10-02"),
+      dupNew: f("Renew the Kospel warranty · 11:15Z", "10-03"),
+      normal: f("pay the 2019 tax bill", "01-01"),
+      lesson: f("", "10-01", "lessons"),
+    };
+    close();
+    expect(new Set(Object.values(ids)).size).toBe(Object.keys(ids).length);
+
+    const out = sink();
+    const r = await runMemoryMaintenance({ dbPath, persona: PERSONA, out, skipSnapshot: true });
+    expect(r.errors).toEqual([]);
+    expect(r.commitmentHygiene).toEqual({ empty: 3, scheduler: 1, duplicate: 2 });
+    expect(out.text()).toContain("nightly: 6 commitment(s) expired by hygiene (empty 3, scheduler 1, duplicate 2)");
+
+    const re = await openDrawerStore(dbPath);
+    try {
+      const status = new Map(
+        [...re.store.list(PERSONA, "commitments"), ...re.store.list(PERSONA, "lessons")].map((e) => [e.id, e.status]),
+      );
+      expect(status.size).toBe(Object.keys(ids).length); // nothing deleted
+      for (const k of ["empty", "blank", "stampOnly", "scheduler", "dupOld", "dupMid"] as const) {
+        expect([k, status.get(ids[k])]).toEqual([k, "expired"]);
+      }
+      expect(status.get(ids.dupNew)).toBe("active");
+      expect(status.get(ids.normal)).toBe("active");
+      expect(status.get(ids.lesson)).toBe("active");
+    } finally {
+      re.close();
+    }
+
+    const out2 = sink();
+    const r2 = await runMemoryMaintenance({ dbPath, persona: PERSONA, out: out2, skipSnapshot: true });
+    expect(r2.commitmentHygiene).toEqual({ empty: 0, scheduler: 0, duplicate: 0 });
+    expect(out2.text()).not.toContain("hygiene");
+    await rm(dir, { recursive: true, force: true });
+  });
+});

@@ -25,6 +25,7 @@
  * into the restore points.
  */
 
+import { SCHEDULER_COMMITMENT } from "./heartbeat.ts";
 import type { WriteSink } from "./io.ts";
 import { log } from "./logger.ts";
 import {
@@ -33,6 +34,7 @@ import {
   type BackupResult,
 } from "../memory/dbBackup.ts";
 import { openDrawerStore } from "../memory/drawerSync.ts";
+import type { DrawerEntry, DrawerStore } from "../memory/drawers.ts";
 import { openJournalStore } from "../memory/journalIngest.ts";
 import {
   renderClosedDays,
@@ -43,11 +45,68 @@ import {
 export interface MaintenanceResult {
   /** Beliefs moved to `dormant` this run. */
   dormant: number;
+  /** Commitments expired by the hygiene rules (#763), per rule. */
+  commitmentHygiene?: CommitmentHygieneResult;
   /** Closed journal days rendered to markdown, and rows pruned (#461). */
   journal?: JournalRenderResult;
   backup?: BackupResult;
   /** Anything that failed. Reported, never thrown — see below. */
   errors: string[];
+}
+
+export interface CommitmentHygieneResult {
+  empty: number;
+  scheduler: number;
+  duplicate: number;
+}
+
+/** Tag, stamp, case and spacing stripped: what two copies of one commitment share. */
+export function normaliseCommitment(content: string): string {
+  return content
+    .replace(/^\s*\[commitment\]\s*/i, "")
+    .replace(/\s*·\s*\d{1,2}:\d{2}Z\s*$/, "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+/**
+ * Expire junk ACTIVE commitments (#763): empty or blank rows, the scheduler
+ * format, and exact duplicates after normalising (the newest survives).
+ * Expire only, never delete; other kinds and anything else are left alone,
+ * however old. Idempotent: a second run expires nothing.
+ */
+export function expireJunkCommitments(store: DrawerStore, persona: string): CommitmentHygieneResult {
+  const r: CommitmentHygieneResult = { empty: 0, scheduler: 0, duplicate: 0 };
+  const groups = new Map<string, DrawerEntry[]>();
+  for (const e of store.list(persona, "commitments")) {
+    if (e.status !== "active") continue;
+    const norm = normaliseCommitment(e.content);
+    if ((norm.match(/[\p{L}\p{N}]/gu)?.length ?? 0) < 3) {
+      store.setStatus(e.id, "expired");
+      r.empty++;
+    } else if (SCHEDULER_COMMITMENT.test(e.content)) {
+      store.setStatus(e.id, "expired");
+      r.scheduler++;
+    } else {
+      const g = groups.get(norm);
+      if (g) g.push(e);
+      else groups.set(norm, [e]);
+    }
+  }
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    g.sort(
+      (a, b) =>
+        b.assertedAt.getTime() - a.assertedAt.getTime() ||
+        b.lastReaffirmedAt.getTime() - a.lastReaffirmedAt.getTime(),
+    );
+    for (const e of g.slice(1)) {
+      store.setStatus(e.id, "expired");
+      r.duplicate++;
+    }
+  }
+  return r;
 }
 
 /**
@@ -109,6 +168,27 @@ export async function runMemoryMaintenance(input: {
     const msg = `dormancy sweep: ${(e as Error).message}`;
     result.errors.push(msg);
     log.warn("nightly: dormancy sweep failed", { error: (e as Error).message });
+  }
+
+  try {
+    const { store, close } = await openDrawerStore(input.dbPath);
+    try {
+      const h = expireJunkCommitments(store, input.persona);
+      result.commitmentHygiene = h;
+      const n = h.empty + h.scheduler + h.duplicate;
+      if (n > 0) {
+        write(
+          `nightly: ${n} commitment(s) expired by hygiene ` +
+            `(empty ${h.empty}, scheduler ${h.scheduler}, duplicate ${h.duplicate})\n`,
+        );
+      }
+    } finally {
+      close();
+    }
+  } catch (e) {
+    const msg = `commitment hygiene: ${(e as Error).message}`;
+    result.errors.push(msg);
+    log.warn("nightly: commitment hygiene failed", { error: (e as Error).message });
   }
 
   // The journal render — rows to markdown, verified, then the rows of days an
