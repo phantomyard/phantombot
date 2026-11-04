@@ -23,12 +23,19 @@
  *   3. DECAY — BUT ONLY FOR BELIEFS. `norms`, `lessons` and `decisions` are
  *      claims about how the world works; they go stale, and an unreaffirmed
  *      2024 decision must not outrank a 2026 one. `commitments` and `people`
- *      do NOT decay: a commitment is open, discharged or overdue — age makes
- *      it MORE urgent, not less relevant, so decaying it would silently bury
- *      the one thing that needed surfacing. A person fact ("date of birth") is
- *      not less true for going a year unmentioned. Those two move by `status`
- *      alone. Getting this wrong in either direction is a data-loss bug, so
- *      the split lives in one exported list (`BELIEF_KINDS`), not in a comment.
+ *      do NOT decay: a commitment is open, discharged or overdue, and a person
+ *      fact ("date of birth") is not less true for going a year unmentioned.
+ *      Those two move by `status` alone — neither ever goes dormant. Getting
+ *      this wrong in either direction is a data-loss bug, so the split lives
+ *      in one exported list (`BELIEF_KINDS`), not in a comment.
+ *
+ *      Commitments do FADE IN RANK (#767): their score halves every
+ *      COMMITMENT_HALF_LIFE_DAYS without reaffirmation, so a hoard of stale
+ *      rows stops outranking this week's when both match a message. That is
+ *      ordering only — a faded commitment is never filtered, never dormant,
+ *      stays active and searchable — and the nightly commitment review walks
+ *      the oldest of them so each one is eventually closed or kept by a
+ *      deliberate decision rather than silently buried.
  *   4. LIFECYCLE. `status` carries what a flat file could only imply, so a
  *      discharged commitment stops ranking against a live one.
  *
@@ -138,6 +145,14 @@ export const HALF_LIFE_DAYS: Record<DrawerKind, number> = {
 };
 
 /**
+ * Rank fade for commitments (#767): score = weight · 2^(-ageDays / this), off
+ * `last_reaffirmed_at`. ORDERING ONLY — commitments are not in BELIEF_KINDS,
+ * so no floor applies and nothing ever goes dormant. A month: this week's
+ * obligations outrank last quarter's, and refiling one brings it back.
+ */
+export const COMMITMENT_HALF_LIFE_DAYS = 30;
+
+/**
  * Below this decayed score a belief goes `dormant`: it stops being injected,
  * stays queryable, and any reaffirmation brings it straight back. Chosen so a
  * default-weight entry survives three half-lives of total silence before going
@@ -210,6 +225,15 @@ CREATE INDEX IF NOT EXISTS idx_drawer_entries_rank
   ON drawer_entries (persona, kind, status, last_reaffirmed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_drawer_entries_supersedes
   ON drawer_entries (persona, supersedes);
+-- Nightly commitment review cursor (#767): when each commitment was last put
+-- in front of the review stage, so the walk moves on instead of re-reading
+-- the same oldest rows every night. Its own table: drawer_entries is untouched.
+CREATE TABLE IF NOT EXISTS commitment_reviews (
+  persona     TEXT NOT NULL,
+  id          TEXT NOT NULL,
+  reviewed_at TEXT NOT NULL,
+  PRIMARY KEY (persona, id)
+);
 `;
 
 export function ensureDrawerSchema(db: Database): void {
@@ -263,10 +287,17 @@ function mapRow(r: RawDrawerRow): DrawerEntry {
   };
 }
 
-/** Decayed score for one entry. Non-belief kinds are weight-only (no clock). */
+/**
+ * Decayed score for one entry. Beliefs decay by HALF_LIFE_DAYS; commitments
+ * fade by COMMITMENT_HALF_LIFE_DAYS (ranking only, see the header); people
+ * are weight-only (no clock).
+ */
 export function scoreEntry(entry: DrawerEntry, now: Date = new Date()): number {
-  if (!decays(entry.kind)) return entry.weight;
-  const halfLife = HALF_LIFE_DAYS[entry.kind];
+  if (entry.kind === "people") return entry.weight;
+  const halfLife =
+    entry.kind === "commitments"
+      ? COMMITMENT_HALF_LIFE_DAYS
+      : HALF_LIFE_DAYS[entry.kind];
   if (halfLife <= 0) return entry.weight;
   const ageDays =
     (now.getTime() - entry.lastReaffirmedAt.getTime()) / 86_400_000;
@@ -535,9 +566,9 @@ export class DrawerStore {
    * Ranked, injectable entries: `active` only, scored, highest first.
    *
    * Beliefs are scored off `last_reaffirmed_at` and dropped under
-   * DORMANT_FLOOR. Commitments and people are scored on weight alone — no
-   * clock — for the reason in the header. `now` is injectable so tests do not
-   * have to sleep.
+   * DORMANT_FLOOR. Commitments fade off the same clock but are NEVER dropped
+   * (#767); people are scored on weight alone. `now` is injectable so tests
+   * do not have to sleep.
    */
   ranked(
     persona: string,
@@ -567,6 +598,44 @@ export class DrawerStore {
       )
       .all(persona, kind) as RawDrawerRow[];
     return rows.map(mapRow);
+  }
+
+  /**
+   * The commitments the nightly review should read tonight (#767): a
+   * `fraction` of the ACTIVE ones (rounded up, at least one when any exist),
+   * never-reviewed first, then least recently reviewed; oldest reaffirmation
+   * first within each. A percentage, not a count, so a persona with a hoard
+   * works through it in a fixed number of nights and a small one is not
+   * re-read every night.
+   */
+  commitmentReviewBatch(persona: string, fraction: number): DrawerEntry[] {
+    const { n } = this.db
+      .query(
+        "SELECT count(*) AS n FROM drawer_entries " +
+          "WHERE persona = ? AND kind = 'commitments' AND status = 'active'",
+      )
+      .get(persona) as { n: number };
+    if (n === 0 || !(fraction > 0)) return [];
+    const take = Math.max(1, Math.ceil(n * Math.min(fraction, 1)));
+    const rows = this.db
+      .query(
+        "SELECT d.* FROM drawer_entries d " +
+          "LEFT JOIN commitment_reviews r ON r.persona = d.persona AND r.id = d.id " +
+          "WHERE d.persona = ? AND d.kind = 'commitments' AND d.status = 'active' " +
+          "ORDER BY r.reviewed_at IS NOT NULL, r.reviewed_at, d.last_reaffirmed_at, d.id " +
+          "LIMIT ?",
+      )
+      .all(persona, take) as RawDrawerRow[];
+    return rows.map(mapRow);
+  }
+
+  /** Record that these commitments were put in front of the review stage. */
+  markCommitmentsReviewed(persona: string, ids: string[], now: Date = new Date()): void {
+    const q = this.db.query(
+      "INSERT INTO commitment_reviews (persona, id, reviewed_at) VALUES (?, ?, ?) " +
+        "ON CONFLICT (persona, id) DO UPDATE SET reviewed_at = excluded.reviewed_at",
+    );
+    for (const id of ids) q.run(persona, id, now.toISOString());
   }
 
   /**

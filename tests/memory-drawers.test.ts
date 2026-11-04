@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BELIEF_KINDS,
+  COMMITMENT_HALF_LIFE_DAYS,
   DORMANT_FLOOR,
   DrawerStore,
   DRAWER_KINDS,
@@ -290,7 +291,7 @@ describe("decay", () => {
     expect(s.get(old.id)).toBeDefined();
   });
 
-  test("commitments and people NEVER decay, however old", () => {
+  test("commitments and people NEVER decay out, however old", () => {
     const s = store();
     const now = new Date();
     for (const kind of ["commitments", "people"] as const) {
@@ -302,8 +303,9 @@ describe("decay", () => {
         assertedAt: daysAgo(365 * 10),
       });
       expect(decays(kind)).toBe(false);
-      expect(scoreEntry(entry, now)).toBe(1);
-      // Still ranked, still injectable: age makes an obligation urgent, not stale.
+      if (kind === "people") expect(scoreEntry(entry, now)).toBe(1);
+      // Still ranked, still injectable, even when a commitment's rank fade
+      // (#767) has taken its score far under DORMANT_FLOOR.
       expect(s2.ranked(PERSONA, kind, { now }).map((e) => e.id)).toEqual([
         entry.id,
       ]);
@@ -317,6 +319,39 @@ describe("decay", () => {
     });
     expect(s.sweepDormant(PERSONA, now)).toHaveLength(0);
     expect(s.get(c.id)!.status).toBe("active");
+  });
+
+  test("commitments fade in rank by COMMITMENT_HALF_LIFE_DAYS (#767)", () => {
+    const s = store();
+    const now = new Date();
+    const old = s.file({
+      persona: PERSONA,
+      kind: "commitments",
+      content: "Old obligation.",
+      weight: 2,
+      assertedAt: daysAgo(COMMITMENT_HALF_LIFE_DAYS),
+    });
+    const fresh = s.file({
+      persona: PERSONA,
+      kind: "commitments",
+      content: "Fresh obligation.",
+      assertedAt: daysAgo(1),
+    });
+    expect(scoreEntry(old, now)).toBeCloseTo(1, 3);
+    expect(scoreEntry(fresh, now)).toBeLessThan(1);
+    expect(scoreEntry(fresh, now)).toBeGreaterThan(0.97);
+    // Weight 2 at one half-life ties weight 1 fresh; at two half-lives the
+    // heavier one loses — the clock, not just weight, now orders commitments.
+    const older = s.file({
+      persona: PERSONA,
+      kind: "commitments",
+      content: "Older heavy obligation.",
+      weight: 2,
+      assertedAt: daysAgo(COMMITMENT_HALF_LIFE_DAYS * 2),
+    });
+    const ranked = s.ranked(PERSONA, "commitments", { now }).map((e) => e.id);
+    expect(ranked.indexOf(fresh.id)).toBeLessThan(ranked.indexOf(older.id));
+    expect(ranked).toHaveLength(3);
   });
 
   test("the belief split is exactly the three belief drawers", () => {

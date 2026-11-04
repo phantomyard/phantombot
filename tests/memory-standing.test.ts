@@ -822,3 +822,41 @@ describe("commitment relevance by document frequency, any language", () => {
     expect(await match(indexPath, "the and the rest")).toEqual([]);
   });
 });
+
+describe("relevance hits are weighted by rank fade (#767)", () => {
+  test("a fresh match outranks a stale stronger one; both stay ahead of non-matches", async () => {
+    const day = 86_400_000;
+    let staleId = "";
+    await seed((s) => {
+      staleId = s.file({ persona: PERSONA, kind: "commitments", content: "renew kospel boiler warranty certificate", assertedAt: new Date(Date.now() - 120 * day) }).id;
+      s.file({ persona: PERSONA, kind: "commitments", content: "ask about kospel boiler today", assertedAt: new Date(Date.now() - 1 * day) });
+      for (let i = 0; i < 4; i++) {
+        s.file({ persona: PERSONA, kind: "commitments", content: `unrelated obligation number ${i}`, assertedAt: new Date(Date.now() - (10 + i) * day) });
+      }
+    });
+    const indexPath = join(root, "fade-index.sqlite");
+    const { store, close } = await openDrawerStore(dbPath);
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      syncDrawerIndex(ix, store, PERSONA);
+      // Precondition: on match strength alone the stale row is the better hit.
+      const order = ix.matchPathsUnder("drawers/commitments/", "kospel boiler warranty certificate");
+      expect(order).toHaveLength(2);
+      expect(order[0]).toContain(staleId);
+    } finally {
+      ix.close();
+      close();
+    }
+    const lines = (await buildStandingMemory({
+      dbPath,
+      persona: PERSONA,
+      indexPath,
+      query: "kospel boiler warranty certificate",
+    }))!
+      .split("\n")
+      .filter((l) => /^- \[[0-9a-f]+\]/.test(l));
+    expect(lines[0]).toContain("ask about kospel boiler today");
+    expect(lines[1]).toContain("renew kospel boiler warranty");
+    expect(lines).toHaveLength(6);
+  });
+});
