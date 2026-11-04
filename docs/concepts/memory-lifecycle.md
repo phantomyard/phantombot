@@ -65,9 +65,20 @@ conversation). Those rows stay in the journal and the index, and their other
 tags still promote. Each heartbeat also expires active commitments in the exact
 scheduler format that were filed before the rule; nothing else is touched and
 nothing is deleted. In the standing-memory block, commitments that match the
-turn's user message in the search index (any term of 3+ characters, best BM25
-first) come first, followed by the rest in normal ranked order. With no
-message, no index, no match or an index error, the order is unchanged.
+turn's user message in the search index come first, best BM25 first, followed
+by the rest in normal ranked order. A commitment matches only when it shares at
+least 2 distinct terms with the message, after lowercasing, dropping a fixed
+stopword list and dropping terms under 4 characters (#763). With no message,
+fewer than 2 usable terms, no index, no match or an index error, the order is
+unchanged.
+
+Each nightly maintenance run also applies commitment hygiene (#763). It
+normalises active commitments (leading `[commitment] ` tag and trailing
+` · HH:MMZ` stamp stripped, whitespace collapsed, lowercased) and expires
+exactly three kinds: empty or blank rows (fewer than 3 letters or digits), the
+scheduler format above, and exact duplicates, keeping the newest. It only
+expires, never deletes, never touches other drawers, and has no age, fuzzy or
+LLM rule. A second run expires nothing.
 
 ## Nightly distillation
 

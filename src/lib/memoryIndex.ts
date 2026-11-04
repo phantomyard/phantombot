@@ -542,6 +542,16 @@ CREATE TABLE IF NOT EXISTS turn_index_state (
 );
 `;
 
+/** matchPathsUnder (#763): words too common to say what a message is about. */
+const MATCH_STOPWORDS: ReadonlySet<string> = new Set([
+  "the", "and", "you", "your", "that", "this", "with", "from", "have", "will",
+  "what", "when", "then", "them", "they", "there", "here", "been", "were",
+  "about", "into", "just", "like", "also", "only", "some", "more", "than",
+  "very", "does", "done", "want", "need", "okay", "yeah", "please", "robbie",
+]);
+const MATCH_MIN_TERM_LENGTH = 4;
+const MATCH_MIN_SHARED_TERMS = 2;
+
 export class MemoryIndex {
   /**
    * Runs a closure inside one IMMEDIATE write transaction.
@@ -1564,32 +1574,45 @@ export class MemoryIndex {
   }
 
   /**
-   * Paths under `prefix` matching ANY term of `query`, best BM25 first (#761).
-   * OR, not the AND `search` uses: a whole user message as an AND query
-   * matches almost nothing. Terms under 3 characters are dropped.
+   * Paths under `prefix` sharing at least 2 distinct real terms with `query`,
+   * best BM25 first (#761, #763). The query is lowercased, stopwords and terms
+   * under 4 characters are dropped; an OR query finds the candidates and a
+   * per-term pass counts how many distinct terms each one shares. Fewer than
+   * 2 usable terms: no hits.
    */
   matchPathsUnder(prefix: string, query: string, limit = 20): string[] {
     const terms = [
       ...new Set(
         query
-          .replace(/[^A-Za-z0-9_\- ]+/g, " ")
+          .toLowerCase()
+          .replace(/[^a-z0-9_\- ]+/g, " ")
           .split(/\s+/)
-          .filter((t) => t.length >= 3),
+          .filter((t) => t.length >= MATCH_MIN_TERM_LENGTH && !MATCH_STOPWORDS.has(t)),
       ),
     ].slice(0, 32);
-    if (terms.length === 0) return [];
-    const rows = this.db
-      .query(
-        `SELECT path FROM notes WHERE notes MATCH ? ` +
-          `AND substr(path, 1, ?) = ? ORDER BY bm25(notes, ${NOTE_FIELD_WEIGHTS.join(", ")}) LIMIT ?`,
-      )
-      .all(
-        terms.map((t) => `"${t}"`).join(" OR "),
-        prefix.length,
-        prefix,
-        limit,
-      ) as Array<{ path: string }>;
-    return rows.map((r) => r.path);
+    if (terms.length < MATCH_MIN_SHARED_TERMS) return [];
+    const scoped = `AND substr(path, 1, ?) = ?`;
+    const candidates = (
+      this.db
+        .query(
+          `SELECT path FROM notes WHERE notes MATCH ? ${scoped} ` +
+            `ORDER BY bm25(notes, ${NOTE_FIELD_WEIGHTS.join(", ")})`,
+        )
+        .all(terms.map((t) => `"${t}"`).join(" OR "), prefix.length, prefix) as Array<{
+        path: string;
+      }>
+    ).map((r) => r.path);
+    if (candidates.length === 0) return [];
+    const shared = new Map<string, number>();
+    const perTerm = this.db.query(`SELECT path FROM notes WHERE notes MATCH ? ${scoped}`);
+    for (const t of terms) {
+      for (const r of perTerm.all(`"${t}"`, prefix.length, prefix) as Array<{ path: string }>) {
+        shared.set(r.path, (shared.get(r.path) ?? 0) + 1);
+      }
+    }
+    return candidates
+      .filter((p) => (shared.get(p) ?? 0) >= MATCH_MIN_SHARED_TERMS)
+      .slice(0, limit);
   }
 
   /**

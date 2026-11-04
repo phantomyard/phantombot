@@ -485,7 +485,7 @@ function isMachineRow(entry: { source: string; conversation?: string }): boolean
 }
 
 /** The exact line `task add` journals (src/cli/task.ts writeCommitmentToDaily). */
-const SCHEDULER_COMMITMENT = /^(\[commitment\] )?task \d+: .* — fires \d{4}-/;
+export const SCHEDULER_COMMITMENT = /^(\[commitment\] )?task \d+: .* — fires \d{4}-/;
 
 /**
  * Expire the scheduler bookkeeping already filed as commitments before #761
