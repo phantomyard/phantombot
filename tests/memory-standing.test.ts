@@ -689,13 +689,13 @@ describe("commitments ranked by relevance to the turn (#761)", () => {
   });
 });
 
-describe("commitment relevance needs 2 real shared terms (#763)", () => {
+describe("commitment relevance needs 2 distinctive shared terms (#763)", () => {
   async function seedAndIndex(): Promise<string> {
     await seed((s) => {
       s.file({ persona: PERSONA, kind: "commitments", content: "renew the kospel boiler warranty", assertedAt: new Date("2026-01-01T00:00:00Z") });
       s.file({ persona: PERSONA, kind: "commitments", content: "chase the kospel installer about your quote", assertedAt: new Date("2026-01-02T00:00:00Z") });
       for (let i = 0; i < 4; i++) {
-        s.file({ persona: PERSONA, kind: "commitments", content: `newer obligation number ${i} that you have from this`, assertedAt: new Date(`2026-02-0${i + 1}T00:00:00Z`) });
+        s.file({ persona: PERSONA, kind: "commitments", content: `newer obligation number ${i} that you have from the list`, assertedAt: new Date(`2026-02-0${i + 1}T00:00:00Z`) });
       }
     });
     const indexPath = join(root, "index.sqlite");
@@ -712,7 +712,7 @@ describe("commitment relevance needs 2 real shared terms (#763)", () => {
   const commitmentLines = (block: string) =>
     block.split("\n").filter((l) => /^- \[[0-9a-f]+\]/.test(l));
 
-  test("stopwords and short words match nothing", async () => {
+  test("words on most rows, and words under 3 letters, match nothing", async () => {
     const indexPath = await seedAndIndex();
     const ix = await MemoryIndex.open(indexPath);
     try {
@@ -734,7 +734,7 @@ describe("commitment relevance needs 2 real shared terms (#763)", () => {
     expect(lines[1]).toContain("newer obligation");
     expect(lines).toHaveLength(commitmentLines(plain!).length);
   });
-  test("the [commitment] capture label is not a shared term", async () => {
+  test("the [commitment] capture label is not a shared term (it is on every row)", async () => {
     await seed((s) => {
       s.file({ persona: PERSONA, kind: "commitments", content: "[commitment] renew the kospel boiler warranty", assertedAt: new Date("2026-01-01T00:00:00Z") });
       for (let i = 0; i < 4; i++) {
@@ -758,5 +758,67 @@ describe("commitment relevance needs 2 real shared terms (#763)", () => {
     // Two real terms still match.
     const lines = commitmentLines((await buildStandingMemory({ dbPath, persona: PERSONA, indexPath, query: "my commitment on the kospel warranty" }))!);
     expect(lines[0]).toContain("kospel boiler warranty");
+  });
+});
+
+describe("commitment relevance by document frequency, any language", () => {
+  async function seedRows(rows: string[]): Promise<string> {
+    await seed((s) => {
+      rows.forEach((content, i) =>
+        s.file({ persona: PERSONA, kind: "commitments", content, assertedAt: new Date(Date.UTC(2026, 0, 1 + i)) }),
+      );
+    });
+    const indexPath = join(root, "index.sqlite");
+    const { store, close } = await openDrawerStore(dbPath);
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      syncDrawerIndex(ix, store, PERSONA);
+    } finally {
+      ix.close();
+      close();
+    }
+    return indexPath;
+  }
+  async function match(indexPath: string, query: string): Promise<string[]> {
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      return ix.matchPathsUnder("drawers/commitments/", query);
+    } finally {
+      ix.close();
+    }
+  }
+  const filler = (word: string, n: number) =>
+    Array.from({ length: n }, (_, i) => `${word} tarea número ${i} para la semana que viene`);
+
+  test("Spanish: accented words tokenize whole, Spanish filler drops out by frequency", async () => {
+    const indexPath = await seedRows([
+      "renovar la garantía de la caldera kospel",
+      "llamar al instalador para la cotización",
+      ...filler("revisar", 20),
+    ]);
+    // "garantía" + "caldera" are rare: the warranty row only.
+    const hits = await match(indexPath, "¿Qué pasa con la garantía de la caldera?");
+    expect(hits).toHaveLength(1);
+    // "para" / "que" / "semana" sit on most rows: on their own they match nothing.
+    expect(await match(indexPath, "para la semana que viene")).toEqual([]);
+  });
+
+  test("a label on every row (a project name, a tag) is not a shared term", async () => {
+    const indexPath = await seedRows([
+      "phantomchat renew the kospel boiler warranty",
+      ...Array.from({ length: 20 }, (_, i) => `phantomchat follow up item ${i}`),
+    ]);
+    // Only "kospel" is distinctive; "phantomchat" is on every row.
+    expect(await match(indexPath, "phantomchat kospel")).toEqual([]);
+    expect(await match(indexPath, "phantomchat kospel warranty")).toHaveLength(1);
+  });
+
+  test("3-letter rare words count (ENT, SOC), common 3-letter ones do not", async () => {
+    const indexPath = await seedRows([
+      "ENT follow-up at Rijnstate on Monday",
+      ...Array.from({ length: 20 }, (_, i) => `the inbox poll ${i} and the rest`),
+    ]);
+    expect(await match(indexPath, "when is the ENT at Rijnstate?")).toHaveLength(1);
+    expect(await match(indexPath, "the and the rest")).toEqual([]);
   });
 });

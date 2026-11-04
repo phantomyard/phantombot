@@ -67,9 +67,11 @@ scheduler format that were filed before the rule; nothing else is touched and
 nothing is deleted. In the standing-memory block, commitments that match the
 turn's user message in the search index come first, best BM25 first, followed
 by the rest in normal ranked order. A commitment matches only when it shares at
-least 2 distinct terms with the message, after lowercasing, dropping a fixed
-stopword list and dropping terms under 4 characters (#763). With no message,
-fewer than 2 usable terms, no index, no match or an index error, the order is
+least 2 distinct distinctive terms with the message. Terms are Unicode words
+of 3 or more characters; a term is distinctive when it appears in at most
+max(2, 10%) of the persona's open commitments, so filler words, capture labels
+and names on most rows drop out in any language, with no word list. With no
+message, fewer than 2 distinctive terms, no index, no match or an index error, the order is
 unchanged.
 
 Each nightly maintenance run also applies commitment hygiene (#763). It
