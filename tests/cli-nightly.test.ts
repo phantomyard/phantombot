@@ -63,7 +63,7 @@ async function daily(date: string, body = `notes for ${date}`): Promise<void> {
 
 interface StageCall {
   date: string;
-  stage: NightlyStage | "override" | "compact";
+  stage: NightlyStage | "override" | "compact" | "review";
   prompt: string;
   startedAt: number;
   endedAt: number;
@@ -78,7 +78,7 @@ function harness(opts: { fail?: string[]; delayMs?: number } = {}) {
   const calls: StageCall[] = [];
   const runStage = async (a: {
     date: string;
-    stage: NightlyStage | "override" | "compact";
+    stage: NightlyStage | "override" | "compact" | "review";
     prompt: string;
   }) => {
     const startedAt = Date.now();
@@ -1014,5 +1014,56 @@ describe("runNightly — compaction stage (#410)", () => {
     expect(await Bun.file(join(personaDir, "MEMORY.md")).text()).toBe(over);
     const state = await loadNightlyState(personaDir);
     expect(state.errors?.some((e) => e.startsWith("compaction:"))).toBe(true);
+  });
+});
+
+describe("runNightly — commitment review (#767)", () => {
+  async function seedCommitments(n: number): Promise<void> {
+    const { openDrawerStore } = await import("../src/memory/drawerSync.ts");
+    const { store, close } = await openDrawerStore(config.memoryDbPath);
+    try {
+      for (let i = 0; i < n; i++) {
+        store.file({ persona: "phantom", kind: "commitments", content: `obligation ${i}` });
+      }
+    } finally {
+      close();
+    }
+  }
+
+  test("runs once per sweep when commitments are open", async () => {
+    await seedCommitments(3);
+    const h = harness();
+    const out = new CaptureStream();
+    expect(
+      await runNightly({ config, now, out, runStage: h.runStage, refreshIndex: async () => {} }),
+    ).toBe(0);
+    expect(h.calls.filter((c) => c.stage === "review")).toHaveLength(1);
+    expect(out.text).toContain("commitment review — 1 reviewed");
+  });
+
+  test("--no-review and --date backfills skip it", async () => {
+    await seedCommitments(3);
+    await daily("2026-05-01");
+    const skip = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(), runStage: skip.runStage,
+      refreshIndex: async () => {}, skipCommitmentReview: true,
+    });
+    expect(skip.calls.some((c) => c.stage === "review")).toBe(false);
+    const backfill = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(), runStage: backfill.runStage,
+      refreshIndex: async () => {}, today: "2026-05-01", force: true,
+    });
+    expect(backfill.calls.some((c) => c.stage === "review")).toBe(false);
+  });
+
+  test("a failed review turn is a sweep error", async () => {
+    await seedCommitments(3);
+    const h = harness({ fail: ["2026-05-10:review"] });
+    const code = await runNightly({
+      config, now, out: new CaptureStream(), runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(code).not.toBe(0);
   });
 });

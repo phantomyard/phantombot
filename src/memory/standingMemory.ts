@@ -146,8 +146,16 @@ export const STANDING_MEMORY_PREAMBLE =
   "it with `phantombot memory drawers --discharge <id>`; when its window has " +
   "passed unmet, `--expire <id>`.";
 
-/** Move commitments the query matches to the front, in match order. Never throws. */
-async function relevanceFirst<T extends DrawerEntry>(
+/**
+ * Move commitments the query matches to the front. Never throws.
+ *
+ * Hits are ordered by match strength weighted by rank fade (#767): the i-th
+ * best match scores `fade / (1 + i)`, where fade is the entry's ranked score
+ * (2^(-age/30d) at default weight). A stale strong match therefore yields to a
+ * fresh decent one — a hoard of old rows that share words with the message
+ * can no longer crowd out this week's — but still ranks among the hits.
+ */
+async function relevanceFirst<T extends DrawerEntry & { score?: number }>(
   entries: T[],
   input: { persona: string; query?: string; indexPath?: string },
 ): Promise<T[]> {
@@ -163,7 +171,8 @@ async function relevanceFirst<T extends DrawerEntry>(
     }
     if (order.size === 0) return entries;
     const hit = entries.filter((e) => order.has(e.id));
-    hit.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
+    const strength = (e: T) => (e.score ?? 1) / (1 + order.get(e.id)!);
+    hit.sort((a, b) => strength(b) - strength(a) || order.get(a.id)! - order.get(b.id)!);
     return [...hit, ...entries.filter((e) => !order.has(e.id))];
   } catch (e) {
     log.warn("standing memory: commitment relevance skipped", {

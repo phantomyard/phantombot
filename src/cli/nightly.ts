@@ -41,6 +41,7 @@ import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
 import { refreshPersonaIndex } from "../lib/indexRefresh.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import { runCommitmentReview } from "../lib/nightlyCommitmentReview.ts";
 import { runMemoryMaintenance } from "../lib/nightlyMaintenance.ts";
 import {
   buildCompactionPrompt,
@@ -120,6 +121,11 @@ export interface RunNightlyInput {
    * rewrite MEMORY.md.
    */
   skipCompaction?: boolean;
+  /**
+   * Skip the commitment review stage (#767). Set by `--no-review`; always
+   * skipped for a `--date` backfill and for a monolithic prompt override.
+   */
+  skipCommitmentReview?: boolean;
   out?: WriteSink;
   err?: WriteSink;
   /** Test seam — override the clock. */
@@ -128,7 +134,7 @@ export interface RunNightlyInput {
   runStage?: (args: {
     persona: string;
     date: string;
-    stage: NightlyStage | "override" | "compact";
+    stage: NightlyStage | "override" | "compact" | "review";
     prompt: string;
   }) => Promise<TurnResult>;
   /** Test seam — skip the real index refresh. */
@@ -661,6 +667,42 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     }
 
     // ---------------------------------------------------------------------
+    // Commitment review (#767). Once per sweep, after compaction: one turn
+    // reads COMMITMENT_REVIEW_FRACTION of the open commitments, oldest and
+    // least recently reviewed first, and code applies only its explicit
+    // DISCHARGE/EXPIRE lines for ids in the batch. Runs even after a stage
+    // error — it only moves commitment status, which no other stage rewrites,
+    // and the tail snapshot below captures the result.
+    // ---------------------------------------------------------------------
+    if (!input.skipCommitmentReview && !input.today && !monolithic) {
+      await holdSweep(todayStamp, queue.length, queue.length);
+      const reviewDate = now.toISOString().slice(0, 10);
+      const review = await runCommitmentReview({
+        dbPath: config.memoryDbPath,
+        persona,
+        today: reviewDate,
+        now,
+        out,
+        runOne: async (prompt) =>
+          input.runStage
+            ? await input.runStage({ persona, date: reviewDate, stage: "review", prompt })
+            : await runNightlyTurn({
+                persona,
+                conversation: `${nightlyConversationKey(reviewDate)}:review`,
+                userMessage: prompt,
+                agentDir: dir,
+                harnesses,
+                memory: memory!,
+                promptCache: config.promptCache,
+              }),
+      });
+      if (review?.error) {
+        errors.push(`commitment review: ${review.error}`);
+        log.error("nightly: commitment review failed", { persona, error: review.error });
+      }
+    }
+
+    // ---------------------------------------------------------------------
     // Stage four TAIL: dormancy sweep + restore point (issue #417).
     //
     // The RENDER half of this stage now runs at the head of the sweep (see
@@ -740,6 +782,12 @@ export default defineCommand({
         "Skip the compaction stage (leave over-budget files untouched).",
       default: false,
     },
+    "no-review": {
+      type: "boolean",
+      description:
+        "Skip the commitment review stage (leave open commitments untouched).",
+      default: false,
+    },
   },
   async run({ args }) {
     const max = args["max-dates"] ? Number(args["max-dates"]) : undefined;
@@ -749,6 +797,7 @@ export default defineCommand({
       maxDates: Number.isFinite(max) ? max : undefined,
       force: Boolean(args.force),
       skipCompaction: Boolean(args["no-compact"]),
+      skipCommitmentReview: Boolean(args["no-review"]),
     });
   },
 });
