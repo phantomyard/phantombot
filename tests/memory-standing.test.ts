@@ -734,4 +734,29 @@ describe("commitment relevance needs 2 real shared terms (#763)", () => {
     expect(lines[1]).toContain("newer obligation");
     expect(lines).toHaveLength(commitmentLines(plain!).length);
   });
+  test("the [commitment] capture label is not a shared term", async () => {
+    await seed((s) => {
+      s.file({ persona: PERSONA, kind: "commitments", content: "[commitment] renew the kospel boiler warranty", assertedAt: new Date("2026-01-01T00:00:00Z") });
+      for (let i = 0; i < 4; i++) {
+        s.file({ persona: PERSONA, kind: "commitments", content: `[commitment] newer obligation number ${i}`, assertedAt: new Date(`2026-02-0${i + 1}T00:00:00Z`) });
+      }
+    });
+    const indexPath = join(root, "index.sqlite");
+    const { store, close } = await openDrawerStore(dbPath);
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      syncDrawerIndex(ix, store, PERSONA);
+    } finally {
+      ix.close();
+      close();
+    }
+    const plain = await buildStandingMemory({ dbPath, persona: PERSONA, indexPath });
+    // Only "kospel" is a real shared term; the commit-family words must not make it two.
+    for (const query of ["Did I make a commitment about Kospel?", "kospel commitments", "what was committed on kospel"]) {
+      expect(await buildStandingMemory({ dbPath, persona: PERSONA, indexPath, query })).toBe(plain);
+    }
+    // Two real terms still match.
+    const lines = commitmentLines((await buildStandingMemory({ dbPath, persona: PERSONA, indexPath, query: "my commitment on the kospel warranty" }))!);
+    expect(lines[0]).toContain("kospel boiler warranty");
+  });
 });
