@@ -50,9 +50,7 @@
  * the env var holding it, which the vault already put in the child env.
  */
 
-import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { join } from "node:path";
+import { appendFileSync, readFileSync, rmSync } from "node:fs";
 
 import {
   decisionModelDecide,
@@ -62,7 +60,6 @@ import {
   capPayloadUtf8,
   decisionModelLevelToScore100,
 } from "./decisionModelJudge.ts";
-import { readPersonaIdentityNsec } from "./personaIdentity.ts";
 import { wrapJudgeContent } from "./threatJudge.ts";
 
 /** Child-env var carrying the escort context (JSON) into the harness. */
@@ -569,61 +566,30 @@ export function claudeEscortHooks(command: string[]): Record<string, unknown> {
 /** How long the same held action stays announced (issue #768: no repeats). */
 export const ESCORT_HOLD_REPEAT_WINDOW_MS = 12 * 60 * 60 * 1000;
 
-/** The per-persona ledger of recently announced holds. */
-export const ESCORT_HOLD_LEDGER_FILE = "escort-hold-notices.json";
-
 /**
- * The ledger's MAC key, derived from the persona nsec. The ledger lives in a
- * directory the escorted turn can write, and its keys are summaries the turn
- * authors itself, so an unauthenticated entry would let a turn pre-seed its
- * own next action and silence the notice for the whole window. Only entries
- * MACed by phantombot count. No identity ⇒ no key ⇒ nothing is suppressed
- * (fail toward telling the principal).
+ * Recently announced holds, per persona scope, in THIS process's memory only.
+ * Deliberately not a file: anything on disk sits where the escorted turn runs
+ * (same OS user, bypass-permissions harness), so it could pre-seed, forge or
+ * corrupt a ledger — or read any key used to sign one — and silence its own
+ * notice. Process memory is the one place the turn cannot reach. A restart or
+ * a fresh `phantombot` process re-announces, which fails toward telling the
+ * principal.
  */
-function holdLedgerKey(ledgerDir: string): Buffer | undefined {
-  let nsec: string | undefined;
-  try {
-    nsec = readPersonaIdentityNsec(ledgerDir);
-  } catch {
-    nsec = undefined;
-  }
-  if (!nsec) return undefined;
-  return createHash("sha256").update("phantombot-escort-hold-ledger\0").update(nsec).digest();
+const announcedHolds = new Map<string, Map<string, number>>();
+
+/** Test-only: forget every announced hold. */
+export function resetEscortHoldAnnouncements(): void {
+  announcedHolds.clear();
 }
 
-function holdLedgerMac(key: Buffer, summary: string, t: number): string {
-  return createHmac("sha256", key).update(`${summary}\0${t}`).digest("hex");
-}
-
-function macMatches(expected: string, got: unknown): boolean {
-  if (typeof got !== "string" || got.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(expected), Buffer.from(got));
-}
-
-type HoldLedgerEntry = { t: number; mac: string };
-
-function readHoldLedger(
-  ledgerDir: string,
-  key: Buffer,
-  now: number,
-  windowMs: number,
-): Record<string, HoldLedgerEntry> {
-  let seen: Record<string, unknown> = {};
-  try {
-    const v = JSON.parse(readFileSync(join(ledgerDir, ESCORT_HOLD_LEDGER_FILE), "utf8")) as unknown;
-    if (v && typeof v === "object") seen = v as Record<string, unknown>;
-  } catch {
-    seen = {};
+function liveAnnounced(scope: string, now: number, windowMs: number): Map<string, number> {
+  let seen = announcedHolds.get(scope);
+  if (!seen) {
+    seen = new Map();
+    announcedHolds.set(scope, seen);
   }
-  const kept: Record<string, HoldLedgerEntry> = {};
-  for (const [k, e] of Object.entries(seen)) {
-    if (!e || typeof e !== "object") continue;
-    const { t, mac } = e as { t?: unknown; mac?: unknown };
-    if (typeof t !== "number" || !Number.isFinite(t) || t > now || now - t >= windowMs) continue;
-    if (!macMatches(holdLedgerMac(key, k, t), mac)) continue;
-    kept[k] = { t, mac: mac as string };
-  }
-  return kept;
+  for (const [k, t] of seen) if (t > now || now - t >= windowMs) seen.delete(k);
+  return seen;
 }
 
 /**
@@ -631,42 +597,28 @@ function readHoldLedger(
  * few minutes onto the same held step must not ping the principal every few
  * minutes. READ-ONLY: a hold is only consumed by `markEscortHoldsAnnounced`,
  * after the notice was actually delivered — a failed notify must leave it
- * fresh, or it would sit silent for the whole window. An unreadable ledger,
- * a missing persona identity, or an entry without a valid MAC announces
+ * fresh, or it would sit silent for the whole window. No scope announces
  * (fail toward telling the principal).
  */
 export function freshEscortHolds(
-  ledgerDir: string | undefined,
+  scope: string | undefined,
   holds: EscortHold[],
   now: number = Date.now(),
   windowMs: number = ESCORT_HOLD_REPEAT_WINDOW_MS,
 ): EscortHold[] {
-  if (!ledgerDir || holds.length === 0) return holds;
-  const key = holdLedgerKey(ledgerDir);
-  if (!key) return holds;
-  const kept = readHoldLedger(ledgerDir, key, now, windowMs);
-  return holds.filter((h) => kept[h.summary] === undefined);
+  if (!scope || holds.length === 0) return holds;
+  const seen = liveAnnounced(scope, now, windowMs);
+  return holds.filter((h) => !seen.has(h.summary));
 }
 
-/**
- * Record holds as announced now. Call ONLY after the notice was delivered.
- * Best-effort: an unwritable ledger is ignored (the hold may be announced
- * again, which is the safe direction).
- */
+/** Record holds as announced now. Call ONLY after the notice was delivered. */
 export function markEscortHoldsAnnounced(
-  ledgerDir: string | undefined,
+  scope: string | undefined,
   holds: EscortHold[],
   now: number = Date.now(),
   windowMs: number = ESCORT_HOLD_REPEAT_WINDOW_MS,
 ): void {
-  if (!ledgerDir || holds.length === 0) return;
-  const key = holdLedgerKey(ledgerDir);
-  if (!key) return;
-  const kept = readHoldLedger(ledgerDir, key, now, windowMs);
-  for (const h of holds) kept[h.summary] = { t: now, mac: holdLedgerMac(key, h.summary, now) };
-  try {
-    writeFileSync(join(ledgerDir, ESCORT_HOLD_LEDGER_FILE), JSON.stringify(kept), { mode: 0o600 });
-  } catch {
-    // ignore
-  }
+  if (!scope || holds.length === 0) return;
+  const seen = liveAnnounced(scope, now, windowMs);
+  for (const h of holds) seen.set(h.summary, now);
 }

@@ -87,9 +87,11 @@ log is writable by the turn it records, and a summary is the action's own
 model-authored text, so relaying it would give a prompt-injected turn an
 unescorted line into the principal's chat. Summaries are used internally as
 dedup keys and nothing else. The same held action is not
-announced again for 12 hours (`escort-hold-notices.json` in the persona dir;
-a hold is recorded there only once its notice was delivered, so a failed
-notify is retried on the next turn),
+announced again for 12 hours by the same phantombot process (kept in process
+memory only: any file in the persona dir is writable, forgeable or readable by
+the escorted turn, so it could silence its own notice; a restart or a new
+process re-announces. A hold is recorded only once its notice was delivered,
+so a failed notify is retried on the next turn),
 so a poller that wakes every few minutes onto the same step does not ping
 every few minutes. The turn's model is told the principal will hear about it,
 so it neither notifies separately nor leaves the step for "a later turn".

@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,7 +18,7 @@ import {
   ENV_PHANTOMBOT_ESCORT,
   ESCORT_ACTION_CAP_BYTES,
   ESCORT_BRIEFING_CAP_BYTES,
-  ESCORT_HOLD_LEDGER_FILE,
+  resetEscortHoldAnnouncements,
   ESCORT_HOLD_SUMMARY_CHARS,
   drainEscortHolds,
   escortBlockMessage,
@@ -425,56 +425,47 @@ describe("the principal's notice is one short plain line (#768)", () => {
     expect(n).not.toMatch(/\d+\/100/);
   });
 
-  // The ledger's MAC key derives from the persona identity.
-  const personaTmp = (): string => {
-    const dir = tmp();
-    writeFileSync(join(dir, "identity.json"), JSON.stringify({ nsec: "nsec1testpersonasecretforescortledger" }));
-    return dir;
-  };
-
+  // Suppression lives in process memory only (#768 review): nothing on disk
+  // the escorted turn could write, forge or read a key from.
   it("the same hold is announced once per window", () => {
-    const dir = personaTmp();
+    resetEscortHoldAnnouncements();
+    const scope = tmp();
     const h = [{ summary: "git push" }];
-    expect(freshEscortHolds(dir, h, 1_000, 10_000)).toEqual(h);
+    expect(freshEscortHolds(scope, h, 1_000, 10_000)).toEqual(h);
     // Filtering alone never consumes: only a delivered notice is marked.
-    expect(freshEscortHolds(dir, h, 2_000, 10_000)).toEqual(h);
-    markEscortHoldsAnnounced(dir, h, 1_000, 10_000);
-    expect(freshEscortHolds(dir, h, 5_000, 10_000)).toEqual([]);
-    expect(freshEscortHolds(dir, [{ summary: "other" }], 5_000, 10_000)).toEqual([{ summary: "other" }]);
-    expect(freshEscortHolds(dir, h, 12_000, 10_000)).toEqual(h);
-    expect(existsSync(join(dir, ESCORT_HOLD_LEDGER_FILE))).toBe(true);
+    expect(freshEscortHolds(scope, h, 2_000, 10_000)).toEqual(h);
+    markEscortHoldsAnnounced(scope, h, 1_000, 10_000);
+    expect(freshEscortHolds(scope, h, 5_000, 10_000)).toEqual([]);
+    expect(freshEscortHolds(scope, [{ summary: "other" }], 5_000, 10_000)).toEqual([{ summary: "other" }]);
+    expect(freshEscortHolds(tmp(), h, 5_000, 10_000)).toEqual(h);
+    expect(freshEscortHolds(scope, h, 12_000, 10_000)).toEqual(h);
+    // No file is ever written for the turn to tamper with.
+    expect(readdirSync(scope)).toEqual([]);
   });
 
-  it("an unreadable ledger announces (fails toward telling)", () => {
-    const dir = personaTmp();
-    writeFileSync(join(dir, ESCORT_HOLD_LEDGER_FILE), "{bad");
-    expect(freshEscortHolds(dir, [{ summary: "git push" }])).toEqual([{ summary: "git push" }]);
-  });
-
-  it("a ledger entry the turn wrote itself cannot silence the notice", () => {
-    const dir = personaTmp();
+  it("files the turn writes in the persona dir cannot silence the notice", () => {
+    resetEscortHoldAnnouncements();
+    const scope = tmp();
     const h = [{ summary: "printf 'x' > /tmp/whatever" }];
-    // Old plain shape, and the new shape with a forged MAC: both ignored.
-    writeFileSync(join(dir, ESCORT_HOLD_LEDGER_FILE), JSON.stringify({ [h[0]!.summary]: 4_000 }));
-    expect(freshEscortHolds(dir, h, 5_000, 10_000)).toEqual(h);
-    expect(escortHoldNotice(freshEscortHolds(dir, h, 5_000, 10_000))).toBe("🔒 1 action was held in a background task.");
+    writeFileSync(join(scope, "identity.json"), JSON.stringify({ nsec: "nsec1testpersonasecret" }));
     writeFileSync(
-      join(dir, ESCORT_HOLD_LEDGER_FILE),
-      JSON.stringify({ [h[0]!.summary]: { t: 4_000, mac: "0".repeat(64) } }),
+      join(scope, "escort-hold-notices.json"),
+      JSON.stringify({
+        [h[0]!.summary]: { t: 4_000, mac: "0".repeat(64) },
+        plain: 4_000,
+        unrelated: { t: 4_000, mac: "é".repeat(64) },
+      }),
     );
-    expect(freshEscortHolds(dir, h, 5_000, 10_000)).toEqual(h);
-    // A genuine entry copied onto another summary does not transfer.
-    markEscortHoldsAnnounced(dir, [{ summary: "git push" }], 4_000, 10_000);
-    const real = JSON.parse(readFileSync(join(dir, ESCORT_HOLD_LEDGER_FILE), "utf8"));
-    writeFileSync(join(dir, ESCORT_HOLD_LEDGER_FILE), JSON.stringify({ ...real, [h[0]!.summary]: real["git push"] }));
-    expect(freshEscortHolds(dir, h, 5_000, 10_000)).toEqual(h);
-    expect(freshEscortHolds(dir, [{ summary: "git push" }], 5_000, 10_000)).toEqual([]);
+    expect(freshEscortHolds(scope, h, 5_000, 10_000)).toEqual(h);
+    expect(escortHoldNotice(freshEscortHolds(scope, h, 5_000, 10_000))).toBe("🔒 1 action was held in a background task.");
   });
 
-  it("without a persona identity nothing is suppressed", () => {
-    const dir = tmp();
+  it("a fresh process (reset) announces again", () => {
+    resetEscortHoldAnnouncements();
+    const scope = tmp();
     const h = [{ summary: "git push" }];
-    markEscortHoldsAnnounced(dir, h, 1_000, 10_000);
-    expect(freshEscortHolds(dir, h, 5_000, 10_000)).toEqual(h);
+    markEscortHoldsAnnounced(scope, h, 1_000, 10_000);
+    resetEscortHoldAnnouncements();
+    expect(freshEscortHolds(scope, h, 5_000, 10_000)).toEqual(h);
   });
 });

@@ -16,6 +16,7 @@ import { loadDecisionModelHealth } from "../src/lib/decisionModelHealth.ts";
 import { setLogSink } from "../src/lib/logSink.ts";
 
 import { makeScreener, type ScreenerDeps } from "../src/orchestrator/screen.ts";
+import { resetEscortHoldAnnouncements } from "../src/lib/escort.ts";
 import type { Config, DecisionModelSettings } from "../src/config.ts";
 import type { JudgeResult } from "../src/lib/threatJudge.ts";
 import type { decisionModelJudgeThreat } from "../src/lib/decisionModelJudge.ts";
@@ -619,13 +620,9 @@ describe("screener escort settings", () => {
 describe("screener escort briefing + hold notice (#768)", () => {
   const PASS = { ok: true as const, verdict: { score: 5, reason: "fine", question: "" } };
 
-  // The hold ledger is MAC-keyed by the persona identity; without one nothing
-  // is ever suppressed, so the repeat-suppression cases need an identity.
-  beforeEach(async () => {
-    await Bun.write(
-      join(personasDir, "robbie", "identity.json"),
-      JSON.stringify({ nsec: "nsec1testpersonasecretforescortledger" }),
-    );
+  // Hold suppression is process memory (#768 review); start each case clean.
+  beforeEach(() => {
+    resetEscortHoldAnnouncements();
   });
 
   it("a pass carries the persona's drawer briefing to the escort", async () => {
@@ -661,6 +658,29 @@ describe("screener escort briefing + hold notice (#768)", () => {
     // The next poller wake hits the same held step: nothing new to say.
     await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }]);
     expect(sent).toHaveLength(1);
+  });
+
+  it("persona-dir files the turn can write never silence a hold notice", async () => {
+    // Forged, plain and malformed-multibyte ledger entries plus a readable
+    // identity: suppression is process memory, so none of it counts.
+    await Bun.write(join(personasDir, "robbie", "identity.json"), JSON.stringify({ nsec: "nsec1forgeable" }));
+    await Bun.write(
+      join(personasDir, "robbie", "escort-hold-notices.json"),
+      JSON.stringify({
+        "git push": { t: Date.now(), mac: "0".repeat(64) },
+        plain: Date.now(),
+        unrelated: { t: Date.now(), mac: "é".repeat(64) },
+      }),
+    );
+    const sent: string[] = [];
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+      notify: async (m) => (sent.push(m), 0),
+    });
+    const v = await screen("hello");
+    await v.onEscortHolds!([{ summary: "git push" }]);
+    expect(sent).toEqual(["🔒 1 action was held in a background task."]);
   });
 
   it("a failing notify never throws out of onEscortHolds", async () => {
