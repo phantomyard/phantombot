@@ -177,9 +177,19 @@ const aria = engine.persona("aria");             // cheap handle; existence chec
 ```
 
 `delete` stops the persona's PhantomChat channel, cancels its running turns and
-waits for them to unwind, then removes its memory rows, search index and
-directory (vault and identity included). A turn started on a deleted persona
-ends with `persona_not_found`. Other personas are untouched.
+waits for them to unwind, then removes its memory rows (scheduled tasks
+included), search index and directory (vault and identity included). A turn
+started on a deleted persona ends with `persona_not_found`. Other personas are
+untouched.
+
+Everything keyed by the deleted NAME goes too, so nothing is left pointing at a
+persona that no longer exists: if it was the host default, `default_persona` is
+re-pointed at the same survivor a broken default would heal to (or cleared when
+it was the last one), through the audited `state.json` writer; its native agent
+dir `pi-native/personas/<name>` (the `auth.json` and model config the embedded
+engine would otherwise inherit into a persona re-created under that name) is
+removed — the host-level `pi-native/agent` migration source is not — and its
+`autostart_personas` / `[autostart_modes]` roster entries are dropped.
 
 A persona is two files the loader concatenates at every turn. `identity`,
 `tone`, `expertise`, `owner` and `hardRules` become **IDENTITY.md** (who it
