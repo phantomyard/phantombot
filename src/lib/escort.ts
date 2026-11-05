@@ -428,14 +428,20 @@ export function drainEscortHolds(holdLog: string): EscortHold[] {
 
 /**
  * The principal's notice for a turn's holds: ONE short line, no scores, no
- * jargon (issue #768 — the principal is already over-notified). Distinct
- * actions only; the rest are counted, not listed.
+ * jargon (issue #768 — the principal is already over-notified).
+ *
+ * COUNT ONLY, never a summary. The hold log sits in the persona's own `tmp/`,
+ * so the turn being escorted can write to it, and a summary is the action's
+ * own (model-authored) text anyway. Relaying it would hand a prompt-injected
+ * background turn an unescorted line into the principal's chat, inside
+ * phantombot's own frame. Summaries stay internal: dedup keys only.
  */
 export function escortHoldNotice(holds: EscortHold[]): string | undefined {
-  const distinct = [...new Set(holds.map((h) => h.summary))];
-  if (distinct.length === 0) return undefined;
-  const more = distinct.length > 1 ? ` (+${distinct.length - 1} more)` : "";
-  return `🔒 Held in a background task: ${distinct[0]}${more}.`;
+  const n = new Set(holds.map((h) => h.summary)).size;
+  if (n === 0) return undefined;
+  return n === 1
+    ? "🔒 1 action was held in a background task."
+    : `🔒 ${n} actions were held in a background task.`;
 }
 
 /** The slice of pi's ExtensionAPI the escort touches. */

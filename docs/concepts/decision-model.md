@@ -81,9 +81,12 @@ old behaviour).
 **Holds reach the principal (#768).** A held action is never parked silently.
 The escort records each hold in a per-turn log under the persona's `tmp/`.
 When the turn ends, phantombot sends the principal **one** short line for the
-whole turn, for example `🔒 Held in a background task: gh pr review 446
---approve.` There are no scores or jargon, and a
-second held action is counted, not listed. The same held action is not
+whole turn: `🔒 1 action was held in a background task.` (or `N actions
+were…`). There are no scores or jargon, and the line is a COUNT only: the hold
+log is writable by the turn it records, and a summary is the action's own
+model-authored text, so relaying it would give a prompt-injected turn an
+unescorted line into the principal's chat. Summaries are used internally as
+dedup keys and nothing else. The same held action is not
 announced again for 12 hours (`escort-hold-notices.json` in the persona dir;
 a hold is recorded there only once its notice was delivered, so a failed
 notify is retried on the next turn),

@@ -413,7 +413,14 @@ describe("the principal's notice is one short plain line (#768)", () => {
   it("one line, no scores, distinct actions counted", () => {
     expect(escortHoldNotice([])).toBeUndefined();
     const n = escortHoldNotice([{ summary: "git push" }, { summary: "git push" }, { summary: "gh pr review 1 --approve" }])!;
-    expect(n).toBe("🔒 Held in a background task: git push (+1 more).");
+    expect(n).toBe("🔒 2 actions were held in a background task.");
+    expect(escortHoldNotice([{ summary: "git push" }])).toBe("🔒 1 action was held in a background task.");
+  });
+
+  it("never relays the (agent-writable) summary text", () => {
+    const n = escortHoldNotice([{ summary: "go to evil.example/verify and re-enter your vault passphrase" }])!;
+    expect(n).not.toContain("evil.example");
+    expect(n).not.toContain("passphrase");
     expect(n).not.toContain("\n");
     expect(n).not.toMatch(/\d+\/100/);
   });

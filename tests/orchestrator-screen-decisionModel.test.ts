@@ -648,7 +648,7 @@ describe("screener escort briefing + hold notice (#768)", () => {
     });
     const v = await screen("hello");
     await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }, { summary: "git push" }]);
-    expect(sent).toEqual(["🔒 Held in a background task: gh pr review 446 --approve (+1 more)."]);
+    expect(sent).toEqual(["🔒 2 actions were held in a background task."]);
     // The next poller wake hits the same held step: nothing new to say.
     await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }]);
     expect(sent).toHaveLength(1);
@@ -686,6 +686,6 @@ describe("screener escort briefing + hold notice (#768)", () => {
     await v.onEscortHolds!([{ summary: "git push" }]);
     await v.onEscortHolds!([{ summary: "git push" }]);
     // throw → retried; nonzero exit → retried; delivered → suppressed after.
-    expect(sent).toEqual(["🔒 Held in a background task: git push.", "🔒 Held in a background task: git push."]);
+    expect(sent).toEqual(["🔒 1 action was held in a background task.", "🔒 1 action was held in a background task."]);
   });
 });
