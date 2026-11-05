@@ -7,6 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { appendFileSync, existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +16,7 @@ import { runTurn } from "../src/orchestrator/turn.ts";
 import type { ScreenVerdict } from "../src/orchestrator/screen.ts";
 import { type MemoryStore, openMemoryStore } from "../src/memory/store.ts";
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
-import type { EscortSettings } from "../src/lib/escort.ts";
+import type { EscortHold, EscortSettings } from "../src/lib/escort.ts";
 
 let agentDir: string;
 let memory: MemoryStore;
@@ -92,6 +93,43 @@ describe("runTurn + escort", () => {
     await run({ harnesses: [a.h], verdict: PASS_ESCORTED });
     expect(a.reqs).toHaveLength(1);
     expect(a.reqs[0]!.escort).toEqual({ ...SETTINGS, task: "please file the invoice" });
+  });
+
+  // Issue #768: a held action is never parked silently.
+  test("holds recorded during the turn reach onEscortHolds once, after the turn", async () => {
+    const calls: EscortHold[][] = [];
+    let holdLog: string | undefined;
+    const h: Harness = {
+      id: "claude",
+      supportsEscort: true,
+      available: async () => true,
+      async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        holdLog = req.escort?.holdLog;
+        // What the escort hook does on two refusals inside this turn.
+        appendFileSync(holdLog!, JSON.stringify({ summary: "git push origin fix" }) + "\n");
+        appendFileSync(holdLog!, JSON.stringify({ summary: "gh pr review 1 --approve" }) + "\n");
+        expect(calls).toHaveLength(0); // not before the turn ends
+        yield { type: "done", finalText: "done" };
+      },
+    };
+    await run({
+      harnesses: [h],
+      verdict: { ...PASS_ESCORTED, onEscortHolds: async (holds) => void calls.push(holds) },
+    });
+    expect(holdLog).toStartWith(join(agentDir, "tmp", "escort-holds-"));
+    expect(calls).toEqual([[{ summary: "git push origin fix" }, { summary: "gh pr review 1 --approve" }]]);
+    expect(existsSync(holdLog!)).toBe(false);
+  });
+
+  test("a turn with no holds tells nobody", async () => {
+    const calls: EscortHold[][] = [];
+    const a = harness("claude", true);
+    await run({
+      harnesses: [a.h],
+      verdict: { ...PASS_ESCORTED, onEscortHolds: async (holds) => void calls.push(holds) },
+    });
+    expect(a.reqs[0]!.escort?.holdLog).toBeDefined();
+    expect(calls).toHaveLength(0);
   });
 
   test("harnesses that cannot enforce the escort are left out of the chain", async () => {

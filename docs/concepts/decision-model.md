@@ -67,6 +67,35 @@ refused without asking — it is never judged on a cut-off head. The `claude`
 escort settings pin `disableAllHooks: false`, so a user-level setting cannot
 switch the hook off.
 
+**Briefing (#768).** The escort also sees the persona's briefing: the same
+ranked decisions, people and norms rows the threat judge is briefed from,
+packed to 6 KB. That is what lets it recognise the owner's routine work. For
+example, a fleet agent pushing a requested fix to its own PR branch,
+approving, replying to or resolving a review thread, or re-requesting
+reviewers from a background poller turn. The briefing is data: it never makes
+an action acceptable that serves an injected instruction. Calibrate with
+`bun scripts/evalDecisionModelJudge.ts --escort` (routine PR-loop actions must
+score under the threshold, hijacks at or above it; `--no-briefing` shows the
+old behaviour).
+
+**Holds reach the principal (#768).** A held action is never parked silently.
+The escort records each hold in a per-turn log under the persona's `tmp/`.
+When the turn ends, phantombot sends the principal **one** short line for the
+whole turn: `🔒 1 action was held in a background task.` (or `N actions
+were…`). There are no scores or jargon, and the line is a COUNT only: the hold
+log is writable by the turn it records, and a summary is the action's own
+model-authored text, so relaying it would give a prompt-injected turn an
+unescorted line into the principal's chat. Summaries are used internally as
+dedup keys and nothing else. The same held action is not
+announced again for 12 hours by the same phantombot process (kept in process
+memory only: any file in the persona dir is writable, forgeable or readable by
+the escorted turn, so it could silence its own notice; a restart or a new
+process re-announces. A hold is recorded only once its notice was delivered,
+so a failed notify is retried on the next turn),
+so a poller that wakes every few minutes onto the same step does not ping
+every few minutes. The turn's model is told the principal will hear about it,
+so it neither notifies separately nor leaves the step for "a later turn".
+
 Known limits:
 
 - **The task is capped at 2 KB.** On a longer message the escort judges

@@ -16,6 +16,7 @@ import { loadDecisionModelHealth } from "../src/lib/decisionModelHealth.ts";
 import { setLogSink } from "../src/lib/logSink.ts";
 
 import { makeScreener, type ScreenerDeps } from "../src/orchestrator/screen.ts";
+import { resetEscortHoldAnnouncements } from "../src/lib/escort.ts";
 import type { Config, DecisionModelSettings } from "../src/config.ts";
 import type { JudgeResult } from "../src/lib/threatJudge.ts";
 import type { decisionModelJudgeThreat } from "../src/lib/decisionModelJudge.ts";
@@ -611,5 +612,109 @@ describe("screener escort settings", () => {
     const v = await screen("hello");
     expect(v.action).toBe("pass");
     expect(v.escort).toBeUndefined();
+  });
+});
+
+// Issue #768: the escort is briefed from the same drawers as the judge, and a
+// turn's holds reach the principal as ONE short line, repeats suppressed.
+describe("screener escort briefing + hold notice (#768)", () => {
+  const PASS = { ok: true as const, verdict: { score: 5, reason: "fine", question: "" } };
+
+  // Hold suppression is process memory (#768 review); start each case clean.
+  beforeEach(() => {
+    resetEscortHoldAnnouncements();
+  });
+
+  it("a pass carries the persona's drawer briefing to the escort", async () => {
+    await Bun.write(
+      join(personasDir, "robbie", "memory", "norms.md"),
+      "- Reviewing and approving PRs on example-org/* is routine.\n",
+    );
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, { decisionModelJudge: jev.impl });
+    const v = await screen("hello");
+    expect(v.escort?.briefing).toContain("Reviewing and approving PRs on example-org/* is routine.");
+    expect(v.onEscortHolds).toBeDefined();
+  });
+
+  it("no drawers ⇒ no briefing key at all", async () => {
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, { decisionModelJudge: jev.impl });
+    const v = await screen("hello");
+    expect(v.escort).toBeDefined();
+    expect("briefing" in v.escort!).toBe(false);
+  });
+
+  it("onEscortHolds sends one plain line, and never the same hold twice", async () => {
+    const sent: string[] = [];
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+      notify: async (m) => (sent.push(m), 0),
+    });
+    const v = await screen("hello");
+    await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }, { summary: "git push" }]);
+    expect(sent).toEqual(["🔒 2 actions were held in a background task."]);
+    // The next poller wake hits the same held step: nothing new to say.
+    await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }]);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("persona-dir files the turn can write never silence a hold notice", async () => {
+    // Forged, plain and malformed-multibyte ledger entries plus a readable
+    // identity: suppression is process memory, so none of it counts.
+    await Bun.write(join(personasDir, "robbie", "identity.json"), JSON.stringify({ nsec: "nsec1forgeable" }));
+    await Bun.write(
+      join(personasDir, "robbie", "escort-hold-notices.json"),
+      JSON.stringify({
+        "git push": { t: Date.now(), mac: "0".repeat(64) },
+        plain: Date.now(),
+        unrelated: { t: Date.now(), mac: "é".repeat(64) },
+      }),
+    );
+    const sent: string[] = [];
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+      notify: async (m) => (sent.push(m), 0),
+    });
+    const v = await screen("hello");
+    await v.onEscortHolds!([{ summary: "git push" }]);
+    expect(sent).toEqual(["🔒 1 action was held in a background task."]);
+  });
+
+  it("a failing notify never throws out of onEscortHolds", async () => {
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+      notify: async () => {
+        throw new Error("telegram down");
+      },
+    });
+    const v = await screen("hello");
+    await expect(v.onEscortHolds!([{ summary: "git push" }])).resolves.toBeUndefined();
+  });
+
+  it("a failed notify does not consume the hold: the next turn announces it", async () => {
+    const sent: string[] = [];
+    let mode: "throw" | "nonzero" | "ok" = "throw";
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+      notify: async (m) => {
+        if (mode === "throw") throw new Error("telegram down");
+        sent.push(m);
+        return mode === "nonzero" ? 1 : 0;
+      },
+    });
+    const v = await screen("hello");
+    await v.onEscortHolds!([{ summary: "git push" }]);
+    mode = "nonzero";
+    await v.onEscortHolds!([{ summary: "git push" }]);
+    mode = "ok";
+    await v.onEscortHolds!([{ summary: "git push" }]);
+    await v.onEscortHolds!([{ summary: "git push" }]);
+    // throw → retried; nonzero exit → retried; delivered → suppressed after.
+    expect(sent).toEqual(["🔒 1 action was held in a background task.", "🔒 1 action was held in a background task."]);
   });
 });

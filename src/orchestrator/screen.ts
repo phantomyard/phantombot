@@ -153,7 +153,14 @@ import {
   decisionModelJudgeThreat,
 } from "../lib/decisionModelJudge.ts";
 import { recordDecisionModelOutcome } from "../lib/decisionModelHealth.ts";
-import type { EscortSettings } from "../lib/escort.ts";
+import {
+  ESCORT_BRIEFING_CAP_BYTES,
+  escortHoldNotice,
+  freshEscortHolds,
+  markEscortHoldsAnnounced,
+  type EscortHold,
+  type EscortSettings,
+} from "../lib/escort.ts";
 import {
   confirmAlertDelivered,
   noteAlertDeliveryFailed,
@@ -193,6 +200,12 @@ export interface ScreenVerdict {
    * with. Absent = no decision model, so the turn runs unescorted as before.
    */
   escort?: EscortSettings;
+  /**
+   * Pass + escort only (issue #768): tell the principal about the actions the
+   * escort held during the turn — ONE short line per turn, repeats of the same
+   * held action suppressed. runTurn calls it once the turn ends. Never throws.
+   */
+  onEscortHolds?: (holds: EscortHold[]) => Promise<void>;
 }
 
 /**
@@ -512,6 +525,34 @@ export function makeScreener(
     });
   };
 
+  // The escort's briefing (issue #768). Never throws.
+  const escortBriefing = async (): Promise<{ briefing?: string }> => {
+    try {
+      const b = await readBriefingDrawersCapped(config, persona, ESCORT_BRIEFING_CAP_BYTES);
+      return b && b.trim() !== "" ? { briefing: b } : {};
+    } catch {
+      return {};
+    }
+  };
+
+  // Escort holds → the principal, once (issue #768). One plain line per turn,
+  // no scores; the same held action is not announced again inside the repeat
+  // window. Delivery is best-effort: a failed notify never fails the turn,
+  // and never consumes the hold — the ledger is written only after a
+  // delivered notice, so the next turn tries again.
+  const onEscortHolds = async (holds: EscortHold[]): Promise<void> => {
+    try {
+      const fresh = freshEscortHolds(holdLedgerDir, holds);
+      const notice = escortHoldNotice(fresh);
+      if (!notice) return;
+      const code = await notify(notice);
+      if (code === 0) markEscortHoldsAnnounced(holdLedgerDir, fresh);
+      else log.warn("screen: escort hold notice not delivered", { code });
+    } catch (e) {
+      log.warn("screen: escort hold notice failed", { error: (e as Error).message });
+    }
+  };
+
   return async (content: string, signal?: AbortSignal): Promise<ScreenVerdict> => {
     // 1. Optional legacy recall (best-effort; never throws → ""). Production
     //    leaves recall unset; the persona context is the briefing now.
@@ -738,7 +779,12 @@ export function makeScreener(
                 keyEnv: jev!.keyEnv,
                 timeoutMs: jev!.judge.timeoutMs,
                 threshold: jev!.judge.threshold,
+                // The same ranked rows the judge briefs from (issue #768), so
+                // the escort knows what is routine in the owner's world.
+                // Best-effort: no briefing ⇒ the escort judges as before.
+                ...(await escortBriefing()),
               },
+              onEscortHolds,
             }
           : {}),
       };
