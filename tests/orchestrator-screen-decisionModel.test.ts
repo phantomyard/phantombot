@@ -619,6 +619,15 @@ describe("screener escort settings", () => {
 describe("screener escort briefing + hold notice (#768)", () => {
   const PASS = { ok: true as const, verdict: { score: 5, reason: "fine", question: "" } };
 
+  // The hold ledger is MAC-keyed by the persona identity; without one nothing
+  // is ever suppressed, so the repeat-suppression cases need an identity.
+  beforeEach(async () => {
+    await Bun.write(
+      join(personasDir, "robbie", "identity.json"),
+      JSON.stringify({ nsec: "nsec1testpersonasecretforescortledger" }),
+    );
+  });
+
   it("a pass carries the persona's drawer briefing to the escort", async () => {
     await Bun.write(
       join(personasDir, "robbie", "memory", "norms.md"),

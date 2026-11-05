@@ -425,8 +425,15 @@ describe("the principal's notice is one short plain line (#768)", () => {
     expect(n).not.toMatch(/\d+\/100/);
   });
 
-  it("the same hold is announced once per window", () => {
+  // The ledger's MAC key derives from the persona identity.
+  const personaTmp = (): string => {
     const dir = tmp();
+    writeFileSync(join(dir, "identity.json"), JSON.stringify({ nsec: "nsec1testpersonasecretforescortledger" }));
+    return dir;
+  };
+
+  it("the same hold is announced once per window", () => {
+    const dir = personaTmp();
     const h = [{ summary: "git push" }];
     expect(freshEscortHolds(dir, h, 1_000, 10_000)).toEqual(h);
     // Filtering alone never consumes: only a delivered notice is marked.
@@ -439,8 +446,35 @@ describe("the principal's notice is one short plain line (#768)", () => {
   });
 
   it("an unreadable ledger announces (fails toward telling)", () => {
-    const dir = tmp();
+    const dir = personaTmp();
     writeFileSync(join(dir, ESCORT_HOLD_LEDGER_FILE), "{bad");
     expect(freshEscortHolds(dir, [{ summary: "git push" }])).toEqual([{ summary: "git push" }]);
+  });
+
+  it("a ledger entry the turn wrote itself cannot silence the notice", () => {
+    const dir = personaTmp();
+    const h = [{ summary: "printf 'x' > /tmp/whatever" }];
+    // Old plain shape, and the new shape with a forged MAC: both ignored.
+    writeFileSync(join(dir, ESCORT_HOLD_LEDGER_FILE), JSON.stringify({ [h[0]!.summary]: 4_000 }));
+    expect(freshEscortHolds(dir, h, 5_000, 10_000)).toEqual(h);
+    expect(escortHoldNotice(freshEscortHolds(dir, h, 5_000, 10_000))).toBe("🔒 1 action was held in a background task.");
+    writeFileSync(
+      join(dir, ESCORT_HOLD_LEDGER_FILE),
+      JSON.stringify({ [h[0]!.summary]: { t: 4_000, mac: "0".repeat(64) } }),
+    );
+    expect(freshEscortHolds(dir, h, 5_000, 10_000)).toEqual(h);
+    // A genuine entry copied onto another summary does not transfer.
+    markEscortHoldsAnnounced(dir, [{ summary: "git push" }], 4_000, 10_000);
+    const real = JSON.parse(readFileSync(join(dir, ESCORT_HOLD_LEDGER_FILE), "utf8"));
+    writeFileSync(join(dir, ESCORT_HOLD_LEDGER_FILE), JSON.stringify({ ...real, [h[0]!.summary]: real["git push"] }));
+    expect(freshEscortHolds(dir, h, 5_000, 10_000)).toEqual(h);
+    expect(freshEscortHolds(dir, [{ summary: "git push" }], 5_000, 10_000)).toEqual([]);
+  });
+
+  it("without a persona identity nothing is suppressed", () => {
+    const dir = tmp();
+    const h = [{ summary: "git push" }];
+    markEscortHoldsAnnounced(dir, h, 1_000, 10_000);
+    expect(freshEscortHolds(dir, h, 5_000, 10_000)).toEqual(h);
   });
 });

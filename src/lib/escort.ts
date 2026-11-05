@@ -51,6 +51,7 @@
  */
 
 import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 
 import {
@@ -61,6 +62,7 @@ import {
   capPayloadUtf8,
   decisionModelLevelToScore100,
 } from "./decisionModelJudge.ts";
+import { readPersonaIdentityNsec } from "./personaIdentity.ts";
 import { wrapJudgeContent } from "./threatJudge.ts";
 
 /** Child-env var carrying the escort context (JSON) into the harness. */
@@ -570,21 +572,56 @@ export const ESCORT_HOLD_REPEAT_WINDOW_MS = 12 * 60 * 60 * 1000;
 /** The per-persona ledger of recently announced holds. */
 export const ESCORT_HOLD_LEDGER_FILE = "escort-hold-notices.json";
 
+/**
+ * The ledger's MAC key, derived from the persona nsec. The ledger lives in a
+ * directory the escorted turn can write, and its keys are summaries the turn
+ * authors itself, so an unauthenticated entry would let a turn pre-seed its
+ * own next action and silence the notice for the whole window. Only entries
+ * MACed by phantombot count. No identity ⇒ no key ⇒ nothing is suppressed
+ * (fail toward telling the principal).
+ */
+function holdLedgerKey(ledgerDir: string): Buffer | undefined {
+  let nsec: string | undefined;
+  try {
+    nsec = readPersonaIdentityNsec(ledgerDir);
+  } catch {
+    nsec = undefined;
+  }
+  if (!nsec) return undefined;
+  return createHash("sha256").update("phantombot-escort-hold-ledger\0").update(nsec).digest();
+}
+
+function holdLedgerMac(key: Buffer, summary: string, t: number): string {
+  return createHmac("sha256", key).update(`${summary}\0${t}`).digest("hex");
+}
+
+function macMatches(expected: string, got: unknown): boolean {
+  if (typeof got !== "string" || got.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(expected), Buffer.from(got));
+}
+
+type HoldLedgerEntry = { t: number; mac: string };
+
 function readHoldLedger(
   ledgerDir: string,
+  key: Buffer,
   now: number,
   windowMs: number,
-): Record<string, number> {
-  let seen: Record<string, number> = {};
+): Record<string, HoldLedgerEntry> {
+  let seen: Record<string, unknown> = {};
   try {
     const v = JSON.parse(readFileSync(join(ledgerDir, ESCORT_HOLD_LEDGER_FILE), "utf8")) as unknown;
-    if (v && typeof v === "object") seen = v as Record<string, number>;
+    if (v && typeof v === "object") seen = v as Record<string, unknown>;
   } catch {
     seen = {};
   }
-  const kept: Record<string, number> = {};
-  for (const [k, t] of Object.entries(seen)) {
-    if (typeof t === "number" && now - t < windowMs) kept[k] = t;
+  const kept: Record<string, HoldLedgerEntry> = {};
+  for (const [k, e] of Object.entries(seen)) {
+    if (!e || typeof e !== "object") continue;
+    const { t, mac } = e as { t?: unknown; mac?: unknown };
+    if (typeof t !== "number" || !Number.isFinite(t) || t > now || now - t >= windowMs) continue;
+    if (!macMatches(holdLedgerMac(key, k, t), mac)) continue;
+    kept[k] = { t, mac: mac as string };
   }
   return kept;
 }
@@ -594,8 +631,9 @@ function readHoldLedger(
  * few minutes onto the same held step must not ping the principal every few
  * minutes. READ-ONLY: a hold is only consumed by `markEscortHoldsAnnounced`,
  * after the notice was actually delivered — a failed notify must leave it
- * fresh, or it would sit silent for the whole window. An unreadable ledger
- * announces (fail toward telling the principal).
+ * fresh, or it would sit silent for the whole window. An unreadable ledger,
+ * a missing persona identity, or an entry without a valid MAC announces
+ * (fail toward telling the principal).
  */
 export function freshEscortHolds(
   ledgerDir: string | undefined,
@@ -604,7 +642,9 @@ export function freshEscortHolds(
   windowMs: number = ESCORT_HOLD_REPEAT_WINDOW_MS,
 ): EscortHold[] {
   if (!ledgerDir || holds.length === 0) return holds;
-  const kept = readHoldLedger(ledgerDir, now, windowMs);
+  const key = holdLedgerKey(ledgerDir);
+  if (!key) return holds;
+  const kept = readHoldLedger(ledgerDir, key, now, windowMs);
   return holds.filter((h) => kept[h.summary] === undefined);
 }
 
@@ -620,8 +660,10 @@ export function markEscortHoldsAnnounced(
   windowMs: number = ESCORT_HOLD_REPEAT_WINDOW_MS,
 ): void {
   if (!ledgerDir || holds.length === 0) return;
-  const kept = readHoldLedger(ledgerDir, now, windowMs);
-  for (const h of holds) kept[h.summary] = now;
+  const key = holdLedgerKey(ledgerDir);
+  if (!key) return;
+  const kept = readHoldLedger(ledgerDir, key, now, windowMs);
+  for (const h of holds) kept[h.summary] = { t: now, mac: holdLedgerMac(key, h.summary, now) };
   try {
     writeFileSync(join(ledgerDir, ESCORT_HOLD_LEDGER_FILE), JSON.stringify(kept), { mode: 0o600 });
   } catch {
