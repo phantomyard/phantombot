@@ -24,6 +24,7 @@ import {
   escortBlockMessage,
   escortHoldNotice,
   freshEscortHolds,
+  markEscortHoldsAnnounced,
   recordEscortHold,
   summarizeEscortAction,
   ESCORT_TASK_CAP_BYTES,
@@ -412,7 +413,7 @@ describe("the principal's notice is one short plain line (#768)", () => {
   it("one line, no scores, distinct actions counted", () => {
     expect(escortHoldNotice([])).toBeUndefined();
     const n = escortHoldNotice([{ summary: "git push" }, { summary: "git push" }, { summary: "gh pr review 1 --approve" }])!;
-    expect(n).toBe("🔒 Held in a background task: git push (+1 more). Reply OK and I'll run it.");
+    expect(n).toBe("🔒 Held in a background task: git push (+1 more).");
     expect(n).not.toContain("\n");
     expect(n).not.toMatch(/\d+\/100/);
   });
@@ -421,6 +422,9 @@ describe("the principal's notice is one short plain line (#768)", () => {
     const dir = tmp();
     const h = [{ summary: "git push" }];
     expect(freshEscortHolds(dir, h, 1_000, 10_000)).toEqual(h);
+    // Filtering alone never consumes: only a delivered notice is marked.
+    expect(freshEscortHolds(dir, h, 2_000, 10_000)).toEqual(h);
+    markEscortHoldsAnnounced(dir, h, 1_000, 10_000);
     expect(freshEscortHolds(dir, h, 5_000, 10_000)).toEqual([]);
     expect(freshEscortHolds(dir, [{ summary: "other" }], 5_000, 10_000)).toEqual([{ summary: "other" }]);
     expect(freshEscortHolds(dir, h, 12_000, 10_000)).toEqual(h);

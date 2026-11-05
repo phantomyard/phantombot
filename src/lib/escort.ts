@@ -435,7 +435,7 @@ export function escortHoldNotice(holds: EscortHold[]): string | undefined {
   const distinct = [...new Set(holds.map((h) => h.summary))];
   if (distinct.length === 0) return undefined;
   const more = distinct.length > 1 ? ` (+${distinct.length - 1} more)` : "";
-  return `🔒 Held in a background task: ${distinct[0]}${more}. Reply OK and I'll run it.`;
+  return `🔒 Held in a background task: ${distinct[0]}${more}.`;
 }
 
 /** The slice of pi's ExtensionAPI the escort touches. */
@@ -564,24 +564,14 @@ export const ESCORT_HOLD_REPEAT_WINDOW_MS = 12 * 60 * 60 * 1000;
 /** The per-persona ledger of recently announced holds. */
 export const ESCORT_HOLD_LEDGER_FILE = "escort-hold-notices.json";
 
-/**
- * Drop the holds announced within the repeat window, and mark the rest as
- * announced now. A poller that wakes every few minutes onto the same held
- * step must not ping the principal every few minutes. Best-effort: an
- * unreadable ledger announces (fail toward telling the principal), an
- * unwritable one is ignored.
- */
-export function freshEscortHolds(
-  ledgerDir: string | undefined,
-  holds: EscortHold[],
-  now: number = Date.now(),
-  windowMs: number = ESCORT_HOLD_REPEAT_WINDOW_MS,
-): EscortHold[] {
-  if (!ledgerDir || holds.length === 0) return holds;
-  const path = join(ledgerDir, ESCORT_HOLD_LEDGER_FILE);
+function readHoldLedger(
+  ledgerDir: string,
+  now: number,
+  windowMs: number,
+): Record<string, number> {
   let seen: Record<string, number> = {};
   try {
-    const v = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    const v = JSON.parse(readFileSync(join(ledgerDir, ESCORT_HOLD_LEDGER_FILE), "utf8")) as unknown;
     if (v && typeof v === "object") seen = v as Record<string, number>;
   } catch {
     seen = {};
@@ -590,12 +580,45 @@ export function freshEscortHolds(
   for (const [k, t] of Object.entries(seen)) {
     if (typeof t === "number" && now - t < windowMs) kept[k] = t;
   }
-  const fresh = holds.filter((h) => kept[h.summary] === undefined);
-  for (const h of fresh) kept[h.summary] = now;
+  return kept;
+}
+
+/**
+ * Drop the holds announced within the repeat window. A poller that wakes every
+ * few minutes onto the same held step must not ping the principal every few
+ * minutes. READ-ONLY: a hold is only consumed by `markEscortHoldsAnnounced`,
+ * after the notice was actually delivered — a failed notify must leave it
+ * fresh, or it would sit silent for the whole window. An unreadable ledger
+ * announces (fail toward telling the principal).
+ */
+export function freshEscortHolds(
+  ledgerDir: string | undefined,
+  holds: EscortHold[],
+  now: number = Date.now(),
+  windowMs: number = ESCORT_HOLD_REPEAT_WINDOW_MS,
+): EscortHold[] {
+  if (!ledgerDir || holds.length === 0) return holds;
+  const kept = readHoldLedger(ledgerDir, now, windowMs);
+  return holds.filter((h) => kept[h.summary] === undefined);
+}
+
+/**
+ * Record holds as announced now. Call ONLY after the notice was delivered.
+ * Best-effort: an unwritable ledger is ignored (the hold may be announced
+ * again, which is the safe direction).
+ */
+export function markEscortHoldsAnnounced(
+  ledgerDir: string | undefined,
+  holds: EscortHold[],
+  now: number = Date.now(),
+  windowMs: number = ESCORT_HOLD_REPEAT_WINDOW_MS,
+): void {
+  if (!ledgerDir || holds.length === 0) return;
+  const kept = readHoldLedger(ledgerDir, now, windowMs);
+  for (const h of holds) kept[h.summary] = now;
   try {
-    writeFileSync(path, JSON.stringify(kept), { mode: 0o600 });
+    writeFileSync(join(ledgerDir, ESCORT_HOLD_LEDGER_FILE), JSON.stringify(kept), { mode: 0o600 });
   } catch {
     // ignore
   }
-  return fresh;
 }

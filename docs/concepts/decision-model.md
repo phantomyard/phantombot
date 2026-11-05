@@ -82,9 +82,11 @@ old behaviour).
 The escort records each hold in a per-turn log under the persona's `tmp/`.
 When the turn ends, phantombot sends the principal **one** short line for the
 whole turn, for example `🔒 Held in a background task: gh pr review 446
---approve. Reply OK and I'll run it.` There are no scores or jargon, and a
+--approve.` There are no scores or jargon, and a
 second held action is counted, not listed. The same held action is not
-announced again for 12 hours (`escort-hold-notices.json` in the persona dir),
+announced again for 12 hours (`escort-hold-notices.json` in the persona dir;
+a hold is recorded there only once its notice was delivered, so a failed
+notify is retried on the next turn),
 so a poller that wakes every few minutes onto the same step does not ping
 every few minutes. The turn's model is told the principal will hear about it,
 so it neither notifies separately nor leaves the step for "a later turn".

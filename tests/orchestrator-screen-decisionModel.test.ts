@@ -648,7 +648,7 @@ describe("screener escort briefing + hold notice (#768)", () => {
     });
     const v = await screen("hello");
     await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }, { summary: "git push" }]);
-    expect(sent).toEqual(["🔒 Held in a background task: gh pr review 446 --approve (+1 more). Reply OK and I'll run it."]);
+    expect(sent).toEqual(["🔒 Held in a background task: gh pr review 446 --approve (+1 more)."]);
     // The next poller wake hits the same held step: nothing new to say.
     await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }]);
     expect(sent).toHaveLength(1);
@@ -664,5 +664,28 @@ describe("screener escort briefing + hold notice (#768)", () => {
     });
     const v = await screen("hello");
     await expect(v.onEscortHolds!([{ summary: "git push" }])).resolves.toBeUndefined();
+  });
+
+  it("a failed notify does not consume the hold: the next turn announces it", async () => {
+    const sent: string[] = [];
+    let mode: "throw" | "nonzero" | "ok" = "throw";
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+      notify: async (m) => {
+        if (mode === "throw") throw new Error("telegram down");
+        sent.push(m);
+        return mode === "nonzero" ? 1 : 0;
+      },
+    });
+    const v = await screen("hello");
+    await v.onEscortHolds!([{ summary: "git push" }]);
+    mode = "nonzero";
+    await v.onEscortHolds!([{ summary: "git push" }]);
+    mode = "ok";
+    await v.onEscortHolds!([{ summary: "git push" }]);
+    await v.onEscortHolds!([{ summary: "git push" }]);
+    // throw → retried; nonzero exit → retried; delivered → suppressed after.
+    expect(sent).toEqual(["🔒 Held in a background task: git push.", "🔒 Held in a background task: git push."]);
   });
 });

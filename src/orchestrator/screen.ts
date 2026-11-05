@@ -157,6 +157,7 @@ import {
   ESCORT_BRIEFING_CAP_BYTES,
   escortHoldNotice,
   freshEscortHolds,
+  markEscortHoldsAnnounced,
   type EscortHold,
   type EscortSettings,
 } from "../lib/escort.ts";
@@ -536,11 +537,17 @@ export function makeScreener(
 
   // Escort holds → the principal, once (issue #768). One plain line per turn,
   // no scores; the same held action is not announced again inside the repeat
-  // window. Delivery is best-effort: a failed notify never fails the turn.
+  // window. Delivery is best-effort: a failed notify never fails the turn,
+  // and never consumes the hold — the ledger is written only after a
+  // delivered notice, so the next turn tries again.
   const onEscortHolds = async (holds: EscortHold[]): Promise<void> => {
     try {
-      const notice = escortHoldNotice(freshEscortHolds(holdLedgerDir, holds));
-      if (notice) await notify(notice);
+      const fresh = freshEscortHolds(holdLedgerDir, holds);
+      const notice = escortHoldNotice(fresh);
+      if (!notice) return;
+      const code = await notify(notice);
+      if (code === 0) markEscortHoldsAnnounced(holdLedgerDir, fresh);
+      else log.warn("screen: escort hold notice not delivered", { code });
     } catch (e) {
       log.warn("screen: escort hold notice failed", { error: (e as Error).message });
     }
