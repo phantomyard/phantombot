@@ -69,7 +69,7 @@ export function untrustedReason(env: NodeJS.ProcessEnv): string | undefined {
   return undefined;
 }
 
-async function openClient(input: DeviceRunInput): Promise<LocalToolsClient | string> {
+async function openClient(input: DeviceRunInput): Promise<{ client: LocalToolsClient; close(): void } | string> {
   const env = input.env ?? process.env;
   const why = untrustedReason(env);
   if (why) return `refused: ${why}; the principal's PC is for trusted turns only`;
@@ -81,13 +81,24 @@ async function openClient(input: DeviceRunInput): Promise<LocalToolsClient | str
   const pool = input.makePool
     ? await input.makePool(pc.identity.secretKey)
     : await defaultPool(pc.identity.secretKey);
-  return new LocalToolsClient({
+  const client = new LocalToolsClient({
     secretKey: pc.identity.secretKey,
     publicKeyHex: pc.identity.publicKeyHex,
     relays: pc.relays,
     principalsHex: pc.allowedHex,
     pool,
   });
+  return {
+    client,
+    close() {
+      try {
+        client.close();
+      } finally {
+        // This CLI session owns the pool; protocol clients may share theirs.
+        pool.close(pc.relays);
+      }
+    },
+  };
 }
 
 async function defaultPool(secretKey: Uint8Array): Promise<LocalToolsPool> {
@@ -108,11 +119,12 @@ function describeDevice(d: DeviceCapability): Record<string, unknown> {
 export async function runDeviceList(input: DeviceRunInput): Promise<number> {
   const out = input.out ?? ((s) => process.stdout.write(s));
   const err = input.err ?? ((s) => process.stderr.write(s));
-  const client = await openClient(input);
-  if (typeof client === "string") {
-    err(`${client}\n`);
+  const session = await openClient(input);
+  if (typeof session === "string") {
+    err(`${session}\n`);
     return 1;
   }
+  const { client } = session;
   try {
     const devices = await client.discover((input.waitS ?? 5) * 1000);
     if (input.json) {
@@ -126,7 +138,7 @@ export async function runDeviceList(input: DeviceRunInput): Promise<number> {
     }
     return 0;
   } finally {
-    client.close();
+    session.close();
   }
 }
 
@@ -160,11 +172,12 @@ export async function runDeviceCall(
     err(`--timeout must be 1 .. ${MAX_CALL_MS / 1000} seconds\n`);
     return 1;
   }
-  const client = await openClient(input);
-  if (typeof client === "string") {
-    err(`${client}\n`);
+  const session = await openClient(input);
+  if (typeof session === "string") {
+    err(`${session}\n`);
     return 1;
   }
+  const { client } = session;
   try {
     const devices = await client.discover((input.waitS ?? 8) * 1000, input.device);
     const device = findDevice(devices, input.device);
@@ -198,7 +211,7 @@ export async function runDeviceCall(
     }
     return exitCodeFor(result);
   } finally {
-    client.close();
+    session.close();
   }
 }
 

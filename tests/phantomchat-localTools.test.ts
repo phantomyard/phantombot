@@ -67,6 +67,7 @@ class FakeApp {
   subscribers: OnEvent[] = [];
   received: Array<{ to: string; tags: string[][]; body: Record<string, unknown> }> = [];
   published = 0;
+  closedRelays: Array<string[] | undefined> = [];
   switchOn = true;
   /** The device's clock offset from ours, in ms (negative = behind). */
   skewMs = 0;
@@ -86,7 +87,9 @@ class FakeApp {
     if (to === this.identity.publicKeyHex) queueMicrotask(() => this.#read(event));
     return [Promise.resolve("ok")];
   }
-  close() {}
+  close(relays?: string[]) {
+    this.closedRelays.push(relays);
+  }
   deliver(e: NTNostrEvent) {
     for (const s of this.subscribers) s(e);
   }
@@ -194,6 +197,7 @@ describe("phantombot device list", () => {
     expect(isLocalToolsRumor({ tags: hello.tags })).toBe(true);
     // One wrap per hello: to the app, none to ourselves.
     expect(app.published).toBe(1);
+    expect(app.closedRelays).toEqual([RELAYS]);
   });
 
   test("switch OFF = silence = no devices", async () => {
@@ -201,6 +205,7 @@ describe("phantombot device list", () => {
     const out = sink();
     expect(await runDeviceList({ ...base(), out })).toBe(0);
     expect(out.text).toContain("no devices online");
+    expect(app.closedRelays).toEqual([RELAYS]);
   });
 
   test("ignores a capability from a non-principal and an untagged one", async () => {
@@ -221,11 +226,39 @@ describe("phantombot device list", () => {
   });
 });
 
+describe("device relay ownership", () => {
+  for (const command of ["list", "call"] as const) {
+    test(`${command} closes its pool when discovery fails`, async () => {
+      app.publish = () => [Promise.reject(new Error("relay offline"))];
+      const input = { ...base(), out: sink(), err: sink() };
+      const run = command === "list"
+        ? runDeviceList(input)
+        : runDeviceCall({ ...input, device: "desk", tool: "bash", args: "{}" });
+      await expect(run).rejects.toThrow("no relay accepted");
+      expect(app.closedRelays).toEqual([RELAYS]);
+    });
+  }
+
+  test("closing a protocol client leaves its caller-owned pool open", () => {
+    const client = new LocalToolsClient({
+      secretKey: persona.secretKey,
+      publicKeyHex: persona.publicKeyHex,
+      principalsHex: [owner.publicKeyHex],
+      relays: RELAYS,
+      pool: app,
+    });
+    client.open();
+    client.close();
+    expect(app.closedRelays).toEqual([]);
+  });
+});
+
 describe("phantombot device call", () => {
   test("runs on the device by name and joins the chunked result", async () => {
     const out = sink();
     const code = await runDeviceCall({ ...base(), device: "desk", tool: "bash", args: '{"command":"ls"}', out });
     expect(code).toBe(0);
+    expect(app.closedRelays).toEqual([RELAYS]);
     expect(out.text).toBe('ran {"command":"ls"}\n');
     const call = app.received.find((r) => r.body.t === "call")!.body;
     expect(call.deviceId).toBe(DEVICE);
@@ -245,6 +278,7 @@ describe("phantombot device call", () => {
     const err = sink();
     expect(await runDeviceCall({ ...base(), device: "desk", tool: "bash", args: "{}", err })).toBe(3);
     expect(err.text).toContain("not available");
+    expect(app.closedRelays).toEqual([RELAYS]);
 
     app.switchOn = true;
     app.answerCalls = false;
@@ -259,6 +293,7 @@ describe("phantombot device call", () => {
       out: sink(),
     });
     expect(code).toBe(3);
+    expect(app.closedRelays).toEqual([RELAYS, RELAYS]);
   });
 
   test("a result for our call id from another principal's app is ignored", async () => {
@@ -295,6 +330,7 @@ describe("phantombot device call", () => {
     while (!app.received.some((r) => r.body.t === "call")) await new Promise((r) => setTimeout(r, 5));
     controller.abort();
     expect(await p).toBe(130);
+    expect(app.closedRelays).toEqual([RELAYS]);
     await new Promise((r) => setTimeout(r, 10));
     const call = app.received.find((r) => r.body.t === "call")!.body;
     expect(app.received.find((r) => r.body.t === "cancel")?.body.callId).toBe(call.callId);
