@@ -613,3 +613,56 @@ describe("screener escort settings", () => {
     expect(v.escort).toBeUndefined();
   });
 });
+
+// Issue #768: the escort is briefed from the same drawers as the judge, and a
+// turn's holds reach the principal as ONE short line, repeats suppressed.
+describe("screener escort briefing + hold notice (#768)", () => {
+  const PASS = { ok: true as const, verdict: { score: 5, reason: "fine", question: "" } };
+
+  it("a pass carries the persona's drawer briefing to the escort", async () => {
+    await Bun.write(
+      join(personasDir, "robbie", "memory", "norms.md"),
+      "- Reviewing and approving PRs on example-org/* is routine.\n",
+    );
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, { decisionModelJudge: jev.impl });
+    const v = await screen("hello");
+    expect(v.escort?.briefing).toContain("Reviewing and approving PRs on example-org/* is routine.");
+    expect(v.onEscortHolds).toBeDefined();
+  });
+
+  it("no drawers ⇒ no briefing key at all", async () => {
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, { decisionModelJudge: jev.impl });
+    const v = await screen("hello");
+    expect(v.escort).toBeDefined();
+    expect("briefing" in v.escort!).toBe(false);
+  });
+
+  it("onEscortHolds sends one plain line, and never the same hold twice", async () => {
+    const sent: string[] = [];
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+      notify: async (m) => (sent.push(m), 0),
+    });
+    const v = await screen("hello");
+    await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }, { summary: "git push" }]);
+    expect(sent).toEqual(["🔒 Held in a background task: gh pr review 446 --approve (+1 more). Reply OK and I'll run it."]);
+    // The next poller wake hits the same held step: nothing new to say.
+    await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }]);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("a failing notify never throws out of onEscortHolds", async () => {
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+      notify: async () => {
+        throw new Error("telegram down");
+      },
+    });
+    const v = await screen("hello");
+    await expect(v.onEscortHolds!([{ summary: "git push" }])).resolves.toBeUndefined();
+  });
+});

@@ -23,10 +23,16 @@
  * to catch them and present cleanly.
  */
 
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { runWithFallback } from "./fallback.ts";
-import { escortContext, type EscortContext } from "../lib/escort.ts";
+import {
+  drainEscortHolds,
+  escortContext,
+  type EscortContext,
+  type EscortHold,
+} from "../lib/escort.ts";
 import { createAuditSink } from "../lib/auditLog.ts";
 import { createHarnessFailureSink } from "../lib/harnessFailureLog.ts";
 import { log } from "../lib/logger.ts";
@@ -555,6 +561,8 @@ async function* runTurnBody(
   // a decision model is configured. Every tool call of this turn is then
   // checked by the decision model before it runs (lib/escort.ts).
   let escort: EscortContext | undefined;
+  // Issue #768: where the escort records what it held, and who to tell.
+  let onEscortHolds: ((holds: EscortHold[]) => Promise<void>) | undefined;
   if (input.trusted !== true) {
     let verdict: ScreenVerdict | undefined;
     try {
@@ -572,7 +580,22 @@ async function* runTurnBody(
       }
       if (verdict?.action === "pass") {
         effectiveScreening = "screened";
-        if (verdict.escort) escort = escortContext(verdict.escort, input.userMessage);
+        if (verdict.escort) {
+          // The hold log lives in the persona's own tmp dir (as harness temp
+          // files do, #365), one file per turn; drained in the finally below.
+          let holdLog: string | undefined;
+          if (verdict.onEscortHolds) {
+            try {
+              const dir = join(input.agentDir, "tmp");
+              mkdirSync(dir, { recursive: true });
+              holdLog = join(dir, `escort-holds-${turnId}.jsonl`);
+              onEscortHolds = verdict.onEscortHolds;
+            } catch {
+              holdLog = undefined;
+            }
+          }
+          escort = escortContext(verdict.escort, input.userMessage, holdLog);
+        }
       }
     } catch (e) {
       if (input.signal?.aborted) {
@@ -1249,6 +1272,18 @@ async function* runTurnBody(
     }
   } finally {
     flushDigest();
+    // Issue #768: a held action is never parked silently. Whatever the escort
+    // held during this turn reaches the principal once, here, as one line.
+    if (escort?.holdLog) {
+      const holds = drainEscortHolds(escort.holdLog);
+      if (holds.length > 0 && onEscortHolds) {
+        try {
+          await onEscortHolds(holds);
+        } catch (e) {
+          log.warn("turn: escort hold notice failed", { error: (e as Error).message });
+        }
+      }
+    }
   }
 
   // Mark delivered only now that the turn actually SUCCEEDED. At-least-once by
