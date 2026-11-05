@@ -82,6 +82,7 @@ import {
   phantomchatInfo,
   startHostedChannel,
 } from "./phantomchat.ts";
+import { checkDecisionModel } from "./decisionModels.ts";
 import { checkProvider, listProviders } from "./providers.ts";
 import {
   parseJsonReply,
@@ -93,6 +94,7 @@ import type {
   CreatePersonaOptions,
   DecideOptions,
   DecisionAnswer,
+  DecisionModelCheck,
   DecisionResult,
   EngineEvent,
   EngineLogRecord,
@@ -240,6 +242,14 @@ export class Engine {
     list(): Promise<ProviderInfo[]>;
     check(provider: string, apiKey: string, options?: ProviderCheckOptions): Promise<ProviderCheck>;
   };
+  /**
+   * The decision model's setup building block: check a key for a built-in
+   * transport and list its decision models. Stores nothing; persist with
+   * `persona.configure({ decisionModel: { provider, model, apiKey } })`.
+   */
+  readonly decisionModels: {
+    check(provider: string, apiKey: string): Promise<DecisionModelCheck>;
+  };
 
   #scope: EngineScope;
   /** `#scope` plus `persona`, one per persona handle (identity-stable). */
@@ -271,6 +281,9 @@ export class Engine {
       list: () => this.run(async () => listProviders()),
       check: (provider, apiKey, options) =>
         this.run(() => checkProvider(provider, apiKey, options ?? {})),
+    };
+    this.decisionModels = {
+      check: (provider, apiKey) => this.run(() => checkDecisionModel(provider, apiKey)),
     };
   }
 

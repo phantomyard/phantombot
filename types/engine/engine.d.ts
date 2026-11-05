@@ -28,7 +28,7 @@
  *
  * Runtime: Bun (the engine uses `bun:sqlite` and `Bun.spawn`, like the CLI).
  */
-import type { CreatePersonaOptions, DecideOptions, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
+import type { CreatePersonaOptions, DecideOptions, DecisionModelCheck, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
 /**
  * Open an engine on `options.root`. Rejects with `invalid_root` or
  * `root_locked`. Always `close()` it (or use `await using`).
@@ -57,6 +57,14 @@ export declare class Engine {
     readonly providers: {
         list(): Promise<ProviderInfo[]>;
         check(provider: string, apiKey: string, options?: ProviderCheckOptions): Promise<ProviderCheck>;
+    };
+    /**
+     * The decision model's setup building block: check a key for a built-in
+     * transport and list its decision models. Stores nothing; persist with
+     * `persona.configure({ decisionModel: { provider, model, apiKey } })`.
+     */
+    readonly decisionModels: {
+        check(provider: string, apiKey: string): Promise<DecisionModelCheck>;
     };
     /** A handle on `name`. Cheap; existence is checked on use. */
     persona(name: string): Persona;
