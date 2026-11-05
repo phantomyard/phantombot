@@ -191,6 +191,14 @@ engine would otherwise inherit into a persona re-created under that name) is
 removed — the host-level `pi-native/agent` migration source is not — and its
 `autostart_personas` / `[autostart_modes]` roster entries are dropped.
 
+The TUI's own removal (`phantombot` → a phantom → remove) is the other door to
+the same state, and it prunes the same name-keyed debris. It ARCHIVES the
+persona directory rather than deleting it (`personas-archive/<name>-<stamp>/`,
+restorable with `persona --import`), but the native agent dir is not persona
+content: it is per-host engine state keyed by the name, so it is removed there
+too. A restored persona provisions its own credential on its first native turn
+instead of inheriting the archived one.
+
 A persona is two files the loader concatenates at every turn. `identity`,
 `tone`, `expertise`, `owner` and `hardRules` become **IDENTITY.md** (who it
 is). `soul` is how it carries itself (values, voice, what it refuses), written

@@ -30,7 +30,12 @@
  * untested surface.
  */
 
-import { type Config, personaDir, servedPersonasOf } from "../config.ts";
+import {
+  type Config,
+  personaDir,
+  servedPersonasOf,
+  xdgDataHome,
+} from "../config.ts";
 import { applyEmbeddingConfig } from "../cli/embedding.ts";
 import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { applyVoiceConfig } from "../cli/voice.ts";
@@ -41,8 +46,16 @@ import {
   updateConfigToml,
   type TomlObject,
 } from "../lib/configWriter.ts";
-import { writeAutostartPersonas } from "../lib/personaDefault.ts";
+import {
+  writeAutostartMode,
+  writeAutostartPersonas,
+} from "../lib/personaDefault.ts";
 import { archivePersona } from "../lib/personaArchive.ts";
+import { nativeAgentDir } from "../lib/nativeAgentDir.ts";
+import { log } from "../lib/logger.ts";
+import { existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { dirname } from "node:path";
 import { setPersonaSecret } from "../lib/vaultSecrets.ts";
 import { openPersonaVault } from "../lib/vault.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
@@ -444,10 +457,12 @@ export function describePersonaRemoval(
   autostarted: boolean,
 ): Consequence {
   return {
-    summary: `${persona}'s directory moves to personas-archive/ — nothing is hard-deleted`,
+    summary: `${persona}'s directory moves to personas-archive/; its engine auth is cleared`,
     detail:
       `The phantom goes quiet on this host: its persona directory is archived ` +
-      `(timestamped, restorable later via persona --import)` +
+      `(timestamped, restorable later via persona --import), its per-persona ` +
+      `engine credential store (pi-native/personas/${persona}) is removed so a ` +
+      `persona re-created under this name starts clean` +
       (autostarted ? `, its autostart entry is dropped,` : `,`) +
       ` and the daemon restarts without it. Its channels and heartbeat timers stop with it.`,
     longRunning: false,
@@ -470,6 +485,16 @@ export function describePersonaRemoval(
  * /restart cannot be removed out from under the host). The autostart entry
  * is dropped BEFORE the directory moves, so a concurrent daemon rebuild
  * never reads a boot list naming a directory that is no longer there.
+ *
+ * It prunes the SAME name-keyed debris `Engine#deletePersona` does (#771):
+ * both `autostart_personas` and its `[autostart_modes]` record, and the
+ * persona's `pi-native/personas/<name>` scope. What the archive keeps —
+ * identity, vault, memory, config — is persona CONTENT; the native agent dir
+ * is host engine state (auth.json, model store) that a persona re-created
+ * under the same name would otherwise inherit, which is the inheritance #771
+ * acceptance 3 forbids. `persona --import` therefore restores the persona and
+ * not its old engine credential: the restored persona provisions its own on
+ * its first native turn, exactly like a new one.
  */
 export async function applyRemovePersona(input: {
   config: Config;
@@ -520,10 +545,38 @@ export async function applyRemovePersona(input: {
         // The restart below still drops the persona; heal catches the rest.
       }
     }
+    // The mode record is the OTHER half of the same host roster, and it can
+    // outlive `autostart_personas` (a record with no list entry is legal, and
+    // applyAutostartChoice writes the two keys separately), so it is pruned on
+    // its own presence rather than inside the branch above. Gated on presence
+    // for the same reason the engine gates it: config.toml is parsed and
+    // re-stringified on write, which drops the operator's comments, so an
+    // archive with nothing to remove must not rewrite it.
+    if (input.persona in (input.config.autostartModes ?? {})) {
+      await writeAutostartMode(input.config, input.persona, undefined);
+    }
     const archived = await archivePersona(
       input.config.personasDir,
       input.persona,
     );
+    // The per-persona native (embedded pi) engine scope: `dirname` of the
+    // agent dir, so the layout stays owned by lib/nativeAgentDir.ts and no
+    // empty `personas/<name>` husk survives. The HOST-level `pi-native/agent`
+    // migration source is never touched — every SURVIVING persona absorbs from
+    // it on its first ensure(). Best-effort and logged, never thrown: the
+    // directory has already moved into the archive, so failing the action here
+    // would report a removal that did happen.
+    try {
+      const nativeScope = dirname(nativeAgentDir(xdgDataHome(), input.persona));
+      if (existsSync(nativeScope)) {
+        await rm(nativeScope, { recursive: true, force: true });
+      }
+    } catch (e) {
+      log.warn("persona remove: could not remove the native agent dir", {
+        persona: input.persona,
+        error: (e as Error).message,
+      });
+    }
     const svc = input.serviceControl ?? defaultServiceControl();
     const r = await svc.restart();
     return r.ok
