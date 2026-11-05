@@ -271,6 +271,28 @@ export interface ProviderCheck {
   models: ProviderModel[];
 }
 
+// ─── decision models ───────────────────────────────────────────────────────
+
+/** A built-in decision-model transport `engine.decisionModels.check()` can verify. */
+export type DecisionModelProvider = "openrouter" | "typesafe";
+
+/** Result of `engine.decisionModels.check()`. */
+export interface DecisionModelCheck {
+  /**
+   * "verified": the provider accepted the key. "invalid": it explicitly
+   * rejected it (401/403), the only verdict to block on. "unverified": it
+   * could not be checked (no key, network error, outage).
+   */
+  status: "verified" | "invalid" | "unverified";
+  /** Human-readable evidence (HTTP status or error text). Never contains the key. */
+  detail: string;
+  /**
+   * Decision model ids to pass as `decisionModel.model`, the default
+   * (`typesafe/jev-1.13`) first; [] when the key was rejected or not given.
+   */
+  models: string[];
+}
+
 // ─── turns ─────────────────────────────────────────────────────────────────
 
 /**

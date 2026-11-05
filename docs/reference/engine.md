@@ -234,6 +234,32 @@ if (check.status !== "invalid") {
   you do not trust.
 - `detail` never contains the key.
 
+### Decision models: `engine.decisionModels`
+
+For an app's own decision-model setup screen: check a key for a built-in
+transport (`"openrouter"` or `"typesafe"`) and read its decision models, the
+same list the `phantombot decision-model` wizard offers. Nothing is stored;
+save the choice with `persona.configure`.
+
+```ts
+const check = await engine.decisionModels.check("openrouter", typedKey);
+// { status: "verified" | "invalid" | "unverified", detail, models: ["typesafe/jev-1.13", ...] }
+if (check.status !== "invalid") {
+  await aria.configure({ decisionModel: { provider: "openrouter", model: picked, apiKey: typedKey } });
+}
+```
+
+- `status` means what it means for `providers.check`: `"invalid"` only when
+  the provider explicitly rejected the key (401/403). OpenRouter is checked at
+  `/api/v1/key` (its model catalogue is public); TypeSafe at `/v1/models`.
+- `models` starts with the default (`typesafe/jev-1.13`), then OpenRouter's
+  decisions catalogue or TypeSafe's list. It is `[]` when the key was rejected
+  or not given.
+- Any other provider is `invalid_argument`. A custom decisions provider needs a
+  `baseUrl`, and this method deliberately takes none, so it makes no
+  caller-directed requests.
+- `detail` never contains the key.
+
 ### `persona.configure({ brain?, decisionModel?, embeddings? })`
 
 `configure` writes to the persona's **own** `config.toml`, never the root-wide

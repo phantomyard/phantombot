@@ -90,7 +90,8 @@ export function providerKeyCheckable(providerId: string): boolean {
 export const BROWSER_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 
-async function check(
+/** GET `url` with `headers` and map the status: 2xx verified, 401/403 invalid, else unverified. */
+export async function probeKeyEndpoint(
   url: string,
   headers: Record<string, string>,
 ): Promise<KeyProbeResult> {
@@ -137,16 +138,16 @@ export async function probeProviderKey(
     if (!trimmed && providerId === "phantomops") {
       return { status: "unverified", detail: "no token to check" };
     }
-    return check(`${base}/models`, trimmed ? { Authorization: `Bearer ${trimmed}` } : {});
+    return probeKeyEndpoint(`${base}/models`, trimmed ? { Authorization: `Bearer ${trimmed}` } : {});
   }
   if (!trimmed) return { status: "unverified", detail: "no key to check" };
   const special = SPECIAL[providerId];
   if (special) {
     const { url, headers } = special(trimmed);
-    return check(url, headers);
+    return probeKeyEndpoint(url, headers);
   }
   const base = OPENAI_COMPATIBLE_BASES[providerId];
-  if (base) return check(`${base}/models`, { Authorization: `Bearer ${trimmed}` });
+  if (base) return probeKeyEndpoint(`${base}/models`, { Authorization: `Bearer ${trimmed}` });
   return {
     status: "unverified",
     detail: `no known check for provider '${providerId}'`,
