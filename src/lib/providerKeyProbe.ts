@@ -53,6 +53,23 @@ export const OPENAI_COMPATIBLE_BASES: Record<string, string> = {
   // so one GET both verifies the key and lists the models.
   opencode: "https://opencode.ai/inference/v1",
   "opencode-go": "https://opencode.ai/inference/go/v1",
+  // The rest of Pi's catalogue with an OpenAI-shaped `/models` behind the key.
+  // Each answers 401 to a bad Bearer. Hosts match Pi's own base URLs; MiniMax
+  // runs inference on its Anthropic route but lists models on the OpenAI one.
+  "vercel-ai-gateway": "https://ai-gateway.vercel.sh/v1",
+  zai: "https://api.z.ai/api/coding/paas/v4",
+  "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4",
+  "kimi-coding": "https://api.kimi.com/coding/v1",
+  minimax: "https://api.minimax.io/v1",
+  "minimax-cn": "https://api.minimaxi.com/v1",
+  xiaomi: "https://api.xiaomimimo.com/v1",
+  "xiaomi-token-plan-cn": "https://token-plan-cn.xiaomimimo.com/v1",
+  "xiaomi-token-plan-ams": "https://token-plan-ams.xiaomimimo.com/v1",
+  "xiaomi-token-plan-sgp": "https://token-plan-sgp.xiaomimimo.com/v1",
+  // Not here on purpose: Ant Ling (its edge answers 403 to every request from
+  // some regions, which would read as a rejected key), Azure (per-resource
+  // host) and Cloudflare (needs the account id). They stay unverified and get
+  // Pi's bundled model list instead (piBundledModels.ts).
 };
 
 /** Non-OpenAI-shaped providers with a known cheap auth check. */

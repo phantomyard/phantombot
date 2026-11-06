@@ -28,14 +28,22 @@ afterEach(async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function fakeBackends(status: "verified" | "invalid" | "unverified") {
+function fakeBackends(
+  status: "verified" | "invalid" | "unverified",
+  live: "list" | "empty" = "list",
+) {
   _setProviderBackendsForTesting({
+    bundled: async (id) => {
+      calls.push({ kind: "bundled", id, key: "" });
+      return [{ provider: id, model: "pi-bundled", supportsImages: true }];
+    },
     probe: async (id, key, opts) => {
       calls.push({ kind: "probe", id, key, ...opts });
       return { status, detail: `HTTP ${status === "invalid" ? 401 : 200}` };
     },
     models: async (id, key, opts) => {
       calls.push({ kind: "models", id, key, ...opts });
+      if (live === "empty") return [];
       return [
         { provider: id, model: "m-text", supportsImages: false },
         { provider: id, model: "m-vision", supportsImages: true },
@@ -77,12 +85,12 @@ describe("engine.providers.list", () => {
 describe("engine.providers.list: checkable / autoModel / keyLabel", () => {
   test("checkable matches what the real probe can actually answer", async () => {
     const list = await engine.providers.list();
-    for (const id of ["openrouter", "anthropic", "openai", "openai-compatible", "phantomops"]) {
+    for (const id of ["openrouter", "anthropic", "openai", "openai-compatible", "phantomops", "zai", "minimax"]) {
       expect(list.find((p) => p.id === id)!.checkable).toBe(true);
     }
     const unCheckable = list.filter((p) => !p.checkable);
-    expect(unCheckable.map((p) => p.id)).toContain("zai");
-    expect(unCheckable.map((p) => p.id)).toContain("minimax");
+    expect(unCheckable.map((p) => p.id)).toContain("ant-ling");
+    expect(unCheckable.map((p) => p.id)).toContain("cloudflare-workers-ai");
     // Every provider reported uncheckable really has no check (no network:
     // the probe returns before any fetch for these).
     for (const p of unCheckable) {
@@ -175,6 +183,32 @@ describe("engine.providers.check", () => {
     const r = await engine.providers.check("anthropic", "k");
     expect(r.status).toBe("unverified");
     expect(r.models.length).toBe(2);
+  });
+
+  test("no live list falls back to Pi's bundled models", async () => {
+    fakeBackends("unverified", "empty");
+    const res = await engine.providers.check("minimax", "sk-x");
+    expect(res.models).toEqual([{ id: "pi-bundled", supportsImages: true }]);
+  });
+
+  test("a live list wins over the bundled one", async () => {
+    fakeBackends("verified");
+    const res = await engine.providers.check("zai", "sk-x");
+    expect(res.models.map((m) => m.id)).toEqual(["m-text", "m-vision"]);
+    expect(calls.some((c) => c.kind === "bundled")).toBe(false);
+  });
+
+  test("a rejected key gets no bundled models either", async () => {
+    fakeBackends("invalid", "empty");
+    expect((await engine.providers.check("minimax", "sk-bad")).models).toEqual([]);
+  });
+
+  test("bring-your-own endpoints never get Pi's bundled list", async () => {
+    fakeBackends("unverified", "empty");
+    const res = await engine.providers.check("openai-compatible", "", {
+      baseUrl: "http://localhost:11434/v1",
+    });
+    expect(res.models).toEqual([]);
   });
 
   test("a failing model fetch is not fatal", async () => {

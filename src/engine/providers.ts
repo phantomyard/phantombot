@@ -27,6 +27,7 @@ import {
   type KeyProbeResult,
 } from "../lib/providerKeyProbe.ts";
 import { fetchProviderModels } from "../lib/providerModelCatalog.ts";
+import { bundledProviderModels } from "../lib/piBundledModels.ts";
 import type { PiModel } from "../lib/piModels.ts";
 import type {
   ProviderCheck,
@@ -39,11 +40,14 @@ import type {
 export interface ProviderBackends {
   probe: (id: string, key: string, opts: { baseUrl?: string }) => Promise<KeyProbeResult>;
   models: (id: string, key: string, opts: { baseUrl?: string }) => Promise<PiModel[]>;
+  /** Pi's bundled list, used when `models` comes back empty. */
+  bundled?: (id: string) => Promise<PiModel[]>;
 }
 
 const realBackends: ProviderBackends = {
   probe: (id, key, opts) => probeProviderKey(id, key, opts),
   models: (id, key, opts) => fetchProviderModels(id, key, fetch, opts),
+  bundled: (id) => bundledProviderModels(id),
 };
 
 let backendsForTesting: ProviderBackends | undefined;
@@ -131,9 +135,16 @@ export async function checkProvider(
   // supplied where one is required, even when the catalogue is public
   // (OpenRouter): a list there reads as proof the key is fine.
   const noKey = apiKey.trim() === "" && !customProviderAllowsKeyless(providerId);
-  const models: ProviderModel[] =
-    probe.status === "invalid" || noKey
-      ? []
-      : rows.map((m) => ({ id: m.model, supportsImages: m.supportsImages }));
+  const refused = probe.status === "invalid" || noKey;
+  // No live list (no list endpoint, an unverifiable key, an outage): offer the
+  // models Pi itself ships for the provider so the picker is never empty. Not
+  // for bring-your-own endpoints, whose models are whatever that server runs.
+  const listed =
+    !refused && rows.length === 0 && !spec && b.bundled
+      ? await b.bundled(providerId).catch(() => [] as PiModel[])
+      : rows;
+  const models: ProviderModel[] = refused
+    ? []
+    : listed.map((m) => ({ id: m.model, supportsImages: m.supportsImages }));
   return { status: probe.status, detail: probe.detail, models };
 }

@@ -93,3 +93,28 @@ describe("probeProviderKey — OpenCode Zen / Go", () => {
     expect(calls[0]!.url).toBe("https://opencode.ai/inference/v1/models");
   });
 });
+
+describe("probeProviderKey — the rest of Pi's OpenAI-shaped providers", () => {
+  const endpoints: Record<string, string> = {
+    "vercel-ai-gateway": "https://ai-gateway.vercel.sh/v1/models",
+    zai: "https://api.z.ai/api/coding/paas/v4/models",
+    "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/models",
+    "kimi-coding": "https://api.kimi.com/coding/v1/models",
+    minimax: "https://api.minimax.io/v1/models",
+    "minimax-cn": "https://api.minimaxi.com/v1/models",
+    xiaomi: "https://api.xiaomimimo.com/v1/models",
+    "xiaomi-token-plan-cn": "https://token-plan-cn.xiaomimimo.com/v1/models",
+    "xiaomi-token-plan-ams": "https://token-plan-ams.xiaomimimo.com/v1/models",
+    "xiaomi-token-plan-sgp": "https://token-plan-sgp.xiaomimimo.com/v1/models",
+  };
+  for (const [id, url] of Object.entries(endpoints)) {
+    test(`${id}: a key is checked at its own models endpoint, 401 = invalid`, async () => {
+      stubFetch(200);
+      expect((await probeProviderKey(id, "sk-x")).status).toBe("verified");
+      expect(calls[0]!.url).toBe(url);
+      expect(calls[0]!.headers.Authorization).toBe("Bearer sk-x");
+      stubFetch(401);
+      expect((await probeProviderKey(id, "sk-bad")).status).toBe("invalid");
+    });
+  }
+});
