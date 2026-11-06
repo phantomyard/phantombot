@@ -110,13 +110,10 @@ test("process timeout terminates descendants", async () => {
 test("bundled sandbox permits an existing Bun/Node runtime with no host secrets", async () => {
   const workspace = fresh();
   prepareSandboxTools(workspace);
-  // Probe runs from a file: shell quoting of an inline -e expression is
-  // platform-dependent and buried the actual assertion.
-  writeFileSync(
-    join(workspace, "probe.ts"),
-    'console.log("runtime-ok"); console.log(process.env.GITHUB_TOKEN ?? "no-secret");\n',
+  const r = await runSandbox(
+    workspace,
+    `bun -e ${quote('console.log("runtime-ok"); console.log(process.env.GITHUB_TOKEN ?? "no-secret")')}`,
   );
-  const r = await runSandbox(workspace, "bun probe.ts");
   expect(r.exitCode, r.output).toBe(0);
   expect(r.output).toContain("runtime-ok");
   expect(r.output).toContain("no-secret");
