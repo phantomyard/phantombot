@@ -38,13 +38,31 @@ function seatbeltString(s: string): string {
   return JSON.stringify(s);
 }
 export function seatbeltProfile(workspace: string): string {
+  const system = [
+    "/System/Library",
+    "/System/Cryptexes",
+    "/System/Volumes/Preboot/Cryptexes",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/usr/libexec",
+    "/usr/share",
+    "/bin",
+    "/sbin",
+    "/Library/Apple",
+    "/private/var/db/dyld",
+  ];
+  const runtimePaths = system
+    .map((p) => `(subpath ${seatbeltString(p)})`)
+    .join(" ");
   return `(version 1)(deny default)
 (allow process-exec process-fork sysctl-read)
+(allow process-info-pidinfo (target self))
 (allow file-read-metadata)
 (allow signal (target self))
-(allow file-map-executable (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Library/Apple") (subpath "/private/var/db/dyld") (subpath ${seatbeltString(workspace)}))
-(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Library/Apple") (subpath "/private/var/db/dyld"))
-(allow file-read* (literal "/dev/random") (literal "/dev/urandom") (literal "/private/etc/localtime"))
+(allow mach-lookup (global-name "com.apple.logd") (global-name "com.apple.system.logger") (global-name "com.apple.system.opendirectoryd.libinfo"))
+(allow file-read* file-map-executable ${runtimePaths})
+(allow file-read* (literal "/dev/random") (literal "/dev/urandom") (literal "/private/etc/localtime") (literal "/private/etc/passwd"))
 (allow file-read* file-write* (literal "/dev/null"))
 (allow file* (subpath ${seatbeltString(workspace)}))`;
 }
@@ -72,6 +90,8 @@ export function sandboxEnvironment(workspace: string): NodeJS.ProcessEnv {
     LANG: "C.UTF-8",
     ...(process.platform === "win32"
       ? {
+          LOCALAPPDATA: process.env.LOCALAPPDATA ?? join(workspace, ".local"),
+          APPDATA: join(workspace, ".config"),
           SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
           ComSpec: `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`,
         }

@@ -41,8 +41,7 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
   through Landlock, even if their path changes after inspection. No environment,
   file descriptor, host socket or loader setting is forwarded beyond stdio.
 - macOS: `/usr/bin/sandbox-exec` applies a default-deny Seatbelt profile. Only
-  system runtime files and the disposable workspace are accessible; network and
-  Mach IPC are denied. The OS must still provide this deprecated system facility.
+  system runtime files and the disposable workspace are accessible; network and arbitrary Mach IPC are denied; only system logging/user lookup services are reachable. The OS must still provide this deprecated system facility.
 - Windows: a private AppContainer profile with no capabilities supplies the
   filesystem/network boundary. Only the disposable directory gets an inherited
   writable ACL and low-integrity label. Launch uses a stdio-only handle list,

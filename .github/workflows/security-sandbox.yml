@@ -24,3 +24,6 @@ jobs:
         run: |
           bun build --compile ./src/index.ts --outfile dist/phantombot-security${{ runner.os == 'Windows' && '.exe' || '' }}
           bun scripts/securityCompiledSmoke.ts ./dist/phantombot-security${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Read macOS sandbox denials after a failed gate
+        if: failure() && runner.os == 'macOS'
+        run: /usr/bin/log show --last 3m --style compact --predicate 'process == "sandboxd" OR eventMessage CONTAINS "Sandbox:"' | tail -100
