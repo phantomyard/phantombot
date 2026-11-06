@@ -156,6 +156,7 @@ flowchart TD
 | `phantombot mcp …` | Discover and use external integrations lazily. |
 | `phantombot vault …` | Manage encrypted persona-scoped credentials. |
 | `phantombot notify …` | Send a material background update to configured owners. |
+| `phantombot escort …` | Allow, revoke or list kinds of action background tasks may do (the answer to an escort hold notice). |
 | `phantombot doctor` | Check channels, timers, connectors, harnesses, and memory health. |
 | `phantombot start\|stop\|restart\|logs` | Manage the installed service. |
 | `phantombot update` | Check for or install a verified release. |

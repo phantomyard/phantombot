@@ -156,8 +156,11 @@ import { recordDecisionModelOutcome } from "../lib/decisionModelHealth.ts";
 import {
   ESCORT_BRIEFING_CAP_BYTES,
   escortHoldNotice,
+  escortAllowanceBriefing,
+  escortHoldSource,
   freshEscortHolds,
   markEscortHoldsAnnounced,
+  readEscortAllowances,
   type EscortHold,
   type EscortSettings,
 } from "../lib/escort.ts";
@@ -528,8 +531,15 @@ export function makeScreener(
   // The escort's briefing (issue #768). Never throws.
   const escortBriefing = async (): Promise<{ briefing?: string }> => {
     try {
-      const b = await readBriefingDrawersCapped(config, persona, ESCORT_BRIEFING_CAP_BYTES);
-      return b && b.trim() !== "" ? { briefing: b } : {};
+      // The principal's allowances go FIRST and outside the drawer packing,
+      // so the cap can never cut a ruling (see escortAllowanceBriefing).
+      const allowances = escortAllowanceBriefing(readEscortAllowances(holdLedgerDir));
+      const room = ESCORT_BRIEFING_CAP_BYTES - (allowances ? Buffer.byteLength(allowances, "utf8") + 2 : 0);
+      const b = room > 0 ? await readBriefingDrawersCapped(config, persona, room) : undefined;
+      const parts = [allowances, b && b.trim() !== "" ? b : undefined].filter(
+        (x): x is string => !!x,
+      );
+      return parts.length > 0 ? { briefing: parts.join("\n\n") } : {};
     } catch {
       return {};
     }
@@ -543,7 +553,10 @@ export function makeScreener(
   const onEscortHolds = async (holds: EscortHold[]): Promise<void> => {
     try {
       const fresh = freshEscortHolds(holdLedgerDir, holds);
-      const notice = escortHoldNotice(fresh);
+      const notice = escortHoldNotice(fresh, {
+        source: escortHoldSource(_conversation),
+        allowed: new Set(readEscortAllowances(holdLedgerDir)),
+      });
       if (!notice) return;
       const code = await notify(notice);
       if (code === 0) markEscortHoldsAnnounced(holdLedgerDir, fresh);

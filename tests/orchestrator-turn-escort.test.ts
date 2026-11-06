@@ -106,8 +106,8 @@ describe("runTurn + escort", () => {
       async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
         holdLog = req.escort?.holdLog;
         // What the escort hook does on two refusals inside this turn.
-        appendFileSync(holdLog!, JSON.stringify({ summary: "git push origin fix" }) + "\n");
-        appendFileSync(holdLog!, JSON.stringify({ summary: "gh pr review 1 --approve" }) + "\n");
+        appendFileSync(holdLog!, JSON.stringify({ summary: "git push origin fix", kind: "push" }) + "\n");
+        appendFileSync(holdLog!, JSON.stringify({ summary: "gh pr review 1 --approve", kind: "review" }) + "\n");
         expect(calls).toHaveLength(0); // not before the turn ends
         yield { type: "done", finalText: "done" };
       },
@@ -117,7 +117,7 @@ describe("runTurn + escort", () => {
       verdict: { ...PASS_ESCORTED, onEscortHolds: async (holds) => void calls.push(holds) },
     });
     expect(holdLog).toStartWith(join(agentDir, "tmp", "escort-holds-"));
-    expect(calls).toEqual([[{ summary: "git push origin fix" }, { summary: "gh pr review 1 --approve" }]]);
+    expect(calls).toEqual([[{ summary: "git push origin fix", kind: "push" }, { summary: "gh pr review 1 --approve", kind: "review" }]]);
     expect(existsSync(holdLog!)).toBe(false);
   });
 
