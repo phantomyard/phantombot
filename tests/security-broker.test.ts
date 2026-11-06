@@ -28,7 +28,7 @@ function rig(
     now: () => 1000,
     secret: () => "sensitive-key",
     audit: (e) => audits.push(e),
-    fetch: (async (url, init) => {
+    fetch: (async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
       calls.push({ url: String(url), init });
       return Response.json(reply(String(url), init));
     }) as unknown as typeof fetch,
