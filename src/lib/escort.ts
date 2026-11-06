@@ -182,7 +182,7 @@ export type EscortAllowKind = keyof typeof ESCORT_ACTION_KINDS;
  * offering anything for that would turn the refusal into a widening).
  */
 export const ESCORT_UNOFFERED_KINDS = {
-  allowances: "a try to change the escort's own allowances",
+  allowances: "a try to change the escort's own allowances or record a ruling",
 } as const;
 
 export type EscortActionKind = EscortAllowKind | keyof typeof ESCORT_UNOFFERED_KINDS | "other";
@@ -397,7 +397,7 @@ export async function escortCheck(
     if (touchesEscortAllowances(action)) {
       return {
         allow: false,
-        reason: "only the principal can change the escort's allowances",
+        reason: "only the principal can change the escort's allowances or record a ruling",
       };
     }
     const kind = classifyEscortAction(action);
@@ -714,7 +714,8 @@ export function escortAllowanceBriefing(
 }
 
 /**
- * True for an action that mentions the escort's own allowances. Refused
+ * True for an action that mentions the escort's own allowances or records a
+ * ruling (`escort allow|revoke|deny`, `judge rule`). Refused
  * outright, without asking the decision model. This is a guard against the
  * obvious spellings, NOT a boundary: the allowances file sits in the persona
  * dir, which the escorted turn can write. Shell quoting that the shell drops
@@ -744,7 +745,7 @@ export function touchesEscortAllowances(action: EscortAction): boolean {
     .replace(/\$(?=['"])/g, "")
     .replace(/[\\'"`]/g, "")
     .replace(/\s+/g, " ");
-  return /escort-allow|\bescort (?:allow|revoke|deny)\b/i.test(flat);
+  return /escort-allow|\bescort (?:allow|revoke|deny)\b|\bjudge rule\b/i.test(flat);
 }
 
 /** The slice of pi's ExtensionAPI the escort touches. */

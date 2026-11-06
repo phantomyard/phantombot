@@ -497,7 +497,7 @@ describe("the principal's notice is one short plain line (#768)", () => {
     const holds = drainEscortHolds(holdLog);
     expect(holds.map((h) => h.kind)).toEqual(["allowances"]);
     const notice = escortHoldNotice(holds, { source: "scheduled task 7" })!;
-    expect(notice).toBe("🔒 Held in scheduled task 7: a try to change the escort's own allowances.");
+    expect(notice).toBe("🔒 Held in scheduled task 7: a try to change the escort's own allowances or record a ruling.");
     expect(notice).not.toContain("allow ");
   });
 
@@ -588,6 +588,20 @@ describe("the principal's allowances (#768 follow-through)", () => {
       fetchImpl: stub.fetchImpl,
     });
     expect(w.allow).toBe(false);
+    expect(stub.seen.calls).toBe(0);
+  });
+
+  it("refuses an escorted judge-rule allow/deny/clear outright, without asking", async () => {
+    const stub = stubFetch(0);
+    for (const command of [
+      "phantombot judge rule allow billing@vendor.com --note ok",
+      "phantombot judge rule deny push",
+      "phantombot jud''ge   rule clear x",
+    ]) {
+      const d = await escortCheck(CTX, { tool: "Bash", input: { command } }, { env: ENV, fetchImpl: stub.fetchImpl });
+      expect(d.allow).toBe(false);
+      if (!d.allow) expect(d.reason).toContain("record a ruling");
+    }
     expect(stub.seen.calls).toBe(0);
   });
 });
