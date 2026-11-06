@@ -68,6 +68,7 @@ import { classifyFailure } from "../lib/harnessAlert.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
 import { harnessSpawnEnv } from "../lib/vault.ts";
+import { ENV_SECURITY_SESSION } from "../security/session.ts";
 import { applyEscortEnv } from "../lib/escort.ts";
 import {
   type HarnessActivity,
@@ -180,6 +181,7 @@ export class PiHarness implements Harness {
    * pi runs its owner's extensions, not ours, and sits out escorted turns.
    */
   readonly supportsEscort: boolean;
+  get supportsSecuritySession(): boolean { return this.config.mode === "native"; }
 
   constructor(private readonly config: PiHarnessConfig) {
     this.id = config.id ?? (config.mode === "native" ? "native" : "pi-host");
@@ -284,6 +286,7 @@ export class PiHarness implements Harness {
       "--offline",
       "--no-session",
     ];
+    if (req.securitySession) baseArgs.push("--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "sandbox,broker");
     // Capability routing: pin the orchestrator model. Without this `--model`
     // the saved primary is never honored — Pi falls back to its own default
     // and the routing config is silently inert. The delegate models reach the
@@ -615,7 +618,9 @@ export class PiHarness implements Harness {
     if (req.tmpBaseDir) childEnv[ENV_PHANTOMBOT_TMP_DIR] = req.tmpBaseDir;
     // Escort (issue #702): the embedded engine's escort extension reads its
     // context from here. Set or CLEARED on every spawn, never inherited.
-    applyEscortEnv(childEnv, this.config.mode === "native" ? req.escort : undefined);
+    applyEscortEnv(childEnv, this.config.mode === "native" && !req.securitySession ? req.escort : undefined);
+    delete childEnv[ENV_SECURITY_SESSION];
+    if (req.securitySession) childEnv[ENV_SECURITY_SESSION] = JSON.stringify(req.securitySession);
     // Native: hand the child the embedded engine's package dir (compiled
     // binaries only) and the self-exec argv, so the capability-routing
     // extension's delegates re-enter THIS engine rather than hunting for a
@@ -760,7 +765,7 @@ export class PiHarness implements Harness {
         ? join(childAgentDir, "extensions", "capability-routing")
         : undefined;
       if (
-        existsSync(managedExtDir) &&
+        !req.securitySession && existsSync(managedExtDir) &&
         (!autoDiscoveredExtDir ||
           resolve(managedExtDir) !== resolve(autoDiscoveredExtDir))
       ) {

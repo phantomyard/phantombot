@@ -1,0 +1,26 @@
+name: security-sandbox
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  sandbox:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.x
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/security-broker.test.ts tests/security-sandbox.test.ts tests/security-session.test.ts
+      - name: Compile the runtime and exercise the actual shipped launcher
+        shell: bash
+        run: |
+          bun build --compile ./src/index.ts --outfile dist/phantombot-security${{ runner.os == 'Windows' && '.exe' || '' }}
+          bun scripts/securityCompiledSmoke.ts ./dist/phantombot-security${{ runner.os == 'Windows' && '.exe' || '' }}

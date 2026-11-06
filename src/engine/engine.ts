@@ -1,3 +1,5 @@
+import { readSecurityPolicy, validatePolicy, SECURITY_POLICY_FILE } from "../security/policy.ts";
+import type { SecurityPolicy } from "./securityTypes.ts";
 /**
  * The embeddable phantombot engine.
  *
@@ -618,6 +620,11 @@ interface PersonaRuntime {
 
 export class Persona {
   readonly name: string;
+  readonly security: {
+    /** Owner/application code only. Never expose this method to an end user or tool. */
+    configure(policy: SecurityPolicy): Promise<void>;
+    policy(): Promise<SecurityPolicy>;
+  };
   readonly secrets: {
     /** Store a credential in this persona's encrypted vault (verified by read-back). */
     set(name: string, value: string): Promise<void>;
@@ -678,6 +685,14 @@ export class Persona {
   constructor(engine: Engine, name: string) {
     this.#engine = engine;
     this.name = name;
+    this.security = {
+      configure: policy => this.#run(async () => {
+        const validated = validatePolicy(policy);
+        const target = join(await this.#dir(), SECURITY_POLICY_FILE);
+        await writeFileAtomic(target, JSON.stringify(validated, null, 2) + "\n", { mode: 0o600 });
+      }),
+      policy: () => this.#run(async () => readSecurityPolicy(await this.#dir())),
+    };
     this.secrets = {
       set: (key, value) => this.#run(() => this.#setSecret(key, value)),
       has: (key) =>

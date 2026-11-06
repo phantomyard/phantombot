@@ -55,7 +55,13 @@ import { EMBEDDED_PI_SUBCOMMAND, runEmbeddedPi } from "./lib/embeddedPi.ts";
 import { ESCORT_SUBCOMMAND, runEscortHook } from "./lib/escort.ts";
 import { BODY_GUARD_SUBCOMMAND, runBodyGuardHook } from "./lib/bodyPathGuard.ts";
 
-if (process.argv[2] === EMBEDDED_PI_SUBCOMMAND) {
+import { SANDBOX_SUBCOMMAND, sandboxExecChild } from "./security/sandbox.ts";
+
+if (process.argv[2] === SANDBOX_SUBCOMMAND) {
+  try { sandboxExecChild(process.argv.slice(3)); } catch (error) {
+    console.error((error as Error).message); process.exit(126);
+  }
+} else if (process.argv[2] === EMBEDDED_PI_SUBCOMMAND) {
   await runEmbeddedPi(process.argv.slice(3));
 } else if (process.argv[2] === ESCORT_SUBCOMMAND) {
   // The escort's claude PreToolUse hook (issue #702, lib/escort.ts). Dispatched

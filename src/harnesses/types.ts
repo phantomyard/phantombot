@@ -194,6 +194,7 @@ export interface HarnessRequest {
    * handed an escorted request. Omitted = no escort, today's behaviour.
    */
   escort?: EscortContext;
+  securitySession?: import("../security/types.ts").SessionDescriptor;
 }
 
 export type HarnessChunk =
@@ -356,6 +357,7 @@ export interface Harness {
    * orchestrator leaves this harness out of an escorted turn's chain.
    */
   readonly supportsEscort?: boolean;
+  readonly supportsSecuritySession?: boolean;
 
   /** Quick check: is the binary present and minimally callable? */
   available(): Promise<boolean>;
