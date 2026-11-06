@@ -56,6 +56,7 @@ import { ESCORT_SUBCOMMAND, runEscortHook } from "./lib/escort.ts";
 import { BODY_GUARD_SUBCOMMAND, runBodyGuardHook } from "./lib/bodyPathGuard.ts";
 
 import { runSandbox, SANDBOX_SUBCOMMAND, sandboxExecChild } from "./security/sandbox.ts";
+import { runSecurityMcpServer, SECURITY_MCP_SUBCOMMAND } from "./security/mcpServer.ts";
 
 if (process.argv[2] === "__sandbox_run") {
   try {
@@ -66,6 +67,10 @@ if (process.argv[2] === "__sandbox_run") {
   try { sandboxExecChild(process.argv.slice(3)); } catch (error) {
     console.error((error as Error).message); process.exit(126);
   }
+} else if (process.argv[2] === SECURITY_MCP_SUBCOMMAND) {
+  // GHSA-w7w8: the bounded claude turn's only tools (security/mcpServer.ts).
+  await runSecurityMcpServer();
+  process.exit(0);
 } else if (process.argv[2] === EMBEDDED_PI_SUBCOMMAND) {
   await runEmbeddedPi(process.argv.slice(3));
 } else if (process.argv[2] === ESCORT_SUBCOMMAND) {

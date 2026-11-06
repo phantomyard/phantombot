@@ -61,6 +61,8 @@ import { harnessSpawnEnv } from "../lib/vault.ts";
 import { applyEscortEnv, claudeEscortSettings } from "../lib/escort.ts";
 import { claudeBodyGuardHookEntry } from "../lib/bodyPathGuard.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
+import { ENV_SECURITY_SESSION } from "../security/session.ts";
+import { SECURITY_MCP_SERVER, SECURITY_MCP_SUBCOMMAND } from "../security/mcpServer.ts";
 import {
   type HarnessActivity,
   runHarnessProcess,
@@ -96,6 +98,12 @@ export class ClaudeHarness implements Harness {
   readonly id = "claude";
   /** Escort (issue #702): enforced by a PreToolUse hook in --settings. */
   readonly supportsEscort = true;
+  /**
+   * GHSA-w7w8: a bounded (untrusted) turn runs with claude's built-in tools
+   * OFF and only the runtime's sandbox + broker served over MCP, from an env
+   * that carries no vault secret (boundedClaudeEnv).
+   */
+  readonly supportsSecuritySession = true;
 
   constructor(
     private readonly config: ClaudeHarnessConfig,
@@ -184,16 +192,19 @@ export class ClaudeHarness implements Harness {
     // connectors never inject into a phantombot prompt. Background/nightly
     // (mcpMode "none") keep the zero-server config. Best-effort: any failure
     // resolves to the empty config, so the isolation holds regardless.
-    const foregroundMcpConfig =
-      req.mcpMode === "none" ? undefined : await buildForegroundMcpConfig(req.persona);
+    const bounded = req.securitySession !== undefined;
+    const foregroundMcpConfig = bounded
+      ? securityMcpConfig(phantombotSelfCommand())
+      : req.mcpMode === "none" ? undefined : await buildForegroundMcpConfig(req.persona);
 
     const args = this.buildArgs(
       req.systemPrompt,
-      req.toolsMode,
+      bounded ? "none" : req.toolsMode,
       systemPromptFile,
-      req.mcpMode,
+      bounded ? undefined : req.mcpMode,
       foregroundMcpConfig,
-      req.escort !== undefined,
+      !bounded && req.escort !== undefined,
+      bounded,
     );
     log.debug("claude.invoke spawning", {
       bin: this.config.bin,
@@ -209,7 +220,10 @@ export class ClaudeHarness implements Harness {
     // becomes visible, another persona's keys are removed); inside an engine
     // scope it is a per-spawn copy and the application's env is never written
     // (see harnessSpawnEnv).
-    const spawnEnv = await harnessSpawnEnv(req.persona);
+    // A bounded turn never loads the vault: it starts from a fixed allowlist of
+    // the daemon's own non-secret env (GHSA-w7w8). Credentials stay in the
+    // runtime's session broker.
+    const spawnEnv = bounded ? boundedClaudeEnv(process.env) : await harnessSpawnEnv(req.persona);
 
     // OAuth-on-host: don't leak any ANTHROPIC_* / CLAUDE_CODE_* auth or
     // routing var into the subprocess env (the vault may have supplied one),
@@ -236,10 +250,13 @@ export class ClaudeHarness implements Harness {
     );
     // The escort hook reads its context from the env claude hands it (set or
     // CLEARED here, never inherited — see applyEscortEnv).
-    applyEscortEnv(env, req.escort);
+    applyEscortEnv(env, bounded ? undefined : req.escort);
+    const envMap = env as Record<string, string>;
+    delete envMap[ENV_SECURITY_SESSION];
+    if (req.securitySession) envMap[ENV_SECURITY_SESSION] = JSON.stringify(req.securitySession);
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
-      cwd: req.workingDir,
+      cwd: req.securitySession?.workspace ?? req.workingDir,
       env,
       stdin: "pipe",
       stdout: "pipe",
@@ -293,6 +310,9 @@ export class ClaudeHarness implements Harness {
     foregroundMcpConfig?: string,
     // Escorted turn (issue #702): add the PreToolUse escort hook.
     escorted = false,
+    // Bounded turn (GHSA-w7w8): built-ins already off via toolsMode "none";
+    // the settings deny them by name too, belt and braces.
+    bounded = false,
   ): string[] {
     const args = [
       "--print",
@@ -397,7 +417,11 @@ export class ClaudeHarness implements Harness {
     // replaces the other.
     args.push(
       "--settings",
-      JSON.stringify(claudeTurnSettings(phantombotSelfCommand(), escorted)),
+      JSON.stringify(
+        bounded
+          ? claudeBoundedSettings()
+          : claudeTurnSettings(phantombotSelfCommand(), escorted),
+      ),
     );
     if (systemPromptFile) {
       // Read the persona system prompt from a file to keep it off the
@@ -408,6 +432,61 @@ export class ClaudeHarness implements Harness {
     }
     return args;
   }
+}
+
+/** Claude's built-in tools, denied by name in a bounded turn. */
+export const CLAUDE_BUILTIN_TOOLS = [
+  "Bash", "Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Glob", "Grep",
+  "LS", "WebFetch", "WebSearch", "Task", "Workflow", "TodoWrite",
+] as const;
+
+/** --settings for a bounded turn: only the two session MCP tools may run. */
+export function claudeBoundedSettings(): Record<string, unknown> {
+  return {
+    permissions: {
+      deny: [...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS.permissions.deny, ...CLAUDE_BUILTIN_TOOLS],
+      allow: [`mcp__${SECURITY_MCP_SERVER}__sandbox`, `mcp__${SECURITY_MCP_SERVER}__broker`],
+    },
+    enableAllProjectMcpServers: false,
+  };
+}
+
+/**
+ * The --mcp-config of a bounded turn: ONE stdio server, this phantombot's
+ * `__security_mcp`. The session token is not in argv; the server reads it
+ * from the env claude hands it.
+ */
+export function securityMcpConfig(self: string[]): string {
+  return JSON.stringify({
+    mcpServers: {
+      [SECURITY_MCP_SERVER]: {
+        type: "stdio",
+        command: self[0],
+        args: [...self.slice(1), SECURITY_MCP_SUBCOMMAND],
+      },
+    },
+  });
+}
+
+/**
+ * Non-secret env a bounded claude turn may inherit: enough to find the binary,
+ * its own OAuth login under HOME, locale and an HTTP proxy. Nothing from the
+ * vault — this is built from a fixed allowlist, never by stripping known keys.
+ */
+const BOUNDED_ENV_ALLOW = new Set([
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "TZ",
+  "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+  "SystemRoot", "SYSTEMROOT", "windir", "ComSpec", "PATHEXT", "USERPROFILE",
+  "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "HOMEDRIVE", "HOMEPATH",
+]);
+export function boundedClaudeEnv(source: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(source)) {
+    if (v === undefined) continue;
+    if (BOUNDED_ENV_ALLOW.has(k) || k.startsWith("LC_")) out[k] = v;
+  }
+  return out;
 }
 
 /**
