@@ -26,6 +26,9 @@ jobs:
           const cases = [
             ['baseline', '(version 1)(allow default)'],
             ['shipped', profile],
+            ['all-read', profile + '\n(allow file-read* file-map-executable)'],
+            ['all-mach', profile + '\n(allow mach-lookup)'],
+            ['all-ipc', profile + '\n(allow ipc-posix* ipc-sysv*)'],
             ['process-info', profile + '\n(allow process-info* (target same-sandbox))'],
             ['task-port', profile + '\n(allow mach-priv-task-port (target same-sandbox))'],
             ['system-read', profile + '\n(allow file-read* file-map-executable (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin"))'],
