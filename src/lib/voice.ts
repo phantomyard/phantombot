@@ -60,7 +60,22 @@ export interface AzureEdgeVoice {
  */
 export const DEFAULT_STT_TIMEOUT_MS = 60_000;
 
+export interface VoiceDirectionConfig {
+  enabled: boolean;
+  provider?: "elevenlabs" | "openai-compatible";
+  baseUrl?: string;
+  keyEnv?: string;
+  model?: string;
+  voice?: string;
+  speed?: number;
+}
+
 export interface VoiceConfig {
+  /** Effective direction credential; populated by the audio dispatcher. */
+  keyEnv?: string;
+  /** Optional independent directions; absent keeps the legacy full-loop TUI config. */
+  tts?: VoiceDirectionConfig;
+  stt?: VoiceDirectionConfig;
   provider: VoiceProvider;
   elevenlabs?: ElevenLabsVoice;
   openaiCompatible?: OpenAICompatibleVoice;

@@ -28,6 +28,7 @@
  *
  * Runtime: Bun (the engine uses `bun:sqlite` and `Bun.spawn`, like the CLI).
  */
+import { voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
 import type { CreatePersonaOptions, DecideOptions, DecisionModelCheck, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
 /**
  * Open an engine on `options.root`. Rejects with `invalid_root` or
@@ -65,6 +66,10 @@ export declare class Engine {
      */
     readonly decisionModels: {
         check(provider: string, apiKey: string): Promise<DecisionModelCheck>;
+    };
+    readonly voiceModels: {
+        providers(): Promise<ReturnType<typeof voiceProviders>>;
+        check(input: VoiceCheckInput): Promise<VoiceCheck>;
     };
     /** A handle on `name`. Cheap; existence is checked on use. */
     persona(name: string): Persona;

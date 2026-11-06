@@ -82,6 +82,7 @@ import {
   phantomchatInfo,
   startHostedChannel,
 } from "./phantomchat.ts";
+import { checkVoice, validateVoiceDirection, voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
 import { checkDecisionModel } from "./decisionModels.ts";
 import { checkProvider, listProviders } from "./providers.ts";
 import {
@@ -251,6 +252,11 @@ export class Engine {
     check(provider: string, apiKey: string): Promise<DecisionModelCheck>;
   };
 
+  readonly voiceModels: {
+    providers(): Promise<ReturnType<typeof voiceProviders>>;
+    check(input: VoiceCheckInput): Promise<VoiceCheck>;
+  };
+
   #scope: EngineScope;
   /** `#scope` plus `persona`, one per persona handle (identity-stable). */
   #scopes = new Map<string, EngineScope>();
@@ -281,6 +287,10 @@ export class Engine {
       list: () => this.run(async () => listProviders()),
       check: (provider, apiKey, options) =>
         this.run(() => checkProvider(provider, apiKey, options ?? {})),
+    };
+    this.voiceModels = {
+      providers: () => this.run(async () => voiceProviders()),
+      check: (input) => this.run(() => checkVoice(input)),
     };
     this.decisionModels = {
       check: (provider, apiKey) => this.run(() => checkDecisionModel(provider, apiKey)),
@@ -706,6 +716,29 @@ export class Persona {
       const path = personaConfigPath(config.personasDir, this.name);
       const toml = await readTomlTable(path);
 
+      const voiceSecrets: Array<{ name: string; value: string }> = [];
+      if (settings.voice) {
+        for (const direction of ["tts", "stt"] as const) {
+          const d = settings.voice[direction];
+          if (d === undefined) continue;
+          const { apiKey, ...metadata } = d;
+          validateVoiceDirection(metadata);
+          const block = table(table(toml, "voice"), direction);
+          // A changed endpoint must never reuse a key from a previous provider.
+          const changed = metadata.provider !== undefined && (metadata.provider !== block.provider || metadata.baseUrl !== block.base_url);
+          if (changed && !apiKey) throw new EngineError("invalid_argument", "a changed voice endpoint needs its API key");
+          if (metadata.enabled && direction === "tts" && !metadata.voice) throw new EngineError("invalid_argument", "TTS voice is required");
+          if (apiKey !== undefined) {
+            if (typeof apiKey !== "string" || !apiKey.trim() || apiKey.length > 65536) throw new EngineError("invalid_argument", "invalid voice apiKey");
+            if (!metadata.keyEnv) throw new EngineError("invalid_argument", "voice keyEnv is required with apiKey");
+            voiceSecrets.push({ name: metadata.keyEnv, value: apiKey });
+          }
+          const keys = { enabled: "enabled", provider: "provider", model: "model", baseUrl: "base_url", keyEnv: "key_env", voice: "voice", speed: "speed" } as const;
+          for (const key of Object.keys(keys) as Array<keyof typeof keys>) {
+            if (metadata[key] !== undefined) block[keys[key]] = metadata[key];
+          }
+        }
+      }
       const brain = settings.brain;
       if (brain) {
         const harnesses = table(toml, "harnesses");
@@ -879,6 +912,8 @@ export class Persona {
           );
         }
       }
+
+      for (const secret of voiceSecrets) await this.#setSecret(secret.name, secret.value);
 
       // Secrets FIRST: a config naming a key that never landed in the vault
       // is a persona that looks configured and fails on its first turn.

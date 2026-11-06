@@ -520,3 +520,36 @@ on top. The child sees that copy; nothing is written back.
   variable of the same name from your environment, and the rest of the vault
   still applies. The daemon keeps its more tolerant rules; they are right on
   an operator's own machine and wrong for a tenant.
+
+## Voice models
+
+`engine.voiceModels.providers()` exposes the TUI's ElevenLabs and OpenAI-compatible
+transports. `voiceModels.check({modality: 'tts' | 'stt', provider, apiKey, baseUrl?,
+model?, voice?})` reuses the TUI's key validation and separate speech/transcription
+catalogues. No key is saved by discovery; `models` may be empty on an endpoint
+without modality metadata, where the TUI's typed model fallback remains available.
+TTS voices belong to the selected model; supplying `voice` also proves an
+unlisted pair with the TUI's validation helper.
+
+`persona.configure({voice: {tts?, stt?}})` writes independent directions. Each
+full direction has `enabled`, `provider`, `model`, `keyEnv`, optional `baseUrl`,
+`voice`, `speed` and `apiKey`. Secrets go into the persona vault before metadata
+is saved. An endpoint/provider change requires a new key. `{enabled: false}`
+retains configuration and keys. Re-enable with the full retained metadata and
+omit `apiKey` to keep that direction's key. A running channel restarts, with
+failures visible on `phantomchat.status()`.
+
+Existing `[voice]` configurations retain their full-loop behaviour until a
+`[voice.tts]` or `[voice.stt]` direction is stated. An explicit TUI/CLI voice save
+replaces independent directions with its unified full-loop configuration.
+
+PhantomChat peers may use encrypted `phantomchat-voice-models` control requests
+(`get`, `set`) to select models on a remote runtime. Only fresh requests from a
+configured allowlisted principal are accepted, never TOFU/open-bot senders or
+group context. The remote endpoint and vault key must already match the app's
+Settings provider; the protocol cannot provision or retrieve credentials, change
+endpoints, or run tools. Both directions may be disabled and later restored.
+A failed, incompatible or unsupported remote operation is never a successful
+local save. Messages also carry the existing local-tools control tag so older
+engines discard them before the turn pipeline. Shutdown drains outstanding
+configuration work before releasing the engine root.

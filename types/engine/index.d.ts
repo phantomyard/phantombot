@@ -11,3 +11,4 @@
 export { createEngine, Engine, Persona } from "./engine.ts";
 export { EngineError, isEngineError, type EngineErrorCode } from "./errors.ts";
 export type * from "./types.ts";
+export type { VoiceCheck, VoiceCheckInput, VoiceModality } from "./voice.ts";

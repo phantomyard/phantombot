@@ -16,6 +16,7 @@ import {
   runTelegramServer,
 } from "../channels/telegram.ts";
 import { TELEGRAM_BOT_COMMANDS } from "../channels/commands.ts";
+import { createVoiceModelsHandler } from "../channels/phantomchat/voiceModels.ts";
 import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
 import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
 import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
@@ -1395,6 +1396,9 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           publicKeyHex: identity.publicKeyHex,
           transport,
           inboundSink: p2pBridge,
+          voiceModels: createVoiceModelsHandler({persona: spec.persona, config: personaConfig,
+            allowedNpubs: spec.config.allowedNpubs, secretKey: identity.secretKey,
+            publish: event => transport.publishWrap(event)}),
         });
         // Post-restart confirmation for a `/update` that was issued FROM
         // PhantomChat. The Telegram notify above deliberately deferred any

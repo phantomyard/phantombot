@@ -138,7 +138,23 @@ export type EmbeddingsConfig = {
     /** 0 or omitted: the server's native size. */
     dims?: number;
 };
+export interface VoiceDirectionSettings {
+    enabled: boolean;
+    provider?: "elevenlabs" | "openai-compatible";
+    baseUrl?: string;
+    keyEnv?: string;
+    model?: string;
+    voice?: string;
+    speed?: number;
+    /** Omit to retain the persona-vault key. */
+    apiKey?: string;
+}
+export interface VoiceSettings {
+    tts?: VoiceDirectionSettings;
+    stt?: VoiceDirectionSettings;
+}
 export interface PersonaConfig {
+    voice?: VoiceSettings;
     brain?: BrainConfig;
     decisionModel?: DecisionModelConfig;
     embeddings?: EmbeddingsConfig;

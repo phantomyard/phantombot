@@ -25,6 +25,7 @@
  */
 
 import { log } from "../../lib/logger.ts";
+import { isVoiceModelsRumor, type VoiceModelsHandler } from "./voiceModels.ts";
 import { isLocalToolsRumor } from "./localTools.ts";
 import type {
   Channel,
@@ -140,6 +141,7 @@ export interface PhantomchatChannelInput {
    * the same path as relay ones. Omit to run relay-only (the default).
    */
   inboundSink?: InboundWrapSink;
+  voiceModels?: VoiceModelsHandler;
   /**
    * Self-heal watchdog poll interval (ms). Defaults to
    * `SUBSCRIPTION_HEAL_CHECK_MS`; overridable so tests can drive the watchdog
@@ -303,6 +305,12 @@ export function createPhantomchatChannel(
         // cryptographic rumor.pubkey.
         const senderHex = rumor.pubkey.toLowerCase();
         if (senderHex === publicKeyHex.toLowerCase()) return;
+
+        if (isVoiceModelsRumor(rumor)) {
+          if (rumor.tags.some(tag => tag[0] === "group")) return;
+          if (remember(seenRumorIds, rumor.id)) input.voiceModels?.(rumor);
+          return;
+        }
 
         // Local PC tools control traffic (#747) is read by `phantombot device`,
         // never by the turn pipeline. Dropped on the TAGS, before any parse, so
@@ -730,6 +738,7 @@ export function createPhantomchatChannel(
           yield queue.shift()!;
         }
       } finally {
+        await input.voiceModels?.close();
         clearTimeout(liveFallback);
         clearInterval(healTimer);
         clearInterval(pollTimer);
