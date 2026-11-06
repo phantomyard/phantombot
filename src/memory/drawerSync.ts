@@ -59,6 +59,7 @@ import {
   ingestDrawerFile,
   type IngestResult,
 } from "./drawerIngest.ts";
+import { relevanceFirst } from "./drawerRelevance.ts";
 import { enableWalMode } from "./store.ts";
 
 /**
@@ -317,11 +318,33 @@ export async function drawerSection(
   personaDir: string,
   persona: string,
   kind: DrawerKind,
-  opts: { limit?: number; now?: Date } = {},
+  opts: {
+    limit?: number;
+    now?: Date;
+    /**
+     * What is being judged (#768). Entries the search index matches against
+     * it come first, best match first; the rest follow in ranked order, so
+     * the byte cap still trims the weakest. No query: ranked order.
+     */
+    query?: string;
+    /** Search index path for the query. Default: memoryIndexPath(persona). */
+    indexPath?: string;
+  } = {},
 ): Promise<DrawerBriefingSection | undefined> {
   let rows: string | undefined;
   try {
-    rows = renderDrawer(store, persona, kind, opts);
+    if (opts.query?.trim()) {
+      const ranked = store.ranked(persona, kind, { limit: opts.limit, now: opts.now });
+      const ordered = await relevanceFirst(ranked, {
+        persona,
+        kind,
+        query: opts.query,
+        indexPath: opts.indexPath,
+      });
+      rows = ordered.length > 0 ? ordered.map(renderEntry).join("\n") : undefined;
+    } else {
+      rows = renderDrawer(store, persona, kind, opts);
+    }
   } catch (e) {
     // The store opened but this drawer's query did not survive it (corrupt
     // page, schema older than the code). Every other failure here degrades to

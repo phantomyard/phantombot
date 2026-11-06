@@ -22,6 +22,12 @@
  *     surfaced as `senderId`), never on the envelope `from` field.
  */
 
+import {
+  HoldThreadRelay,
+  groupHoldLine,
+  holdCount,
+  startHoldRelay,
+} from "../../lib/holdRelay.ts";
 import { homedir } from "node:os";
 import type { Config } from "../../config.ts";
 import { DEFAULT_CHATTINESS, DEFAULT_TELEGRAM_STREAMING } from "../../config.ts";
@@ -264,6 +270,8 @@ export interface RunPhantomchatServerInput {
    */
   secretKey: Uint8Array;
   /** Stop after draining the currently-available messages. For tests. */
+  /** Hold-notice poll interval (#768). Tests only; default HOLD_RELAY_POLL_MS. */
+  holdRelayPollMs?: number;
   oneShot?: boolean;
   /**
    * ServiceControl override for the `/restart` slash command's afterSend.
@@ -543,6 +551,10 @@ export async function runPhantomchatServer(
     return "trusted";
   };
 
+  // Open groups for hold notices (#768), keyed by conversationId.
+  const holdRelay = new HoldThreadRelay(input.agentDir);
+  const holdGroups = new Map<string, { groupId: string; members: string[] }>();
+
   const handle = async (
     msg: ChannelMessage,
     alsoReceipt?: string[],
@@ -573,6 +585,17 @@ export async function runPhantomchatServer(
         sender: senderHex.slice(0, 12) + "…",
       });
       return;
+    }
+
+    // A group the owner is active in is an open thread for hold notices
+    // (#768). DMs are not: notify already reached the owner's DM.
+    if (msg.groupId && tier === "trusted") {
+      // Same member set the reply path builds: the group's members as the
+      // rumor lists them, plus the sender (never in that list).
+      const members = new Set<string>(memberHexes);
+      members.add(senderHex.toLowerCase());
+      holdGroups.set(msg.conversationId, { groupId: msg.groupId, members: [...members] });
+      holdRelay.touch(msg.conversationId);
     }
 
     // ===================== GROUP ADDRESSING GATE =====================
@@ -1665,8 +1688,19 @@ export async function runPhantomchatServer(
   // aborts. Under oneShot, tests feed a fixed set of gift-wraps and then abort
   // the signal; listen()'s loop drains its queue and completes, so this
   // for-await ends naturally and we fall through to draining inFlight.
-  for await (const msg of channel.listen(input.signal)) {
-    coalescer.accept(msg);
+  // Hold notices into the owner's open groups (#768): a count only, sent out
+  // of band (never a turn), and a group we can no longer reach just misses it.
+  const stopHoldRelay = startHoldRelay(holdRelay, async (thread, notices) => {
+    const g = holdGroups.get(thread);
+    if (!g) return;
+    await transport.sendGroupMessage(g.groupId, g.members, groupHoldLine(holdCount(notices)));
+  }, input.holdRelayPollMs);
+  try {
+    for await (const msg of channel.listen(input.signal)) {
+      coalescer.accept(msg);
+    }
+  } finally {
+    stopHoldRelay();
   }
 
   // Whatever is still waiting for a caption goes out as-is: a hold must never

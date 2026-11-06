@@ -55,6 +55,7 @@ import replyModeCmd from "./replyMode.ts";
 import p2pCmd from "./p2p.ts";
 import deviceCmd from "./device.ts";
 import escortCmd from "./escort.ts";
+import judgeCmd from "./judge.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -99,6 +100,7 @@ export const mainCommand = defineCommand({
     p2p: p2pCmd,
     device: deviceCmd,
     escort: escortCmd,
+    judge: judgeCmd,
     workspace: workspaceCmd,
   },
 });

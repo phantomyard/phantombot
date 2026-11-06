@@ -96,6 +96,12 @@ import {
 import type { GroupChatState } from "./routing.ts";
 import { abortReasonString, persistInterruptedTurn } from "./interrupted.ts";
 import {
+  HoldThreadRelay,
+  groupHoldLine,
+  holdCount,
+  startHoldRelay,
+} from "../../lib/holdRelay.ts";
+import {
   captureNudgeForTurn,
   CHAT_REPLY_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
@@ -255,6 +261,8 @@ export interface RunTelegramServerInput {
   /** Stop after one polling cycle. For tests. */
   oneShot?: boolean;
   /** Signal to stop the loop cleanly. */
+  /** Hold-notice poll interval (#768). Tests only; default HOLD_RELAY_POLL_MS. */
+  holdRelayPollMs?: number;
   signal?: AbortSignal;
   /**
    * Minimum gap between two `sendChatAction` calls (ms). Used to throttle
@@ -418,6 +426,18 @@ export async function runTelegramServer(
   }
 
   let offset = 0;
+
+  // Hold notices into the owner's open groups (#768): a count only, sent out
+  // of band (never a turn), and a closed group just misses it.
+  const holdRelay = new HoldThreadRelay(input.agentDir);
+  const stopHoldRelay = input.oneShot
+    ? () => {}
+    : startHoldRelay(
+        holdRelay,
+        (chatId, notices) =>
+          input.transport.sendMessage(chatId, groupHoldLine(holdCount(notices))),
+        input.holdRelayPollMs,
+      );
 
   try {
     do {
@@ -583,6 +603,9 @@ export async function runTelegramServer(
 
         const isGroupChat =
           msg.chatType === "group" || msg.chatType === "supergroup";
+        // A group the owner is active in is an open thread for hold notices
+        // (#768). DMs are not: notify already reached the owner's DM.
+        if (isGroupChat && principalAuthenticated) holdRelay.touch(msg.conversationId);
 
         // Slash commands: handled INLINE so they bypass the per-chat queue
         // and any in-flight turn. Voice messages are never slash commands
@@ -848,6 +871,7 @@ export async function runTelegramServer(
       }
     } while (!input.oneShot);
   } finally {
+    stopHoldRelay();
     // Drain pending workers so tests can assert on transport state, and
     // production shutdowns don't leave zombie subprocesses behind.
     if (inFlight.size > 0) {

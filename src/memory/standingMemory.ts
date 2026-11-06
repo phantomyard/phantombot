@@ -28,13 +28,10 @@
  * dead turn.
  */
 
-import { existsSync } from "node:fs";
-import { memoryIndexPath } from "../config.ts";
 import { log } from "../lib/logger.ts";
-import { MemoryIndex } from "../lib/memoryIndex.ts";
 import { inertBlock } from "../lib/promptSafeText.ts";
 import { type DrawerEntry, type DrawerKind } from "./drawers.ts";
-import { DRAWER_INDEX_PREFIX } from "./drawerIndex.ts";
+import { relevanceFirst } from "./drawerRelevance.ts";
 import { openDrawerStore } from "./drawerSync.ts";
 
 /**
@@ -147,44 +144,6 @@ export const STANDING_MEMORY_PREAMBLE =
   "passed unmet, `--expire <id>`.";
 
 /**
- * Move commitments the query matches to the front. Never throws.
- *
- * Hits are ordered by match strength weighted by rank fade (#767): the i-th
- * best match scores `fade / (1 + i)`, where fade is the entry's ranked score
- * (2^(-age/30d) at default weight). A stale strong match therefore yields to a
- * fresh decent one — a hoard of old rows that share words with the message
- * can no longer crowd out this week's — but still ranks among the hits.
- */
-async function relevanceFirst<T extends DrawerEntry & { score?: number }>(
-  entries: T[],
-  input: { persona: string; query?: string; indexPath?: string },
-): Promise<T[]> {
-  const path = input.indexPath ?? memoryIndexPath(input.persona);
-  if (entries.length < 2 || !existsSync(path)) return entries;
-  let ix: MemoryIndex | undefined;
-  try {
-    ix = await MemoryIndex.open(path);
-    const order = new Map<string, number>();
-    for (const p of ix.matchPathsUnder(`${DRAWER_INDEX_PREFIX}commitments/`, input.query!)) {
-      const id = /\/([^/]+)\.md$/.exec(p)?.[1];
-      if (id && !order.has(id)) order.set(id, order.size);
-    }
-    if (order.size === 0) return entries;
-    const hit = entries.filter((e) => order.has(e.id));
-    const strength = (e: T) => (e.score ?? 1) / (1 + order.get(e.id)!);
-    hit.sort((a, b) => strength(b) - strength(a) || order.get(a.id)! - order.get(b.id)!);
-    return [...hit, ...entries.filter((e) => !order.has(e.id))];
-  } catch (e) {
-    log.warn("standing memory: commitment relevance skipped", {
-      error: (e as Error).message,
-    });
-    return entries;
-  } finally {
-    ix?.close();
-  }
-}
-
-/**
  * Build the standing memory block for one persona, or undefined when no
  * drawer has an injectable entry (or the store cannot be read).
  */
@@ -210,7 +169,7 @@ export async function buildStandingMemory(input: {
     for (const kind of STANDING_KINDS) {
       let entries = opened.store.ranked(input.persona, kind, { now });
       if (kind === "commitments" && input.query?.trim()) {
-        entries = await relevanceFirst(entries, input);
+        entries = await relevanceFirst(entries, { ...input, kind });
       }
       if (entries.length === 0) continue;
       sections.push({

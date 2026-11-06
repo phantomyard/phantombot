@@ -4544,3 +4544,66 @@ describe("reply-language overlay", () => {
     expect(prompt.split("# Reply language").length - 1).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Hold notices into the owner's open groups (#768)
+// ---------------------------------------------------------------------------
+
+describe("runTelegramServer hold relay (#768)", () => {
+  test("a group the owner is active in gets a count; DMs and stranger-only groups do not", async () => {
+    const { publishHoldNotice, groupHoldLine } = await import("../src/lib/holdRelay.ts");
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push(
+      { updateId: 1, conversationId: "-1001", senderId: "42", fromUsername: "owner", chatType: "supergroup", text: "@nim_test_bot hi" },
+      { updateId: 2, conversationId: "-2002", senderId: "77", fromUsername: "stranger", chatType: "supergroup", text: "@nim_test_bot hi" },
+      { updateId: 3, conversationId: "42", senderId: "42", fromUsername: "owner", text: "hi" },
+    );
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    const ac = new AbortController();
+    const run = runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["nim"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "nim",
+      transport,
+      signal: ac.signal,
+      holdRelayPollMs: 10,
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    publishHoldNotice(agentDir, { source: "judge", count: 1, text: "🔒 I held an untrusted request." });
+    await new Promise((r) => setTimeout(r, 80));
+    ac.abort();
+    await run;
+    const holdLines = transport.sent.filter((m) => m.text.startsWith("🔒"));
+    expect(holdLines).toEqual([{ chatId: "-1001", text: groupHoldLine(1) }]);
+  });
+});
+
+describe("runTelegramServer hold relay on an open bot (#768)", () => {
+  test("a group where only strangers spoke is not an open thread", async () => {
+    const { publishHoldNotice } = await import("../src/lib/holdRelay.ts");
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1, conversationId: "-3003", senderId: "77", fromUsername: "stranger", chatType: "supergroup", text: "@nim_test_bot hi",
+    });
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: '{"score":5,"reason":"ok","question":""}' }]);
+    const ac = new AbortController();
+    const run = runTelegramServer({
+      config: baseConfig({ allowedUserIds: [], groupPersonaNames: ["nim"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "nim",
+      transport,
+      signal: ac.signal,
+      holdRelayPollMs: 10,
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    publishHoldNotice(agentDir, { source: "judge", count: 1, text: "🔒 I held an untrusted request." });
+    await new Promise((r) => setTimeout(r, 80));
+    ac.abort();
+    await run;
+    expect(transport.sent.filter((m) => m.text.startsWith("🔒"))).toEqual([]);
+  });
+});
