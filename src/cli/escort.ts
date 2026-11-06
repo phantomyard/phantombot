@@ -7,8 +7,10 @@
  * replies "allow push". From then on the escort's briefing carries a ruling
  * that background tasks may do that kind of action when their task calls for
  * it — context for the decision model, never a bypass: it still asks whether
- * each action fits its task. The escort refuses any escorted action that
- * touches these allowances, so the turn being escorted cannot grant itself one.
+ * each action fits its task. The escort refuses escorted actions that mention
+ * these allowances (the obvious spellings). The file is writable by the
+ * escorted turn, so that guard is not a boundary; an allowance only informs
+ * the escort's judgement, which is why a forged one cannot bypass it.
  */
 
 import { defineCommand } from "citty";

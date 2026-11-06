@@ -732,7 +732,7 @@ describe("screener escort briefing + hold notice (#768)", () => {
     expect(Buffer.byteLength(v.escort!.briefing!, "utf8")).toBeLessThanOrEqual(ESCORT_BRIEFING_CAP_BYTES);
     await v.onEscortHolds!([{ summary: "git push", kind: "push" }]);
     expect(sent).toEqual([
-      "🔒 Held in a background task: push code to a repository.\nThat is already allowed; it was held because it did not fit this task.",
+      "🔒 Held in a background task: push code to a repository.\nThat is already allowed; it was held anyway.",
     ]);
   });
 });

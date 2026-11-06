@@ -170,7 +170,21 @@ export const ESCORT_ACTION_KINDS = {
 } as const;
 
 export type EscortAllowKind = keyof typeof ESCORT_ACTION_KINDS;
-export type EscortActionKind = EscortAllowKind | "other";
+/**
+ * Kinds a notice can name but never offers to allow: "other" (unrecognised)
+ * and "allowances" (the turn tried to change the escort's own allowances —
+ * offering anything for that would turn the refusal into a widening).
+ */
+export const ESCORT_UNOFFERED_KINDS = {
+  allowances: "a try to change the escort's own allowances",
+} as const;
+
+export type EscortActionKind = EscortAllowKind | keyof typeof ESCORT_UNOFFERED_KINDS | "other";
+
+function isEscortActionKind(k: unknown): k is EscortActionKind {
+  return isEscortAllowKind(k) || k === "other" ||
+    (typeof k === "string" && Object.prototype.hasOwnProperty.call(ESCORT_UNOFFERED_KINDS, k));
+}
 
 /** True for a word the principal can allow ("other" never is). */
 export function isEscortAllowKind(k: unknown): k is EscortAllowKind {
@@ -474,7 +488,7 @@ export function recordEscortHold(ctx: EscortContext | undefined, action: EscortA
   try {
     const hold: EscortHold = {
       summary: summarizeEscortAction(action),
-      kind: classifyEscortAction(action),
+      kind: touchesEscortAllowances(action) ? "allowances" : classifyEscortAction(action),
     };
     appendFileSync(ctx.holdLog, JSON.stringify(hold) + "\n", { mode: 0o600 });
     return true;
@@ -504,7 +518,7 @@ export function drainEscortHolds(holdLog: string): EscortHold[] {
       if (typeof v.summary === "string" && v.summary.trim() !== "") {
         holds.push({
           summary: summarizeEscortAction({ tool: v.summary, input: undefined }),
-          kind: isEscortAllowKind(v.kind) ? v.kind : "other",
+          kind: isEscortActionKind(v.kind) ? v.kind : "other",
         });
       }
     } catch {
@@ -541,8 +555,9 @@ export function escortHoldSource(conversation: string | undefined): string {
  * The question is backed: "allow <kind>" makes the trusted turn run
  * `phantombot escort allow <kind>`, which the escort's briefing carries on
  * every later check (see escortAllowanceBriefing). Kinds already allowed are
- * not offered again — the escort held them anyway because they did not fit
- * the task, and the notice says so.
+ * not offered again; the notice says it was held anyway (the cause may be a
+ * misfit, a missing key or an outage — the hold does not record which). A
+ * try to change the allowances is named but never offered.
  */
 export function escortHoldNotice(
   holds: EscortHold[],
@@ -553,11 +568,14 @@ export function escortHoldNotice(
   const source = opts.source ?? "a background task";
   const kinds: EscortActionKind[] = [];
   for (const h of holds) {
-    const k = isEscortAllowKind(h.kind) ? h.kind : "other";
+    const k = isEscortActionKind(h.kind) ? h.kind : "other";
     if (!kinds.includes(k)) kinds.push(k);
   }
-  const named = kinds.filter((k): k is EscortAllowKind => k !== "other");
+  const named = kinds.filter(isEscortAllowKind);
   const phrases: string[] = named.map((k) => ESCORT_ACTION_KINDS[k]);
+  for (const k of kinds) {
+    if (k !== "other" && !isEscortAllowKind(k)) phrases.push(ESCORT_UNOFFERED_KINDS[k]);
+  }
   if (kinds.includes("other")) phrases.push(named.length > 0 ? "another tool call" : "a tool call");
   const what = phrases.join(", ");
   const head = n === 1
@@ -572,7 +590,7 @@ export function escortHoldNotice(
     return `${head}\nAllow this in background tasks next time? Reply ${reply}. No reply = keep holding.`;
   }
   if (named.length > 0) {
-    return `${head}\nThat is already allowed; it was held because it did not fit this task.`;
+    return `${head}\nThat is already allowed; it was held anyway.`;
   }
   return head;
 }
@@ -630,18 +648,37 @@ export function escortAllowanceBriefing(kinds: readonly EscortAllowKind[]): stri
 }
 
 /**
- * True for an action that touches the escort's own allowances. Refused
- * outright, without asking the decision model: only the principal's trusted
- * turn grants an allowance, never the turn being escorted.
+ * True for an action that mentions the escort's own allowances. Refused
+ * outright, without asking the decision model. This is a guard against the
+ * obvious spellings, NOT a boundary: the allowances file sits in the persona
+ * dir, which the escorted turn can write. Shell quoting that the shell drops
+ * (backslashes, quotes, `$''`) is removed and whitespace collapsed before
+ * matching, so `escort-a\llow.json`, `esc''ort allow` and the like are caught;
+ * a determined turn can still build the name some other way. An allowance is
+ * context for the escort, never a bypass, so a forged one only informs a
+ * judgement the decision model still makes.
  */
 export function touchesEscortAllowances(action: EscortAction): boolean {
-  let text: string;
-  try {
-    text = typeof action.input === "string" ? action.input : JSON.stringify(action.input ?? {});
-  } catch {
-    text = String(action.input);
-  }
-  return /escort-allow|\bescort\s+(?:allow|revoke)\b/i.test(text ?? "");
+  const parts: string[] = [];
+  const walk = (v: unknown, depth: number): void => {
+    if (depth > 8) return;
+    if (typeof v === "string") parts.push(v);
+    else if (Array.isArray(v)) for (const x of v) walk(x, depth + 1);
+    else if (v && typeof v === "object") {
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+        parts.push(k);
+        walk(x, depth + 1);
+      }
+    }
+  };
+  walk(action.input, 0);
+  const flat = parts
+    .join(" ")
+    .replace(/\\\r?\n/g, "")
+    .replace(/\$(?=['"])/g, "")
+    .replace(/[\\'"`]/g, "")
+    .replace(/\s+/g, " ");
+  return /escort-allow|\bescort (?:allow|revoke)\b/i.test(flat);
 }
 
 /** The slice of pi's ExtensionAPI the escort touches. */
