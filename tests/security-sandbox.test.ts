@@ -39,7 +39,7 @@ test("real OS permits local work and denies reads/writes outside", async () => {
     file = join(outside, "secret");
   writeFileSync(file, "host-secret");
   const allowed = await runSandbox(workspace, "echo local > local.txt");
-  expect(allowed.exitCode).toBe(0);
+  expect(allowed.exitCode, allowed.output).toBe(0);
   expect(readFileSync(join(workspace, "local.txt"), "utf8")).toContain("local");
   const denied = await runSandbox(workspace, cat(file));
   expect(denied.exitCode).not.toBe(0);
@@ -110,7 +110,7 @@ test("bundled sandbox permits an existing Bun/Node runtime with no host secrets"
     workspace,
     `bun -e ${quote('console.log("runtime-ok"); console.log(process.env.GITHUB_TOKEN ?? "no-secret")')}`,
   );
-  expect(r.exitCode).toBe(0);
+  expect(r.exitCode, r.output).toBe(0);
   expect(r.output).toContain("runtime-ok");
   expect(r.output).toContain("no-secret");
 }, 15000);

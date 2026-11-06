@@ -55,9 +55,14 @@ import { EMBEDDED_PI_SUBCOMMAND, runEmbeddedPi } from "./lib/embeddedPi.ts";
 import { ESCORT_SUBCOMMAND, runEscortHook } from "./lib/escort.ts";
 import { BODY_GUARD_SUBCOMMAND, runBodyGuardHook } from "./lib/bodyPathGuard.ts";
 
-import { SANDBOX_SUBCOMMAND, sandboxExecChild } from "./security/sandbox.ts";
+import { runSandbox, SANDBOX_SUBCOMMAND, sandboxExecChild } from "./security/sandbox.ts";
 
-if (process.argv[2] === SANDBOX_SUBCOMMAND) {
+if (process.argv[2] === "__sandbox_run") {
+  try {
+    const result = await runSandbox(process.argv[3]!, process.argv[4]!);
+    await Bun.write(Bun.stdout, JSON.stringify(result));
+  } catch (error) { console.error((error as Error).message); process.exit(126); }
+} else if (process.argv[2] === SANDBOX_SUBCOMMAND) {
   try { sandboxExecChild(process.argv.slice(3)); } catch (error) {
     console.error((error as Error).message); process.exit(126);
   }

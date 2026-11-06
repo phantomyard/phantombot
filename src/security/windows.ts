@@ -47,6 +47,7 @@ export function windowsSandbox(workspace: string, command: string): number {
     FreeSid: { args: ["ptr"], returns: "ptr" },
   });
   const kernel = dlopen("kernel32.dll", {
+    GetLastError: { args: [], returns: "u32" },
     LocalFree: { args: ["ptr"], returns: "ptr" },
     InitializeProcThreadAttributeList: {
       args: ["ptr", "u32", "u32", "ptr"],
@@ -87,7 +88,10 @@ export function windowsSandbox(workspace: string, command: string): number {
     CloseHandle: { args: ["ptr"], returns: "bool" },
   });
   const check = (ok: unknown, operation: string) => {
-    if (!ok) throw new Error(`sandbox unavailable: ${operation}`);
+    if (!ok)
+      throw new Error(
+        `sandbox unavailable: ${operation} (Win32 ${kernel.symbols.GetLastError()})`,
+      );
   };
   const name = wide(windowsProfileName(workspace));
   const sidOut = Buffer.alloc(8);

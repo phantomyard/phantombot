@@ -86,7 +86,7 @@ not an execution-time phrase blacklist.
 - `npm-package`: `grant`, `name`, `version`. Only the fixed public npm registry
   tarball route is reachable. No credentials or arbitrary URL are accepted.
   Extraction stages Bun's offline cache. Stage the dependencies in the lockfile,
-  then run `bun install --offline`; package lifecycle scripts stay sandboxed.
+  then run `bun install --frozen-lockfile --offline`; package lifecycle scripts stay sandboxed.
 - `http`: `grant`, optional `body`. URL, method and optional Bearer credential
   vault name are fixed by the owner's HTTP grant. Redirects are refused.
 - `mcp`: `grant`, `arguments`. Server/tool are fixed in the grant, and arguments

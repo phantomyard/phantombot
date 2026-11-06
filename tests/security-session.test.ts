@@ -32,7 +32,7 @@ test("real session enforces IPC authentication and cleans workspace", async () =
     exitCode: number;
     output: string;
   };
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, result.output).toBe(0);
   expect(result.output).toContain("session-ok");
   await session.close();
   await expect(fetch(session.descriptor.url)).rejects.toThrow();

@@ -473,7 +473,7 @@ The broker keeps credentials in the runtime's persona vault. A GitHub grant
 permits inspecting/checking out the specified PR and publishing reviews at its
 verified head; a team grant additionally verifies a review-request event against
 the GitHub API. An npm grant downloads packages into the sandbox's Bun cache for
-`bun install --offline`. HTTP grants fix one HTTPS URL and method; MCP grants fix
+`bun install --frozen-lockfile --offline`. HTTP grants fix one HTTPS URL and method; MCP grants fix
 one server, tool and exact argument object. Authorized operations have no Escort
 classifier call, including during a decision-model outage. Grants cannot merge,
 push, deploy or change policy unless the owner separately grants an appropriate
