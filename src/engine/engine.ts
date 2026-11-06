@@ -29,7 +29,7 @@
 
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
 import { runMemoryCapture, runMemorySearch } from "../cli/memory.ts";
@@ -42,6 +42,7 @@ import {
   loadConfig,
   memoryIndexPath,
   personaDir,
+  xdgDataHome,
 } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
@@ -58,7 +59,14 @@ import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
 import { writeFileAtomic, type WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
-import { listPersonaDirs } from "../lib/personaDefault.ts";
+import { nativeAgentDir } from "../lib/nativeAgentDir.ts";
+import {
+  healDefaultPersonaIfBroken,
+  listPersonaDirs,
+  writeAutostartMode,
+  writeAutostartPersonas,
+  writeDefaultPersona,
+} from "../lib/personaDefault.ts";
 import { ENV_PI_API_KEY } from "../lib/piRouting.ts";
 import { APP_CONVERSATION_PREFIX } from "../lib/memoryIndex.ts";
 import { acquireRunLock, type LockHandle } from "../lib/runLock.ts";
@@ -449,10 +457,93 @@ export class Engine {
       } catch (e) {
         throw new EngineError("write_failed", `cannot delete persona '${name}': ${(e as Error).message}`);
       }
+      // Debris that lives OUTSIDE the persona dir (issue #771). Best-effort
+      // and logged, never thrown: the directory is already gone, and a second
+      // delete() returns false without retrying, so a throw here would report
+      // a failure nobody can act on.
+      await this.#prunePersonaDebris(config, name);
       this.#handles.delete(name);
       this.#scopes.delete(name);
       return true;
     });
+  }
+
+  /**
+   * Everything keyed by a persona name that outlives its directory.
+   *
+   * The persona dir carries identity, vault, config, memory files and the
+   * PhantomChat channel — but three things live elsewhere and used to survive
+   * a delete (#771):
+   *
+   *  - `state.json`'s `default_persona`, which kept naming a persona that no
+   *    longer exists until the NEXT create healed it by accident
+   *    (`adoptAsDefaultIfMissing`). Written through `writeDefaultPersona` /
+   *    `healDefaultPersonaIfBroken`, so the change lands in state-audit.log
+   *    like every other default-persona write.
+   *  - the native (embedded pi) agent dir `<dataHome>/pi-native/personas/<name>`
+   *    — auth.json and the model config, which a later persona created under
+   *    the SAME name then inherited. NEVER the host-level
+   *    `<dataHome>/pi-native/agent`: that legacy dir is the migration source
+   *    every surviving persona's first ensure() absorbs from, so removing it
+   *    would strip state from personas that were not deleted.
+   *  - the host-global `autostart_personas` / `[autostart_modes]` roster
+   *    entries, which would boot a persona that no longer exists.
+   *
+   * Each step is gated on the debris actually being present: a delete must not
+   * rewrite config.toml (parsed and re-stringified, which drops the operator's
+   * comments) to remove nothing.
+   */
+  async #prunePersonaDebris(config: Config, name: string): Promise<void> {
+    // 1. The host default. Only when it names THIS persona — anything else is
+    //    another persona's setting, and a delete never re-points it.
+    try {
+      if (config.defaultPersona.toLowerCase() === name.toLowerCase()) {
+        // The same heal the startup path uses, so survivors are chosen by the
+        // same rules (case-match, then the first usable persona) instead of a
+        // blind `personas[0]`. The dir is already gone, so the current default
+        // is broken and heal repoints it; with no persona left to repoint at
+        // it declines to write, and the field is cleared.
+        const healed = await healDefaultPersonaIfBroken(config);
+        if (healed === null) await writeDefaultPersona(null);
+      }
+    } catch (e) {
+      log.warn("persona delete: could not clear default_persona", {
+        persona: name,
+        error: (e as Error).message,
+      });
+    }
+    // 2. The persona's own native agent scope. `dirname` of the agent dir so
+    //    the layout stays owned by lib/nativeAgentDir.ts, and so an empty
+    //    `personas/<name>` husk cannot be left behind.
+    try {
+      await rm(dirname(nativeAgentDir(xdgDataHome(), name)), {
+        recursive: true,
+        force: true,
+      });
+    } catch (e) {
+      log.warn("persona delete: could not remove the native agent dir", {
+        persona: name,
+        error: (e as Error).message,
+      });
+    }
+    // 3. The host-global boot roster.
+    try {
+      const autostart = config.autostartPersonas ?? [];
+      if (autostart.includes(name)) {
+        await writeAutostartPersonas(
+          config,
+          autostart.filter((n) => n !== name),
+        );
+      }
+      if (config.autostartModes && name in config.autostartModes) {
+        await writeAutostartMode(config, name, undefined);
+      }
+    } catch (e) {
+      log.warn("persona delete: could not prune the autostart roster", {
+        persona: name,
+        error: (e as Error).message,
+      });
+    }
   }
 
   async #createPersona(name: string, options: CreatePersonaOptions): Promise<Persona> {

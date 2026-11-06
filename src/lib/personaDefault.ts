@@ -313,9 +313,19 @@ export function listPersonaDirs(config: Config): string[] {
   }
 }
 
-async function writeDefaultPersona(name: string): Promise<void> {
+/**
+ * Write — or CLEAR, with `null` — `state.default_persona`. The ONE writer for
+ * the field, so every change goes through `saveState` and lands in
+ * state-audit.log with its old→new delta.
+ *
+ * The clear case is a delete (issue #771): removing a persona must not leave
+ * the default naming a directory that is already gone, waiting for the next
+ * create to heal it by accident.
+ */
+export async function writeDefaultPersona(name: string | null): Promise<void> {
   const state = await loadState();
-  state.default_persona = name;
+  if (name === null) delete state.default_persona;
+  else state.default_persona = name;
   await saveState(state);
 }
 

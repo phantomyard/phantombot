@@ -177,9 +177,27 @@ const aria = engine.persona("aria");             // cheap handle; existence chec
 ```
 
 `delete` stops the persona's PhantomChat channel, cancels its running turns and
-waits for them to unwind, then removes its memory rows, search index and
-directory (vault and identity included). A turn started on a deleted persona
-ends with `persona_not_found`. Other personas are untouched.
+waits for them to unwind, then removes its memory rows (scheduled tasks
+included), search index and directory (vault and identity included). A turn
+started on a deleted persona ends with `persona_not_found`. Other personas are
+untouched.
+
+Everything keyed by the deleted NAME goes too, so nothing is left pointing at a
+persona that no longer exists: if it was the host default, `default_persona` is
+re-pointed at the same survivor a broken default would heal to (or cleared when
+it was the last one), through the audited `state.json` writer; its native agent
+dir `pi-native/personas/<name>` (the `auth.json` and model config the embedded
+engine would otherwise inherit into a persona re-created under that name) is
+removed — the host-level `pi-native/agent` migration source is not — and its
+`autostart_personas` / `[autostart_modes]` roster entries are dropped.
+
+The TUI's own removal (`phantombot` → a phantom → remove) is the other door to
+the same state, and it prunes the same name-keyed debris. It ARCHIVES the
+persona directory rather than deleting it (`personas-archive/<name>-<stamp>/`,
+restorable with `persona --import`), but the native agent dir is not persona
+content: it is per-host engine state keyed by the name, so it is removed there
+too. A restored persona provisions its own credential on its first native turn
+instead of inheriting the archived one.
 
 A persona is two files the loader concatenates at every turn. `identity`,
 `tone`, `expertise`, `owner` and `hardRules` become **IDENTITY.md** (who it

@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -434,6 +434,88 @@ describe("personas.delete", () => {
     engine = undefined;
     expect(harness.aborted).toBe(2);
     await bobTurn;
+  });
+
+  // Issue #771: a delete used to remove only the persona dir, leaving
+  // state.json's default_persona naming a persona that no longer existed and
+  // that persona's native agent dir (auth.json + model config) on disk.
+
+  const statePath = () => join(root, "data", "phantombot", "state.json");
+  const nativeAgent = (name: string) => join(root, "data", "pi-native", "personas", name, "agent");
+  const seedCredential = (name: string) => {
+    mkdirSync(nativeAgent(name), { recursive: true });
+    writeFileSync(join(nativeAgent(name), "auth.json"), JSON.stringify({ openai: { type: "api_key", key: `sk-${name}` } }));
+  };
+
+  test("re-points the host default (audited) and removes only that persona's native agent dir", async () => {
+    const e = await openEngine();
+    await e.personas.create("ana");
+    await e.personas.create("bob");
+    // state.json is written by the persona-producing paths OUTSIDE the engine
+    // (adoptAsDefaultIfMissing), so seed it the way they leave it.
+    writeFileSync(statePath(), JSON.stringify({ default_persona: "bob" }));
+    seedCredential("ana");
+    seedCredential("bob");
+    // The host-level legacy dir is every SURVIVING persona's migration source.
+    const legacy = join(root, "data", "pi-native", "agent", "auth.json");
+    mkdirSync(join(root, "data", "pi-native", "agent"), { recursive: true });
+    writeFileSync(legacy, '{"openai":{"type":"api_key","key":"sk-legacy"}}');
+
+    expect(await e.personas.delete("bob")).toBe(true);
+
+    // The default moved to the one survivor, not to a ghost.
+    expect(JSON.parse(readFileSync(statePath(), "utf8")).default_persona).toBe("ana");
+    // Only bob's native scope went; ana's and the legacy dir are byte-identical.
+    expect(existsSync(join(root, "data", "pi-native", "personas", "bob"))).toBe(false);
+    expect(readFileSync(join(nativeAgent("ana"), "auth.json"), "utf8")).toBe('{"openai":{"type":"api_key","key":"sk-ana"}}');
+    expect(readFileSync(legacy, "utf8")).toBe('{"openai":{"type":"api_key","key":"sk-legacy"}}');
+    // It went through saveState, so the change is auditable like any other.
+    expect(readFileSync(join(root, "data", "phantombot", "state-audit.log"), "utf8")).toContain(
+      '"from":"bob","to":"ana"',
+    );
+
+    // A persona re-created under the same name starts clean.
+    await e.personas.create("bob");
+    expect(existsSync(join(nativeAgent("bob"), "auth.json"))).toBe(false);
+    await e.close();
+    engine = undefined;
+  });
+
+  test("deleting the last persona clears the default and leaves no native persona dirs", async () => {
+    const e = await openEngine();
+    await e.personas.create("ana");
+    writeFileSync(statePath(), JSON.stringify({ default_persona: "ana" }));
+    seedCredential("ana");
+
+    expect(await e.personas.delete("ana")).toBe(true);
+
+    expect(JSON.parse(readFileSync(statePath(), "utf8")).default_persona ?? null).toBeNull();
+    const natives = join(root, "data", "pi-native", "personas");
+    expect(existsSync(natives) ? readdirSync(natives) : []).toEqual([]);
+    await e.close();
+    engine = undefined;
+  });
+
+  test("a non-default delete leaves the default alone and drops its autostart roster entries", async () => {
+    const e = await openEngine();
+    await e.personas.create("ana");
+    await e.personas.create("bob");
+    writeFileSync(statePath(), JSON.stringify({ default_persona: "ana" }));
+    mkdirSync(join(root, "config", "phantombot"), { recursive: true });
+    writeFileSync(
+      join(root, "config", "phantombot", "config.toml"),
+      'autostart_personas = ["ana", "bob"]\n\n[autostart_modes]\nbob = "boot"\nana = "login"\n',
+    );
+
+    expect(await e.personas.delete("bob")).toBe(true);
+
+    expect(JSON.parse(readFileSync(statePath(), "utf8")).default_persona).toBe("ana");
+    const toml = readFileSync(join(root, "config", "phantombot", "config.toml"), "utf8");
+    expect(toml).toContain('autostart_personas = [ "ana" ]');
+    expect(toml).toContain('ana = "login"');
+    expect(toml).not.toContain('bob = "boot"');
+    await e.close();
+    engine = undefined;
   });
 });
 
