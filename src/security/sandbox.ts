@@ -1,7 +1,7 @@
 import { socketPair, receiveListener, superviseProc } from "./linux-notify.ts";
-import { closeSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { mkdirSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { windowsSandbox } from "./windows.ts";
 import { linuxSandbox } from "./linux.ts";
@@ -67,21 +67,38 @@ export function seatbeltProfile(workspace: string): string {
 (allow file* (subpath ${seatbeltString(workspace)}))`;
 }
 
+/**
+ * Neutral launcher home outside the workspace. The launcher resolves global
+ * runtime config (bunfig from HOME and XDG_CONFIG_HOME) before confinement, so
+ * a model-planted config must not be reachable through those lookups; the
+ * confined child cannot write here either, so it holds no cross-run state.
+ */
+export function neutralSandboxHome(): string {
+  return mkdtempSync(join(tmpdir(), "pb-sandbox-home-"));
+}
+
+export function discardSandboxHome(home: string): void {
+  rmSync(home, { recursive: true, force: true });
+}
+
 /** No ambient credential, proxy, loader, shell-startup or engine variable survives. */
-export function sandboxEnvironment(workspace: string): NodeJS.ProcessEnv {
+export function sandboxEnvironment(
+  workspace: string,
+  home: string,
+): NodeJS.ProcessEnv {
   return {
     PATH:
       process.platform === "win32"
         ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32;${join(workspace, ".tools")}`
         : `/usr/bin:/bin:/usr/sbin:/sbin:${join(workspace, ".tools")}`,
-    HOME: workspace,
-    USERPROFILE: workspace,
+    HOME: home,
+    USERPROFILE: home,
     TMPDIR: join(workspace, ".tmp"),
     TMP: join(workspace, ".tmp"),
     TEMP: join(workspace, ".tmp"),
     BUN_INSTALL_CACHE_DIR: join(workspace, ".bun", "install", "cache"),
-    XDG_CACHE_HOME: join(workspace, ".cache"),
-    XDG_CONFIG_HOME: join(workspace, ".config"),
+    XDG_CACHE_HOME: join(home, ".cache"),
+    XDG_CONFIG_HOME: join(home, ".config"),
     OPENSSL_CONF: process.platform === "win32" ? "NUL" : "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
@@ -90,8 +107,8 @@ export function sandboxEnvironment(workspace: string): NodeJS.ProcessEnv {
     LANG: "C.UTF-8",
     ...(process.platform === "win32"
       ? {
-          LOCALAPPDATA: process.env.LOCALAPPDATA ?? join(workspace, ".local"),
-          APPDATA: join(workspace, ".config"),
+          LOCALAPPDATA: process.env.LOCALAPPDATA ?? join(home, ".local"),
+          APPDATA: join(home, ".config"),
           SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
           ComSpec: `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`,
         }
@@ -141,6 +158,7 @@ export async function runSandbox(
     ];
   else throw new Error("sandbox unavailable on this platform");
   if (opts.signal?.aborted) throw new Error("sandbox cancelled");
+  const home = neutralSandboxHome();
   const sockets = process.platform === "linux" ? socketPair() : undefined;
   const child = spawn(invocation[0]!, invocation.slice(1), {
     // The launcher itself must not discover bunfig/preloads from the repo.
@@ -150,7 +168,7 @@ export async function runSandbox(
         : process.platform === "win32"
           ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32`
           : "/",
-    env: launcherEnvironment(workspace),
+    env: launcherEnvironment(workspace, home),
     stdio: [
       opts.stdin ? "pipe" : "ignore",
       "pipe",
@@ -221,12 +239,16 @@ export async function runSandbox(
     stop();
     supervisorStopped = true;
     await supervision;
+    discardSandboxHome(home);
   }
 }
 
 /** AppContainer resolution uses the caller's LocalAppData, never the child's. */
-function launcherEnvironment(workspace: string): NodeJS.ProcessEnv {
-  const env = sandboxEnvironment(workspace);
+function launcherEnvironment(
+  workspace: string,
+  home: string,
+): NodeJS.ProcessEnv {
+  const env = sandboxEnvironment(workspace, home);
   if (process.platform === "win32") {
     for (const key of [
       "LOCALAPPDATA",

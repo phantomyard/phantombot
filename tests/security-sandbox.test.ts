@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -27,11 +28,14 @@ const win = process.platform === "win32";
 const quote = (s: string) => (win ? `"${s}"` : `'${s.replace(/'/g, "'\\''")}'`);
 const cat = (p: string) => `${win ? "type" : "cat"} ${quote(p)}`;
 test("sandbox has only an explicit clean environment", () => {
-  const env = sandboxEnvironment("/work");
+  const env = sandboxEnvironment("/work", "/neutral");
   expect(env).not.toHaveProperty("GITHUB_TOKEN");
   expect(env).not.toHaveProperty("PHANTOMBOT_ESCORT");
   expect(env).not.toHaveProperty("NODE_OPTIONS");
   expect(env).not.toHaveProperty("HTTP_PROXY");
+  expect(env.HOME).toBe("/neutral");
+  expect(env.XDG_CONFIG_HOME).toBe("/neutral/.config");
+  expect(env.XDG_CACHE_HOME).toBe("/neutral/.cache");
 });
 test("real OS permits local work and denies reads/writes outside", async () => {
   const workspace = fresh(),
@@ -106,10 +110,13 @@ test("process timeout terminates descendants", async () => {
 test("bundled sandbox permits an existing Bun/Node runtime with no host secrets", async () => {
   const workspace = fresh();
   prepareSandboxTools(workspace);
-  const r = await runSandbox(
-    workspace,
-    `bun -e ${quote('console.log("runtime-ok"); console.log(process.env.GITHUB_TOKEN ?? "no-secret")')}`,
+  // Probe runs from a file: shell quoting of an inline -e expression is
+  // platform-dependent and buried the actual assertion.
+  writeFileSync(
+    join(workspace, "probe.ts"),
+    'console.log("runtime-ok"); console.log(process.env.GITHUB_TOKEN ?? "no-secret");\n',
   );
+  const r = await runSandbox(workspace, "bun probe.ts");
   expect(r.exitCode, r.output).toBe(0);
   expect(r.output).toContain("runtime-ok");
   expect(r.output).toContain("no-secret");
@@ -119,10 +126,20 @@ test("launcher never executes repository Bun preloads outside confinement", asyn
   const workspace = fresh(),
     outside = fresh(),
     canary = join(outside, "escaped");
-  writeFileSync(join(workspace, "bunfig.toml"), 'preload = ["./preload.ts"]\n');
+  writeFileSync(
+    join(workspace, "bunfig.toml"),
+    `preload = [${JSON.stringify(join(workspace, "preload.ts"))}]\n`,
+  );
   writeFileSync(
     join(workspace, "preload.ts"),
     `import{writeFileSync}from"node:fs";writeFileSync(${JSON.stringify(canary)},"escaped");`,
+  );
+  // XDG route: the model learns the workspace path from broker({manifest:true}),
+  // so a global bunfig planted there must not be reachable via XDG_CONFIG_HOME.
+  mkdirSync(join(workspace, ".config"), { mode: 0o700 });
+  writeFileSync(
+    join(workspace, ".config", ".bunfig.toml"),
+    `preload = [${JSON.stringify(canary)}]\n`,
   );
   const r = await runSandbox(workspace, "echo preload-safe");
   expect(r.exitCode, r.output).toBe(0);

@@ -3,20 +3,25 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { sandboxEnvironment } from "../src/security/sandbox.ts";
+import {
+  discardSandboxHome,
+  neutralSandboxHome,
+  sandboxEnvironment,
+} from "../src/security/sandbox.ts";
 import { deleteWindowsProfile } from "../src/security/windows.ts";
 const binary = resolve(process.argv[2]!);
 const workspace = mkdtempSync(join(tmpdir(), "pb-compiled-sandbox-"));
 const outside = mkdtempSync(join(tmpdir(), "pb-compiled-outside-"));
 const secret = join(outside, "secret");
 writeFileSync(secret, "compiled-host-secret");
+const home = neutralSandboxHome();
 try {
   const command =
     process.platform === "win32"
       ? `echo compiled-ok & type "${secret}"`
       : `echo compiled-ok; cat '${secret}'`;
   const run = spawnSync(binary, ["__sandbox_run", workspace, command], {
-    env: sandboxEnvironment(workspace),
+    env: sandboxEnvironment(workspace, home),
     encoding: "utf8",
     timeout: 15000,
   });
@@ -37,6 +42,7 @@ try {
     throw new Error(JSON.stringify(result));
   console.log("compiled sandbox smoke passed");
 } finally {
+  discardSandboxHome(home);
   deleteWindowsProfile(workspace);
   rmSync(workspace, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });

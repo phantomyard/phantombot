@@ -1,7 +1,11 @@
 /** Windows' built-in AppContainer + kill-on-close Job. No installer/admin. */
 import { dlopen, ptr, type Pointer } from "bun:ffi";
 import { createHash } from "node:crypto";
-import { sandboxEnvironment } from "./sandbox.ts";
+import {
+  discardSandboxHome,
+  neutralSandboxHome,
+  sandboxEnvironment,
+} from "./sandbox.ts";
 
 const wide = (s: string) => Buffer.from(s + "\0", "utf16le");
 const address = (b: Buffer, at = 0) => Number(b.readBigUInt64LE(at)) as Pointer;
@@ -17,6 +21,19 @@ export function windowsProfileName(workspace: string): string {
 
 /** Executed in a clean launcher subprocess; only stdio handles are inherited. */
 export function windowsSandbox(workspace: string, command: string): number {
+  const home = neutralSandboxHome();
+  try {
+    return windowsSandboxInHome(workspace, command, home);
+  } finally {
+    discardSandboxHome(home);
+  }
+}
+
+function windowsSandboxInHome(
+  workspace: string,
+  command: string,
+  home: string,
+): number {
   if (process.arch !== "x64" && process.arch !== "arm64")
     throw new Error("unsupported Windows sandbox architecture");
   const user = dlopen("userenv.dll", {
@@ -238,7 +255,7 @@ export function windowsSandbox(workspace: string, command: string): number {
         ),
         "stdio-only handle list",
       );
-      const env = sandboxEnvironment(workspace);
+      const env = sandboxEnvironment(workspace, home);
       const environment = Buffer.from(
         Object.entries(env)
           .sort(([a], [b]) => a.localeCompare(b))
