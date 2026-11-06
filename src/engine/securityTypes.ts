@@ -1,7 +1,11 @@
 /** Owner-authored authority. These objects are never built from model text. */
 export interface SecurityPolicy {
   version: 1;
-  /** Explicit opt-in while the cross-platform rollout is validated. */
+  /**
+   * On by default (GHSA-w7w8): with no policy file, untrusted turns run
+   * bounded under DEFAULT_WORKFLOW_GRANTS. `false` is the owner's explicit
+   * opt-out.
+   */
   enabled: boolean;
   grants: NetworkGrant[];
 }
@@ -47,8 +51,56 @@ export type NetworkGrant =
         Json
       >;
       expiresAt: number;
+    }
+  | {
+      /** Repo-scoped GitHub work: clone, push a branch, PR/review/comment API. Never merge. */
+      id: string;
+      kind: "github";
+      /** "owner/name", or "*" for any repository the credential reaches. */
+      repository: string;
+      /** Vault name of the token; default GITHUB_TOKEN, then GH_TOKEN, then `gh auth token`. */
+      credential?: string;
+      expiresAt: number;
+    }
+  | { id: string; kind: "notify"; expiresAt: number }
+  | { id: string; kind: "memory"; expiresAt: number }
+  | {
+      /** An exact owner-chosen host command; runs outside the sandbox with the persona env. */
+      id: string;
+      kind: "host-command";
+      command: string[];
+      /** Whether the model may append arguments. Default false. */
+      extraArgs?: boolean;
+      expiresAt: number;
     };
+export type WorkflowOperation =
+  | { kind: "github-clone"; grant: string; repository: string; ref?: string; directory?: string }
+  | {
+      kind: "github-push";
+      grant: string;
+      repository: string;
+      /** Path, relative to the workspace, of a git checkout to push from. */
+      directory: string;
+      branch: string;
+      /** Sandbox-side commit to push; must be the checkout's HEAD or reachable. */
+      sha: string;
+      force?: boolean;
+    }
+  | {
+      kind: "github-api";
+      grant: string;
+      repository?: string;
+      method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+      /** `/repos/<owner>/<name>/...` or `/graphql`. */
+      path: string;
+      body?: Json;
+    }
+  | { kind: "notify"; grant: string; message: string }
+  | { kind: "memory-capture"; grant: string; text: string; tags?: string[] }
+  | { kind: "memory-search"; grant: string; query: string; limit?: number }
+  | { kind: "host-command"; grant: string; args?: string[] };
 export type BrokerOperation =
+  | WorkflowOperation
   | { kind: "npm-package"; grant: string; name: string; version: string }
   | {
       kind: "github-checkout";

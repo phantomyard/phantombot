@@ -171,6 +171,7 @@ export const ESCORT_ACTION_KINDS = {
   delete: "delete files",
   web: "make a web request",
   edit: "edit a file",
+  memory: "save something to memory",
   read: "read files",
   shell: "run a shell command",
 } as const;
@@ -387,6 +388,13 @@ export async function escortCheck(
     env?: NodeJS.ProcessEnv;
     fetchImpl?: DecisionModelFetch;
     signal?: AbortSignal;
+    /**
+     * A brokered action (GHSA-w7w8): its kind comes from the broker's typed
+     * operation, and the "mentions allowances" guard is skipped — a broker
+     * operation cannot run phantombot or touch the allowances file, so text
+     * that merely NAMES them (a PR comment, a diff) is not a threat.
+     */
+    brokered?: { kind: EscortAllowKind };
   } = {},
 ): Promise<EscortDecision> {
   try {
@@ -394,13 +402,13 @@ export async function escortCheck(
     if (!apiKey) {
       return { allow: false, reason: `the decision-model key (${ctx.keyEnv}) is not available` };
     }
-    if (touchesEscortAllowances(action)) {
+    if (!opts.brokered && touchesEscortAllowances(action)) {
       return {
         allow: false,
         reason: "only the principal can change the escort's allowances or record a ruling",
       };
     }
-    const kind = classifyEscortAction(action);
+    const kind = opts.brokered?.kind ?? classifyEscortAction(action);
     if (isEscortAllowKind(kind) && ctx.deny?.includes(kind)) {
       return {
         allow: false,
@@ -499,12 +507,16 @@ export function summarizeEscortAction(action: EscortAction): string {
  * that cannot be written must never turn a refusal into anything else (the
  * action is refused either way). Returns whether the hold was recorded.
  */
-export function recordEscortHold(ctx: EscortContext | undefined, action: EscortAction): boolean {
+export function recordEscortHold(
+  ctx: EscortContext | undefined,
+  action: EscortAction,
+  brokeredKind?: EscortAllowKind,
+): boolean {
   if (!ctx?.holdLog) return false;
   try {
     const hold: EscortHold = {
       summary: summarizeEscortAction(action),
-      kind: touchesEscortAllowances(action) ? "allowances" : classifyEscortAction(action),
+      kind: brokeredKind ?? (touchesEscortAllowances(action) ? "allowances" : classifyEscortAction(action)),
     };
     appendFileSync(ctx.holdLog, JSON.stringify(hold) + "\n", { mode: 0o600 });
     return true;

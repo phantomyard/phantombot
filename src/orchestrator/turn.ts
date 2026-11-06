@@ -1,5 +1,6 @@
 import { readSecurityPolicy } from "../security/policy.ts";
 import { createSecuritySession } from "../security/session.ts";
+import { brokerEscortGate } from "../security/escortGate.ts";
 /**
  * Single-turn coordinator.
  *
@@ -32,6 +33,7 @@ import { runWithFallback } from "./fallback.ts";
 import {
   drainEscortHolds,
   escortContext,
+  readEscortAllowances,
   type EscortContext,
   type EscortHold,
 } from "../lib/escort.ts";
@@ -699,6 +701,10 @@ async function* runTurnBody(
     }
   }
 
+  // GHSA-w7w8: every untrusted turn (outside content, `ask`, scheduled tasks)
+  // runs BOUNDED by default — OS sandbox + credential broker, no vault, no
+  // host files — unless the owner's security-policy.json says enabled:false.
+  // The escort then judges only what leaves the sandbox (escortGate.ts).
   // An escorted turn runs only on harnesses that can block a tool call before
   // it runs (issue #702). The rest (codex, a host pi) are left out of THIS
   // turn's chain; with none left the turn does not run at all — an escort
@@ -1115,7 +1121,14 @@ async function* runTurnBody(
 
   let securitySession: Awaited<ReturnType<typeof createSecuritySession>> | undefined;
   try {
-    if (boundedSecurity && securityPolicy) securitySession = await createSecuritySession({ personaDir: input.agentDir, policy: securityPolicy, signal: input.signal, audit: event => log.info("security: operation", { ...event }) });
+    if (boundedSecurity && securityPolicy) securitySession = await createSecuritySession({
+      personaDir: input.agentDir,
+      persona: input.persona,
+      policy: securityPolicy,
+      signal: input.signal,
+      audit: event => log.info("security: operation", { ...event }),
+      ...(escort ? { gate: brokerEscortGate(escort, readEscortAllowances(input.agentDir), { signal: input.signal }) } : {}),
+    });
     // #580 (second half): withhold pre-tool narration that is confidently in
     // a language the user did not write in. Applied HERE, above every
     // consumer, so ACP, the TUI and `ask` are covered as well as the two chat

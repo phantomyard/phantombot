@@ -7,6 +7,7 @@ import type {
   SecurityPolicy,
 } from "./types.ts";
 import { sameJson, validatePolicy } from "./policy.ts";
+import type { WorkflowBroker } from "./workflow.ts";
 
 export class SandboxArchive {
   constructor(
@@ -40,6 +41,13 @@ export class CapabilityBroker {
       audit?: (event: SecurityAudit) => void;
       now?: () => number;
       signal?: AbortSignal;
+      /** Workflow grants (github, notify, memory, host-command). */
+      workflow?: WorkflowBroker;
+      /**
+       * The escort, judging ONLY actions that leave the sandbox (GHSA-w7w8).
+       * Throws a PolicyError to refuse. Absent = grants alone decide.
+       */
+      gate?: (grant: NetworkGrant, operation: BrokerOperation) => Promise<void>;
     },
   ) {
     this.grants = new Map(validatePolicy(policy).grants.map((g) => [g.id, g]));
@@ -125,6 +133,17 @@ export class CapabilityBroker {
       if (!grant) throw new PolicyError("policy_denied", "no such grant");
       if (grant.expiresAt <= (this.deps.now ?? Date.now)())
         throw new PolicyError("expired", "grant expired");
+      await this.deps.gate?.(grant, operation);
+      if (
+        grant.kind === "github" ||
+        grant.kind === "notify" ||
+        grant.kind === "memory" ||
+        grant.kind === "host-command"
+      ) {
+        if (!this.deps.workflow)
+          throw new PolicyError("unavailable", "workflow operations unavailable");
+        return await this.deps.workflow.execute(grant, operation as never);
+      }
       if (grant.kind === "npm-registry" && operation.kind === "npm-package") {
         if (
           !/^(?:@[a-z0-9_-]+\/)?[a-z0-9_-][a-z0-9._-]*$/.test(operation.name) ||
