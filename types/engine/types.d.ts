@@ -138,6 +138,44 @@ export type EmbeddingsConfig = {
     /** 0 or omitted: the server's native size. */
     dims?: number;
 };
+/** Input of `engine.embeddings.check()`. */
+export interface EmbeddingsCheckInput {
+    provider: "gemini" | "openai-compatible";
+    /** Gemini: required to check. OpenAI-compatible: optional (local servers). */
+    apiKey?: string;
+    /** OpenAI-compatible only: the `/v1` base URL. */
+    baseUrl?: string;
+    /** The model to prove with a live embed. Gemini default: "gemini-embedding-001". */
+    model?: string;
+}
+/** Result of `engine.embeddings.check()`. */
+export interface EmbeddingsCheck {
+    /**
+     * "verified": a live one-token embed with `model` succeeded. "failed": it
+     * was refused or errored, save nothing. "unchecked": nothing to embed with
+     * yet (no Gemini key, or no OpenAI-compatible model chosen).
+     */
+    status: "verified" | "failed" | "unchecked";
+    /** Human-readable evidence. Never contains the key. */
+    detail: string;
+    /** Embedding model ids the provider offers; [] when the endpoint lists none. */
+    models: string[];
+    /** Vector size from the live embed; pass it as `embeddings.dims`. */
+    dims?: number;
+}
+/** Result of `persona.memory.refresh()`. */
+export interface MemoryRefreshResult {
+    /** Files (re)indexed for keyword search. */
+    indexed: number;
+    /** Index rows removed for files that are gone. */
+    removed: number;
+    /** Chunks embedded by the configured embeddings provider (0 without one). */
+    embedded: number;
+    /** Chunks the provider failed to embed; retried on the next refresh. */
+    embedFailed: number;
+    /** Set when the refresh could not complete. Never throws for this. */
+    error?: string;
+}
 export interface VoiceDirectionSettings {
     enabled: boolean;
     provider?: "elevenlabs" | "openai-compatible";

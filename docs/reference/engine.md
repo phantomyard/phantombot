@@ -278,6 +278,33 @@ if (check.status !== "invalid") {
   caller-directed requests.
 - `detail` never contains the key.
 
+### Embeddings: `engine.embeddings`
+
+For an app's own embeddings setup screen, with what `phantombot embedding`
+offers: list a provider's embedding models and prove a choice with a live
+one-token embed, which is also where `dims` comes from. Nothing is stored;
+save with `persona.configure`, then call `persona.memory.refresh()`.
+
+```ts
+const list = await engine.embeddings.check({ provider: "openai-compatible", baseUrl, apiKey });
+// { status: "unchecked", detail: "choose a model", models: ["bge-m3", ...] }
+const proof = await engine.embeddings.check({ provider: "openai-compatible", baseUrl, apiKey, model: picked });
+if (proof.status === "verified") {
+  await aria.configure({ embeddings: { provider: "openai-compatible", baseUrl, apiKey, model: picked, dims: proof.dims } });
+  await aria.memory.refresh();
+}
+```
+
+- `"verified"`: the embed with `model` worked. `"failed"`: it was refused or
+  errored; `detail` says why. `"unchecked"`: nothing to embed with yet (no
+  Gemini key, or no OpenAI-compatible `model`).
+- Gemini has one model (`gemini-embedding-001`, the default). OpenAI-compatible
+  models come from the endpoint's Models API, filtered to embedding models; `[]`
+  when it lists none, so offer a typed model id.
+- `apiKey` is optional for OpenAI-compatible (local llama-server, Ollama).
+- `baseUrl` must be http(s) without credentials, query or fragment.
+- `detail` never contains the key.
+
 ### `persona.configure({ brain?, decisionModel?, embeddings? })`
 
 `configure` writes to the persona's **own** `config.toml`, never the root-wide
@@ -458,6 +485,15 @@ await aria.memory.search("deploy day", { limit: 5, scope: "all" }); // MemoryHit
 - `capture` indexes the note right away. The heartbeat later promotes tagged
   notes to drawers, as it does on the daemon.
 - `search` uses the CLI's BM25F search, hybrid when embeddings are configured.
+- `refresh()` brings the index up to date: re-indexes changed `memory/` and
+  `kb/` files and embeds changed chunks with the configured provider. The
+  daemon's heartbeat does this; the engine runs no heartbeat, so call it after
+  configuring embeddings and then on a timer. It is incremental, and it reports
+  an index failure in `error` instead of rejecting.
+
+```ts
+await aria.memory.refresh(); // { indexed, removed, embedded, embedFailed, error? }
+```
 
 ## Errors
 
@@ -496,7 +532,8 @@ chat channel's history.
 - **Scheduled maintenance.** The engine does not drive the heartbeat or the
   nightly distillation. Captured notes and conversation turns are searchable
   immediately, but tagged notes are not promoted to drawers and days are not
-  distilled. Do not point `phantombot heartbeat` at an engine root as a
+  distilled (`persona.memory.refresh()` covers the index and embeddings part).
+  Do not point `phantombot heartbeat` at an engine root as a
   workaround: the heartbeat also heals the host's service units. Engine-driven
   maintenance is the next step.
 - **`decide()` in doctor's decision-model telemetry.** The judge and the

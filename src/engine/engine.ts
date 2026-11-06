@@ -92,6 +92,8 @@ import {
 } from "./phantomchat.ts";
 import { checkVoice, validateVoiceDirection, voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
 import { checkDecisionModel } from "./decisionModels.ts";
+import { checkEmbeddings } from "./embeddings.ts";
+import { refreshPersonaIndex } from "../lib/indexRefresh.ts";
 import { checkProvider, listProviders } from "./providers.ts";
 import {
   parseJsonReply,
@@ -104,6 +106,9 @@ import type {
   DecideOptions,
   DecisionAnswer,
   DecisionModelCheck,
+  EmbeddingsCheck,
+  EmbeddingsCheckInput,
+  MemoryRefreshResult,
   DecisionResult,
   EngineEvent,
   EngineLogRecord,
@@ -265,6 +270,15 @@ export class Engine {
     check(input: VoiceCheckInput): Promise<VoiceCheck>;
   };
 
+  /**
+   * The embeddings setup building block: list a provider's embedding models
+   * and prove a choice with a live embed. Stores nothing; persist with
+   * `persona.configure({ embeddings: { ..., dims } })`.
+   */
+  readonly embeddings: {
+    check(input: EmbeddingsCheckInput): Promise<EmbeddingsCheck>;
+  };
+
   #scope: EngineScope;
   /** `#scope` plus `persona`, one per persona handle (identity-stable). */
   #scopes = new Map<string, EngineScope>();
@@ -302,6 +316,9 @@ export class Engine {
     };
     this.decisionModels = {
       check: (provider, apiKey) => this.run(() => checkDecisionModel(provider, apiKey)),
+    };
+    this.embeddings = {
+      check: (input) => this.run(() => checkEmbeddings(input)),
     };
   }
 
@@ -612,6 +629,14 @@ export class Persona {
     search(query: string, options?: MemorySearchOptions): Promise<MemoryHit[]>;
     /** Record a note in today's journal; indexed immediately. */
     capture(text: string, options?: { tags?: string[]; conversation?: string }): Promise<void>;
+    /**
+     * Bring the search index up to date: re-index changed memory/ and kb/
+     * files and embed changed chunks with the configured embeddings provider
+     * (the daemon's heartbeat and nightly do this; the engine runs none).
+     * Incremental, so it is cheap to call after `configure` and on a timer.
+     * Never rejects for an index failure: it is reported in `error`.
+     */
+    refresh(): Promise<MemoryRefreshResult>;
   };
   /**
    * This persona's PhantomChat channel, hosted by the engine: its own npub,
@@ -678,6 +703,15 @@ export class Persona {
     this.memory = {
       search: (query, options) => this.#search(query, options ?? {}),
       capture: (text, options) => this.#capture(text, options ?? {}),
+      refresh: () =>
+        this.#run(async () => {
+          const config = await loadConfig(this.name);
+          return refreshPersonaIndex({
+            config,
+            personaDir: await this.#dir(),
+            indexPath: memoryIndexPath(this.name),
+          });
+        }),
     };
     this.phantomchat = {
       info: () => this.#run(async () => phantomchatInfo(await this.#dir())),
