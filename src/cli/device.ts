@@ -78,8 +78,8 @@ async function openClient(input: DeviceRunInput): Promise<{ client: LocalToolsCl
   const pc = loadPhantomchatPersonaConfig(personaDir(config, persona));
   if (!pc) return `persona '${persona}' has no PhantomChat channel (no phantomchat.json)`;
   if (pc.allowedHex.length === 0) return `persona '${persona}' has no allowed principal npub`;
-  const pool = input.makePool
-    ? await input.makePool(pc.identity.secretKey)
+  const { pool, destroy } = input.makePool
+    ? { pool: await input.makePool(pc.identity.secretKey), destroy: () => {} }
     : await defaultPool(pc.identity.secretKey);
   const client = new LocalToolsClient({
     secretKey: pc.identity.secretKey,
@@ -95,15 +95,63 @@ async function openClient(input: DeviceRunInput): Promise<{ client: LocalToolsCl
         client.close();
       } finally {
         // This CLI session owns the pool; protocol clients may share theirs.
-        pool.close(pc.relays);
+        try {
+          pool.close(pc.relays);
+        } finally {
+          destroy();
+        }
       }
     },
   };
 }
 
-async function defaultPool(secretKey: Uint8Array): Promise<LocalToolsPool> {
+/**
+ * The CLI's own pool, plus `destroy()` for every socket it ever opened (#770).
+ *
+ * `pool.close()` is not enough: nostr-tools only closes an OPEN socket, and a
+ * connect timeout drops the relay from the pool's map without closing its
+ * CONNECTING socket. Either one keeps the process alive after the command is
+ * done. So the pool's WebSocket class records each socket, and `destroy()`
+ * closes them all; a socket created after that is closed on creation.
+ */
+async function defaultPool(
+  secretKey: Uint8Array,
+): Promise<{ pool: LocalToolsPool; destroy(): void }> {
   const { AuthGuardedSimplePool } = await import("../channels/phantomchat/authGuardedPool.ts");
-  return new AuthGuardedSimplePool(secretKey) as unknown as LocalToolsPool;
+  const owned = new Set<WebSocket>();
+  let destroyed = false;
+  const shut = (ws: WebSocket) => {
+    try {
+      ws.close();
+    } catch {
+      // Already closing or closed.
+    }
+  };
+  class SessionWebSocket extends WebSocket {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols);
+      if (destroyed) {
+        shut(this);
+        return;
+      }
+      owned.add(this);
+      this.addEventListener("close", () => owned.delete(this));
+    }
+  }
+  // SimplePool's ctor type only names enablePing/enableReconnect, but it
+  // spreads every option into AbstractSimplePool, which honours this one.
+  const options = { websocketImplementation: SessionWebSocket } as ConstructorParameters<
+    typeof AuthGuardedSimplePool
+  >[1];
+  const pool = new AuthGuardedSimplePool(secretKey, options) as unknown as LocalToolsPool;
+  return {
+    pool,
+    destroy() {
+      destroyed = true;
+      for (const ws of owned) shut(ws);
+      owned.clear();
+    },
+  };
 }
 
 function describeDevice(d: DeviceCapability): Record<string, unknown> {
