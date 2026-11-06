@@ -437,52 +437,20 @@ Phantombot is built by [Phantomyard](https://github.com/phantomyard).
 
 ### Bounded development workflows (opt-in)
 
-A persona can replace per-tool Escort model checks with OS-enforced local
-execution and deterministic API grants. Configure `security-policy.json` in its
-persona directory, or call `persona.security.configure(policy)` from an embedding
-application's trusted code. This is shared by the standalone runtime and
-`phantombot/engine`; it is not a frontend permission flag.
+Set an owner-authored `security-policy.json` in the persona directory, or use
+`persona.security.configure(policy)` in an embedding application. After the
+Judge passes an untrusted turn, the native engine exposes only sandboxed shell
+commands and a credential broker. Authorized calls bypass Escort's classifier.
 
-```json
-{
-  "version": 1,
-  "enabled": true,
-  "grants": [
-    {
-      "id": "team-reviews",
-      "kind": "github-team-review",
-      "repository": "phantomyard/phantombot",
-      "reviewerLogin": "your-github-login",
-      "requesterLogins": ["your-teammate"],
-      "expiresAt": 1800000000000
-    },
-    { "id": "packages", "kind": "npm-registry", "expiresAt": 1800000000000 }
-  ]
-}
-```
+The OS confines files and direct networking; credentials stay in the parent
+runtime. Linux uses Landlock/seccomp, macOS Seatbelt, and Windows AppContainer/Job
+Objects. No Docker, separate sandbox installation or elevated setup is required;
+unsupported facilities refuse execution without falling back to a host shell.
 
-After the Judge passes an untrusted turn, bounded mode selects the embedded
-native harness and exposes only `sandbox` and `broker`. Commands run in a fresh,
-disposable workspace with a clean environment, read-only system tools and no
-direct network. Linux uses Landlock ABI 3+ and seccomp notifications; macOS uses
-the system Seatbelt launcher; Windows uses AppContainer and a Job Object. No
-Docker, separate sandbox installation or elevated setup is required. Unsupported
-or disabled OS facilities refuse execution; they never fall back to a host shell.
-
-The broker keeps credentials in the runtime's persona vault. A GitHub grant
-permits inspecting/checking out the specified PR and publishing reviews at its
-verified head; a team grant additionally verifies a review-request event against
-the GitHub API. An npm grant downloads packages into the sandbox's Bun cache for
-`bun install --frozen-lockfile --offline`. HTTP grants fix one HTTPS URL and method; MCP grants fix
-one server, tool and exact argument object. Authorized operations have no Escort
-classifier call, including during a decision-model outage. Grants cannot merge,
-push, deploy or change policy unless the owner separately grants an appropriate
-HTTP/MCP operation. A denied operation does not grant its own expansion.
-
-Policy changes apply to subsequent turns; in-flight grants are immutable and
-expire at `expiresAt` (Unix milliseconds). This rollout is opt-in: an absent policy
-preserves the existing Judge/Escort path. Bounded mode requires native tools and
-does not expose arbitrary host CLI commands, persona files, or direct IMAP/SMTP.
-Migrate such integrations to explicit broker grants before enabling their tasks.
-See [the security contract](docs/reference/bounded-security.md) for limits and
-operation schemas.
+Grants cover specified PRs or verified team review requests, public npm staging
+for frozen offline installs, fixed HTTPS endpoints, and exact MCP calls. They
+expire and cannot expand from model/repository text. The daemon and embedded
+engine share enforcement. Existing behavior remains until enabled; migrate
+integrations requiring host files or direct IMAP/SMTP before enabling their tasks.
+See [the security contract](docs/reference/bounded-security.md) for policy examples,
+operation schemas, platform limits and rollout gates.

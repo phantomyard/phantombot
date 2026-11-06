@@ -33,7 +33,7 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
 - Linux: glibc, x64/arm64, Landlock ABI 3 or newer, seccomp user notification and
   ADDFD are required. Filesystem writes and arbitrary file reads are confined to
   the workspace. System executables/libraries/headers/share data, CPU counts,
-  OpenSSL's public configuration, timezone and random/null devices are readable.
+  timezone and random/null devices are readable. OpenSSL and Git use clean configuration.
   Direct networking, host IPC, process inspection, namespace changes and process
   group escape are denied. A narrow notification supervisor supplies read-only
   descriptors for the requesting process's own maps/status/stat/statm/limits/
@@ -113,3 +113,12 @@ subprocess inheritance, loopback blocking, Bun execution, timeout, authenticated
 IPC, deterministic grant bounds and review publication semantics. The dedicated
 security-sandbox CI workflow runs the platform matrix. Keep rollout opt-in until
 independent reviewers confirm the boundaries and the real runtime gates pass.
+
+## Policy example
+
+```json
+{"version":1,"enabled":true,"grants":[
+  {"id":"reviews","kind":"github-team-review","repository":"phantomyard/phantombot","reviewerLogin":"your-github-login","requesterLogins":["your-teammate"],"expiresAt":1800000000000},
+  {"id":"packages","kind":"npm-registry","expiresAt":1800000000000}
+]}
+```

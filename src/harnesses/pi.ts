@@ -841,7 +841,7 @@ export class PiHarness implements Harness {
       model: string | undefined,
     ): AsyncGenerator<HarnessChunk> {
       const proc = spawnInNewSession([...this.command(), ...buildArgs(model)], {
-        cwd: req.workingDir,
+        cwd: req.securitySession ? (process.platform === "win32" ? `${spawnEnv.SystemRoot ?? "C:\\Windows"}\\System32` : "/") : req.workingDir,
         env: childEnv,
         stdin: "ignore",
         stdout: "pipe",

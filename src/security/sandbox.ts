@@ -41,6 +41,8 @@ export function seatbeltProfile(workspace: string): string {
   return `(version 1)(deny default)
 (allow process-exec process-fork sysctl-read)
 (allow file-read-metadata)
+(allow signal (target self))
+(allow file-map-executable (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Library/Apple") (subpath "/private/var/db/dyld") (subpath ${seatbeltString(workspace)}))
 (allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Library/Apple") (subpath "/private/var/db/dyld"))
 (allow file-read* (literal "/dev/random") (literal "/dev/urandom") (literal "/private/etc/localtime"))
 (allow file-read* file-write* (literal "/dev/null"))
@@ -62,6 +64,9 @@ export function sandboxEnvironment(workspace: string): NodeJS.ProcessEnv {
     BUN_INSTALL_CACHE_DIR: join(workspace, ".bun", "install", "cache"),
     XDG_CACHE_HOME: join(workspace, ".cache"),
     XDG_CONFIG_HOME: join(workspace, ".config"),
+    OPENSSL_CONF: process.platform === "win32" ? "NUL" : "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
     CI: "1",
     GIT_TERMINAL_PROMPT: "0",
     LANG: "C.UTF-8",
@@ -118,8 +123,14 @@ export async function runSandbox(
   if (opts.signal?.aborted) throw new Error("sandbox cancelled");
   const sockets = process.platform === "linux" ? socketPair() : undefined;
   const child = spawn(invocation[0]!, invocation.slice(1), {
-    cwd: workspace,
-    env: sandboxEnvironment(workspace),
+    // The launcher itself must not discover bunfig/preloads from the repo.
+    cwd:
+      process.platform === "darwin"
+        ? workspace
+        : process.platform === "win32"
+          ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32`
+          : "/",
+    env: launcherEnvironment(workspace),
     stdio: [
       opts.stdin ? "pipe" : "ignore",
       "pipe",
@@ -191,4 +202,21 @@ export async function runSandbox(
     supervisorStopped = true;
     await supervision;
   }
+}
+
+/** AppContainer resolution uses the caller's LocalAppData, never the child's. */
+function launcherEnvironment(workspace: string): NodeJS.ProcessEnv {
+  const env = sandboxEnvironment(workspace);
+  if (process.platform === "win32") {
+    for (const key of [
+      "LOCALAPPDATA",
+      "APPDATA",
+      "USERPROFILE",
+      "SystemDrive",
+      "windir",
+    ]) {
+      if (process.env[key]) env[key] = process.env[key];
+    }
+  }
+  return env;
 }

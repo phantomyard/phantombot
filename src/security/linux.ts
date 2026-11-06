@@ -87,7 +87,6 @@ export function linuxSandbox(
   for (const p of [
     "/etc/ld.so.cache",
     "/etc/localtime",
-    "/etc/ssl/openssl.cnf",
     "/proc/stat",
     "/sys/devices/system/cpu/online",
   ])

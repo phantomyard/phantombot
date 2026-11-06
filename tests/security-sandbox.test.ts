@@ -114,3 +114,17 @@ test("bundled sandbox permits an existing Bun/Node runtime with no host secrets"
   expect(r.output).toContain("runtime-ok");
   expect(r.output).toContain("no-secret");
 }, 15000);
+
+test("launcher never executes repository Bun preloads outside confinement", async () => {
+  const workspace = fresh(),
+    outside = fresh(),
+    canary = join(outside, "escaped");
+  writeFileSync(join(workspace, "bunfig.toml"), 'preload = ["./preload.ts"]\n');
+  writeFileSync(
+    join(workspace, "preload.ts"),
+    `import{writeFileSync}from"node:fs";writeFileSync(${JSON.stringify(canary)},"escaped");`,
+  );
+  const r = await runSandbox(workspace, "echo preload-safe");
+  expect(r.exitCode, r.output).toBe(0);
+  expect(() => readFileSync(canary)).toThrow();
+}, 15000);
