@@ -306,9 +306,13 @@ export function createPhantomchatChannel(
         const senderHex = rumor.pubkey.toLowerCase();
         if (senderHex === publicKeyHex.toLowerCase()) return;
 
+        // (4) Dedup by rumor id — the SAME logical message can arrive via more
+        // than one wrap; the rumor id is stable across them.
+        if (!remember(seenRumorIds, rumor.id)) return;
+
         if (isVoiceModelsRumor(rumor)) {
           if (rumor.tags.some(tag => tag[0] === "group")) return;
-          if (remember(seenRumorIds, rumor.id)) input.voiceModels?.(rumor);
+          input.voiceModels?.(rumor);
           return;
         }
 
@@ -316,10 +320,6 @@ export function createPhantomchatChannel(
         // never by the turn pipeline. Dropped on the TAGS, before any parse, so
         // a malformed body can't fall through to the plain-text path.
         if (isLocalToolsRumor(rumor)) return;
-
-        // (4) Dedup by rumor id — the SAME logical message can arrive via more
-        // than one wrap; the rumor id is stable across them.
-        if (!remember(seenRumorIds, rumor.id)) return;
 
         // (5) Parse the JSON envelope. `type === "text"` is a chat message;
         // `presence-ping` / `presence-pong` are legacy types, silently dropped

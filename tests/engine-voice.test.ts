@@ -100,3 +100,24 @@ test("remote model-only control authenticates, persists, disables/restores and n
   expect(replies.at(-1).ok).toBe(false); expect(JSON.stringify(config.voice)).toBe(before);
   await handler.close();
 });
+
+
+test("independent providers use their own vault slots and key-missing diagnostics", async () => {
+  const persona = engine.persona("voice");
+  await persona.configure({voice: {
+    tts: {enabled: true, provider: "elevenlabs", model: "eleven_turbo_v2_5", voice: "daniel-id", keyEnv: "CUSTOM_TTS_KEY", apiKey: "eleven-key"},
+    stt: choice("CUSTOM_STT_KEY", "transcribe-a", "transcribe-key"),
+  }});
+  const config = await engine.run(() => loadConfig("voice"));
+  let outbound: any;
+  const fetchTts = (async (url: any, init: any) => {
+    outbound = {url: String(url), key: init.headers["xi-api-key"], model: JSON.parse(init.body).model_id};
+    return new Response(new Uint8Array([1,2,3]), {headers: {"content-type": "audio/ogg"}});
+  }) as typeof fetch;
+  expect((await engine.run(() => synthesize(config, "mixed providers", fetchTts))).ok).toBe(true);
+  expect(outbound).toEqual({url: "https://api.elevenlabs.io/v1/text-to-speech/daniel-id?output_format=opus_48000_128", key: "eleven-key", model: "eleven_turbo_v2_5"});
+  expect((await engine.run(() => transcribe(config, Buffer.from("audio"), "audio/ogg"))).ok).toBe(true);
+  expect(calls.at(-1)?.key).toBe("Bearer transcribe-key");
+  await persona.secrets.delete("CUSTOM_TTS_KEY");
+  expect(await engine.run(() => ttsSupport(config))).toMatchObject({ok: false, reason: "key_missing", envVar: "CUSTOM_TTS_KEY"});
+});

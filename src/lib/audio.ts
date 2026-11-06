@@ -113,9 +113,9 @@ export async function sttSupport(config: Config): Promise<AudioSupport> {
   if (provider === "azure_edge") {
     return { ok: false, reason: "provider_removed", provider };
   }
-  const envVar = provider === "openai-compatible"
+  const envVar = config.voice.keyEnv ?? (provider === "openai-compatible"
     ? config.voice.openaiCompatible?.keyEnv ?? ENV_KEY_FOR_PROVIDER[provider]
-    : ENV_KEY_FOR_PROVIDER[provider];
+    : ENV_KEY_FOR_PROVIDER[provider]);
   return (await voiceApiKey(config))
     ? { ok: true }
     : { ok: false, reason: "key_missing", provider, envVar };
@@ -131,9 +131,9 @@ export async function ttsSupport(config: Config): Promise<AudioSupport> {
   if (provider === "azure_edge") {
     return { ok: false, reason: "provider_removed", provider };
   }
-  const envVar = provider === "openai-compatible"
+  const envVar = config.voice.keyEnv ?? (provider === "openai-compatible"
     ? config.voice.openaiCompatible?.keyEnv ?? ENV_KEY_FOR_PROVIDER[provider]
-    : ENV_KEY_FOR_PROVIDER[provider];
+    : ENV_KEY_FOR_PROVIDER[provider]);
   return (await voiceApiKey(config))
     ? { ok: true }
     : { ok: false, reason: "key_missing", provider, envVar };
