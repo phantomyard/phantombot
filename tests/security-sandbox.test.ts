@@ -34,8 +34,8 @@ test("sandbox has only an explicit clean environment", () => {
   expect(env).not.toHaveProperty("NODE_OPTIONS");
   expect(env).not.toHaveProperty("HTTP_PROXY");
   expect(env.HOME).toBe("/neutral");
-  expect(env.XDG_CONFIG_HOME).toBe("/neutral/.config");
-  expect(env.XDG_CACHE_HOME).toBe("/neutral/.cache");
+  expect(env.XDG_CONFIG_HOME).toBe(join("/neutral", ".config"));
+  expect(env.XDG_CACHE_HOME).toBe(join("/neutral", ".cache"));
 });
 test("real OS permits local work and denies reads/writes outside", async () => {
   const workspace = fresh(),
