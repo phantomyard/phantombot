@@ -95,7 +95,10 @@ not an execution-time phrase blacklist.
 A `github-review` grant fixes `repository` and `pullRequest`. A
 `github-team-review` grant fixes `repository`, `reviewerLogin` and
 `requesterLogins`; each GitHub operation supplies `pullRequest` and must have a
-provider-authenticated matching `review_requested` timeline event. Email sender
+provider-authenticated matching `review_requested` timeline event that has not
+been revoked or replaced by a request from an unauthorized actor. The broker
+checks chronological timeline pages (up to 2,000 events, refusing longer histories),
+and rechecks the request immediately before publishing a review. Email sender
 text and repository instructions cannot establish this authority. Grants do not
 automatically follow references to another repository/PR.
 

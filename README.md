@@ -447,7 +447,7 @@ runtime. Linux uses Landlock/seccomp, macOS Seatbelt, and Windows AppContainer/J
 Objects. No Docker, separate sandbox installation or elevated setup is required;
 unsupported facilities refuse execution without falling back to a host shell.
 
-Grants cover specified PRs or verified team review requests, public npm staging
+Grants cover specified PRs or verified, revocation-aware team review requests, public npm staging
 for frozen offline installs, fixed HTTPS endpoints, and exact MCP calls. They
 expire and cannot expand from model/repository text. The daemon and embedded
 engine share enforcement. Existing behavior remains until enabled; migrate

@@ -273,6 +273,49 @@ describe("deterministic grants", () => {
       expect(calls).toHaveLength(actor === "robbie" ? 2 : 1);
     }
   });
+  test("team review revocation and re-requests use the latest matching event", async () => {
+    const team: NetworkGrant = {
+      id: "team", kind: "github-team-review",
+      repository: "phantomyard/phantombot", reviewerLogin: "kai",
+      requesterLogins: ["robbie"], expiresAt: 2000,
+    };
+    const requested = (actor = "robbie") => ({
+      event: "review_requested", requested_reviewer: { login: "Kai" },
+      actor: { login: actor },
+    });
+    const removed = { event: "review_request_removed", requested_reviewer: { login: "kai" } };
+    for (const kind of ["github-read", "github-checkout", "github-review"] as const) {
+      for (const [events, allowed] of [
+        [[requested(), removed], false],
+        [[requested(), removed, requested("attacker")], false],
+        [[requested(), removed, requested("ROBBIE")], true],
+        [[requested(), { ...removed, requested_reviewer: { login: "someone-else" } }], true],
+      ] as const) {
+        const { broker, calls } = rig([team], url => url.includes("timeline") ? events :
+          url.includes("codeload") ? {} : { state: "open", head: { sha: head } });
+        const op = { kind, grant: "team", pullRequest: 12, resource: "pull" as const,
+          head, event: "APPROVE" as const, body: "Verified." };
+        if (allowed) await broker.execute(op);
+        else {
+          await expect(broker.execute(op)).rejects.toMatchObject({ outcome: "policy_denied" });
+          expect(calls).toHaveLength(1);
+        }
+      }
+    }
+    // A removal on page two must override the request on page one.
+    const { broker } = rig([team], url => url.includes("page=2") ? [removed] :
+      [requested(), ...Array.from({ length: 99 }, () => ({ event: "commented" }))]);
+    await expect(broker.execute({kind: "github-read", grant: "team", pullRequest: 12,
+      resource: "pull"})).rejects.toMatchObject({ outcome: "policy_denied" });
+    // Removal while the PR head is being fetched must prevent the POST.
+    let timelines = 0;
+    const changed = rig([team], url => url.includes("timeline") ?
+      (++timelines === 1 ? [requested()] : [requested(), removed]) :
+      {state: "open", head: {sha: head}});
+    await expect(changed.broker.execute({kind: "github-review", grant: "team", pullRequest: 12,
+      head, event: "APPROVE", body: "Verified."})).rejects.toMatchObject({outcome: "policy_denied"});
+    expect(changed.calls.some(call => call.init?.method === "POST")).toBe(false);
+  });
   test("invalid policies never downgrade to legacy", () => {
     expect(() =>
       validatePolicy({

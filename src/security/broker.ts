@@ -203,33 +203,40 @@ export class CapabilityBroker {
         "Content-Type": "application/json",
       };
       const root = `https://api.github.com/repos/${grant.repository}/pulls/${pullRequest}`;
-      if (grant.kind === "github-team-review") {
-        const events = (await this.request(
-          `https://api.github.com/repos/${grant.repository}/issues/${pullRequest}/timeline?per_page=100`,
-          { headers },
-        )) as {
-          event?: string;
-          actor?: { login?: string };
-          requested_reviewer?: { login?: string };
-        }[];
-        if (
-          !Array.isArray(events) ||
-          !events.some(
-            (e) =>
-              e.event === "review_requested" &&
-              e.requested_reviewer?.login?.toLowerCase() ===
-                grant.reviewerLogin.toLowerCase() &&
-              grant.requesterLogins.some(
-                (login) =>
-                  login.toLowerCase() === e.actor?.login?.toLowerCase(),
-              ),
-          )
-        )
-          throw new PolicyError(
-            "policy_denied",
-            "no verified team review request",
-          );
-      }
+      const verifyTeamRequest = async () => {
+        if (grant.kind !== "github-team-review") return;
+        let authorized = false;
+        // Timeline pages are chronological. A removal or a replacement request
+        // from an untrusted actor revokes the earlier authority.
+        for (let page = 1; page <= 20; page++) {
+          const events = (await this.request(
+            `https://api.github.com/repos/${grant.repository}/issues/${pullRequest}/timeline?per_page=100&page=${page}`,
+            { headers },
+          )) as {
+            event?: string;
+            actor?: { login?: string };
+            requested_reviewer?: { login?: string };
+          }[];
+          if (!Array.isArray(events))
+            throw new PolicyError("policy_denied", "invalid review timeline");
+          for (const event of events) {
+            if (event.requested_reviewer?.login?.toLowerCase() !==
+                grant.reviewerLogin.toLowerCase()) continue;
+            if (event.event === "review_request_removed") authorized = false;
+            else if (event.event === "review_requested")
+              authorized = grant.requesterLogins.some(
+                login => login.toLowerCase() === event.actor?.login?.toLowerCase(),
+              );
+          }
+          if (events.length < 100) {
+            if (!authorized)
+              throw new PolicyError("policy_denied", "no verified team review request");
+            return;
+          }
+        }
+        throw new PolicyError("policy_denied", "review timeline exceeds verification limit");
+      };
+      await verifyTeamRequest();
       if (operation.kind === "github-checkout") {
         if (!/^[a-f0-9]{40}$/.test(operation.head))
           throw new PolicyError("policy_denied", "invalid head");
@@ -301,6 +308,7 @@ export class CapabilityBroker {
             "stale_head",
             "PR closed or head changed; re-review the current head",
           );
+        await verifyTeamRequest();
         // Recheck expiry immediately before the write, after the network read.
         if (grant.expiresAt <= (this.deps.now ?? Date.now)())
           throw new PolicyError("expired", "grant expired");
