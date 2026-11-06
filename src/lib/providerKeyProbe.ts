@@ -48,6 +48,11 @@ export const OPENAI_COMPATIBLE_BASES: Record<string, string> = {
   fireworks: "https://api.fireworks.ai/inference/v1",
   cerebras: "https://api.cerebras.ai/v1",
   nvidia: "https://integrate.api.nvidia.com/v1",
+  // OpenCode Zen and OpenCode Go: the same bases Pi sends inference to. Their
+  // `/models` is public without a header but answers 401 to a bad Bearer key,
+  // so one GET both verifies the key and lists the models.
+  opencode: "https://opencode.ai/inference/v1",
+  "opencode-go": "https://opencode.ai/inference/go/v1",
 };
 
 /** Non-OpenAI-shaped providers with a known cheap auth check. */

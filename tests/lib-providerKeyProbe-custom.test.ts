@@ -77,3 +77,19 @@ describe("probeProviderKey — custom providers (#694)", () => {
     expect(res.status).toBe("invalid");
   });
 });
+
+describe("probeProviderKey — OpenCode Zen / Go", () => {
+  test("OpenCode Go is checkable and probes its own models endpoint with Bearer auth", async () => {
+    stubFetch(200);
+    const res = await probeProviderKey("opencode-go", "sk-go");
+    expect(res.status).toBe("verified");
+    expect(calls[0]!.url).toBe("https://opencode.ai/inference/go/v1/models");
+    expect(calls[0]!.headers.Authorization).toBe("Bearer sk-go");
+  });
+
+  test("a key OpenCode rejects is INVALID", async () => {
+    stubFetch(401);
+    expect((await probeProviderKey("opencode", "sk-bad")).status).toBe("invalid");
+    expect(calls[0]!.url).toBe("https://opencode.ai/inference/v1/models");
+  });
+});

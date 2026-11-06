@@ -57,6 +57,28 @@ describe("fetchProviderModels", () => {
     expect(calls[0]!.headers.Authorization).toBe("Bearer sk-test");
   });
 
+  test("OpenCode Go lists its models with the key and reads MIME-typed image input", async () => {
+    const { impl, calls } = stubFetch({
+      data: [
+        { id: "deepseek-v4.1-flash", modalities: { input: ["text", "image/png"] } },
+        { id: "glm-5.3-flash", modalities: { input: ["text"] } },
+      ],
+    });
+    const models = await fetchProviderModels("opencode-go", "sk-go", impl);
+    expect(models).toEqual([
+      { provider: "opencode-go", model: "deepseek-v4.1-flash", supportsImages: true },
+      { provider: "opencode-go", model: "glm-5.3-flash", supportsImages: false },
+    ]);
+    expect(calls[0]!.url).toBe("https://opencode.ai/inference/go/v1/models");
+    expect(calls[0]!.headers.Authorization).toBe("Bearer sk-go");
+  });
+
+  test("OpenCode Zen uses its own base", async () => {
+    const { impl, calls } = stubFetch({ data: [{ id: "claude-sonnet-4-6" }] });
+    await fetchProviderModels("opencode", "sk-zen", impl);
+    expect(calls[0]!.url).toBe("https://opencode.ai/inference/v1/models");
+  });
+
   test("anthropic gets its own header shape and a full-page limit", async () => {
     const { impl, calls } = stubFetch({ data: [{ id: "claude-sonnet-4-6" }] });
     await fetchProviderModels("anthropic", "sk-ant", impl);
