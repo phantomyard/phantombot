@@ -2270,7 +2270,24 @@ function asRecord(v: unknown): Record<string, unknown> {
     : {};
 }
 
-function buildVoiceConfig(
+function buildVoiceConfig(tomlVoice: Record<string, unknown>): import("./lib/voice.ts").VoiceConfig {
+  const legacy = buildLegacyVoiceConfig(tomlVoice);
+  for (const direction of ["tts", "stt"] as const) {
+    const raw = tomlVoice[direction];
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      const v = raw as Record<string, unknown>;
+      legacy[direction] = {
+        enabled: v.enabled === true,
+        provider: asString(v.provider) as "openai-compatible" | "elevenlabs",
+        baseUrl: asString(v.base_url), keyEnv: asString(v.key_env),
+        model: asString(v.model), voice: asString(v.voice), speed: asNumber(v.speed),
+      };
+    }
+  }
+  return legacy;
+}
+
+function buildLegacyVoiceConfig(
   tomlVoice: Record<string, unknown>,
 ): import("./lib/voice.ts").VoiceConfig {
   const provider =

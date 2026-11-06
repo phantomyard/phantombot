@@ -22,6 +22,7 @@ import {
   recordTrustedNpub,
   savePhantomchatPersonaConfig,
 } from "../channels/phantomchat/personaStore.ts";
+import { createVoiceModelsHandler } from "../channels/phantomchat/voiceModels.ts";
 import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
 import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
 import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
@@ -214,6 +215,9 @@ export async function startHostedChannel(input: StartChannelInput): Promise<Host
     secretKey: identity.secretKey,
     publicKeyHex: identity.publicKeyHex,
     transport,
+    voiceModels: createVoiceModelsHandler({persona: input.persona, config: input.config,
+      allowedNpubs: spec.allowedNpubs, secretKey: identity.secretKey,
+      publish: event => transport.publishWrap(event)}),
   });
   void transport
     .publishProfile({ name: displayName, bot: true, commands: TELEGRAM_BOT_COMMANDS })

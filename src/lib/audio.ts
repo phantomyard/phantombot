@@ -71,10 +71,25 @@ export type AudioSupport =
  * follows whichever listener is asking. Returns undefined for providers that
  * need no key (`none`) and for the retired Azure value.
  */
+/** Translate an independent direction into the existing provider dispatcher. */
+export function voiceForDirection(config: Config, direction: "tts" | "stt"): Config {
+  const d = config.voice[direction];
+  if (!d) return config;
+  if (!d.enabled) return { ...config, voice: { provider: "none" } };
+  if (d.provider === "elevenlabs") return { ...config, voice: {
+    provider: "elevenlabs", stt: d, keyEnv: d.keyEnv,
+    elevenlabs: { voiceId: d.voice ?? "", modelId: d.model ?? "", stability: 1, similarityBoost: 0.7, style: 0.8 },
+  } };
+  return { ...config, voice: { provider: "openai-compatible", openaiCompatible: {
+    baseUrl: d.baseUrl ?? "", keyEnv: d.keyEnv ?? "", sttModel: d.model ?? "",
+    ttsModel: d.model ?? "", voice: d.voice ?? "", speed: d.speed ?? 1,
+  } } };
+}
+
 export async function voiceApiKey(config: Config): Promise<string | undefined> {
   const provider = config.voice.provider;
   if (provider === "elevenlabs") {
-    return await getPersonaSecret(config, ENV_KEY_FOR_PROVIDER.elevenlabs);
+    return await getPersonaSecret(config, config.voice.keyEnv ?? ENV_KEY_FOR_PROVIDER.elevenlabs);
   }
   if (provider === "openai-compatible") {
     const keyEnv = config.voice.openaiCompatible?.keyEnv;
@@ -90,6 +105,7 @@ export async function voiceApiKey(config: Config): Promise<string | undefined> {
  * environment — see `voiceApiKey`.
  */
 export async function sttSupport(config: Config): Promise<AudioSupport> {
+  config = voiceForDirection(config, "stt");
   const provider = config.voice.provider;
   if (provider === "none") {
     return { ok: false, reason: "provider_none", provider };
@@ -97,9 +113,9 @@ export async function sttSupport(config: Config): Promise<AudioSupport> {
   if (provider === "azure_edge") {
     return { ok: false, reason: "provider_removed", provider };
   }
-  const envVar = provider === "openai-compatible"
+  const envVar = config.voice.keyEnv ?? (provider === "openai-compatible"
     ? config.voice.openaiCompatible?.keyEnv ?? ENV_KEY_FOR_PROVIDER[provider]
-    : ENV_KEY_FOR_PROVIDER[provider];
+    : ENV_KEY_FOR_PROVIDER[provider]);
   return (await voiceApiKey(config))
     ? { ok: true }
     : { ok: false, reason: "key_missing", provider, envVar };
@@ -107,6 +123,7 @@ export async function sttSupport(config: Config): Promise<AudioSupport> {
 
 /** Diagnose whether the configured provider can synthesize TTS. Async: see sttSupport. */
 export async function ttsSupport(config: Config): Promise<AudioSupport> {
+  config = voiceForDirection(config, "tts");
   const provider = config.voice.provider;
   if (provider === "none") {
     return { ok: false, reason: "provider_none", provider };
@@ -114,9 +131,9 @@ export async function ttsSupport(config: Config): Promise<AudioSupport> {
   if (provider === "azure_edge") {
     return { ok: false, reason: "provider_removed", provider };
   }
-  const envVar = provider === "openai-compatible"
+  const envVar = config.voice.keyEnv ?? (provider === "openai-compatible"
     ? config.voice.openaiCompatible?.keyEnv ?? ENV_KEY_FOR_PROVIDER[provider]
-    : ENV_KEY_FOR_PROVIDER[provider];
+    : ENV_KEY_FOR_PROVIDER[provider]);
   return (await voiceApiKey(config))
     ? { ok: true }
     : { ok: false, reason: "key_missing", provider, envVar };
@@ -137,6 +154,7 @@ export async function synthesize(
   text: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<SynthesizeResult> {
+  config = voiceForDirection(config, "tts");
   const p = config.voice.provider;
   const key = await voiceApiKey(config);
   if (p === "elevenlabs") {
@@ -163,12 +181,13 @@ export async function transcribe(
   mime: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<TranscribeResult> {
+  config = voiceForDirection(config, "stt");
   const p = config.voice.provider;
   const key = await voiceApiKey(config);
   if (p === "elevenlabs") {
     if (!key)
       return { ok: false, error: "no ElevenLabs API key in the persona vault" };
-    return elevenlabsScribe(key, audio, mime, fetchImpl);
+    return elevenlabsScribe(key, audio, mime, fetchImpl, config.voice.stt?.model);
   }
   if (p === "openai-compatible") {
     if (!key) return { ok: false, error: "no OpenAI-compatible API key in the persona vault" };
@@ -370,6 +389,7 @@ async function elevenlabsScribe(
   audio: Buffer,
   mime: string,
   fetchImpl: typeof fetch,
+  model = "scribe_v1",
 ): Promise<TranscribeResult> {
   const form = new FormData();
   form.set(
@@ -377,7 +397,7 @@ async function elevenlabsScribe(
     new Blob([audio], { type: mime || "audio/ogg" }),
     "voice.ogg",
   );
-  form.set("model_id", "scribe_v1");
+  form.set("model_id", model);
   let res: Response;
   try {
     res = await fetchImpl("https://api.elevenlabs.io/v1/speech-to-text", {

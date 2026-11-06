@@ -77,6 +77,9 @@ export async function applyVoiceConfig(input: ApplyVoiceInput): Promise<void> {
       // save must not carry them forward indefinitely.
       delete (voiceToml as Record<string, unknown>).openai;
       delete (voiceToml as Record<string, unknown>).azure_edge;
+      // A deliberate TUI/CLI save replaces app-managed independent directions.
+      (voiceToml as Record<string, unknown>).tts = false;
+      (voiceToml as Record<string, unknown>).stt = false;
     }
     if (input.voice.provider === "elevenlabs" && input.voice.elevenlabs) {
       const e = input.voice.elevenlabs;

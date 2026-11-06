@@ -25,6 +25,7 @@ import {
   type RelayPool,
 } from "../src/channels/phantomchat/transport.ts";
 import {
+  createRumor, createSeal, createGiftWrap,
   wrapNip17Message,
   wrapV2,
   type NTNostrEvent,
@@ -94,7 +95,7 @@ class FakePool implements RelayPool {
 
 const RELAYS = ["wss://a.test", "wss://b.test"];
 
-function setup(opts?: { autoEose?: boolean; healCheckMs?: number }) {
+function setup(opts?: { autoEose?: boolean; healCheckMs?: number; voiceModels?: import("../src/channels/phantomchat/voiceModels.ts").VoiceModelsHandler }) {
   const ourSk = generateSecretKey();
   const ourPub = getPublicKey(ourSk);
   const pool = new FakePool(RELAYS, { autoEose: opts?.autoEose ?? true });
@@ -108,6 +109,7 @@ function setup(opts?: { autoEose?: boolean; healCheckMs?: number }) {
     publicKeyHex: ourPub,
     transport,
     healCheckMs: opts?.healCheckMs,
+    voiceModels: opts?.voiceModels,
   });
   return { ourSk, ourPub, pool, transport, channel };
 }
@@ -937,5 +939,66 @@ describe("phantomchat channel — ingest chain (arrival order + live gate)", () 
     await pump;
 
     expect(got).toEqual(["v2-first", "legacy-second"]);
+  });
+});
+
+
+describe("phantomchat channel — voice model controls", () => {
+  const waitFor = async (check: () => boolean) => {
+    const deadline = Date.now() + 2000;
+    while (!check() && Date.now() < deadline) await new Promise(r => setTimeout(r, 5));
+    expect(check()).toBe(true);
+  };
+
+  test("routes verified controls once, never turns malformed controls into chat, and drops group context", async () => {
+    const owner = generateSecretKey();
+    const calls: Array<{pubkey: string; content: string}> = [];
+    const handler = Object.assign(async (rumor: {pubkey: string; content: string}) => {calls.push(rumor);}, {close: async () => {}});
+    const {ourPub, pool, channel, transport} = setup({voiceModels: handler});
+    const controller = new AbortController();
+    const messages: ChannelMessage[] = [];
+    const pump = (async () => {for await (const msg of channel.listen!(controller.signal)) messages.push(msg);})();
+    try {
+      await waitFor(() => pool.subscribeCount > 0);
+      pool.fireEose();
+      const tags = [["p", ourPub], ["phantomchat-voice-models", "1"], ["control", "true"]];
+      const rumor = createRumor(JSON.stringify({type: "phantomchat-voice-models", id: "route-test", method: "get"}), owner, tags);
+      const wrap = () => createGiftWrap(createSeal(rumor, owner, ourPub), ourPub) as unknown as NTNostrEvent;
+      pool.feed(wrap());
+      pool.feed(wrap()); // Same rumor, independently wrapped: still one request.
+      const group = createRumor(rumor.content, owner, [...tags, ["group", "not-a-dm"]]);
+      pool.feed(createGiftWrap(createSeal(group, owner, ourPub), ourPub) as unknown as NTNostrEvent);
+      // The tag, not successful JSON parsing, protects against chat fallthrough.
+      const malformed = createRumor("malformed voice control body", owner, tags);
+      pool.feed(createGiftWrap(createSeal(malformed, owner, ourPub), ourPub) as unknown as NTNostrEvent);
+      await waitFor(() => calls.length >= 2);
+      controller.abort();
+      await pump;
+      expect(calls.map(c => c.pubkey)).toEqual([getPublicKey(owner), getPublicKey(owner)]);
+      expect(calls.map(c => c.content)).toEqual([rumor.content, malformed.content]);
+      expect(messages).toEqual([]);
+    } finally {controller.abort(); await pump; transport.close();}
+  });
+
+  test("shutdown awaits the queued voice handler drain before the listener finishes", async () => {
+    let release!: () => void;
+    let closeStarted = false, handled = false, finished = false;
+    const draining = new Promise<void>(resolve => {release = resolve;});
+    const handler = Object.assign(async () => {handled = true;}, {close: async () => {closeStarted = true; await draining;}});
+    const {ourPub, pool, channel, transport} = setup({voiceModels: handler});
+    const controller = new AbortController();
+    const pump = (async () => {for await (const _ of channel.listen!(controller.signal)) { /* no chat */ }})().then(() => {finished = true;});
+    try {
+      await waitFor(() => pool.subscribeCount > 0);
+      const owner = generateSecretKey();
+      const rumor = createRumor("model-control", owner, [["p", ourPub], ["phantomchat-voice-models", "1"], ["control", "true"]]);
+      pool.feed(createGiftWrap(createSeal(rumor, owner, ourPub), ourPub) as unknown as NTNostrEvent);
+      await waitFor(() => handled);
+      controller.abort();
+      await waitFor(() => closeStarted);
+      expect(finished).toBe(false);
+      release(); await pump;
+      expect(finished).toBe(true);
+    } finally {release(); controller.abort(); await pump; transport.close();}
   });
 });

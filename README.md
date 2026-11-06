@@ -397,6 +397,8 @@ bun test
 bun run build
 ```
 
+Voice Models apps can discover TUI-supported speech/transcription models and configure independent TTS/STT directions through the engine; keys stay in each persona vault. Authenticated remote PhantomChat model selection reuses the remote endpoint and key. See [the voice API](docs/reference/engine.md#voice-models).
+
 The engine can also be embedded in a Bun/TypeScript application with isolated
 state, explicit trust, memory, harness fallback, and validated decisions. See
 [`docs/reference/engine.md`](docs/reference/engine.md).
