@@ -25,7 +25,7 @@ afterEach(() => {
   }
 });
 const win = process.platform === "win32";
-const quote = (s: string) => (win ? `"${s}"` : `'${s.replace(/'/g, "'\\''")}'`);
+const quote = (s: string) => (win ? JSON.stringify(s) : `'${s.replace(/'/g, "'\\''")}'`);
 const cat = (p: string) => `${win ? "type" : "cat"} ${quote(p)}`;
 test("sandbox has only an explicit clean environment", () => {
   const env = sandboxEnvironment("/work", "/neutral");
