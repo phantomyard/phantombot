@@ -69,7 +69,13 @@ switch the hook off.
 
 **Briefing (#768).** The escort also sees the persona's briefing: the same
 ranked decisions, people and norms rows the threat judge is briefed from,
-packed to 6 KB. That is what lets it recognise the owner's routine work. For
+packed to 6 KB, matching entries first: the entries the search index matches
+against the turn's task lead each drawer, and the freshest fill the rest, so
+the cap cannot cut the one ruling about this kind of task. The threat judge
+briefs the same way, matched against the request it screens (an old ruling on
+that sender reaches the briefing however many fresher rows sit above it). The
+task or request is untrusted text, so it only chooses which of the owner's
+own entries come first; it never adds text. That is what lets it recognise the owner's routine work. For
 example, a fleet agent pushing a requested fix to its own PR branch,
 approving, replying to or resolving a review thread, or re-requesting
 reviewers from a background poller turn. The briefing is data: it never makes
@@ -85,7 +91,7 @@ the whole turn, for example:
 
 ```
 🔒 Held in scheduled task 1795: push code to a repository.
-Allow this in background tasks next time? Reply "allow push". No reply = keep holding.
+Allow this in background tasks next time? Reply "allow push", or "deny push" to stop asking.
 ```
 
 Every word of it is phantombot's own. The source comes from the turn's
@@ -123,6 +129,36 @@ write, so a determined turn can still forge an allowance. That is why an
 allowance is only context for the escort's judgement, never a bypass. A
 refused try is named in the notice as "a try to change the escort's own
 allowances" and offers nothing to allow.
+
+**Denies.** "deny push" runs `phantombot escort deny push`. A denied kind is
+enforced in code, not by the model: the orchestrator reads the deny list when
+the turn starts and puts it in the escort's context, and an escorted action
+of that kind is refused without asking the decision model. The kind is not
+asked about again. A turn can edit the file for later turns (same caveat as
+above), never the list its own run is held to.
+
+**Rulings land as decisions.** `escort allow|deny|revoke` and
+`phantombot judge rule allow|deny|clear "<sender or kind of request>" --note
+"…"` (the principal's ruling on a held untrusted request) each file a
+`decisions` drawer row tagged with a stable key (`[ruling escort:push]`,
+`[ruling judge:billing@vendor.com]`), indexed at once. A new ruling on the
+same key retires the old one, so the readers see only the latest. Being
+decisions, they reach both briefings relevance-first.
+
+**Hold notices reach the owner's open threads.** After the DM goes out, the
+screen appends one line to `hold-notices.jsonl` in the persona dir. Each
+long-lived reader polls it every 20 s:
+
+- the service sends a count line ("🔒 I held 1 action. Details in my DM.")
+  into each Telegram or PhantomChat group the owner wrote in during the last
+  60 minutes. Never what was held, never into a DM (the DM has the notice);
+- the TUI shows the notice as a system line straight away;
+- ACP adds it to the reply it is streaming, or opens the next reply with it
+  when the session is idle (editors may drop unprompted updates).
+
+Relayed lines are sent out of band and never written to `turns`. A group or
+session that is gone just misses it. Notices from before a reader started are
+never replayed.
 
 Known limits:
 

@@ -31,6 +31,7 @@
  * TTY-gated bare invocation (`lib/tuiGate.ts`).
  */
 
+import { HoldThreadRelay, privateHoldLine, startHoldRelay } from "../lib/holdRelay.ts";
 import { homedir } from "node:os";
 
 import type { Config } from "../config.ts";
@@ -109,6 +110,11 @@ export interface ChatMessage {
   parts?: ChatMessagePart[];
   /** Assistant only: set when the turn failed, so the UI can say so. */
   error?: string;
+  /**
+   * A system line, not a reply (#768: a hold notice relayed into this
+   * session). Shown without a speaker header and never written to memory.
+   */
+  notice?: true;
 }
 
 /** A handled slash command: what to print, and what to do after printing it. */
@@ -233,6 +239,8 @@ export interface OpenChatInput {
   workingDir?: string;
   /** Test seams. */
   memory?: MemoryStore;
+  /** Hold-notice poll interval (#768). Default HOLD_RELAY_POLL_MS. */
+  holdRelayPollMs?: number;
   harnesses?: Harness[];
   /**
    * Injected by tests so a `/restart` in the suite never bounces the
@@ -299,6 +307,15 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
   // over this session's `send` and transcript, so submit/interrupt/stop all
   // survive every screen switch.
   const runner = createTurnRunner(send, transcript);
+
+  // Hold notices (#768): a judge or escort hold anywhere for this persona
+  // shows here as a system line straight away, mid-reply or idle. An open
+  // session is always an open thread; nothing is written to memory.
+  const holdRelay = new HoldThreadRelay(agentDir, { windowMs: Number.POSITIVE_INFINITY });
+  holdRelay.touch(conversation);
+  const stopHoldRelay = startHoldRelay(holdRelay, (_thread, notices) => {
+    transcript.append({ role: "assistant", text: privateHoldLine(notices), at: Date.now(), notice: true });
+  }, input.holdRelayPollMs);
 
   async function* send(
     text: string,
@@ -527,6 +544,7 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
     command,
     reloadHarnesses,
     async close() {
+      stopHoldRelay();
       if (ownsMemory) await memory.close();
     },
   };

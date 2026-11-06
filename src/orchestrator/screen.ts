@@ -148,6 +148,7 @@ import {
   THREAT_THRESHOLD,
   type JudgeResult,
 } from "../lib/threatJudge.ts";
+import { publishHoldNotice } from "../lib/holdRelay.ts";
 import {
   DECISION_MODEL_JUDGE_BRIEFING_CAP_BYTES,
   decisionModelJudgeThreat,
@@ -160,7 +161,8 @@ import {
   escortHoldSource,
   freshEscortHolds,
   markEscortHoldsAnnounced,
-  readEscortAllowances,
+  readEscortRulings,
+  type EscortAllowKind,
   type EscortHold,
   type EscortSettings,
 } from "../lib/escort.ts";
@@ -412,7 +414,7 @@ export function makeScreener(
           timestamp: new Date(),
           trusted: false,
         };
-        const drawersText = await readBriefingDrawers(config, persona);
+        const drawersText = await readBriefingDrawers(config, persona, content);
         systemPrompt =
           buildSystemPrompt(personaFiles, untrustedCtx, drawersText) +
           "\n\n" +
@@ -514,6 +516,7 @@ export function makeScreener(
       config,
       persona,
       DECISION_MODEL_JUDGE_BRIEFING_CAP_BYTES,
+      text,
     );
     return decisionModelJudgeImpl(text, {
       settings: {
@@ -529,19 +532,25 @@ export function makeScreener(
   };
 
   // The escort's briefing (issue #768). Never throws.
-  const escortBriefing = async (): Promise<{ briefing?: string }> => {
+  // `task` is the turn's own message: rulings and norms that match it come
+  // first, so the cap cannot cut the one about this kind of task.
+  const escortBriefing = async (task: string): Promise<{ briefing?: string; deny?: EscortAllowKind[] }> => {
+    // A denied kind is refused in code (see EscortSettings.deny), so it rides
+    // along even when the briefing read below fails.
+    const rulings = readEscortRulings(holdLedgerDir);
+    const deny = rulings.deny.length > 0 ? { deny: rulings.deny } : {};
     try {
-      // The principal's allowances go FIRST and outside the drawer packing,
-      // so the cap can never cut a ruling (see escortAllowanceBriefing).
-      const allowances = escortAllowanceBriefing(readEscortAllowances(holdLedgerDir));
+      // The principal's rulings go FIRST and outside the drawer packing,
+      // so the cap can never cut one (see escortAllowanceBriefing).
+      const allowances = escortAllowanceBriefing(rulings.allow, rulings.deny);
       const room = ESCORT_BRIEFING_CAP_BYTES - (allowances ? Buffer.byteLength(allowances, "utf8") + 2 : 0);
-      const b = room > 0 ? await readBriefingDrawersCapped(config, persona, room) : undefined;
+      const b = room > 0 ? await readBriefingDrawersCapped(config, persona, room, task) : undefined;
       const parts = [allowances, b && b.trim() !== "" ? b : undefined].filter(
         (x): x is string => !!x,
       );
-      return parts.length > 0 ? { briefing: parts.join("\n\n") } : {};
+      return parts.length > 0 ? { briefing: parts.join("\n\n"), ...deny } : deny;
     } catch {
-      return {};
+      return deny;
     }
   };
 
@@ -553,14 +562,23 @@ export function makeScreener(
   const onEscortHolds = async (holds: EscortHold[]): Promise<void> => {
     try {
       const fresh = freshEscortHolds(holdLedgerDir, holds);
+      const rulings = readEscortRulings(holdLedgerDir);
       const notice = escortHoldNotice(fresh, {
         source: escortHoldSource(_conversation),
-        allowed: new Set(readEscortAllowances(holdLedgerDir)),
+        allowed: new Set(rulings.allow),
+        denied: new Set(rulings.deny),
       });
       if (!notice) return;
       const code = await notify(notice);
-      if (code === 0) markEscortHoldsAnnounced(holdLedgerDir, fresh);
-      else log.warn("screen: escort hold notice not delivered", { code });
+      if (code === 0) {
+        markEscortHoldsAnnounced(holdLedgerDir, fresh);
+        // Tell the owner's other open threads too (groups, TUI, ACP).
+        publishHoldNotice(holdLedgerDir, {
+          source: "escort",
+          count: new Set(fresh.map((h) => h.summary)).size,
+          text: notice.split("\n")[0]!,
+        });
+      } else log.warn("screen: escort hold notice not delivered", { code });
     } catch (e) {
       log.warn("screen: escort hold notice failed", { error: (e as Error).message });
     }
@@ -795,7 +813,7 @@ export function makeScreener(
                 // The same ranked rows the judge briefs from (issue #768), so
                 // the escort knows what is routine in the owner's world.
                 // Best-effort: no briefing ⇒ the escort judges as before.
-                ...(await escortBriefing()),
+                ...(await escortBriefing(content)),
               },
               onEscortHolds,
             }
@@ -871,10 +889,19 @@ export function makeScreener(
     if (batch.notify) {
       let delivered = true;
       try {
-        const code = await notify(buildNotifyMessage(batch.count));
+        const message = buildNotifyMessage(batch.count);
+        const code = await notify(message);
         if (code !== 0) {
           delivered = false;
           log.warn(`screen: notify exited ${code} for held request`);
+        } else {
+          // Tell the owner's other open threads too (groups, TUI, ACP). Only
+          // the header line: what was asked stays in the DM.
+          publishHoldNotice(holdLedgerDir, {
+            source: "judge",
+            count: batch.count,
+            text: message.split("\n")[0]!,
+          });
         }
       } catch (e) {
         delivered = false;
@@ -1019,8 +1046,9 @@ export function resolveNotifyPersona(
 async function readBriefingDrawers(
   config: Config,
   persona: string,
+  query?: string,
 ): Promise<string | undefined> {
-  return readBriefingDrawersCapped(config, persona, DRAWERS_CAP_BYTES);
+  return readBriefingDrawersCapped(config, persona, DRAWERS_CAP_BYTES, query);
 }
 
 /**
@@ -1033,6 +1061,7 @@ async function readBriefingDrawersCapped(
   config: Config,
   persona: string,
   capBytes: number,
+  query?: string,
 ): Promise<string | undefined> {
   let dir: string;
   try {
@@ -1041,7 +1070,7 @@ async function readBriefingDrawersCapped(
     return undefined;
   }
 
-  const sections = await collectBriefingSections(config, dir, persona);
+  const sections = await collectBriefingSections(config, dir, persona, query);
   if (sections.length === 0) return undefined;
   return packBriefing(sections, capBytes);
 }
@@ -1050,6 +1079,7 @@ async function collectBriefingSections(
   config: Config,
   dir: string,
   persona: string,
+  query?: string,
 ): Promise<DrawerBriefingSection[]> {
   let opened: Awaited<ReturnType<typeof openDrawerStore>> | undefined;
   try {
@@ -1064,7 +1094,7 @@ async function collectBriefingSections(
     for (const kind of BRIEFING_KINDS) {
       try {
         const section = opened
-          ? await drawerSection(opened.store, dir, persona, kind)
+          ? await drawerSection(opened.store, dir, persona, kind, { query })
           : await fileSection(dir, kind);
         if (section) sections.push(section);
       } catch {

@@ -235,6 +235,14 @@ export function transcriptLines(
   const width = Math.max(MIN_BODY_COLUMNS, box - ROW_INDENT);
   const lines: TranscriptLine[] = [];
   for (const message of messages) {
+    if (message.notice) {
+      // A system line (#768): no speaker, plain text, never markdown.
+      for (const row of wrap(message.text ?? "", width)) {
+        lines.push({ kind: "text", text: row, error: false });
+      }
+      lines.push({ kind: "gap" });
+      continue;
+    }
     const isUser = message.role === "user";
     lines.push({
       kind: "header",

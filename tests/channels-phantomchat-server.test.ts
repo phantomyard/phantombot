@@ -4513,3 +4513,61 @@ describe("phantomchat media → caption coalescing", () => {
     expect(receipts).not.toContain("img-stranger");
   }, 20_000);
 });
+
+describe("runPhantomchatServer hold relay (#768)", () => {
+  test("a group the owner is active in gets a count line, tagged to the group", async () => {
+    const { publishHoldNotice, groupHoldLine } = await import("../src/lib/holdRelay.ts");
+    const andrewSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const memberSk = generateSecretKey();
+    const andrewHex = getPublicKey(andrewSk);
+    const botHex = getPublicKey(botSk);
+    const memberHex = getPublicKey(memberSk);
+    const groupId = "hq-hold-relay";
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(botSk, ["wss://test.relay"], pool);
+    const channel = createPhantomchatChannel({ secretKey: botSk, publicKeyHex: botHex, transport });
+    const payload = JSON.stringify({ content: "hi", type: "text", id: `grp-${Date.now()}-abc`, timestamp: Date.now() });
+    const { wraps } = wrapGroupMessage(andrewSk, [botHex, memberHex], payload, groupId);
+    let inbound: NTNostrEvent | undefined;
+    for (const w of wraps) {
+      try {
+        unwrapNip17Message(w as NTNostrEvent, botSk);
+        inbound = w as NTNostrEvent;
+        break;
+      } catch {
+        /* not ours */
+      }
+    }
+    const ac = new AbortController();
+    const run = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [andrewHex],
+      signal: ac.signal,
+      holdRelayPollMs: 10,
+    });
+    pool.feed(inbound!);
+    await new Promise((r) => setTimeout(r, 100));
+    publishHoldNotice(agentDir, { source: "escort", count: 2, text: "🔒 Held 2 actions in scheduled task 12." });
+    await new Promise((r) => setTimeout(r, 100));
+    ac.abort();
+    await run;
+    const seen: Array<{ text: string; group?: string }> = [];
+    for (const w of pool.published.filter((e) => e.kind === 1059)) {
+      try {
+        const r = unwrapNip17Message(w as NTNostrEvent, andrewSk);
+        seen.push({ text: JSON.parse(r.content).content, group: r.tags.find((t) => t[0] === "group")?.[1] });
+      } catch {
+        /* not for Andrew */
+      }
+    }
+    expect(seen.filter((m) => m.text.startsWith("🔒"))).toEqual([{ text: groupHoldLine(2), group: groupId }]);
+  });
+});

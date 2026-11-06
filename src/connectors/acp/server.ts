@@ -24,6 +24,12 @@ import type { Readable, Writable } from "node:stream";
 import type { ActiveTurnHandle } from "../../channels/commands.ts";
 import { type Config, loadConfig, personaDir } from "../../config.ts";
 import {
+  type HoldNotice,
+  HoldThreadRelay,
+  privateHoldLine,
+  startHoldRelay,
+} from "../../lib/holdRelay.ts";
+import {
   canonicalPersonaName,
   healDefaultPersonaIfBroken,
 } from "../../lib/personaDefault.ts";
@@ -78,6 +84,8 @@ export interface AcpServerOptions {
   /** Log sink — stderr only. Default process.stderr. */
   logErr?: WriteSink;
   /** Shut the read loop down when fired (e.g. SIGINT). */
+  /** Hold-notice poll interval (#768). Tests only; default HOLD_RELAY_POLL_MS. */
+  holdRelayPollMs?: number;
   signal?: AbortSignal;
   /**
    * TEST SEAM. Forwarded to the turn bridge so a test can prove the threat
@@ -185,6 +193,27 @@ export async function runAcpServer(
   // Monotonic counter for presentational tool-call ids within the process.
   let toolSeq = 0;
 
+  // Hold notices (#768). Nothing outside this process can push into an ACP
+  // session, so the session reads the shared record itself. A notice for a
+  // session mid-turn joins the reply being streamed; one for an idle session
+  // waits and opens its next reply (editors may drop unprompted updates). A
+  // session counts as open for 60 minutes after its last prompt. Shown on the
+  // wire only, never written to the conversation.
+  const holdRelay = new HoldThreadRelay(agentDir);
+  const pendingHolds = new Map<string, HoldNotice[]>();
+  const flushHolds = (sessionId: string): void => {
+    const notices = pendingHolds.get(sessionId);
+    if (!notices || notices.length === 0) return;
+    pendingHolds.delete(sessionId);
+    send(agentMessageChunk(sessionId, `\n\n${privateHoldLine(notices)}\n\n`));
+  };
+  const stopHoldRelay = startHoldRelay(holdRelay, (sessionId, notices) => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    pendingHolds.set(sessionId, [...(pendingHolds.get(sessionId) ?? []), ...notices]);
+    if (session.activeTurn) flushHolds(sessionId);
+  }, options.holdRelayPollMs);
+
   // ── method handlers ──────────────────────────────────────────────────
 
   function handleInitialize(id: JsonRpcId): void {
@@ -284,6 +313,8 @@ export async function runAcpServer(
       return;
     }
 
+    holdRelay.touch(sessionId);
+
     const blocks: AcpContentBlock[] = Array.isArray(p.prompt)
       ? (p.prompt as AcpContentBlock[])
       : [];
@@ -342,6 +373,9 @@ export async function runAcpServer(
       if (options.signal.aborted) abort.abort();
       else options.signal.addEventListener("abort", () => abort.abort(), { once: true });
     }
+
+    // Holds that landed while this session was idle open this reply.
+    flushHolds(session.sessionId);
 
     let stopReason: AcpStopReason = "end_turn";
     try {
@@ -673,6 +707,7 @@ export async function runAcpServer(
     await queue;
     await Promise.allSettled([...inflightCommands]);
   } finally {
+    stopHoldRelay();
     if (ownsMemory) await memory.close();
   }
 
