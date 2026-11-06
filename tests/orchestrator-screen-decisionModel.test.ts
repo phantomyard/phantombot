@@ -16,7 +16,7 @@ import { loadDecisionModelHealth } from "../src/lib/decisionModelHealth.ts";
 import { setLogSink } from "../src/lib/logSink.ts";
 
 import { makeScreener, type ScreenerDeps } from "../src/orchestrator/screen.ts";
-import { resetEscortHoldAnnouncements } from "../src/lib/escort.ts";
+import { ESCORT_BRIEFING_CAP_BYTES, resetEscortHoldAnnouncements, setEscortAllowance } from "../src/lib/escort.ts";
 import type { Config, DecisionModelSettings } from "../src/config.ts";
 import type { JudgeResult } from "../src/lib/threatJudge.ts";
 import type { decisionModelJudgeThreat } from "../src/lib/decisionModelJudge.ts";
@@ -653,10 +653,10 @@ describe("screener escort briefing + hold notice (#768)", () => {
       notify: async (m) => (sent.push(m), 0),
     });
     const v = await screen("hello");
-    await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }, { summary: "git push" }]);
-    expect(sent).toEqual(["🔒 2 actions were held in a background task."]);
+    await v.onEscortHolds!([{ summary: "gh pr review 446 --approve", kind: "review" }, { summary: "git push", kind: "push" }]);
+    expect(sent).toEqual(["🔒 Held 2 actions in a background task: post a GitHub review, push code to a repository.\nAllow this in background tasks next time? Reply \"allow review\" or \"allow push\". No reply = keep holding."]);
     // The next poller wake hits the same held step: nothing new to say.
-    await v.onEscortHolds!([{ summary: "gh pr review 446 --approve" }]);
+    await v.onEscortHolds!([{ summary: "gh pr review 446 --approve", kind: "review" }]);
     expect(sent).toHaveLength(1);
   });
 
@@ -679,8 +679,8 @@ describe("screener escort briefing + hold notice (#768)", () => {
       notify: async (m) => (sent.push(m), 0),
     });
     const v = await screen("hello");
-    await v.onEscortHolds!([{ summary: "git push" }]);
-    expect(sent).toEqual(["🔒 1 action was held in a background task."]);
+    await v.onEscortHolds!([{ summary: "git push", kind: "push" }]);
+    expect(sent).toEqual(["🔒 Held in a background task: push code to a repository.\nAllow this in background tasks next time? Reply \"allow push\". No reply = keep holding."]);
   });
 
   it("a failing notify never throws out of onEscortHolds", async () => {
@@ -692,7 +692,7 @@ describe("screener escort briefing + hold notice (#768)", () => {
       },
     });
     const v = await screen("hello");
-    await expect(v.onEscortHolds!([{ summary: "git push" }])).resolves.toBeUndefined();
+    await expect(v.onEscortHolds!([{ summary: "git push", kind: "push" }])).resolves.toBeUndefined();
   });
 
   it("a failed notify does not consume the hold: the next turn announces it", async () => {
@@ -708,13 +708,31 @@ describe("screener escort briefing + hold notice (#768)", () => {
       },
     });
     const v = await screen("hello");
-    await v.onEscortHolds!([{ summary: "git push" }]);
+    await v.onEscortHolds!([{ summary: "git push", kind: "push" }]);
     mode = "nonzero";
-    await v.onEscortHolds!([{ summary: "git push" }]);
+    await v.onEscortHolds!([{ summary: "git push", kind: "push" }]);
     mode = "ok";
-    await v.onEscortHolds!([{ summary: "git push" }]);
-    await v.onEscortHolds!([{ summary: "git push" }]);
+    await v.onEscortHolds!([{ summary: "git push", kind: "push" }]);
+    await v.onEscortHolds!([{ summary: "git push", kind: "push" }]);
     // throw → retried; nonzero exit → retried; delivered → suppressed after.
-    expect(sent).toEqual(["🔒 1 action was held in a background task.", "🔒 1 action was held in a background task."]);
+    expect(sent).toEqual(["🔒 Held in a background task: push code to a repository.\nAllow this in background tasks next time? Reply \"allow push\". No reply = keep holding.", "🔒 Held in a background task: push code to a repository.\nAllow this in background tasks next time? Reply \"allow push\". No reply = keep holding."]);
+  });
+  it("an allowance reaches the escort briefing ahead of the drawers, and is not offered again", async () => {
+    setEscortAllowance(join(personasDir, "robbie"), "push", true);
+    await Bun.write(join(personasDir, "robbie", "memory", "norms.md"), "- x\n".repeat(5000));
+    const sent: string[] = [];
+    const jev = decisionModelStub(PASS);
+    const { screen } = mk(decisionModelSettings(), ALLOW_JSON, {
+      decisionModelJudge: jev.impl,
+      notify: async (m) => (sent.push(m), 0),
+    });
+    const v = await screen("hello");
+    expect(v.escort?.briefing?.startsWith("## owner allowances\n- The owner has ruled that background tasks may push code")).toBe(true);
+    // The drawers are packed into what is left: the whole briefing fits the cap uncut.
+    expect(Buffer.byteLength(v.escort!.briefing!, "utf8")).toBeLessThanOrEqual(ESCORT_BRIEFING_CAP_BYTES);
+    await v.onEscortHolds!([{ summary: "git push", kind: "push" }]);
+    expect(sent).toEqual([
+      "🔒 Held in a background task: push code to a repository.\nThat is already allowed; it was held because it did not fit this task.",
+    ]);
   });
 });

@@ -80,12 +80,22 @@ old behaviour).
 
 **Holds reach the principal (#768).** A held action is never parked silently.
 The escort records each hold in a per-turn log under the persona's `tmp/`.
-When the turn ends, phantombot sends the principal **one** short line for the
-whole turn: `🔒 1 action was held in a background task.` (or `N actions
-were…`). There are no scores or jargon, and the line is a COUNT only: the hold
-log is writable by the turn it records, and a summary is the action's own
-model-authored text, so relaying it would give a prompt-injected turn an
-unescorted line into the principal's chat. Summaries are used internally as
+When the turn ends, phantombot sends the principal **one** short notice for
+the whole turn, for example:
+
+```
+🔒 Held in scheduled task 1795: push code to a repository.
+Allow this in background tasks next time? Reply "allow push". No reply = keep holding.
+```
+
+Every word of it is phantombot's own. The source comes from the turn's
+conversation key, which phantombot sets (`tick:<id>` names the task; anything
+else reads "a background task"). The action is named only by its KIND, from a
+closed vocabulary (`ESCORT_ACTION_KINDS`: push, commit, review, comment,
+merge, github, email, message, delete, web, edit, read, shell), classified
+from the tool name and command. The hold log is writable by the turn it
+records, so a forged line can at most pick a different phantombot label; the
+action's own model-authored text is never relayed. Summaries are used internally as
 dedup keys and nothing else. The same held action is not
 announced again for 12 hours by the same phantombot process (kept in process
 memory only: any file in the persona dir is writable, forgeable or readable by
@@ -95,6 +105,17 @@ so a failed notify is retried on the next turn),
 so a poller that wakes every few minutes onto the same step does not ping
 every few minutes. The turn's model is told the principal will hear about it,
 so it neither notifies separately nor leaves the step for "a later turn".
+
+**Allowances.** The question is backed. When the principal replies "allow
+push", the trusted turn runs `phantombot escort allow push` (`escort list`,
+`escort revoke <kind>`), which writes `escort-allow.json` in the persona dir.
+Each allowance is rendered from the closed vocabulary into the escort's
+briefing, AHEAD of the ranked drawers so the 6 KB cap never cuts it. It is
+context, not a bypass: the escort still judges whether each action fits its
+task, and a notice for an already-allowed kind says it was held for not
+fitting rather than offering it again. The escort refuses, without asking the
+decision model, any action that mentions `escort-allow` or `escort
+allow|revoke`, so an escorted turn cannot grant itself one.
 
 Known limits:
 
