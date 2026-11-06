@@ -29,7 +29,7 @@
  * Runtime: Bun (the engine uses `bun:sqlite` and `Bun.spawn`, like the CLI).
  */
 import { voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
-import type { CreatePersonaOptions, DecideOptions, DecisionModelCheck, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
+import type { CreatePersonaOptions, DecideOptions, DecisionModelCheck, EmbeddingsCheck, EmbeddingsCheckInput, MemoryRefreshResult, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
 /**
  * Open an engine on `options.root`. Rejects with `invalid_root` or
  * `root_locked`. Always `close()` it (or use `await using`).
@@ -71,6 +71,14 @@ export declare class Engine {
         providers(): Promise<ReturnType<typeof voiceProviders>>;
         check(input: VoiceCheckInput): Promise<VoiceCheck>;
     };
+    /**
+     * The embeddings setup building block: list a provider's embedding models
+     * and prove a choice with a live embed. Stores nothing; persist with
+     * `persona.configure({ embeddings: { ..., dims } })`.
+     */
+    readonly embeddings: {
+        check(input: EmbeddingsCheckInput): Promise<EmbeddingsCheck>;
+    };
     /** A handle on `name`. Cheap; existence is checked on use. */
     persona(name: string): Persona;
     /**
@@ -99,6 +107,14 @@ export declare class Persona {
             tags?: string[];
             conversation?: string;
         }): Promise<void>;
+        /**
+         * Bring the search index up to date: re-index changed memory/ and kb/
+         * files and embed changed chunks with the configured embeddings provider
+         * (the daemon's heartbeat and nightly do this; the engine runs none).
+         * Incremental, so it is cheap to call after `configure` and on a timer.
+         * Never rejects for an index failure: it is reported in `error`.
+         */
+        refresh(): Promise<MemoryRefreshResult>;
     };
     /**
      * This persona's PhantomChat channel, hosted by the engine: its own npub,
