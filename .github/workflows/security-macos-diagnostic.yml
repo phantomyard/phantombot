@@ -26,6 +26,8 @@ jobs:
           const cases = [
             ['baseline', '(version 1)(allow default)'],
             ['shipped', profile],
+            ['root-directory', profile + '\n(allow file-read* (literal "/"))'],
+            ['system-parents', profile + '\n(allow file-read* (literal "/") (literal "/System") (literal "/System/Volumes") (literal "/System/Volumes/Preboot"))'],
             ['all-read', profile + '\n(allow file-read* file-map-executable)'],
             ...['/private/var', '/private/etc', '/dev', '/Library', '/System/Volumes', '/private/var/db', '/private/var/run'].map(p => [p, profile + `\n(allow file-read* file-map-executable (subpath ${JSON.stringify(p)}))`]),
             ['all-mach', profile + '\n(allow mach-lookup)'],
