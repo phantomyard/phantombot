@@ -139,6 +139,8 @@ One line per rule: its stable number, then its title. Click through for the full
 - [24](docs/contributing/invariants/security-perimeter.md#inv-24) The phantomchat allowlist IS the principal list — bridges get their own, lower tier (issue #400).
 - [63](docs/contributing/invariants/security-perimeter.md#inv-63) Jev talks to the DECISIONS API, never chat/completions — and its security numbers are calibrated, not assumed (issue #597).
 
+- [88](docs/contributing/invariants/security-perimeter.md#inv-88) Bounded turns replace classifier guesses with OS isolation and immutable broker grants.
+
 ### Personas, config and credentials — [personas-and-config.md](docs/contributing/invariants/personas-and-config.md)
 
 - [7](docs/contributing/invariants/personas-and-config.md#inv-7) Creating/importing/restoring a persona on a fresh box without setting it as default

@@ -1,3 +1,5 @@
+import { readSecurityPolicy } from "../security/policy.ts";
+import { createSecuritySession } from "../security/session.ts";
 /**
  * Single-turn coordinator.
  *
@@ -701,10 +703,14 @@ async function* runTurnBody(
   // it runs (issue #702). The rest (codex, a host pi) are left out of THIS
   // turn's chain; with none left the turn does not run at all — an escort
   // that cannot be enforced is not silently dropped (fail closed, as #703).
-  const chainHarnesses = escort
+  const securityPolicy = input.trusted !== true && input.toolsMode !== "none" ? readSecurityPolicy(input.agentDir) : undefined;
+  const boundedSecurity = securityPolicy?.enabled === true;
+  const chainHarnesses = boundedSecurity
+    ? input.harnesses.filter(h => h.supportsSecuritySession === true)
+    : escort
     ? input.harnesses.filter((h) => h.supportsEscort === true)
     : input.harnesses;
-  if (escort && chainHarnesses.length === 0) {
+  if ((escort || boundedSecurity) && chainHarnesses.length === 0) {
     log.error("turn: no harness in the chain supports the escort, holding the turn", {
       persona: input.persona,
       chain: input.harnesses.map((h) => h.id),
@@ -1022,7 +1028,7 @@ async function* runTurnBody(
   const auditSink = createAuditSink(input.agentDir);
 
   // Harness-failure evidence (issue #638): every recoverable/terminal/throw
-  // failure the orchestrator records is appended (bounded) to
+  // failure the orchestrator records is appended (boundedSecurity) to
   // `<agentDir>/harness-failures/<date>.jsonl`, so a mid-chain failure that a
   // fallback absorbed leaves a diagnosable record instead of vanishing with
   // the process. Best-effort by contract.
@@ -1107,7 +1113,9 @@ async function* runTurnBody(
   /** Tool calls the just-interrupted pass had started (outcome unknown). */
   let softToolCalls: string[] | undefined;
 
+  let securitySession: Awaited<ReturnType<typeof createSecuritySession>> | undefined;
   try {
+    if (boundedSecurity && securityPolicy) securitySession = await createSecuritySession({ personaDir: input.agentDir, policy: securityPolicy, signal: input.signal, audit: event => log.info("security: operation", { ...event }) });
     // #580 (second half): withhold pre-tool narration that is confidently in
     // a language the user did not write in. Applied HERE, above every
     // consumer, so ACP, the TUI and `ask` are covered as well as the two chat
@@ -1119,7 +1127,7 @@ async function* runTurnBody(
     // deadline starts a NEW pass — same chain, fresh hard budget, the nudge
     // as the user message, and the interrupted pair(s) in epoch turns so the
     // fresh process knows what was asked and how far the reply got. Passes
-    // are bounded by nudgeCap; once exhausted the soft deadline is disarmed
+    // are boundedSecurity by nudgeCap; once exhausted the soft deadline is disarmed
     // and the hard cap is the backstop, exactly as before.
     let passUserMessage = input.userMessage;
     while (true) {
@@ -1163,7 +1171,8 @@ async function* runTurnBody(
           startupTimeoutMs: input.startupTimeoutMs,
           mcpMode: input.mcpMode,
           toolsMode: input.toolsMode,
-          ...(escort ? { escort } : {}),
+          ...(escort && !boundedSecurity ? { escort } : {}),
+          ...(securitySession ? { securitySession: securitySession.descriptor } : {}),
           signal: input.signal,
         },
         {
@@ -1271,6 +1280,7 @@ async function* runTurnBody(
       break;
     }
   } finally {
+    await securitySession?.close();
     flushDigest();
     // Issue #768: a held action is never parked silently. Whatever the escort
     // held during this turn reaches the principal once, here, as one line.

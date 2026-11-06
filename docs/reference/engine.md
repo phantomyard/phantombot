@@ -608,3 +608,7 @@ A failed, incompatible or unsupported remote operation is never a successful
 local save. Messages also carry the existing local-tools control tag so older
 engines discard them before the turn pipeline. Shutdown drains outstanding
 configuration work before releasing the engine root.
+
+## Bounded security
+
+`persona.security.configure(policy)` and `persona.security.policy()` configure the same owner-controlled bounded workflows as the standalone runtime. Treat these as privileged application methods; never expose them as model tools or end-user endpoints. See [bounded security](bounded-security.md) for the policy schema and platform contract.

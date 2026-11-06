@@ -548,3 +548,6 @@ export interface MemorySearchOptions {
   limit?: number;
   scope?: "memory" | "kb" | "turns" | "all";
 }
+
+/** Bounded workflows shared by desktop and standalone runtimes. */
+export type { SecurityPolicy, NetworkGrant, BrokerOperation, SecurityAudit } from "./securityTypes.ts";

@@ -434,3 +434,23 @@ bun run build
 ```
 
 Phantombot is built by [Phantomyard](https://github.com/phantomyard).
+
+### Bounded development workflows (opt-in)
+
+Set an owner-authored `security-policy.json` in the persona directory, or use
+`persona.security.configure(policy)` in an embedding application. After the
+Judge passes an untrusted turn, the native engine exposes only sandboxed shell
+commands and a credential broker. Authorized calls bypass Escort's classifier.
+
+The OS confines files and direct networking; credentials stay in the parent
+runtime. Linux uses Landlock/seccomp, macOS Seatbelt, and Windows AppContainer/Job
+Objects. No Docker, separate sandbox installation or elevated setup is required;
+unsupported facilities refuse execution without falling back to a host shell.
+
+Grants cover specified PRs or verified, revocation-aware team review requests, public npm staging
+for frozen offline installs, fixed HTTPS endpoints, and exact MCP calls. They
+expire and cannot expand from model/repository text. The daemon and embedded
+engine share enforcement. Existing behavior remains until enabled; migrate
+integrations requiring host files or direct IMAP/SMTP before enabling their tasks.
+See [the security contract](docs/reference/bounded-security.md) for policy examples,
+operation schemas, platform limits and rollout gates.
