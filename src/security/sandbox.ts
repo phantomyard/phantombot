@@ -59,6 +59,9 @@ export function seatbeltProfile(workspace: string): string {
 (allow process-exec process-fork sysctl-read)
 (allow process-info-pidinfo (target self))
 (allow file-read-metadata)
+; dyld ignition opens the root directory before resolving its system cache.
+; A literal directory grant does not allow reading any of its children.
+(allow file-read* (literal "/"))
 (allow signal (target self))
 (allow mach-lookup (global-name "com.apple.logd") (global-name "com.apple.system.logger") (global-name "com.apple.system.opendirectoryd.libinfo"))
 (allow file-read* file-map-executable ${runtimePaths})
