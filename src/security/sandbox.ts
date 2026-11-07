@@ -1,6 +1,7 @@
 import { socketPair, receiveListener, superviseProc } from "./linux-notify.ts";
 import {
   closeSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -34,10 +35,22 @@ export interface SandboxHostPaths {
 }
 
 /**
+ * The user's own tool logins, read-only, so `gh` and `git` authenticate in a
+ * sandboxed turn exactly as they do in a trusted one (no extra vault names).
+ */
+export const SANDBOX_TOOL_LOGINS = [
+  [".config", "gh"],
+  [".config", "git"],
+  [".gitconfig"],
+  [".git-credentials"],
+];
+
+/**
  * The owner's model (GHSA-w7w8): the only WRITABLE directory is the turn's
- * scratch workspace. Read-only: ~/.local/bin and SSH PUBLIC keys.
- * Everything else in the home folder, including every persona folder (so
- * identity.json, the vault, prompts, config and policy), stays unreachable.
+ * scratch workspace. Read-only: ~/.local/bin, SSH PUBLIC keys and the tool
+ * logins above. Everything else in the home folder, including every persona
+ * folder (so identity.json, the vault, prompts, config and policy), stays
+ * unreachable.
  */
 export function defaultSandboxHostPaths(home = homedir()): SandboxHostPaths {
   const bin = join(home, ".local", "bin"),
@@ -50,7 +63,8 @@ export function defaultSandboxHostPaths(home = homedir()): SandboxHostPaths {
   } catch {
     /* no ~/.ssh */
   }
-  return { read: [bin, ...pub], path: [bin], home };
+  const logins = SANDBOX_TOOL_LOGINS.map((p) => join(home, ...p));
+  return { read: [bin, ...pub, ...logins], path: [bin], home };
 }
 
 function encodeReadPaths(paths: string[]): string {
@@ -177,6 +191,30 @@ export function sandboxSecretEnv(
 }
 
 /**
+ * The turn context a trusted turn's tools see (envBootstrap.withPersonaEnv),
+ * runtime-supplied, never model input. `session` lets `phantombot` inside the
+ * sandbox reach memory and notify through the session (escort-judged).
+ */
+export interface SandboxContext {
+  persona?: string;
+  conversation?: string;
+  turnId?: string;
+  session?: string;
+}
+export const SANDBOX_CONTEXT_ENV = {
+  persona: "PHANTOMBOT_PERSONA",
+  conversation: "PHANTOMBOT_CONVERSATION",
+  turnId: "PHANTOMBOT_TURN_ID",
+  session: "PHANTOMBOT_SECURITY_SESSION",
+} as const;
+export function sandboxContextFromEnv(env: NodeJS.ProcessEnv): SandboxContext {
+  const out: SandboxContext = {};
+  for (const [k, name] of Object.entries(SANDBOX_CONTEXT_ENV))
+    if (env[name]) out[k as keyof SandboxContext] = env[name];
+  return out;
+}
+
+/**
  * The fixed variables, plus the persona's secrets when the runtime passes
  * them. No ambient proxy, loader, shell-startup or engine variable survives,
  * and no secret can override a fixed variable.
@@ -186,11 +224,20 @@ export function sandboxEnvironment(
   home: string,
   secrets?: Record<string, string | undefined>,
   extraPath: string[] = [],
+  context: SandboxContext = {},
 ): NodeJS.ProcessEnv {
   const sep = process.platform === "win32" ? ";" : ":";
+  const ctx: Record<string, string> = {};
+  for (const [k, name] of Object.entries(SANDBOX_CONTEXT_ENV)) {
+    const v = context[k as keyof SandboxContext];
+    if (typeof v === "string" && v && !/[\x00\n\r]/.test(v)) ctx[name] = v;
+  }
+  const gitGlobal = join(home, ".gitconfig");
   const extra = extraPath.length ? sep + extraPath.join(sep) : "";
   return {
     ...sandboxSecretEnv(secrets),
+    ...ctx,
+    PHANTOMBOT_SCRATCH: workspace,
     PATH:
       process.platform === "win32"
         ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32;${join(workspace, ".tools")}${extra}`
@@ -205,7 +252,12 @@ export function sandboxEnvironment(
     XDG_CONFIG_HOME: join(home, ".config"),
     OPENSSL_CONF: process.platform === "win32" ? "NUL" : "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+    // The user's ~/.gitconfig when it is mirrored read-only (tool logins).
+    GIT_CONFIG_GLOBAL: existsSync(gitGlobal)
+      ? gitGlobal
+      : process.platform === "win32"
+        ? "NUL"
+        : "/dev/null",
     CI: "1",
     GIT_TERMINAL_PROMPT: "0",
     LANG: "C.UTF-8",
@@ -235,6 +287,8 @@ export async function runSandbox(
      * macOS only: on Windows they would need ACL changes on host folders.
      */
     hostPaths?: SandboxHostPaths;
+    /** Turn context (persona, conversation, turn, session); runtime-supplied. */
+    context?: SandboxContext;
     /** Test/runtime host self-exec override; never from model input. */ launcher?: string[];
   } = {},
 ): Promise<SandboxResult> {
@@ -290,7 +344,7 @@ export async function runSandbox(
           ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32`
           : "/",
     env: {
-      ...launcherEnvironment(workspace, home, opts.secrets, extraPath),
+      ...launcherEnvironment(workspace, home, opts.secrets, extraPath, opts.context),
       ...(process.platform === "linux" && readable.length
         ? { [ENV_SANDBOX_READ]: encodeReadPaths(readable) }
         : {}),
@@ -383,8 +437,9 @@ function launcherEnvironment(
   home: string,
   secrets?: Record<string, string | undefined>,
   extraPath: string[] = [],
+  context?: SandboxContext,
 ): NodeJS.ProcessEnv {
-  const env = sandboxEnvironment(workspace, home, secrets, extraPath);
+  const env = sandboxEnvironment(workspace, home, secrets, extraPath, context);
   if (process.platform === "win32") {
     for (const key of [
       "LOCALAPPDATA",

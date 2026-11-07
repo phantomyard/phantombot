@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import {
   mkdirSync,
+  realpathSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -202,6 +203,10 @@ test("defaultSandboxHostPaths grants ~/.local/bin and only public SSH keys", () 
   expect(paths.read).toEqual([
     join(home, ".local", "bin"),
     join(home, ".ssh", "id_ed25519.pub"),
+    join(home, ".config", "gh"),
+    join(home, ".config", "git"),
+    join(home, ".gitconfig"),
+    join(home, ".git-credentials"),
   ]);
   expect(paths.path).toEqual([join(home, ".local", "bin")]);
 });
@@ -241,6 +246,55 @@ test.skipIf(win)(
     expect(r.output).not.toContain("HOME-SECRET");
     expect(r.output).toContain("ssh-readonly");
     expect(r.output).toContain("workspace-writable");
+  },
+  20000,
+);
+
+test("sandbox env carries the trusted turn's PHANTOMBOT_* context", () => {
+  const env = sandboxEnvironment("/work", "/neutral", { PHANTOMBOT_PERSONA: "evil" }, [], {
+    persona: "robbie",
+    conversation: "tick:1",
+    turnId: "t-1",
+    session: '{"url":"x"}',
+  });
+  expect(env.PHANTOMBOT_PERSONA).toBe("robbie");
+  expect(env.PHANTOMBOT_CONVERSATION).toBe("tick:1");
+  expect(env.PHANTOMBOT_TURN_ID).toBe("t-1");
+  expect(env.PHANTOMBOT_SECURITY_SESSION).toBe('{"url":"x"}');
+  expect(env.PHANTOMBOT_SCRATCH).toBe("/work");
+  // No ~/.gitconfig mirrored: git still ignores any global config.
+  expect(env.GIT_CONFIG_GLOBAL).toBe(win ? "NUL" : "/dev/null");
+  // A secret cannot pose as context.
+  expect(sandboxEnvironment("/work", "/neutral", { PHANTOMBOT_PERSONA: "evil" })).not.toHaveProperty("PHANTOMBOT_PERSONA");
+});
+
+test.skipIf(win)(
+  "gh/git logins: readable inside like a trusted turn, never writable",
+  async () => {
+    const home = fresh(),
+      ws = fresh();
+    mkdirSync(join(home, ".config", "gh"), { recursive: true });
+    writeFileSync(join(home, ".config", "gh", "hosts.yml"), "github.com:\n    oauth_token: GH-LOGIN\n");
+    writeFileSync(join(home, ".gitconfig"), "[user]\n\tname = Login Name\n");
+    writeFileSync(join(home, ".git-credentials"), "https://u:CRED@github.com\n");
+    const r = await runSandbox(
+      ws,
+      [
+        'cat "$XDG_CONFIG_HOME/gh/hosts.yml"',
+        "git config --global user.name",
+        "cat ~/.git-credentials",
+        'echo x >> "$XDG_CONFIG_HOME/gh/hosts.yml" || echo gh-readonly',
+        "echo x >> ~/.gitconfig || echo git-readonly",
+        'echo "scratch=$PHANTOMBOT_SCRATCH persona=$PHANTOMBOT_PERSONA"',
+      ].join("\n"),
+      { hostPaths: { ...defaultSandboxHostPaths(home), home }, context: { persona: "p1" } },
+    );
+    expect(r.output).toContain("GH-LOGIN");
+    expect(r.output).toContain("Login Name");
+    expect(r.output).toContain("CRED");
+    expect(r.output).toContain("gh-readonly");
+    expect(r.output).toContain("git-readonly");
+    expect(r.output).toContain(`scratch=${realpathSync(ws)} persona=p1`);
   },
   20000,
 );

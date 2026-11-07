@@ -32,6 +32,7 @@
  * Both message/voice flags can be combined to send text AND voice.
  */
 
+import { forwardToSandboxSession } from "../security/sandboxCli.ts";
 import { defineCommand } from "citty";
 
 import {
@@ -103,6 +104,15 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   if (!input.message && !input.voice) {
     err.write("nothing to notify — pass --message and/or --voice.\n");
     return 2;
+  }
+  if (!input.config) {
+    // Sandboxed turn: the session's notify is text-only.
+    const forwarded = await forwardToSandboxSession(
+      { kind: "notify", message: input.message ?? input.voice },
+      out,
+      err,
+    );
+    if (forwarded !== undefined) return forwarded;
   }
 
   // Target persona first, THEN its effective config (phantombot#439). A
