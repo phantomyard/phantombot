@@ -429,8 +429,13 @@ const windowsTurn = (persona: string) => {
   dirs.push(ws); // its AppContainer profile is keyed on this path
   return ws;
 };
+// TEMP diagnostic (windows-2022 /dev/null): removed before merge.
+const nulProbe =
+  "ver & (type nul && echo NUL-READ-OK) & (echo x>nul && echo NUL-WRITE-OK) & (type \\\\.\\NUL && echo DOTNUL-OK) & " +
+  `powershell -NoProfile -Command "try { [IO.File]::Open('NUL','Open','ReadWrite').Close(); 'PS-NUL-RW-OK' } catch { 'PS-NUL-RW: ' + $_.Exception.Message }; try { [IO.File]::Open('\\\\.\\NUL','Open','ReadWrite').Close(); 'PS-DOTNUL-RW-OK' } catch { 'PS-DOTNUL-RW: ' + $_.Exception.Message }" & ` +
+  "where git & git --version & ";
 const toolProbe =
-  'powershell -NoProfile -NonInteractive -Command "Set-Content ps.txt ok; (Get-Location).Path"' +
+  nulProbe + 'powershell -NoProfile -NonInteractive -Command "Set-Content ps.txt ok; (Get-Location).Path"' +
   " && whoami && cd && dir /b && git init -q r && cd r && git status --short" +
   " && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m x && git log --oneline";
 test.skipIf(!win)(
