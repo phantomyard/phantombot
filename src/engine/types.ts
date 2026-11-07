@@ -323,8 +323,11 @@ export interface ProviderCheck {
   /** Human-readable evidence (HTTP status or error text). Never contains the key. */
   detail: string;
   /**
-   * Models this account can use; [] when the list could not be read, the key
-   * was rejected, or no key was supplied for a provider that needs one.
+   * Models this account can use. The provider's live list; Pi's bundled list
+   * for that provider when the live list cannot be read (no list endpoint, an
+   * unverifiable key, an outage). [] when the key was rejected, when no key was
+   * supplied for a provider that needs one, and for a bring-your-own endpoint
+   * whose list could not be read.
    */
   models: ProviderModel[];
 }

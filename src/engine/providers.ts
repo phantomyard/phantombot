@@ -83,8 +83,10 @@ const MAX_BASE_URL_CHARS = 2048;
  * `status` is `"verified"` (the provider accepted the key), `"invalid"` (it
  * explicitly rejected it: 401/403, the only verdict an app should block on) or
  * `"unverified"` (it could not be checked: no known endpoint, network error,
- * outage). `models` is the provider's live list, or [] when it could not be
- * read; an empty list is not by itself a reason to reject the key.
+ * outage). `models` is the provider's live list; Pi's bundled list for that
+ * provider when the live list cannot be read; [] when the key was rejected, a
+ * required key is missing, or a bring-your-own endpoint's list could not be
+ * read. An empty list is not by itself a reason to reject the key.
  */
 export async function checkProvider(
   providerId: string,
