@@ -75,7 +75,7 @@ export function windowsSandbox(workspace: string, command: string): number {
 }
 
 function windowsSandboxInHome(
-  workspace: string,
+  given: string,
   command: string,
   home: string,
 ): number {
@@ -178,7 +178,16 @@ function windowsSandboxInHome(
     TerminateProcess: { args: ["ptr", "u32"], returns: "bool" },
     CloseHandle: { args: ["ptr"], returns: "bool" },
     GetCurrentProcess: { args: [], returns: "ptr" },
+    GetLongPathNameW: { args: ["ptr", "ptr", "u32"], returns: "u32" },
   });
+  // PowerShell expands 8.3 names (C:\Users\RUNNER~1) by listing each
+  // parent, which the AppContainer may not do. Work on the long path; the
+  // profile stays keyed on the path we were given (deleteWindowsProfile).
+  const workspace = (() => {
+    const out = Buffer.alloc(32768 * 2);
+    const n = kernel.symbols.GetLongPathNameW(wide(given), out, 32768);
+    return n > 0 && n < 32768 ? out.toString("utf16le", 0, n * 2) : given;
+  })();
   const base = dlopen("kernelbase.dll", {
     DeriveCapabilitySidsFromName: {
       args: ["ptr", "ptr", "ptr", "ptr", "ptr"],
@@ -361,7 +370,7 @@ function windowsSandboxInHome(
       kernel.symbols.LocalFree(address(out));
     }
   };
-  const name = wide(windowsProfileName(workspace));
+  const name = wide(windowsProfileName(given));
   const sidOut = Buffer.alloc(8);
   const created =
     user.symbols.CreateAppContainerProfile(

@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   defaultSandboxHostPaths,
   runSandbox,
@@ -364,7 +364,8 @@ test.skipIf(!win)(
       'powershell -NoProfile -NonInteractive -Command "Set-Content ps.txt ok; (Get-Location).Path"',
     );
     expect(ps.exitCode, ps.output).toBe(0);
-    expect(ps.output.toLowerCase()).toContain(workspace.toLowerCase());
+    // The sandbox works on the long path; CI temp is 8.3 (RUNNER~1).
+    expect(ps.output.toLowerCase()).toContain(basename(workspace).toLowerCase());
     expect(readFileSync(join(workspace, "ps.txt"), "utf8")).toContain("ok");
     const tools = await runSandbox(workspace, "whoami && cd && dir /b");
     expect(tools.exitCode, tools.output).toBe(0);
