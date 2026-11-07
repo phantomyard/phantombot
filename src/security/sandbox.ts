@@ -13,7 +13,8 @@ import {
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
-import { windowsSandbox } from "./windows.ts";
+import { windowsAppContainerUsable, windowsSandbox } from "./windows.ts";
+import { log } from "../lib/logger.ts";
 import { linuxSandbox } from "./linux.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 
@@ -384,6 +385,7 @@ export async function runSandbox(
   for (const path of [".tmp", ".cache", ".config", ".tools"])
     mkdirSync(join(workspace, path), { recursive: true, mode: 0o700 });
   let invocation: string[];
+  let unconfined = false;
   if (process.platform === "linux")
     invocation = [
       ...(opts.launcher ?? phantombotSelfCommand()),
@@ -402,7 +404,16 @@ export async function runSandbox(
       "-c",
       command,
     ];
-  else if (process.platform === "win32")
+  else if (process.platform === "win32" && !windowsAppContainerUsable()) {
+    // Fail open (never deny service): this Windows build's NUL device is
+    // closed to AppContainers, so git and most tools could not start inside
+    // one. Run in the scratch folder with the sandbox env, unconfined; the
+    // threat judge still screened the turn.
+    windowsUnconfinedNotice();
+    unconfined = true;
+    const cmd = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`;
+    invocation = [cmd, `/d /s /c "${command}"`];
+  } else if (process.platform === "win32")
     invocation = [
       ...(opts.launcher ?? phantombotSelfCommand()),
       SANDBOX_SUBCOMMAND,
@@ -418,13 +429,15 @@ export async function runSandbox(
   const child = spawn(invocation[0]!, invocation.slice(1), {
     // The launcher itself must not discover bunfig/preloads from the repo.
     cwd:
-      process.platform === "darwin"
+      process.platform === "darwin" || unconfined
         ? workspace
         : process.platform === "win32"
           ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32`
           : "/",
     env: {
-      ...launcherEnvironment(workspace, home, opts.secrets, extraPath, opts.context),
+      ...(unconfined
+        ? sandboxEnvironment(workspace, home, opts.secrets, extraPath, opts.context)
+        : launcherEnvironment(workspace, home, opts.secrets, extraPath, opts.context)),
       ...(process.platform === "linux" && readable.length
         ? { [ENV_SANDBOX_READ]: encodeReadPaths(readable) }
         : {}),
@@ -437,6 +450,7 @@ export async function runSandbox(
     ],
     detached: process.platform !== "win32",
     windowsHide: true,
+    windowsVerbatimArguments: unconfined,
   });
   let supervision: Promise<void> | undefined;
   let supervisorStopped = false;
@@ -509,6 +523,15 @@ export async function runSandbox(
     await supervision;
     discardSandboxHome(home);
   }
+}
+
+let unconfinedNoticeShown = false;
+function windowsUnconfinedNotice(): void {
+  if (unconfinedNoticeShown) return;
+  unconfinedNoticeShown = true;
+  log.warn(
+    "Windows sandbox off: this Windows build blocks AppContainers from the NUL device (git cannot run); untrusted commands run unconfined in their scratch folder. Windows 11 26H2 (build 26300) or later runs them sandboxed.",
+  );
 }
 
 /** AppContainer resolution uses the caller's LocalAppData, never the child's. */

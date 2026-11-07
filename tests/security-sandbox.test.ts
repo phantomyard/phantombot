@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import {
   mkdirSync,
   realpathSync,
@@ -21,6 +21,9 @@ import {
   deleteWindowsProfile,
   freeDriveLetters,
   isStaleSandboxDrive,
+  nulGrantsAppContainers,
+  setWindowsAppContainerUsableForTests,
+  windowsAppContainerUsable,
   windowsParents,
   withTraverseAce,
 } from "../src/security/windows.ts";
@@ -44,6 +47,11 @@ afterEach(() => {
   }
 });
 const win = process.platform === "win32";
+// Does this Windows build let AppContainers open NUL (git needs it)? Read once
+// for real, then the confinement tests below always exercise the AppContainer.
+const nulOpen = win && windowsAppContainerUsable();
+beforeAll(() => setWindowsAppContainerUsableForTests(win ? true : undefined));
+afterAll(() => setWindowsAppContainerUsableForTests(undefined));
 const quote = (s: string) => (win ? JSON.stringify(s) : `'${s.replace(/'/g, "'\\''")}'`);
 const cat = (p: string) => `${win ? "type" : "cat"} ${quote(p)}`;
 test("sandbox has only an explicit clean environment", () => {
@@ -429,16 +437,46 @@ const windowsTurn = (persona: string) => {
   dirs.push(ws); // its AppContainer profile is keyed on this path
   return ws;
 };
-// TEMP diagnostic (windows-2022 /dev/null): removed before merge.
-if (win) console.log(require("node:child_process").spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(import.meta.dir, "fixtures", "tmp-nulsd.ps1")], { encoding: "utf8" }).stdout);
-const nulProbe =
-  "ver & (type nul && echo NUL-READ-OK) & (echo x>nul && echo NUL-WRITE-OK) & (type \\\\.\\NUL && echo DOTNUL-OK) & " +
-  `powershell -NoProfile -Command "try { [IO.File]::Open('NUL','Open','ReadWrite').Close(); 'PS-NUL-RW-OK' } catch { 'PS-NUL-RW: ' + $_.Exception.Message }; try { [IO.File]::Open('\\\\.\\NUL','Open','ReadWrite').Close(); 'PS-DOTNUL-RW-OK' } catch { 'PS-DOTNUL-RW: ' + $_.Exception.Message }" & ` +
-  "where git & git --version & ";
-const toolProbe =
-  nulProbe + 'powershell -NoProfile -NonInteractive -Command "Set-Content ps.txt ok; (Get-Location).Path"' +
-  " && whoami && cd && dir /b && git init -q r && cd r && git status --short" +
+const shellProbe =
+  'powershell -NoProfile -NonInteractive -Command "Set-Content ps.txt ok; (Get-Location).Path"' +
+  " && whoami && cd && dir /b";
+const gitProbe =
+  "git init -q r && cd r && git status --short" +
   " && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m x && git log --oneline";
+// git runs inside the AppContainer only where NUL is open to it (26H2+).
+const toolProbe = nulOpen ? `${shellProbe} && ${gitProbe}` : shellProbe;
+test("NUL DACL check matches real Windows builds", () => {
+  // Windows 11 26H2 (build 26300): AppContainers may open NUL.
+  expect(
+    nulGrantsAppContainers(
+      "D:(A;;0x1201bf;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;RC)(A;;0x1201bf;;;AC)(A;;0x1201bf;;;S-1-15-2-2)S:(ML;;NW;;;LW)",
+    ),
+  ).toBe(true);
+  // Server 2022 (20348) / 2025 (26100): Everyone only, which excludes AppContainers.
+  expect(
+    nulGrantsAppContainers("D:(A;;0x1201bf;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;RC)S:AI(ML;;NW;;;LW)"),
+  ).toBe(false);
+  expect(nulGrantsAppContainers("D:(A;;0x1200a9;;;AC)")).toBe(false); // read-only
+  expect(nulGrantsAppContainers("D:(D;;FA;;;AC)")).toBe(false); // deny ACE
+  expect(nulGrantsAppContainers("")).toBe(false);
+});
+test.skipIf(!win)(
+  "Windows without NUL for AppContainers fails open: git runs unconfined in the scratch",
+  async () => {
+    const workspace = windowsTurn("megan");
+    setWindowsAppContainerUsableForTests(false);
+    try {
+      const run = await runSandbox(workspace, `${gitProbe} && cd`);
+      expect(run.exitCode, run.output).toBe(0);
+      expect(run.output.toLowerCase()).toContain(workspace.toLowerCase());
+      const env = await runSandbox(workspace, "echo %PHANTOMBOT_SCRATCH%");
+      expect(env.output.trim().toLowerCase()).toBe(workspace.toLowerCase());
+    } finally {
+      setWindowsAppContainerUsableForTests(true);
+    }
+  },
+  90000,
+);
 test.skipIf(!win)(
   "Windows sandbox runs PowerShell, git and user32 tools in the workspace",
   async () => {

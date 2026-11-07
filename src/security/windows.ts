@@ -701,3 +701,89 @@ export function deleteWindowsProfile(workspace: string): void {
     lib.close();
   }
 }
+
+/**
+ * True when the NUL device's DACL lets AppContainers (ALL APPLICATION
+ * PACKAGES) read and write it. git (and most MSYS/mingw tools) open NUL on
+ * every start, so without this grant they cannot run inside the sandbox.
+ * Windows 11 26H2 (build 26300) grants it; Server 2022/2025 and Windows 11
+ * 24H2 (build 26100) and older do not, and only an admin could change that.
+ */
+export function nulGrantsAppContainers(sddl: string): boolean {
+  const dacl = sddl.split(/S:/)[0] ?? "";
+  for (const m of dacl.matchAll(/\(A;[^;()]*;([^;()]*);;;(AC|S-1-15-2-1)\)/gi)) {
+    const rights = m[1]!.toUpperCase();
+    if (/^(FA|GA)$/.test(rights) || (rights.includes("GR") && rights.includes("GW")))
+      return true;
+    const hex = /^0X([0-9A-F]+)$/.exec(rights);
+    if (hex && (parseInt(hex[1]!, 16) & 0x3) === 0x3) return true;
+  }
+  return false;
+}
+
+let appContainerUsable: boolean | undefined;
+/** Test seam only: forces the NUL check result (undefined = real check). */
+export function setWindowsAppContainerUsableForTests(v: boolean | undefined): void {
+  appContainerUsable = v;
+}
+
+/** Reads NUL's DACL once per process; fails open (false) on any error. */
+export function windowsAppContainerUsable(): boolean {
+  if (appContainerUsable !== undefined) return appContainerUsable;
+  appContainerUsable = false;
+  if (process.platform !== "win32") return appContainerUsable;
+  try {
+    const k = dlopen("kernel32.dll", {
+      CreateFileW: {
+        args: ["ptr", "u32", "u32", "ptr", "u32", "u32", "ptr"],
+        returns: "ptr",
+      },
+      CloseHandle: { args: ["ptr"], returns: "bool" },
+      LocalFree: { args: ["ptr"], returns: "ptr" },
+    });
+    const a = dlopen("advapi32.dll", {
+      GetSecurityInfo: {
+        args: ["ptr", "u32", "u32", "ptr", "ptr", "ptr", "ptr", "ptr"],
+        returns: "u32",
+      },
+      ConvertSecurityDescriptorToStringSecurityDescriptorW: {
+        args: ["ptr", "u32", "u32", "ptr", "ptr"],
+        returns: "bool",
+      },
+    });
+    // READ_CONTROL, share all, OPEN_EXISTING.
+    const h = k.symbols.CreateFileW(wide("\\\\.\\NUL"), 0x20000, 7, null, 3, 0, null);
+    if (!h || Number(h) === -1) return appContainerUsable;
+    try {
+      const sd = Buffer.alloc(8);
+      // SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION.
+      if (a.symbols.GetSecurityInfo(h, 6, 4, null, null, null, null, sd) !== 0)
+        return appContainerUsable;
+      try {
+        const text = Buffer.alloc(8);
+        if (
+          !a.symbols.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            address(sd),
+            1,
+            4,
+            text,
+            null,
+          )
+        )
+          return appContainerUsable;
+        try {
+          appContainerUsable = nulGrantsAppContainers(readWide(address(text), 1 << 16));
+        } finally {
+          k.symbols.LocalFree(address(text));
+        }
+      } finally {
+        k.symbols.LocalFree(address(sd));
+      }
+    } finally {
+      k.symbols.CloseHandle(h);
+    }
+  } catch {
+    /* fail open: unsandboxed */
+  }
+  return appContainerUsable;
+}

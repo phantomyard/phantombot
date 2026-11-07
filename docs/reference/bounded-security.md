@@ -122,6 +122,15 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
   PowerShell and cmd still work, git only for network commands such as
   `ls-remote`. PATH is System32, Windows PowerShell and the host PATH
   entries under the Windows/Program Files folders.
+- Windows builds that close NUL to AppContainers fail open. git (and most
+  MSYS/mingw tools) open the NUL device on every start; its DACL grants ALL
+  APPLICATION PACKAGES only from Windows 11 26H2 (build 26300). Server
+  2022/2025, Windows 11 24H2 (build 26100) and older do not, and only an
+  administrator could change that. phantombot reads NUL's DACL once per
+  process; where AppContainers are not granted, untrusted commands run
+  unconfined (no AppContainer) in their scratch folder with the same clean
+  environment, after the threat judge screened the turn, and one warning is
+  logged. Only Windows 11 26H2+ gets the filesystem boundary.
 
 POSIX commands have a two-minute wall-clock ceiling and bounded output. Linux
 also sets CPU, file-size, descriptor and per-user process limits. These are not
