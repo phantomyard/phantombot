@@ -1,12 +1,53 @@
 # Bounded security
 
+## Default for untrusted turns (GHSA-w7w8)
+
+Every untrusted turn (email, webhooks, `phantombot ask`, scheduled task wakes)
+runs sandboxed by default. No policy file is needed; `{"version":1,"enabled":false,"grants":[]}`
+in `security-policy.json` is the owner's opt-out. Trusted principal turns are
+never sandboxed.
+
+Inside the sandbox a turn has a disposable workspace, **network**, and the
+**whole persona vault in its environment**, so the work it was asked to do
+(git, gh, curl, APIs) runs as it would on the host. It cannot read the
+persona's home, SSH keys, `identity.json` (the vault key), other personas or
+other host files. Host-only actions (notify, memory capture/search) go through
+the broker.
+
+Threat model, stated on purpose:
+
+- **Primary control: the judge.** Every untrusted turn is screened before it
+  runs (decision model, with the harness judge as backup). Both hold at 90/100.
+- **Second look: the escort.** When the decision model is configured, each
+  sandbox command and broker host action is scored before it runs, at the same
+  90/100 bar. It refuses one action and the turn carries on.
+- **Blast radius: the sandbox.** A turn that gets through cannot touch host
+  files, SSH keys, the vault key, other personas, host Unix sockets, or anything
+  that outlives the turn's workspace.
+- **Accepted risk.** A hijack the judge and escort both miss can send the
+  secrets the turn holds (the persona vault) out over the network, or reach a
+  service listening on the host's loopback (Linux/macOS). That is accepted over
+  stripping network or credentials from autonomous work, which breaks the work
+  itself. Per-job secret lists were rejected for the same reason: the admin
+  falls on the owner and every new kind of job breaks until someone lists it.
+
+The 90 bar replaces 70 (decision model, escort) and 80 (harness judge): the
+false positives that held routine work scored 71-76. The scoring rubrics were
+re-anchored with it, so clear threats (hijack, credential or data theft, money,
+access changes, destruction) sit in the top band and other unsupported
+privileged work is "doubtful", not held. Live eval at 90 on the bundled corpora
+(`bun scripts/evalDecisionModelJudge.ts [--escort]`), five runs after the
+re-anchor: judge 0 false negatives, 0 false positives (lowest hold 95, highest
+allow 47 on the last three); escort 0 false positives, one 89 on a
+credential-file read in 3 of 5 runs, whose follow-up step (posting it) holds
+at 95.
+
+## Owner-granted workflows
+
 The owner chooses authority once; models do not grant permissions. The Judge
-still screens the incoming untrusted message once. Within a bounded turn, local
-commands and granted API calls never go through Escort's model classifier.
-Operations outside those boundaries are refused as permission expansions, with
-no automatic retry or model-generated grant. Trusted principal turns retain their
-existing tools. The old Escort remains the compatibility path while bounded mode
-is disabled, not a fallback after a sandbox error.
+still screens the incoming untrusted message once. Operations outside the
+sandbox and broker are refused as permission expansions, with no automatic
+retry or model-generated grant. A sandbox error never falls back to host tools.
 
 ## Authority and lifecycle
 
@@ -15,15 +56,18 @@ harness. Embedders can use `persona.security.configure(policy)` and
 `persona.security.policy()`. These are privileged application APIs, like
 `persona.secrets.set`; do not expose them to untrusted end users or model tools.
 An enabled policy selects only harnesses implementing the bounded tool surface
-(currently native). A malformed policy fails; it cannot turn the feature off.
+(native, and claude with its built-in tools off and the two tools served over
+MCP from a runtime-owned working directory). A malformed policy fails; it cannot turn the feature off.
 The native invocation disables extension, skill and context discovery and declares
 only two tools. A blocking hook additionally rejects every other tool, including
 codemode, raw MCP tools and alternate shell names.
 
-The broker and credentials remain in the parent process. An authenticated
+The broker and grant credentials remain in the parent process. An authenticated
 loopback channel carries structured requests from trusted tool implementations.
-The sandbox child has neither its bearer token nor credential environment
-variables. It cannot reach loopback. Policy is never mounted in its workspace.
+The sandbox child never gets its bearer token. It gets the persona vault as
+environment variables (read-only reader; names a loader or runtime acts on, such
+as `LD_*`, `NODE_*`, `BUN_*`, `PATH` and `HOME`, are dropped). Policy is never
+mounted in its workspace.
 Authority is detached from caller objects and snapshotted for the turn. Expiry is
 checked on every call, and again before a review publication after its head read.
 Closing the turn aborts local work, closes the broker and removes its workspace.
@@ -33,17 +77,20 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
 - Linux: glibc, x64/arm64, Landlock ABI 3 or newer, seccomp user notification and
   ADDFD are required. Filesystem writes and arbitrary file reads are confined to
   the workspace. System executables/libraries/headers/share data, CPU counts,
-  timezone and random/null devices are readable. OpenSSL and Git use clean configuration.
-  Direct networking, host IPC, process inspection, namespace changes and process
-  group escape are denied. A narrow notification supervisor supplies read-only
+  timezone and random/null devices are readable, as are DNS, TLS-root and
+  `/usr/local` runtime files. OpenSSL and Git use clean configuration.
+  AF_INET/AF_INET6 sockets are allowed; every other socket family (host Unix
+  sockets, netlink, packet), host IPC, process inspection, namespace changes and
+  process group escape are denied. A narrow notification supervisor supplies read-only
   descriptors for the requesting process's own maps/status/stat/statm/limits/
   cgroup files; it never grants the host's `/proc` tree. Other opens continue
   through Landlock, even if their path changes after inspection. No environment,
   file descriptor, host socket or loader setting is forwarded beyond stdio.
 - macOS: `/usr/bin/sandbox-exec` applies a default-deny Seatbelt profile. Only
-  system runtime files and the disposable workspace are accessible; network and arbitrary Mach IPC are denied; only system logging/user lookup services are reachable. The OS must still provide this deprecated system facility.
-- Windows: a private AppContainer profile with no capabilities supplies the
-  filesystem/network boundary. Only the disposable directory gets an inherited
+  system runtime files, DNS/TLS files, `/usr/local`, `/opt/homebrew` and the disposable workspace are accessible; network is allowed; arbitrary Mach IPC is denied; only system logging/user lookup, DNS and trust services are reachable. The OS must still provide this deprecated system facility.
+- Windows: a private AppContainer profile with only the `internetClient`
+  capability supplies the filesystem boundary (outbound network allowed; the
+  host's loopback stays unreachable). Only the disposable directory gets an inherited
   writable ACL and low-integrity label. Launch uses a stdio-only handle list,
   suspended creation and mandatory Job assignment before resume. Job closure
   kills descendants; a 2 GiB aggregate memory limit and 128-process limit apply.
@@ -53,7 +100,7 @@ also sets CPU, file-size, descriptor and per-user process limits. These are not
 VMs: kernel vulnerabilities and a compromised principal OS account remain outside
 this boundary. POSIX resource limits are not aggregate memory reservations, and
 macOS process-group cleanup is weaker than Windows Job ownership. The isolation
-contract is files, credentials and network, not immunity to all denial of service.
+contract is host files, the vault key and other personas, not immunity to all denial of service.
 Build tools must already exist: the runtime copies an available Bun/Node binary
 into the disposable workspace; it does not install developer toolchains.
 
@@ -64,12 +111,19 @@ Use explicit, short lifetimes. Setting `enabled` is the owner's choice to replac
 legacy per-kind Escort rulings for that persona's bounded turns.
 
 `broker({manifest:true})` lists the workspace and grants, excluding credential
-names. `sandbox({command:"..."})` runs arbitrary shell commands there; it has no
-host or direct network fallback. Commands can inspect, mutate, build, test and
+names. `sandbox({command:"..."})` runs arbitrary shell commands there, with
+network and the vault env; it has no host fallback. Commands can inspect, mutate, build, test and
 remove their own disposable files. Text mentioning security commands is data,
 not an execution-time phrase blacklist.
 
-`broker({operation:{...}})` supports:
+`broker({operation:{...}})` supports, with no grant needed:
+
+- `notify`: `message` (to 4 KiB). Runs the persona's own `phantombot notify`.
+- `memory-capture`: `text` (to 8 KiB), optional `tags` (decision, lesson,
+  person, commitment, norm). `memory-search`: `query`, optional `limit` (1-20).
+
+These run on the host with fixed argv, and are escorted like sandbox commands.
+With a grant:
 
 - `github-read`: `grant`, `resource` (`pull`, `files`, `comments`, `reviews`).
 - `github-checkout`: `grant`, `head` (40 lowercase hex characters). Downloads
@@ -111,10 +165,10 @@ only operation, grant id, outcome and duration, never credentials or raw bodies.
 
 Run `tests/security-{broker,sandbox,session}.test.ts` and the compiled smoke on all
 three supported OSes. These test real host-file denial, symlink/junction escape,
-subprocess inheritance, loopback blocking, Bun execution, timeout, authenticated
-IPC, deterministic grant bounds and review publication semantics. The dedicated
-security-sandbox CI workflow runs the platform matrix. Keep rollout opt-in until
-independent reviewers confirm the boundaries and the real runtime gates pass.
+subprocess inheritance, network and the secret env, non-inet socket refusal
+(Linux), Bun execution, timeout, authenticated IPC, deterministic grant bounds
+and review publication semantics. The dedicated security-sandbox CI workflow
+runs the platform matrix.
 
 ## Policy example
 

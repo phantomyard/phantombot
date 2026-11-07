@@ -1,5 +1,6 @@
 import { readSecurityPolicy } from "../security/policy.ts";
 import { createSecuritySession } from "../security/session.ts";
+import { sessionEscortGate } from "../security/escortGate.ts";
 /**
  * Single-turn coordinator.
  *
@@ -64,6 +65,7 @@ import {
   CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION,
   PRE_TOOL_NARRATION_INSTRUCTION,
   REPLY_LANGUAGE_INSTRUCTION,
+  SANDBOXED_TURN_INSTRUCTION,
 } from "../persona/builder.ts";
 import { buildTurnContext } from "../persona/turnContext.ts";
 import {
@@ -957,6 +959,7 @@ async function* runTurnBody(
     });
   }
   if (input.toolNarration) overlays.push(PRE_TOOL_NARRATION_INSTRUCTION);
+  if (boundedSecurity) overlays.push(SANDBOXED_TURN_INSTRUCTION);
   overlays.push(REPLY_LANGUAGE_INSTRUCTION);
   let systemPrompt =
     overlays.length > 0
@@ -1115,7 +1118,17 @@ async function* runTurnBody(
 
   let securitySession: Awaited<ReturnType<typeof createSecuritySession>> | undefined;
   try {
-    if (boundedSecurity && securityPolicy) securitySession = await createSecuritySession({ personaDir: input.agentDir, policy: securityPolicy, signal: input.signal, audit: event => log.info("security: operation", { ...event }) });
+    // GHSA-w7w8: an untrusted turn runs sandboxed by default (network + the
+    // persona vault, no host files). The escort, when on, judges each
+    // sandbox command at the session boundary (escortGate.ts).
+    if (boundedSecurity && securityPolicy) securitySession = await createSecuritySession({
+      personaDir: input.agentDir,
+      persona: input.persona,
+      policy: securityPolicy,
+      signal: input.signal,
+      audit: event => log.info("security: operation", { ...event }),
+      ...(escort ? { gate: sessionEscortGate(escort, { signal: input.signal }) } : {}),
+    });
     // #580 (second half): withhold pre-tool narration that is confidently in
     // a language the user did not write in. Applied HERE, above every
     // consumer, so ACP, the TUI and `ask` are covered as well as the two chat

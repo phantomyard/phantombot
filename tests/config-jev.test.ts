@@ -67,7 +67,7 @@ describe("config [jev]", () => {
       enabled: false,
       // 4 s since issue #663 — 1.5 s was the cap bad connections hit.
       timeoutMs: 4000,
-      threshold: 70,
+      threshold: 90,
     });
     expect(config.jev!.router).toEqual({
       enabled: false,

@@ -76,13 +76,31 @@ export function validatePolicy(value: unknown): SecurityPolicy {
   // Detach from the caller and freeze authority; callers never receive this copy.
   return JSON.parse(JSON.stringify(p)) as SecurityPolicy;
 }
+/**
+ * GHSA-w7w8: with no policy file, untrusted turns run sandboxed (network +
+ * the persona's vault, no host files). `enabled: false` is the owner's opt-out.
+ */
+export function defaultSecurityPolicy(): SecurityPolicy {
+  return { version: 1, enabled: true, grants: [] };
+}
+/**
+ * Test seam ONLY (tests/testEnvIsolation.ts): the suite's many mock-harness
+ * fixtures keep the old default; security-default-on.test.ts restores the
+ * real one. Nothing under src/ calls this.
+ */
+let defaultPolicyForTests: (() => SecurityPolicy) | undefined;
+export function setDefaultSecurityPolicyForTests(
+  f: (() => SecurityPolicy) | undefined,
+): void {
+  defaultPolicyForTests = f;
+}
 export function readSecurityPolicy(personaDir: string): SecurityPolicy {
   let text: string;
   try {
     text = readFileSync(join(personaDir, SECURITY_POLICY_FILE), "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT")
-      return { version: 1, enabled: false, grants: [] };
+      return (defaultPolicyForTests ?? defaultSecurityPolicy)();
     throw error;
   }
   return validatePolicy(JSON.parse(text));

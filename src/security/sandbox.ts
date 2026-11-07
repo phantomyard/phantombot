@@ -67,7 +67,11 @@ export function seatbeltProfile(workspace: string): string {
 (allow file-read* file-map-executable ${runtimePaths})
 (allow file-read* (literal "/dev/random") (literal "/dev/urandom") (literal "/private/etc/localtime") (literal "/private/etc/passwd"))
 (allow file-read* file-write* (literal "/dev/null"))
-(allow file* (subpath ${seatbeltString(workspace)}))`;
+(allow file* (subpath ${seatbeltString(workspace)}))
+; GHSA-w7w8: untrusted turns need the network (git, gh, APIs) and DNS/TLS.
+(allow network*)
+(allow mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.trustd") (global-name "com.apple.trustd.agent") (global-name "com.apple.SecurityServer") (global-name "com.apple.SystemConfiguration.configd") (global-name "com.apple.SystemConfiguration.DNSConfiguration"))
+(allow file-read* (literal "/private/etc/hosts") (literal "/private/etc/resolv.conf") (literal "/private/var/run/resolv.conf") (literal "/private/etc/services") (literal "/private/etc/protocols") (literal "/private/etc/group") (subpath "/private/etc/ssl") (subpath "/Library/Keychains") (subpath "/usr/local") (subpath "/opt/homebrew"))`;
 }
 
 /**
@@ -84,12 +88,43 @@ export function discardSandboxHome(home: string): void {
   rmSync(home, { recursive: true, force: true });
 }
 
-/** No ambient credential, proxy, loader, shell-startup or engine variable survives. */
+/**
+ * Names a secret may NOT take inside the sandbox: the fixed variables below,
+ * and anything a loader or runtime acts on. The Linux/Windows launcher runs
+ * before confinement with this env, so a loader variable would act outside
+ * the boundary. Everything else in the persona vault passes (GHSA-w7w8:
+ * untrusted turns get the whole vault; the judge and escort are the guard).
+ */
+const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const RESERVED_SECRET =
+  /^(?:LD_|DYLD_|BUN_|NODE_|PHANTOMBOT_|GIT_CONFIG|XDG_)|^(?:PATH|HOME|USERPROFILE|TMPDIR|TMP|TEMP|OPENSSL_CONF|CI|GIT_TERMINAL_PROMPT|LANG|LOCALAPPDATA|APPDATA|SystemRoot|ComSpec|PATHEXT|BASH_ENV|ENV|SHELLOPTS|PS4|IFS)$/i;
+export function sandboxSecretEnv(
+  secrets: Record<string, string | undefined> | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(secrets ?? {}))
+    if (
+      typeof v === "string" &&
+      !v.includes("\0") &&
+      SECRET_NAME.test(k) &&
+      !RESERVED_SECRET.test(k)
+    )
+      out[k] = v;
+  return out;
+}
+
+/**
+ * The fixed variables, plus the persona's secrets when the runtime passes
+ * them. No ambient proxy, loader, shell-startup or engine variable survives,
+ * and no secret can override a fixed variable.
+ */
 export function sandboxEnvironment(
   workspace: string,
   home: string,
+  secrets?: Record<string, string | undefined>,
 ): NodeJS.ProcessEnv {
   return {
+    ...sandboxSecretEnv(secrets),
     PATH:
       process.platform === "win32"
         ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32;${join(workspace, ".tools")}`
@@ -127,6 +162,8 @@ export async function runSandbox(
     signal?: AbortSignal;
     timeoutMs?: number;
     stdin?: Uint8Array;
+    /** Persona secrets for the sandboxed command (runtime-supplied, never model input). */
+    secrets?: Record<string, string | undefined>;
     /** Test/runtime host self-exec override; never from model input. */ launcher?: string[];
   } = {},
 ): Promise<SandboxResult> {
@@ -171,7 +208,7 @@ export async function runSandbox(
         : process.platform === "win32"
           ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32`
           : "/",
-    env: launcherEnvironment(workspace, home),
+    env: launcherEnvironment(workspace, home, opts.secrets),
     stdio: [
       opts.stdin ? "pipe" : "ignore",
       "pipe",
@@ -250,8 +287,9 @@ export async function runSandbox(
 function launcherEnvironment(
   workspace: string,
   home: string,
+  secrets?: Record<string, string | undefined>,
 ): NodeJS.ProcessEnv {
-  const env = sandboxEnvironment(workspace, home);
+  const env = sandboxEnvironment(workspace, home, secrets);
   if (process.platform === "win32") {
     for (const key of [
       "LOCALAPPDATA",

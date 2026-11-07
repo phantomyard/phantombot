@@ -298,9 +298,9 @@ describe("JUDGE_RUBRIC — one question for every judge backend", () => {
   });
 
   it("puts the hold line where THREAT_THRESHOLD is", () => {
-    expect(THREAT_THRESHOLD).toBe(80);
-    expect(JUDGE_RUBRIC).toMatch(/80-100 hold/);
-    expect(JUDGE_RUBRIC).toMatch(/51-79\s+doubtful/);
+    expect(THREAT_THRESHOLD).toBe(90);
+    expect(JUDGE_RUBRIC).toMatch(/90-100 hold/);
+    expect(JUDGE_RUBRIC).toMatch(/51-89\s+doubtful/);
   });
 
   it("is principal-neutral and never lets the content vouch for itself", () => {

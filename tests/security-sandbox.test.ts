@@ -75,7 +75,34 @@ test("repository child process inherits restrictions", async () => {
   expect(r.exitCode).not.toBe(0);
   expect(r.output).not.toContain("host-secret");
 }, 15000);
-test("real sockets cannot reach a host API", async () => {
+test("sandbox env carries runtime-supplied secrets but never reserved names", () => {
+  const env = sandboxEnvironment("/work", "/neutral", {
+    GH_TOKEN: "gh-secret",
+    LD_PRELOAD: "/evil.so",
+    NODE_OPTIONS: "--require /evil",
+    BUN_OPTIONS: "--preload /evil",
+    PATH: "/evil",
+    HOME: "/evil",
+    PHANTOMBOT_SECURITY_SESSION: "x",
+    "BAD-NAME": "x",
+  });
+  expect(env.GH_TOKEN).toBe("gh-secret");
+  for (const k of ["LD_PRELOAD", "NODE_OPTIONS", "BUN_OPTIONS", "PHANTOMBOT_SECURITY_SESSION", "BAD-NAME"])
+    expect(env).not.toHaveProperty(k);
+  expect(env.HOME).toBe("/neutral");
+  expect(env.PATH).not.toContain("/evil");
+});
+test("sandboxed command sees the secrets it was given", async () => {
+  const workspace = fresh();
+  const r = await runSandbox(
+    workspace,
+    win ? "echo %PROBE_SECRET%" : 'echo "$PROBE_SECRET"',
+    { secrets: { PROBE_SECRET: "probe-value-1" } },
+  );
+  expect(r.exitCode, r.output).toBe(0);
+  expect(r.output).toContain("probe-value-1");
+}, 15000);
+test("sandbox has TCP network (GHSA-w7w8); Windows AppContainer still cannot reach host loopback", async () => {
   const workspace = fresh();
   let calls = 0;
   const server = Bun.serve({
@@ -83,21 +110,38 @@ test("real sockets cannot reach a host API", async () => {
     port: 0,
     fetch: () => {
       calls++;
-      return new Response("host-secret");
+      return new Response("net-ok");
     },
   });
   try {
     const r = await runSandbox(
       workspace,
-      `${win ? "curl.exe" : "curl"} --connect-timeout 1 --max-time 2 http://127.0.0.1:${server.port}/`,
+      `${win ? "curl.exe" : "curl"} -s --connect-timeout 2 --max-time 4 http://127.0.0.1:${server.port}/`,
     );
-    expect(r.exitCode).not.toBe(0);
-    expect(calls).toBe(0);
-    expect(r.output).not.toContain("host-secret");
+    if (win) {
+      expect(r.exitCode).not.toBe(0);
+      expect(calls).toBe(0);
+    } else {
+      expect(r.exitCode, r.output).toBe(0);
+      expect(r.output).toContain("net-ok");
+    }
   } finally {
     await server.stop(true);
   }
 }, 15000);
+test.skipIf(process.platform !== "linux")(
+  "Linux sandbox refuses non-inet sockets (no host Unix sockets)",
+  async () => {
+    const workspace = fresh();
+    const r = await runSandbox(
+      workspace,
+      "python3 -c 'import socket; socket.socket(socket.AF_UNIX)' 2>&1; echo rc=$?",
+    );
+    expect(r.output).toContain("Address family not supported");
+    expect(r.output).toContain("rc=1");
+  },
+  15000,
+);
 test("process timeout terminates descendants", async () => {
   const workspace = fresh();
   const r = await runSandbox(

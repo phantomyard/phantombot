@@ -230,7 +230,7 @@ describe("screener + Jev", () => {
     );
     const v = await screen("hello");
     expect(v.action).toBe("hold");
-    expect(v.score).toBe(80);
+    expect(v.score).toBe(90);
     expect(v.reason).toContain("decision model: jev timeout after 4000ms; harness: ");
   });
 
@@ -249,7 +249,7 @@ describe("screener + Jev", () => {
     // First ask + the one format re-ask.
     expect(harnessCalls).toHaveLength(2);
     // Graded on the HARNESS judge's bar, with the normal notification.
-    expect(notified).toContain("(threat 80/100)");
+    expect(notified).toContain("(threat 90/100)");
     expect(notified).toContain("Why: the judge could not score this request");
     expect(notified).not.toContain("no verdict");
   });

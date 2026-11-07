@@ -62,6 +62,7 @@ function windowsSandboxInHome(
     },
     SetFileSecurityW: { args: ["ptr", "u32", "ptr"], returns: "bool" },
     FreeSid: { args: ["ptr"], returns: "ptr" },
+    ConvertStringSidToSidW: { args: ["ptr", "ptr"], returns: "bool" },
   });
   const kernel = dlopen("kernel32.dll", {
     GetLastError: { args: [], returns: "u32" },
@@ -128,6 +129,7 @@ function windowsSandboxInHome(
     throw new Error("sandbox unavailable: AppContainer profile");
   const sid = address(sidOut);
   check(sid, "AppContainer SID");
+  const netSidOut = Buffer.alloc(8);
   try {
     // The first launch's workspace is runtime-created and empty. Existing
     // profiles already have an inherited ACL: never re-walk agent-made links.
@@ -202,8 +204,19 @@ function windowsSandboxInHome(
       kernel.symbols.InitializeProcThreadAttributeList(attrs, 2, 0, size),
       "process attributes",
     );
+    // GHSA-w7w8: untrusted turns need outbound network. internetClient
+    // (S-1-15-3-1) only: AppContainer still cannot reach the host's loopback.
+    check(
+      adv.symbols.ConvertStringSidToSidW(wide("S-1-15-3-1"), netSidOut),
+      "network capability",
+    );
+    const capabilityList = Buffer.alloc(16);
+    capabilityList.writeBigUInt64LE(netSidOut.readBigUInt64LE());
+    capabilityList.writeUInt32LE(4, 8); // SE_GROUP_ENABLED
     const capabilities = Buffer.alloc(24);
     capabilities.writeBigUInt64LE(BigInt(sid));
+    capabilities.writeBigUInt64LE(BigInt(ptr(capabilityList)), 8);
+    capabilities.writeUInt32LE(1, 16);
     const handles = Buffer.alloc(24),
       startup = Buffer.alloc(112),
       info = Buffer.alloc(24);
@@ -255,7 +268,9 @@ function windowsSandboxInHome(
         ),
         "stdio-only handle list",
       );
-      const env = sandboxEnvironment(workspace, home);
+      // The launcher env carries the persona secrets (runSandbox); forward
+      // them. sandboxEnvironment drops reserved names and keeps fixed values.
+      const env = sandboxEnvironment(workspace, home, process.env);
       const environment = Buffer.from(
         Object.entries(env)
           .sort(([a], [b]) => a.localeCompare(b))
@@ -309,6 +324,7 @@ function windowsSandboxInHome(
       kernel.symbols.DeleteProcThreadAttributeList(attrs);
     }
   } finally {
+    if (address(netSidOut)) kernel.symbols.LocalFree(address(netSidOut));
     adv.symbols.FreeSid(sid);
   }
 }

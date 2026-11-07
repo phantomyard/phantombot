@@ -89,8 +89,28 @@ export function linuxSandbox(
     "/etc/localtime",
     "/proc/stat",
     "/sys/devices/system/cpu/online",
+    // GHSA-w7w8: network for untrusted turns needs name resolution and TLS
+    // roots. resolv.conf resolves to systemd-resolved's stub file, not /run.
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/host.conf",
+    "/etc/nsswitch.conf",
+    "/etc/gai.conf",
+    "/etc/services",
+    "/etc/protocols",
+    "/etc/passwd",
+    "/etc/group",
   ])
     add(p, 1 << 2);
+  for (const p of [
+    "/etc/ssl",
+    "/etc/ca-certificates",
+    "/etc/pki",
+    "/usr/local/bin",
+    "/usr/local/lib",
+    "/usr/local/share",
+  ])
+    add(p, read);
   for (const p of ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"])
     add(p, (1 << 1) | (1 << 2));
   add(workspace, handled, true);
@@ -119,12 +139,15 @@ export function linuxSandbox(
   limit(6, 4096);
   limit(7, 4096);
   // BPF checks the ABI first (including the x32 bit), then denies host IPC,
-  // networking, process inspection and escaping the process group. A fork
+  // process inspection and escaping the process group. Networking is allowed
+  // (GHSA-w7w8) for AF_INET/AF_INET6 sockets ONLY: socket() of any other
+  // family (AF_UNIX to host daemons like the systemd/dbus bus, netlink,
+  // packet) is refused below. A fork
   // inherits these restrictions; clone3 cannot hide namespace flags in a pointer.
   const x64 = process.arch === "x64";
   const blocked = x64
     ? [
-        41, 42, 43, 49, 50, 62, 141, 142, 144, 203, 314, 101, 103, 109, 112,
+        62, 141, 142, 144, 203, 314, 101, 103, 109, 112,
         154, 165, 166, 167, 168, 169, 172, 173, 200, 234, 248, 249, 250, 272,
         298, 300, 303, 304, 308, 310, 311, 312, 321, 323, 424, 425, 426, 427,
         428, 429, 430, 431, 432, 433, 434, 438, 440, 442, 443, 448, 449, 450,
@@ -132,7 +155,7 @@ export function linuxSandbox(
         465, 466,
       ]
     : [
-        198, 203, 200, 201, 202, 129, 140, 118, 119, 122, 274, 117, 116, 154,
+        129, 140, 118, 119, 122, 274, 117, 116, 154,
         157, 39, 40, 224, 225, 142, 130, 131, 217, 218, 219, 97, 241, 262, 264,
         265, 268, 270, 271, 272, 280, 282, 424, 425, 426, 427, 428, 429, 430,
         431, 432, 433, 434, 438, 440, 442, 443, 448, 449, 450, 451, 452, 453,
@@ -156,6 +179,16 @@ export function linuxSandbox(
   ];
   for (const nr of new Set(blocked))
     instructions.push([0x15, 0, 1, nr], [0x06, 0, 0, 0x00050000 | 1]);
+  // socket(domain): only AF_INET (2) and AF_INET6 (10). The low 32 bits of
+  // args[0] sit at offset 16 (little-endian seccomp_data).
+  instructions.push(
+    [0x15, 0, 5, x64 ? 41 : 198],
+    [0x20, 0, 0, 16],
+    [0x15, 2, 0, 2],
+    [0x15, 1, 0, 10],
+    [0x06, 0, 0, 0x00050000 | 97], // EAFNOSUPPORT
+    [0x20, 0, 0, 0],
+  );
   // prlimit64(pid!=0) could lower another host process's limits.
   instructions.push(
     [0x15, 0, 3, x64 ? 302 : 261],

@@ -247,7 +247,7 @@ export async function openPersonaVault(personaDir: string): Promise<Vault> {
  * simply dropped, with no security regression. The caller decides how to
  * surface `badKeys`.
  */
-async function readAllVaultValues(
+export async function readAllVaultValues(
   personaDirPath: string,
 ): Promise<{ values: Map<string, string>; badKeys: string[] } | null> {
   // Open-existing-only: this is a pure READ path (env loading), so it must never

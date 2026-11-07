@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { CapabilityBroker, PolicyError, SandboxArchive } from "./broker.ts";
 import { publicGrant, validatePolicy } from "./policy.ts";
 import { deleteWindowsProfile } from "./windows.ts";
@@ -12,9 +12,45 @@ import type {
   SecurityPolicy,
   SessionDescriptor,
 } from "./types.ts";
-import { openPersonaVault, type Vault } from "../lib/vault.ts";
+import { openPersonaVault, readAllVaultValues, type Vault } from "../lib/vault.ts";
 import { loadRegistry } from "../mcp/registry.ts";
 import { McpHub } from "../mcp/hub.ts";
+import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
+
+/**
+ * A pre-run check on what the turn is about to do (the escort, GHSA-w7w8):
+ * resolves to a refusal message, or undefined to let it run.
+ */
+export type SessionGate = (action: {
+  tool: string;
+  input: unknown;
+}) => Promise<string | undefined>;
+
+const MEMORY_TAGS = new Set(["decision", "lesson", "person", "commitment", "norm"]);
+/** Model text never starts an argv word with "-" (no flag injection). */
+const argText = (s: string) => (s.startsWith("-") ? ` ${s}` : s);
+
+/** The persona's own phantombot, on the host, fixed argv, no shell. */
+async function runSelf(
+  args: string[],
+  signal: AbortSignal,
+): Promise<{ code: number; output: string }> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+  const proc = Bun.spawn([...phantombotSelfCommand(), ...args], {
+    env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    signal: AbortSignal.any([signal, AbortSignal.timeout(60_000)]),
+  });
+  const [out, err, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { code, output: (out + err).slice(0, 64 * 1024) };
+}
 
 export const ENV_SECURITY_SESSION = "PHANTOMBOT_SECURITY_SESSION";
 /** The owner/runtime creates this; neither model text nor repository files can. */
@@ -23,6 +59,10 @@ export async function createSecuritySession(options: {
   policy: SecurityPolicy;
   signal?: AbortSignal;
   audit?: (event: SecurityAudit) => void;
+  /** The escort for this turn; absent = nothing is judged here. */
+  gate?: SessionGate;
+  /** Persona name for notify/memory; default = the persona dir's name. */
+  persona?: string;
 }): Promise<{ descriptor: SessionDescriptor; close(): Promise<void> }> {
   const policy = validatePolicy(options.policy);
   if (!policy.enabled) throw new Error("bounded security is disabled");
@@ -37,6 +77,21 @@ export async function createSecuritySession(options: {
   let vault: Vault | undefined, hub: McpHub | undefined;
   const needVault = async () =>
     (vault ??= await openPersonaVault(options.personaDir));
+  const persona = options.persona ?? basename(options.personaDir);
+  // GHSA-w7w8: every sandboxed command gets the WHOLE persona vault in its
+  // env (the owner's call: no per-job secret lists). Read in the parent on
+  // first use; a persona with no vault still runs, with none.
+  let secrets: Record<string, string> | undefined;
+  const sandboxSecrets = async () => {
+    if (secrets) return secrets;
+    // Read-only path: never provisions an identity or vault as a side effect.
+    const read = await readAllVaultValues(options.personaDir).catch(() => null);
+    return (secrets = Object.fromEntries(read?.values ?? []));
+  };
+  const judged = async (tool: string, input: unknown) => {
+    const refusal = await options.gate?.({ tool, input });
+    if (refusal !== undefined) throw new PolicyError("policy_denied", refusal);
+  };
   // Load secrets in the parent only. There is no credential endpoint on IPC.
   try {
     if (
@@ -93,15 +148,42 @@ export async function createSecuritySession(options: {
               v.kind === "sandbox" &&
               typeof v.command === "string" &&
               v.command.length <= 256 * 1024
-            )
+            ) {
+              await judged("bash", { command: v.command });
               return Response.json(
-                await runSandbox(workspace, v.command, { signal }),
+                await runSandbox(workspace, v.command, {
+                  signal,
+                  secrets: await sandboxSecrets(),
+                }),
               );
+            }
             if (v.kind !== "broker")
               throw new PolicyError(
                 "policy_denied",
                 "unknown session operation",
               );
+            const op = v.operation as Record<string, unknown> | undefined;
+            // The persona's own notify and memory, on the host (the sandbox
+            // has no identity.json): fixed argv, judged like any action.
+            if (op?.kind === "notify" && typeof op.message === "string" && op.message.length <= 4096) {
+              await judged("bash", { command: `phantombot notify --message ${JSON.stringify(op.message)}` });
+              const r = await runSelf(["notify", "--persona", persona, "--message", argText(op.message)], signal);
+              if (r.code !== 0) throw new PolicyError("unavailable", "notify failed");
+              return Response.json({ result: { sent: true } });
+            }
+            if (op?.kind === "memory-capture" && typeof op.text === "string" && op.text.length <= 8192) {
+              const tags = Array.isArray(op.tags) ? op.tags.filter((t): t is string => typeof t === "string" && MEMORY_TAGS.has(t)) : [];
+              await judged("bash", { command: `phantombot memory capture ${JSON.stringify(op.text)}${tags.map((t) => ` --tag ${t}`).join("")}` });
+              const r = await runSelf(["memory", "capture", argText(op.text), "--persona", persona, ...tags.flatMap((t) => ["--tag", t])], signal);
+              if (r.code !== 0) throw new PolicyError("unavailable", "memory capture failed");
+              return Response.json({ result: { captured: true } });
+            }
+            if (op?.kind === "memory-search" && typeof op.query === "string" && op.query.length <= 1024) {
+              const limit = typeof op.limit === "number" && op.limit >= 1 && op.limit <= 20 ? Math.floor(op.limit) : 8;
+              const r = await runSelf(["memory", "search", argText(op.query), "--persona", persona, "--limit", String(limit)], signal);
+              if (r.code !== 0) throw new PolicyError("unavailable", "memory search failed");
+              return Response.json({ result: r.output });
+            }
             const result = await broker.execute(v.operation as BrokerOperation);
             if (result instanceof SandboxArchive) {
               // Directory comes only from the typed broker, never an arbitrary
