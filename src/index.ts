@@ -57,6 +57,7 @@ import { BODY_GUARD_SUBCOMMAND, runBodyGuardHook } from "./lib/bodyPathGuard.ts"
 
 import { runSandbox, SANDBOX_SUBCOMMAND, sandboxExecChild } from "./security/sandbox.ts";
 import { runSecurityMcpServer, SECURITY_MCP_SUBCOMMAND } from "./security/mcpServer.ts";
+import { WINDOWS_SANDBOX_SETUP_SUBCOMMAND, windowsSandboxSetup } from "./security/windows.ts";
 
 if (process.argv[2] === "__sandbox_run") {
   try {
@@ -65,6 +66,11 @@ if (process.argv[2] === "__sandbox_run") {
   } catch (error) { console.error((error as Error).message); process.exit(126); }
 } else if (process.argv[2] === SANDBOX_SUBCOMMAND) {
   try { sandboxExecChild(process.argv.slice(3)); } catch (error) {
+    console.error((error as Error).message); process.exit(126);
+  }
+} else if (process.argv[2] === WINDOWS_SANDBOX_SETUP_SUBCOMMAND) {
+  // One-time, from an elevated prompt (Windows): see windowsSandboxSetup.
+  try { process.exit(windowsSandboxSetup()); } catch (error) {
     console.error((error as Error).message); process.exit(126);
   }
 } else if (process.argv[2] === SECURITY_MCP_SUBCOMMAND) {

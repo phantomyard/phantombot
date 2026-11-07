@@ -1,6 +1,9 @@
 /** Windows' built-in AppContainer + kill-on-close Job. No installer/admin. */
-import { dlopen, ptr, type Pointer } from "bun:ffi";
-import { createHash } from "node:crypto";
+import { dlopen, ptr, read, type Pointer } from "bun:ffi";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   discardSandboxHome,
   neutralSandboxHome,
@@ -10,6 +13,47 @@ import {
 
 const wide = (s: string) => Buffer.from(s + "\0", "utf16le");
 const address = (b: Buffer, at = 0) => Number(b.readBigUInt64LE(at)) as Pointer;
+const readWide = (p: Pointer, max = 1024): string => {
+  let out = "";
+  for (let at = 0; at < max; at += 2) {
+    const unit = read.u16(p, at);
+    if (unit === 0) break;
+    out += String.fromCharCode(unit);
+  }
+  return out;
+};
+/** Fixed per-host capability every sandbox carries (see grantParents). */
+export const TRAVERSE_CAPABILITY = "phantombotSandboxTraverse";
+/** SYNCHRONIZE | FILE_READ_ATTRIBUTES: stat only; no list, no read. */
+const TRAVERSE_MASK = "0x100080";
+
+/** Every parent of `folder`, drive root first, excluding `folder` itself. */
+export function windowsParents(folder: string): string[] {
+  const parts = folder.replace(/[\\/]+$/, "").split(/[\\/]+/);
+  if (parts.length < 2 || !/^[A-Za-z]:$/.test(parts[0]!)) return [];
+  const out: string[] = [];
+  for (let i = 1; i < parts.length; i++)
+    out.push(i === 1 ? `${parts[0]}\\` : parts.slice(0, i).join("\\"));
+  return out;
+}
+
+/**
+ * The DACL SDDL with one explicit, non-inheritable traverse ACE for
+ * `capability`, placed after the explicit ACEs (canonical order). Unchanged
+ * when the ACE is already there or the DACL is absent/NULL.
+ */
+export function withTraverseAce(sddl: string, capability: string): string {
+  const ace = `(A;;${TRAVERSE_MASK};;;${capability})`;
+  const match = /^D:([A-Z]*)((?:\([^)]*\))*)$/.exec(sddl);
+  if (!match || sddl.toUpperCase().includes(ace.toUpperCase())) return sddl;
+  const aces = match[2]!.match(/\([^)]*\)/g) ?? [];
+  if (!aces.length) return sddl;
+  const inherited = aces.findIndex((a) => /^\([^;]*;[^;]*ID/.test(a));
+  const at = inherited < 0 ? aces.length : inherited;
+  aces.splice(at, 0, ace);
+  return `D:${match[1]}${aces.join("")}`;
+}
+
 export function windowsProfileName(workspace: string): string {
   return (
     "Phantombot." +
@@ -64,6 +108,34 @@ function windowsSandboxInHome(
     SetFileSecurityW: { args: ["ptr", "u32", "ptr"], returns: "bool" },
     FreeSid: { args: ["ptr"], returns: "ptr" },
     ConvertStringSidToSidW: { args: ["ptr", "ptr"], returns: "bool" },
+    ConvertSidToStringSidW: { args: ["ptr", "ptr"], returns: "bool" },
+    ConvertSecurityDescriptorToStringSecurityDescriptorW: {
+      args: ["ptr", "u32", "u32", "ptr", "ptr"],
+      returns: "bool",
+    },
+    GetFileSecurityW: {
+      args: ["ptr", "u32", "ptr", "u32", "ptr"],
+      returns: "bool",
+    },
+    OpenProcessToken: { args: ["ptr", "u32", "ptr"], returns: "bool" },
+    GetTokenInformation: {
+      args: ["ptr", "u32", "ptr", "u32", "ptr"],
+      returns: "bool",
+    },
+  });
+  const ui = dlopen("user32.dll", {
+    GetProcessWindowStation: { args: [], returns: "ptr" },
+    SetProcessWindowStation: { args: ["ptr"], returns: "bool" },
+    CreateWindowStationW: {
+      args: ["ptr", "u32", "u32", "ptr"],
+      returns: "ptr",
+    },
+    CreateDesktopW: {
+      args: ["ptr", "ptr", "ptr", "u32", "u32", "ptr"],
+      returns: "ptr",
+    },
+    CloseDesktop: { args: ["ptr"], returns: "bool" },
+    CloseWindowStation: { args: ["ptr"], returns: "bool" },
   });
   const kernel = dlopen("kernel32.dll", {
     GetLastError: { args: [], returns: "u32" },
@@ -105,12 +177,189 @@ function windowsSandboxInHome(
     GetExitCodeProcess: { args: ["ptr", "ptr"], returns: "bool" },
     TerminateProcess: { args: ["ptr", "u32"], returns: "bool" },
     CloseHandle: { args: ["ptr"], returns: "bool" },
+    GetCurrentProcess: { args: [], returns: "ptr" },
+  });
+  const base = dlopen("kernelbase.dll", {
+    DeriveCapabilitySidsFromName: {
+      args: ["ptr", "ptr", "ptr", "ptr", "ptr"],
+      returns: "bool",
+    },
   });
   const check = (ok: unknown, operation: string) => {
     if (!ok)
       throw new Error(
         `sandbox unavailable: ${operation} (Win32 ${kernel.symbols.GetLastError()})`,
       );
+  };
+  const sidString = (value: Pointer | number, what: string): string => {
+    const out = Buffer.alloc(8);
+    check(adv.symbols.ConvertSidToStringSidW(value as Pointer, out), what);
+    try {
+      return readWide(address(out));
+    } finally {
+      kernel.symbols.LocalFree(address(out));
+    }
+  };
+  const userSid = (): string => {
+    const token = Buffer.alloc(8);
+    check(
+      adv.symbols.OpenProcessToken(
+        kernel.symbols.GetCurrentProcess(),
+        0x8, // TOKEN_QUERY
+        token,
+      ),
+      "process token",
+    );
+    try {
+      const info = Buffer.alloc(256),
+        used = Buffer.alloc(4);
+      check(
+        adv.symbols.GetTokenInformation(address(token), 1, info, 256, used),
+        "token user",
+      ); // TokenUser: TOKEN_USER { SID_AND_ATTRIBUTES { PSID, u32 } }
+      return sidString(address(info), "user SID");
+    } finally {
+      kernel.symbols.CloseHandle(address(token));
+    }
+  };
+  const privateDesktop = (container: Pointer) => {
+    // Only this user, SYSTEM and this run's AppContainer; low-integrity
+    // label so the low-IL sandbox may write to it.
+    const sddl =
+      `D:P(A;;GA;;;${userSid()})(A;;GA;;;${sidString(container, "AppContainer SID")})(A;;GA;;;SY)` +
+      "S:(ML;;NW;;;LW)";
+    const descriptor = Buffer.alloc(8);
+    check(
+      adv.symbols.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        wide(sddl),
+        1,
+        descriptor,
+        null,
+      ),
+      "desktop descriptor",
+    );
+    const attributes = Buffer.alloc(24);
+    attributes.writeUInt32LE(24, 0);
+    attributes.writeBigUInt64LE(BigInt(address(descriptor)), 8);
+    const station = `Phantombot-${randomBytes(8).toString("hex")}`;
+    let winsta: Pointer | null = null,
+      desktop: Pointer | null = null;
+    const previous = ui.symbols.GetProcessWindowStation();
+    try {
+      winsta = ui.symbols.CreateWindowStationW(
+        wide(station),
+        0,
+        0x37f, // WINSTA_ALL_ACCESS
+        attributes,
+      );
+      check(winsta, "window station");
+      check(ui.symbols.SetProcessWindowStation(winsta), "enter window station");
+      try {
+        desktop = ui.symbols.CreateDesktopW(
+          wide("Default"),
+          null,
+          null,
+          0,
+          0x10000000, // GENERIC_ALL
+          attributes,
+        );
+      } finally {
+        if (previous) ui.symbols.SetProcessWindowStation(previous);
+      }
+      check(desktop, "desktop");
+    } catch (error) {
+      if (desktop) ui.symbols.CloseDesktop(desktop);
+      if (winsta) ui.symbols.CloseWindowStation(winsta);
+      throw error;
+    } finally {
+      kernel.symbols.LocalFree(address(descriptor));
+    }
+    return {
+      name: wide(`${station}\\Default`),
+      close() {
+        ui.symbols.CloseDesktop(desktop!);
+        ui.symbols.CloseWindowStation(winsta!);
+      },
+    };
+  };
+  let traverseFree: (() => void) | undefined;
+  const traverseCapability = () => {
+    const groups = Buffer.alloc(8),
+      groupCount = Buffer.alloc(4),
+      sids = Buffer.alloc(8),
+      sidCount = Buffer.alloc(4);
+    check(
+      base.symbols.DeriveCapabilitySidsFromName(
+        wide(TRAVERSE_CAPABILITY),
+        groups,
+        groupCount,
+        sids,
+        sidCount,
+      ),
+      "traverse capability",
+    );
+    const free = (list: Buffer, count: Buffer) => {
+      const array = address(list);
+      if (!array) return;
+      for (let i = 0; i < count.readUInt32LE(); i++)
+        kernel.symbols.LocalFree(read.ptr(array, i * 8) as Pointer);
+      kernel.symbols.LocalFree(array);
+    };
+    free(groups, groupCount);
+    check(sidCount.readUInt32LE() >= 1, "traverse capability SID");
+    const capability = read.ptr(address(sids), 0) as Pointer;
+    traverseFree = () => free(sids, sidCount);
+    return { sid: capability, text: sidString(capability, "capability SID") };
+  };
+  const grantParents = (folder: string, capability: string) => {
+    for (const parent of windowsParents(folder)) {
+      const sddl = readDacl(parent);
+      if (sddl === undefined) continue;
+      const next = withTraverseAce(sddl, capability);
+      if (next === sddl) continue;
+      const descriptor = Buffer.alloc(8);
+      if (
+        !adv.symbols.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          wide(next),
+          1,
+          descriptor,
+          null,
+        )
+      )
+        continue;
+      try {
+        // SetFileSecurityW, unlike SetNamedSecurityInfoW, never re-walks
+        // the children: a profile-sized tree is untouched.
+        adv.symbols.SetFileSecurityW(wide(parent), 4, address(descriptor));
+      } finally {
+        kernel.symbols.LocalFree(address(descriptor));
+      }
+    }
+  };
+  const readDacl = (path: string): string | undefined => {
+    const needed = Buffer.alloc(4);
+    adv.symbols.GetFileSecurityW(wide(path), 4, null, 0, needed);
+    const size = needed.readUInt32LE();
+    if (!size) return undefined;
+    const sd = Buffer.alloc(size);
+    if (!adv.symbols.GetFileSecurityW(wide(path), 4, sd, size, needed))
+      return undefined;
+    const out = Buffer.alloc(8);
+    if (
+      !adv.symbols.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        sd,
+        1,
+        4,
+        out,
+        null,
+      )
+    )
+      return undefined;
+    try {
+      return readWide(address(out), 1 << 16);
+    } finally {
+      kernel.symbols.LocalFree(address(out));
+    }
   };
   const name = wide(windowsProfileName(workspace));
   const sidOut = Buffer.alloc(8);
@@ -198,6 +447,28 @@ function windowsSandboxInHome(
         kernel.symbols.LocalFree(address(low));
       }
     }
+    // Anything that loads user32 (PowerShell, git, whoami) dies with
+    // STATUS_DLL_INIT_FAILED unless the AppContainer can open its window
+    // station and desktop. Give each run a private pair it alone may use;
+    // both vanish with their last handle, so nothing on the host changes.
+    // Fail open (never deny service): without a private desktop the run
+    // still starts, as before, just without user32 tools.
+    let surface: { name: Buffer | null; close(): void };
+    try {
+      surface = privateDesktop(sid);
+    } catch {
+      surface = { name: null, close() {} };
+    }
+    // Windows tools (PowerShell, git, cmd's cd/dir) stat every parent of
+    // their working folder. One fixed capability may read those parents'
+    // attributes (this folder only: no listing, no reading, no inheritance)
+    // the workspace's parents; granted once and idempotent, never per turn.
+    const traverse = traverseCapability();
+    try {
+      grantParents(workspace, traverse.text);
+    } catch {
+      // Best effort: a parent we may not change (C:\\ without admin) stays as is.
+    }
     const size = Buffer.alloc(8);
     kernel.symbols.InitializeProcThreadAttributeList(null, 2, 0, size);
     const attrs = Buffer.alloc(address(size));
@@ -211,19 +482,23 @@ function windowsSandboxInHome(
       adv.symbols.ConvertStringSidToSidW(wide("S-1-15-3-1"), netSidOut),
       "network capability",
     );
-    const capabilityList = Buffer.alloc(16);
+    const capabilityList = Buffer.alloc(32);
     capabilityList.writeBigUInt64LE(netSidOut.readBigUInt64LE());
     capabilityList.writeUInt32LE(4, 8); // SE_GROUP_ENABLED
+    capabilityList.writeBigUInt64LE(BigInt(traverse.sid), 16);
+    capabilityList.writeUInt32LE(4, 24);
     const capabilities = Buffer.alloc(24);
     capabilities.writeBigUInt64LE(BigInt(sid));
     capabilities.writeBigUInt64LE(BigInt(ptr(capabilityList)), 8);
-    capabilities.writeUInt32LE(1, 16);
+    capabilities.writeUInt32LE(2, 16);
     const handles = Buffer.alloc(24),
       startup = Buffer.alloc(112),
       info = Buffer.alloc(24);
     startup.writeUInt32LE(112);
     startup.writeUInt32LE(0x100, 60);
     startup.writeBigUInt64LE(BigInt(ptr(attrs)), 104);
+    if (surface.name)
+      startup.writeBigUInt64LE(BigInt(ptr(surface.name)), 16); // lpDesktop
     for (let i = 0; i < 3; i++) {
       const handle = kernel.symbols.GetStdHandle(-10 - i);
       check(handle, "stdio handle");
@@ -323,10 +598,31 @@ function windowsSandboxInHome(
     } finally {
       kernel.symbols.CloseHandle(job);
       kernel.symbols.DeleteProcThreadAttributeList(attrs);
+      surface.close();
     }
   } finally {
     if (address(netSidOut)) kernel.symbols.LocalFree(address(netSidOut));
+    traverseFree?.();
     adv.symbols.FreeSid(sid);
+  }
+}
+
+export const WINDOWS_SANDBOX_SETUP_SUBCOMMAND = "__sandbox_setup";
+/**
+ * `C:\\` and `C:\\Users` only take the traverse ACE from an administrator; the
+ * runtime grants everything below the user's profile itself. Run once,
+ * elevated, per PC: one throwaway sandbox launch from under the profile.
+ * Without it the sandbox still runs (fail open), but PowerShell and git
+ * cannot start in their working folder.
+ */
+export function windowsSandboxSetup(): number {
+  if (process.platform !== "win32") return 0;
+  const workspace = mkdtempSync(join(tmpdir(), "pb-sandbox-setup-"));
+  try {
+    return windowsSandbox(workspace, "echo phantombot sandbox ready");
+  } finally {
+    deleteWindowsProfile(workspace);
+    rmSync(workspace, { recursive: true, force: true });
   }
 }
 

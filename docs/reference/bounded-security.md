@@ -104,6 +104,18 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
   writable ACL and low-integrity label. Launch uses a stdio-only handle list,
   suspended creation and mandatory Job assignment before resume. Job closure
   kills descendants; a 2 GiB aggregate memory limit and 128-process limit apply.
+  Each run gets a private window station and desktop (only the user, SYSTEM
+  and that AppContainer may open them; both vanish with the run), so tools that
+  load user32 (PowerShell, git) start. Every sandbox also carries one fixed
+  capability, `phantombotSandboxTraverse`, granted once on the workspace's
+  parent folders for read-attributes only (no listing, no reading, not
+  inherited, written without re-walking children): PowerShell, git and cmd
+  stat those parents. `C:\` and `C:\Users` take that ACE only from an
+  administrator, so run `phantombot __sandbox_setup` once per PC from an
+  elevated prompt (CI runners and elevated hosts grant it on first launch).
+  Without it the sandbox still runs, but PowerShell and git cannot start in
+  their working folder. PATH is System32, Windows PowerShell and the host PATH
+  entries under the Windows/Program Files folders.
 
 POSIX commands have a two-minute wall-clock ceiling and bounded output. Linux
 also sets CPU, file-size, descriptor and per-user process limits. These are not

@@ -242,7 +242,7 @@ export function sandboxEnvironment(
     PHANTOMBOT_SCRATCH: workspace,
     PATH:
       process.platform === "win32"
-        ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32;${join(workspace, ".tools")}${extra}`
+        ? `${windowsSystemPath(process.env).join(";")};${join(workspace, ".tools")}${extra}`
         : `${process.platform === "darwin" ? "/opt/homebrew/bin:/usr/local/bin:" : ""}/usr/bin:/bin:/usr/sbin:/sbin:${join(workspace, ".tools")}${extra}`,
     HOME: home,
     USERPROFILE: home,
@@ -269,9 +269,72 @@ export function sandboxEnvironment(
           APPDATA: join(home, ".config"),
           SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
           ComSpec: `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`,
+          // Standard machine variables PowerShell/.NET and installers expect.
+          ...windowsMachineEnv(process.env),
+          // Files the elevated host made are owned by Administrators, not the
+          // sandbox's user, so git refuses them as "dubious ownership". The
+          // workspace is the sandbox's own disposable directory.
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "safe.directory",
+          GIT_CONFIG_VALUE_0: "*",
         }
       : {}),
   };
+}
+
+/**
+ * Windows PATH inside the AppContainer: System32, Windows PowerShell, and the
+ * host PATH entries under the Windows or Program Files folders (git, gh,
+ * pwsh, node installs). Those are readable to ALL APPLICATION PACKAGES by
+ * default; per-user folders are not, so they are left out. The launcher
+ * recomputes this from the PATH it was given, so it must be idempotent.
+ */
+export function windowsSystemPath(env: NodeJS.ProcessEnv): string[] {
+  const root = env.SystemRoot ?? "C:\\Windows";
+  const bases = [root, env.ProgramFiles, env["ProgramFiles(x86)"], env.ProgramW6432]
+    .filter((b): b is string => !!b)
+    .map((b) => b.replace(/[\\/]+$/, "").toLowerCase() + "\\");
+  const out = [`${root}\\System32`, `${root}\\System32\\WindowsPowerShell\\v1.0`];
+  const seen = new Set(out.map((p) => p.toLowerCase()));
+  for (const raw of (env.PATH ?? env.Path ?? "").split(";")) {
+    const entry = raw.trim().replace(/[\\/]+$/, "");
+    const key = entry.toLowerCase();
+    if (!entry || seen.has(key) || /[%"\n\r]/.test(entry)) continue;
+    if (!bases.some((b) => key.startsWith(b))) continue;
+    seen.add(key);
+    out.push(entry);
+  }
+  return out;
+}
+
+const WINDOWS_MACHINE_ENV = [
+  "SystemDrive",
+  "windir",
+  "ProgramData",
+  "ALLUSERSPROFILE",
+  "ProgramFiles",
+  "ProgramFiles(x86)",
+  "ProgramW6432",
+  "CommonProgramFiles",
+  "CommonProgramFiles(x86)",
+  "CommonProgramW6432",
+  "PUBLIC",
+  "COMPUTERNAME",
+  "OS",
+  "NUMBER_OF_PROCESSORS",
+  "PROCESSOR_ARCHITECTURE",
+  "PROCESSOR_IDENTIFIER",
+  "PROCESSOR_LEVEL",
+  "PROCESSOR_REVISION",
+  "PATHEXT",
+] as const;
+function windowsMachineEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of WINDOWS_MACHINE_ENV) {
+    const v = env[key];
+    if (typeof v === "string" && v && !/[\x00\n\r]/.test(v)) out[key] = v;
+  }
+  return out;
 }
 
 /** Arbitrary repository code executes only below this boundary. */

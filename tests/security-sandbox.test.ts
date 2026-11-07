@@ -14,8 +14,13 @@ import {
   defaultSandboxHostPaths,
   runSandbox,
   sandboxEnvironment,
+  windowsSystemPath,
 } from "../src/security/sandbox.ts";
-import { deleteWindowsProfile } from "../src/security/windows.ts";
+import {
+  deleteWindowsProfile,
+  windowsParents,
+  withTraverseAce,
+} from "../src/security/windows.ts";
 import { prepareSandboxTools } from "../src/security/workspace.ts";
 const dirs: string[] = [];
 const fresh = () => {
@@ -297,4 +302,80 @@ test.skipIf(win)(
     expect(r.output).toContain(`scratch=${realpathSync(ws)} persona=p1`);
   },
   20000,
+);
+
+const CAP = "S-1-15-3-1024-1-2-3";
+test("windowsParents lists every parent, drive root first", () => {
+  expect(windowsParents("C:\\Users\\me\\scratch\\run")).toEqual([
+    "C:\\",
+    "C:\\Users",
+    "C:\\Users\\me",
+    "C:\\Users\\me\\scratch",
+  ]);
+  expect(windowsParents("C:\\")).toEqual([]);
+  expect(windowsParents("\\\\server\\share\\x")).toEqual([]);
+});
+test("withTraverseAce adds one read-attributes ACE after the explicit ACEs", () => {
+  const dacl = "D:AI(A;;FA;;;S-1-5-21-1)(A;OICIID;FA;;;SY)";
+  const next = withTraverseAce(dacl, CAP);
+  expect(next).toBe(`D:AI(A;;FA;;;S-1-5-21-1)(A;;0x100080;;;${CAP})(A;OICIID;FA;;;SY)`);
+  expect(withTraverseAce(next, CAP)).toBe(next); // idempotent
+  // No inheritance flags on the new ACE: children never gain it.
+  expect(next).not.toContain(`(A;OI;0x100080;;;${CAP})`);
+  // Unparseable, empty or absent DACLs are left alone.
+  expect(withTraverseAce("D:", CAP)).toBe("D:");
+  expect(withTraverseAce("D:NO_ACCESS_CONTROL", CAP)).toBe("D:NO_ACCESS_CONTROL");
+  expect(withTraverseAce("D:(XA;;FX;;;WD;(Member_of {SID(BA)}))", CAP)).toBe(
+    "D:(XA;;FX;;;WD;(Member_of {SID(BA)}))",
+  );
+});
+test("windowsSystemPath keeps only Windows/Program Files PATH entries", () => {
+  const path = windowsSystemPath({
+    SystemRoot: "C:\\Windows",
+    ProgramFiles: "C:\\Program Files",
+    PATH: [
+      "C:\\Windows\\System32",
+      "C:\\Program Files\\Git\\cmd\\",
+      "C:\\Users\\me\\AppData\\Local\\bin",
+      "C:\\Program Files\\nodejs",
+      "%USERPROFILE%\\x",
+      "D:\\tools",
+    ].join(";"),
+  });
+  expect(path).toEqual([
+    "C:\\Windows\\System32",
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0",
+    "C:\\Program Files\\Git\\cmd",
+    "C:\\Program Files\\nodejs",
+  ]);
+  // Idempotent: the launcher recomputes it from the PATH it was given.
+  expect(
+    windowsSystemPath({ SystemRoot: "C:\\Windows", ProgramFiles: "C:\\Program Files", PATH: path.join(";") }),
+  ).toEqual(path);
+});
+test.skipIf(!win)(
+  "Windows sandbox runs PowerShell, git and user32 tools in the workspace",
+  async () => {
+    const workspace = fresh(),
+      outside = fresh();
+    writeFileSync(join(outside, "secret"), "host-secret");
+    const ps = await runSandbox(
+      workspace,
+      'powershell -NoProfile -NonInteractive -Command "Set-Content ps.txt ok; (Get-Location).Path"',
+    );
+    expect(ps.exitCode, ps.output).toBe(0);
+    expect(ps.output.toLowerCase()).toContain(workspace.toLowerCase());
+    expect(readFileSync(join(workspace, "ps.txt"), "utf8")).toContain("ok");
+    const tools = await runSandbox(workspace, "whoami && cd && dir /b");
+    expect(tools.exitCode, tools.output).toBe(0);
+    expect(tools.output).toContain("ps.txt");
+    const git = await runSandbox(workspace, "git init -q r && cd r && git status --short");
+    if (!/not recognized/.test(git.output)) expect(git.exitCode, git.output).toBe(0);
+    // The parent grant is attributes-only: siblings stay unreadable.
+    const sibling = await runSandbox(workspace, `type ${quote(join(outside, "secret"))}`);
+    expect(sibling.output).not.toContain("host-secret");
+    const list = await runSandbox(workspace, `dir /b ${quote(outside)}`);
+    expect(list.output).not.toContain("secret");
+  },
+  60000,
 );
