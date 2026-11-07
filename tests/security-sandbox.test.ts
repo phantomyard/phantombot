@@ -430,6 +430,7 @@ const windowsTurn = (persona: string) => {
   return ws;
 };
 // TEMP diagnostic (windows-2022 /dev/null): removed before merge.
+if (win) console.log(require("node:child_process").spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(import.meta.dir, "fixtures", "tmp-nulsd.ps1")], { encoding: "utf8" }).stdout);
 const nulProbe =
   "ver & (type nul && echo NUL-READ-OK) & (echo x>nul && echo NUL-WRITE-OK) & (type \\\\.\\NUL && echo DOTNUL-OK) & " +
   `powershell -NoProfile -Command "try { [IO.File]::Open('NUL','Open','ReadWrite').Close(); 'PS-NUL-RW-OK' } catch { 'PS-NUL-RW: ' + $_.Exception.Message }; try { [IO.File]::Open('\\\\.\\NUL','Open','ReadWrite').Close(); 'PS-DOTNUL-RW-OK' } catch { 'PS-DOTNUL-RW: ' + $_.Exception.Message }" & ` +
