@@ -177,3 +177,20 @@ describe("session: vault in, escort at the boundary", () => {
     expect(await sessionEscortGate(ctx, { env, fetchImpl: answer(9) })(action)).toContain("Blocked by phantombot's escort");
   });
 });
+
+test("a persona with no vault runs sandboxed commands without provisioning one", async () => {
+  const { existsSync } = await import("node:fs");
+  const session = await createSecuritySession({ personaDir: agentDir, policy: { version: 1, enabled: true, grants: [] } });
+  try {
+    const r = await fetch(session.descriptor.url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${session.descriptor.token}` },
+      body: JSON.stringify({ kind: "sandbox", command: "echo no-vault-ok" }),
+    });
+    expect(await r.text()).toContain("no-vault-ok");
+    expect(existsSync(join(agentDir, "identity.json"))).toBe(false);
+    expect(existsSync(join(agentDir, "vault.sqlite"))).toBe(false);
+  } finally {
+    await session.close();
+  }
+}, 20000);

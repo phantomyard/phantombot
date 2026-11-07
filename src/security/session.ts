@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { CapabilityBroker, PolicyError, SandboxArchive } from "./broker.ts";
 import { publicGrant, validatePolicy } from "./policy.ts";
@@ -12,7 +12,7 @@ import type {
   SecurityPolicy,
   SessionDescriptor,
 } from "./types.ts";
-import { openPersonaVault, readAllVaultValues, type Vault } from "../lib/vault.ts";
+import { openPersonaVault, readAllVaultValues, vaultPath, type Vault } from "../lib/vault.ts";
 import { loadRegistry } from "../mcp/registry.ts";
 import { McpHub } from "../mcp/hub.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
@@ -84,8 +84,10 @@ export async function createSecuritySession(options: {
   let secrets: Record<string, string> | undefined;
   const sandboxSecrets = async () => {
     if (secrets) return secrets;
-    // Read-only path: never provisions an identity or vault as a side effect.
-    const read = await readAllVaultValues(options.personaDir).catch(() => null);
+    // Only an existing vault: never provision an identity or vault here.
+    const read = existsSync(vaultPath(options.personaDir))
+      ? await readAllVaultValues(options.personaDir).catch(() => null)
+      : null;
     return (secrets = Object.fromEntries(read?.values ?? []));
   };
   const judged = async (tool: string, input: unknown) => {
