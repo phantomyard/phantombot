@@ -358,6 +358,8 @@ export interface NativeBrainInfo {
   /** Absent when the persona has no native routing configured. */
   provider?: string;
   model?: string;
+  /** The stored endpoint (`[harnesses.pi.routing].base_url`), for bring-your-own-endpoint providers only. */
+  baseUrl?: string;
   /** A provider key is stored in the vault (the key itself is never returned). */
   hasKey: boolean;
 }

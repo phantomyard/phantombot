@@ -97,6 +97,7 @@ import { checkDecisionModel, decisionModelProviders } from "./decisionModels.ts"
 import { checkEmbeddings, embeddingsProviders, resolveEmbeddingsProvider } from "./embeddings.ts";
 import { refreshPersonaIndex } from "../lib/indexRefresh.ts";
 import { checkProvider, listProviders } from "./providers.ts";
+import { customProviderSpec } from "../lib/piCustomProvider.ts";
 import {
   parseJsonReply,
   structuredOutputInstruction,
@@ -649,9 +650,13 @@ export class Persona {
       const routing = (pi?.routing ?? {}) as Record<string, unknown>;
       const provider = asStr(routing.provider)?.trim();
       const model = asStr(routing.primary_model)?.trim();
+      // Only a bring-your-own-endpoint provider uses base_url; a leftover one
+      // under a catalog provider is dead config and is not reported.
+      const baseUrl = provider && customProviderSpec(provider) ? asStr(routing.base_url)?.trim() : undefined;
       return {
         ...(provider ? { provider } : {}),
         ...(model ? { model } : {}),
+        ...(baseUrl ? { baseUrl } : {}),
         hasKey: await this.#hasSecret(ENV_PI_API_KEY, dir),
       };
     });
@@ -674,7 +679,7 @@ export class Persona {
       } finally {
         vault.close();
       }
-      return checkProvider(info.provider, key ?? "");
+      return checkProvider(info.provider, key ?? "", info.baseUrl ? { baseUrl: info.baseUrl } : {});
     });
   }
 

@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEngine, type Engine, EngineError } from "../src/engine/index.ts";
@@ -178,4 +178,25 @@ test("persona.brainCheck(): checks the stored key with its own provider only", a
     expect(q.auth).toBe("Bearer stored-key");
   }
   expect(JSON.stringify(r)).not.toContain("stored-key");
+});
+
+test("persona.brainCheck(): a bring-your-own endpoint is checked at its stored base_url", async () => {
+  const p = engine.persona("p");
+  await p.configure({ brain: { native: { provider: "openai-compatible", model: "m", apiKey: "byo-key" } } });
+  const cfg = await engine.run(() => loadConfig("p"));
+  const path = join(cfg.personasDir, "p", "config.toml");
+  const text = readFileSync(path, "utf8").replace(/(\[harnesses\.pi\.routing\]\n)/, '$1base_url = "https://llm.example.test/v1"\n');
+  writeFileSync(path, text);
+  expect(await p.brain()).toEqual({
+    provider: "openai-compatible",
+    model: "m",
+    baseUrl: "https://llm.example.test/v1",
+    hasKey: true,
+  });
+  requests = [];
+  const r = await p.brainCheck();
+  expect(r.status).not.toBe("invalid");
+  expect(requests.length).toBeGreaterThan(0);
+  for (const q of requests) expect(q.url.startsWith("https://llm.example.test/v1/")).toBe(true);
+  expect(JSON.stringify(r)).not.toContain("byo-key");
 });
