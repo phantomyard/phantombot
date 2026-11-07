@@ -131,6 +131,8 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
   unconfined (no AppContainer) in their scratch folder with the same clean
   environment, after the threat judge screened the turn, and one warning is
   logged. Only Windows 11 26H2+ gets the filesystem boundary.
+  `PHANTOMBOT_WINDOWS_APPCONTAINER=force` keeps the AppContainer regardless
+  (stricter only; CI uses it to exercise the shipped launcher).
 
 POSIX commands have a two-minute wall-clock ceiling and bounded output. Linux
 also sets CPU, file-size, descriptor and per-user process limits. These are not

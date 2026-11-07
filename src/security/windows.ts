@@ -730,6 +730,10 @@ export function setWindowsAppContainerUsableForTests(v: boolean | undefined): vo
 /** Reads NUL's DACL once per process; fails open (false) on any error. */
 export function windowsAppContainerUsable(): boolean {
   if (appContainerUsable !== undefined) return appContainerUsable;
+  // Forcing ON only makes runs stricter (CI exercises the shipped launcher on
+  // builds whose NUL is closed). PHANTOMBOT_ is reserved: secrets can't set it.
+  if (process.env.PHANTOMBOT_WINDOWS_APPCONTAINER === "force")
+    return (appContainerUsable = true);
   appContainerUsable = false;
   if (process.platform !== "win32") return appContainerUsable;
   try {
