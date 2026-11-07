@@ -236,9 +236,12 @@ if (check.status !== "invalid") {
   (no known endpoint, network error, outage).
 - `checkable: false` means `check` has no endpoint for that provider and will
   always answer `"unverified"`; say "cannot verify", not "failed".
-- `models` is the provider's live list, `[]` when it could not be read, the
-  key was rejected, or no key was given where one is required. Fall back to
-  free-text model entry when it is empty.
+- `models` is the provider's live list. When the live list cannot be read (no
+  list endpoint, an unverifiable key, an outage) it is Pi's bundled model list
+  for that provider instead. It is `[]` when the key was rejected, when no key
+  was given where one is required, and for bring-your-own endpoints
+  (`needsBaseUrl`) whose list could not be read. Fall back to free-text model
+  entry when it is empty.
 - `autoModel: true` (PhantomOps) means show no model picker and use
   `defaultModel`. `keyLabel`, when present, is the prompt copy for the key field.
 - Providers with `needsBaseUrl` (a self-hosted OpenAI-compatible server) need
