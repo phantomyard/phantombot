@@ -2,7 +2,7 @@
 // Regenerate with `bun run build:engine-types` and commit the result.
 import type { SecurityPolicy } from "./securityTypes.ts";
 import { voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
-import type { CreatePersonaOptions, DecideOptions, DecisionModelCheck, DecisionModelProviderInfo, EmbeddingsCheck, EmbeddingsCheckInput, EmbeddingsProviderInfo, MemoryRefreshResult, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
+import type { CreatePersonaOptions, DecideOptions, DecisionModelCheck, DecisionModelProviderInfo, EmbeddingsCheck, EmbeddingsCheckInput, EmbeddingsProviderInfo, NativeBrainInfo, MemoryRefreshResult, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
 /**
  * Open an engine on `options.root`. Rejects with `invalid_root` or
  * `root_locked`. Always `close()` it (or use `await using`).
@@ -75,6 +75,11 @@ export declare class Persona {
         configure(policy: SecurityPolicy): Promise<void>;
         policy(): Promise<SecurityPolicy>;
     };
+    /**
+     * The native engine's current provider and model, as `configure({ brain })`
+     * last wrote them, and whether a provider key is stored. Never the key.
+     */
+    brain(): Promise<NativeBrainInfo>;
     readonly secrets: {
         /** Store a credential in this persona's encrypted vault (verified by read-back). */
         set(name: string, value: string): Promise<void>;

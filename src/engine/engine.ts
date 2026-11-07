@@ -112,6 +112,7 @@ import type {
   EmbeddingsCheck,
   EmbeddingsCheckInput,
   EmbeddingsProviderInfo,
+  NativeBrainInfo,
   MemoryRefreshResult,
   DecisionResult,
   EngineEvent,
@@ -633,6 +634,29 @@ export class Persona {
     configure(policy: SecurityPolicy): Promise<void>;
     policy(): Promise<SecurityPolicy>;
   };
+  /**
+   * The native engine's current provider and model, as `configure({ brain })`
+   * last wrote them, and whether a provider key is stored. Never the key.
+   */
+  brain(): Promise<NativeBrainInfo> {
+    return this.#run(async () => {
+      const config = await loadConfig(this.name);
+      const dir = personaDir(config, this.name);
+      if (!existsSync(dir)) throw notFound(this.name);
+      const toml = await readTomlTable(personaConfigPath(config.personasDir, this.name));
+      const harnesses = toml.harnesses as Record<string, unknown> | undefined;
+      const pi = harnesses?.pi as Record<string, unknown> | undefined;
+      const routing = (pi?.routing ?? {}) as Record<string, unknown>;
+      const provider = asStr(routing.provider)?.trim();
+      const model = asStr(routing.primary_model)?.trim();
+      return {
+        ...(provider ? { provider } : {}),
+        ...(model ? { model } : {}),
+        hasKey: await this.#hasSecret(ENV_PI_API_KEY, dir),
+      };
+    });
+  }
+
   readonly secrets: {
     /** Store a credential in this persona's encrypted vault (verified by read-back). */
     set(name: string, value: string): Promise<void>;

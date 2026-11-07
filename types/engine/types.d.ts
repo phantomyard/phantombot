@@ -329,6 +329,14 @@ export interface ProviderCheck {
      */
     models: ProviderModel[];
 }
+/** Result of `persona.brain()`. */
+export interface NativeBrainInfo {
+    /** Absent when the persona has no native routing configured. */
+    provider?: string;
+    model?: string;
+    /** A provider key is stored in the vault (the key itself is never returned). */
+    hasKey: boolean;
+}
 /** A built-in decision-model transport `engine.decisionModels.check()` can verify. */
 export type DecisionModelProvider = "openrouter" | "typesafe";
 /** One entry of `engine.decisionModels.providers()`. */

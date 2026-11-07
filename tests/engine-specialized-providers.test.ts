@@ -154,3 +154,13 @@ test("decisionModels.providers: only the providers with a decisions API", async 
     { id: "typesafe", label: "TypeSafe", defaultModel: "typesafe/jev-1.13" },
   ]);
 });
+
+test("persona.brain(): provider and model as configured, key presence only", async () => {
+  const p = engine.persona("p");
+  expect(await p.brain()).toEqual({ hasKey: false });
+  await p.configure({ brain: { native: { provider: "openrouter", model: "a/b", apiKey: "secret-brain" } } });
+  const info = await p.brain();
+  expect(info).toEqual({ provider: "openrouter", model: "a/b", hasKey: true });
+  expect(JSON.stringify(info)).not.toContain("secret-brain");
+  expect(await rejects(engine.persona("nobody").brain())).toBeTruthy();
+});
