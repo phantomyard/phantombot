@@ -1,8 +1,35 @@
 # Bounded security
 
-The owner chooses authority once; models do not grant permissions. The Judge
-still screens the incoming untrusted message once. Within a bounded turn, local
-commands and granted API calls never go through Escort's model classifier.
+Bounded mode is ON by default for untrusted turns (GHSA-w7w8, #783): outside
+content, `phantombot ask` and scheduled tasks. The owner chooses authority once;
+models do not grant permissions. The Judge still screens the incoming untrusted
+message once. Within a bounded turn, local commands never go through Escort, and
+of brokered calls only `memory-capture` and `host-command` do (an allowed kind
+passes unjudged; a denied kind is refused). The PR loop and `notify` are bounded
+by the broker allowlist alone, so unattended PR work is never held.
+
+## Default grants
+
+With no `security-policy.json` a persona gets `github` (repository `*`),
+`npm-registry`, `notify` and `memory`. A policy file REPLACES them (list them
+again to keep them); `{"version":1,"enabled":false,"grants":[]}` opts out.
+
+- `github-clone` / `github-push`: the host clones with the persona's vault
+  token (`GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token`) and hands the sandbox
+  a tarball; a push bundles a committed sha INSIDE the sandbox and the host
+  fetches it into a fresh bare repo it owns, so host git never reads a
+  sandbox-written repository. The default branch is refused.
+- `github-api`: any GET and GraphQL query; writes only to PR create/edit
+  (title/body), reviews, review comments/replies, issue comments, thread
+  resolve, requested reviewers, labels and workflow re-runs. GraphQL mutations
+  are allowlisted per field after strings are removed; comments are refused.
+  Merge, auto-merge, settings, refs and the default branch are never brokered.
+- `notify`, `memory-capture`, `memory-search` run `phantombot` on the host for
+  this persona. `host-command` runs one exact owner-granted argv (optionally
+  with model arguments when `extraArgs` is true) — e.g. a mail helper for an
+  inbox poller.
+- A bounded turn's prompt gets a "Sandboxed turn" overlay mapping the persona's
+  usual host commands to these operations.
 Operations outside those boundaries are refused as permission expansions, with
 no automatic retry or model-generated grant. Trusted principal turns retain their
 existing tools. The old Escort remains the compatibility path while bounded mode
@@ -15,7 +42,8 @@ harness. Embedders can use `persona.security.configure(policy)` and
 `persona.security.policy()`. These are privileged application APIs, like
 `persona.secrets.set`; do not expose them to untrusted end users or model tools.
 An enabled policy selects only harnesses implementing the bounded tool surface
-(currently native). A malformed policy fails; it cannot turn the feature off.
+(native, and claude with its built-in tools off and the two tools served over a
+phantombot stdio MCP server, vault env stripped). A malformed policy fails; it cannot turn the feature off.
 The native invocation disables extension, skill and context discovery and declares
 only two tools. A blocking hook additionally rejects every other tool, including
 codemode, raw MCP tools and alternate shell names.
@@ -113,8 +141,9 @@ Run `tests/security-{broker,sandbox,session}.test.ts` and the compiled smoke on 
 three supported OSes. These test real host-file denial, symlink/junction escape,
 subprocess inheritance, loopback blocking, Bun execution, timeout, authenticated
 IPC, deterministic grant bounds and review publication semantics. The dedicated
-security-sandbox CI workflow runs the platform matrix. Keep rollout opt-in until
-independent reviewers confirm the boundaries and the real runtime gates pass.
+security-sandbox CI workflow runs the platform matrix.
+`tests/security-default-on.test.ts` proves the default, the allowlist and the
+escort boundary.
 
 ## Policy example
 

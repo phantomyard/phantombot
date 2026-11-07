@@ -43,7 +43,12 @@ export function sessionFromEnv(env: NodeJS.ProcessEnv = process.env): SessionDes
 export const SANDBOX_TOOL_DESCRIPTION =
   "Run shell commands in the disposable workspace. No credentials, host files or direct network. Reads, edits, installs from cached dependencies, tests and cleanup are permitted without further model checks.";
 export const BROKER_TOOL_DESCRIPTION =
-  "Call credentialed APIs under exact owner grants. Call {manifest:true} to list grants; otherwise supply operation: {kind,grant,...}. GitHub: github-checkout head (extracts into repository/); github-read resource pull/files/comments/reviews; github-review head,event,body,comments. HTTP uses granted URL/method. MCP requires exact granted arguments. npm-package name/version stages a package into the Bun offline cache under an npm-registry grant; install with bun install --offline. Team review grants also require pullRequest. No model permission checks.";
+  "Do what the sandbox cannot (network, credentials) under the owner's grants. {manifest:true} lists grants. Otherwise operation:{kind,grant,...}. " +
+  "GitHub (grant kind github): github-clone {repository:'owner/name',ref?,directory?} copies a checkout into the workspace; " +
+  "github-push {repository,directory,branch,sha,force?} pushes a COMMITTED sha from that checkout to a non-default branch; " +
+  "github-api {method,path:'/repos/owner/name/...' or '/graphql',body?} = any GET/GraphQL query, plus PR create/edit (title, body), reviews, review comments/replies, issue comments, thread resolve, requested reviewers, labels, workflow re-runs. Never merge, never the default branch, never settings. " +
+  "notify {message} tells the owner. memory-capture {text,tags:[decision|lesson|person|commitment|norm]}, memory-search {query,limit?}. host-command {args?} runs an owner-granted command. " +
+  "npm-package {name,version} stages a package for bun install --offline. Older grants: github-checkout/github-read/github-review, http (exact URL/method), mcp (exact arguments).";
 
 /** The wire body each of the two session tools sends to the runtime. */
 export function sessionToolBody(

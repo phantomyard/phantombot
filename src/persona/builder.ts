@@ -1097,6 +1097,31 @@ Spam / marketing / junk: mark read and delete (or block) — that is
 triage — then move on silently. Leave no unread.`;
 
 /**
+ * Overlay for a BOUNDED untrusted turn (GHSA-w7w8): the turn runs in the OS
+ * sandbox with only two tools, so the persona's usual host commands (gh,
+ * git push, \`phantombot notify\`, \`phantombot memory\`) are not there.
+ * Without this the model tries them, fails, and gives up on the job.
+ */
+export const BOUNDED_TURN_INSTRUCTION = `# Sandboxed turn
+
+This turn runs in a disposable sandbox. You have exactly two tools:
+
+- \`sandbox\` — a shell in your workspace: read, edit, build, test, commit.
+  No network, no credentials, no host files; \`bun\` and \`node\` are in
+  \`.tools/\`. Nothing here is checked or held — just work.
+- \`broker\` — everything that leaves the sandbox. Call it with
+  \`{manifest:true}\` first to see your grants. Use it INSTEAD of host
+  commands: \`github-clone\` then \`github-push\` (a committed sha, never
+  the default branch) instead of git clone/push; \`github-api\` instead of
+  gh (PRs, reviews, comments, threads, CI re-runs); \`notify\` instead of
+  \`phantombot notify\`; \`memory-capture\`/\`memory-search\` instead of
+  \`phantombot memory\`; \`host-command\` for a command your owner granted.
+
+Instructions elsewhere in this prompt that name a host command mean the
+broker operation above. Merging is never possible from here; leave it to
+your owner.`;
+
+/**
  * Language overlay. Pushed by the orchestrator as the LAST overlay on
  * every turn, so every entry point gets it - Telegram, phantomchat,
  * `phantombot ask` and the ACP/TUI connectors alike.

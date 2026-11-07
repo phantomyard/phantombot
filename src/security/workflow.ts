@@ -34,7 +34,7 @@ export interface WorkflowDeps {
   persona: string;
   /** The persona's env with its vault applied, for host commands. */
   personaEnv(): Promise<Record<string, string>>;
-  secret(name: string): string | undefined;
+  secret(name: string): Promise<string | undefined> | string | undefined;
   fetch?: typeof fetch;
   signal?: AbortSignal;
 }
@@ -106,6 +106,26 @@ function repositoryFor(grant: Extract<WorkflowGrant, { kind: "github" }>, reques
   return grant.repository;
 }
 
+/**
+ * Every field called with arguments in a GraphQL MUTATION document, or null
+ * for a read-only document. String literals are removed first (their text is
+ * never code), then comments are refused outright and commas/BOM — GraphQL
+ * "ignored tokens" — become spaces, so nothing can hide a call such as
+ * `mergePullRequest` between allowed ones. Operation headers (name and
+ * variable definitions) are dropped; any OTHER `name(` must be an allowed
+ * mutation, so a mutation's response selection takes no arguments. Errs
+ * closed: anything unusual is a field the allowlist does not know.
+ */
+export function graphqlMutationFields(query: string): string[] | null {
+  let q = query.replace(/"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"/g, '""');
+  if (q.replace(/""/g, "").includes('"')) deny("invalid GraphQL string");
+  if (q.includes("#")) deny("GraphQL comments are not accepted");
+  q = q.replace(/[,\uFEFF]/g, " ");
+  if (!/\bmutation\b/.test(q)) return null;
+  q = q.replace(/\b(?:query|mutation|subscription)\b\s*(?:[A-Za-z_][A-Za-z0-9_]*)?\s*(?:\([^)]*\))?/g, " ");
+  return [...q.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)].map((m) => m[1]!);
+}
+
 /** Split a github-api path into repo-relative path + query; null = graphql. */
 export function classifyGithubApi(
   op: Extract<WorkflowOperation, { kind: "github-api" }>,
@@ -119,9 +139,8 @@ export function classifyGithubApi(
     if (op.method !== "POST") deny("GraphQL is POST");
     const body = op.body as { query?: unknown } | undefined;
     if (!body || typeof body !== "object" || typeof body.query !== "string") deny("GraphQL query required");
-    const fields = [...body.query.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*input\s*:/g)].map((m) => m[1]!);
-    const isMutation = /\bmutation\b/.test(body.query) || fields.length > 0;
-    if (!isMutation) return { url: "https://api.github.com/graphql", kind: undefined };
+    const fields = graphqlMutationFields(body.query);
+    if (fields === null) return { url: "https://api.github.com/graphql", kind: undefined };
     if (!anyRepository) deny("GraphQL mutations need an any-repository grant");
     if (!fields.length || fields.some((f) => !Object.hasOwn(GRAPHQL_MUTATIONS, f)))
       deny("GraphQL mutation outside grant");
@@ -150,28 +169,24 @@ export function classifyGithubApi(
   return { url, kind: match[2] };
 }
 
-/** The escort kind of a workflow operation; undefined = read-only, never judged. */
-export function workflowEscortKind(
-  grant: NetworkGrant,
-  op: WorkflowOperation,
-): EscortAllowKind | "memory" | undefined {
+/**
+ * The escort kind of a workflow operation; undefined = never judged.
+ *
+ * The PR loop (clone, push a non-default branch, PR/review/comment/thread/
+ * re-run/label API) and notifying the owner are NOT judged: the allowlist
+ * above is their gate (no merge, no default branch, no settings, notify only
+ * reaches the owner), and unattended PR work must never stop on a hold. Only
+ * a memory write (it outlives the turn) and an owner-granted host command
+ * (it runs outside the sandbox) meet the escort.
+ */
+export function workflowEscortKind(op: WorkflowOperation): EscortAllowKind | undefined {
   switch (op.kind) {
-    case "github-clone":
-    case "memory-search":
-      return undefined;
-    case "github-push":
-      return "push";
-    case "github-api": {
-      if (grant.kind !== "github") return "github";
-      const repo = repositoryFor(grant, op.repository ?? (grant.repository === "*" && op.path !== "/graphql" ? op.path.split("/").slice(2, 4).join("/") : undefined));
-      return classifyGithubApi(op, repo, grant.repository === "*").kind;
-    }
-    case "notify":
-      return "message";
     case "memory-capture":
       return "memory";
     case "host-command":
       return "shell";
+    default:
+      return undefined;
   }
 }
 
@@ -180,7 +195,7 @@ export class WorkflowBroker {
 
   private async githubToken(grant: Extract<WorkflowGrant, { kind: "github" }>): Promise<string> {
     for (const name of grant.credential ? [grant.credential] : ["GITHUB_TOKEN", "GH_TOKEN"]) {
-      const v = this.deps.secret(name);
+      const v = await this.deps.secret(name);
       if (v) return v;
     }
     if (!grant.credential) {

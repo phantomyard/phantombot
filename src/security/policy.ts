@@ -107,13 +107,23 @@ export const DEFAULT_WORKFLOW_GRANTS: NetworkGrant[] = [
 export function defaultSecurityPolicy(): SecurityPolicy {
   return { version: 1, enabled: true, grants: JSON.parse(JSON.stringify(DEFAULT_WORKFLOW_GRANTS)) };
 }
+/**
+ * Test seam ONLY (tests/testEnvIsolation.ts): the policy a persona with no
+ * policy file gets. The suite's preload opts its many mock-harness fixtures
+ * out; tests/security-default-on.test.ts restores the real default and proves
+ * it. Nothing under src/ calls this.
+ */
+let defaultPolicyForTests: (() => SecurityPolicy) | undefined;
+export function setDefaultSecurityPolicyForTests(f: (() => SecurityPolicy) | undefined): void {
+  defaultPolicyForTests = f;
+}
 export function readSecurityPolicy(personaDir: string): SecurityPolicy {
   let text: string;
   try {
     text = readFileSync(join(personaDir, SECURITY_POLICY_FILE), "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT")
-      return defaultSecurityPolicy();
+      return (defaultPolicyForTests ?? defaultSecurityPolicy)();
     throw error;
   }
   return validatePolicy(JSON.parse(text));

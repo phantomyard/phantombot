@@ -2,9 +2,9 @@
  * GHSA-w7w8: the escort, moved to the sandbox boundary. Inside the sandbox a
  * bounded turn reads, edits, builds and tests unjudged — it can only damage a
  * throwaway workspace. Only what LEAVES the sandbox through the broker is
- * judged, and a kind the owner allowed (`phantombot escort allow push`) goes
- * straight through: brokered writes are already narrow by construction, so
- * an allowed kind never interrupts unattended PR work.
+ * judged — and of that, only memory writes and owner-granted host commands
+ * (workflowEscortKind): the PR loop is bounded by the broker's allowlist and
+ * never stops on a hold. A kind the owner allowed goes straight through.
  */
 import {
   escortBlockMessage,
@@ -19,9 +19,9 @@ import { WORKFLOW_GRANT_KINDS, workflowEscortKind } from "./workflow.ts";
 
 /** The escort kind of a brokered operation; undefined = read-only/owner-exact, not judged. */
 export function brokerEscortKind(grant: NetworkGrant, op: BrokerOperation): EscortAllowKind | undefined {
-  if (WORKFLOW_GRANT_KINDS.has(grant.kind)) return workflowEscortKind(grant, op as never);
-  if (op.kind === "github-review") return "review";
-  // npm packages, github-read/checkout, and owner-exact http/mcp grants.
+  if (WORKFLOW_GRANT_KINDS.has(grant.kind)) return workflowEscortKind(op as never);
+  // github-review/team-review (owner-scoped to one PR), npm packages,
+  // github-read/checkout, and owner-exact http/mcp grants: the grant decides.
   return undefined;
 }
 

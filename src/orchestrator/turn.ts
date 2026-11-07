@@ -66,6 +66,7 @@ import {
   CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION,
   PRE_TOOL_NARRATION_INSTRUCTION,
   REPLY_LANGUAGE_INSTRUCTION,
+  BOUNDED_TURN_INSTRUCTION,
 } from "../persona/builder.ts";
 import { buildTurnContext } from "../persona/turnContext.ts";
 import {
@@ -963,6 +964,7 @@ async function* runTurnBody(
     });
   }
   if (input.toolNarration) overlays.push(PRE_TOOL_NARRATION_INSTRUCTION);
+  if (boundedSecurity) overlays.push(BOUNDED_TURN_INSTRUCTION);
   overlays.push(REPLY_LANGUAGE_INSTRUCTION);
   let systemPrompt =
     overlays.length > 0

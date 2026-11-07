@@ -435,12 +435,18 @@ bun run build
 
 Phantombot is built by [Phantomyard](https://github.com/phantomyard).
 
-### Bounded development workflows (opt-in)
+### Bounded development workflows (on by default)
 
-Set an owner-authored `security-policy.json` in the persona directory, or use
-`persona.security.configure(policy)` in an embedding application. After the
-Judge passes an untrusted turn, the native engine exposes only sandboxed shell
-commands and a credential broker. Authorized calls bypass Escort's classifier.
+Every untrusted turn — email, web, webhooks, `phantombot ask`, scheduled tasks —
+runs bounded by default. After the Judge passes it, the native and claude engines
+expose only sandboxed shell commands and a credential broker; codex turns are held.
+With no `security-policy.json` the broker grants GitHub PR work (clone, push a
+non-default branch, PRs, reviews, comments, threads, CI re-runs — never merge),
+npm staging, notifying the owner and the persona's memory, using the persona's
+existing GitHub token. Nothing inside the sandbox is judged; of what leaves it,
+only memory writes and owner-granted host commands meet the escort, so the PR
+loop never stops on a hold. `{"version":1,"enabled":false,"grants":[]}` opts out;
+`persona.security.configure(policy)` does the same in an embedding application.
 
 The OS confines files and direct networking; credentials stay in the parent
 runtime. Linux uses Landlock/seccomp, macOS Seatbelt, and Windows AppContainer/Job

@@ -70,7 +70,7 @@ export async function createSecuritySession(options: {
     if (
       policy.grants.some(
         (g) =>
-          ["github-review", "github-team-review", "mcp", "github"].includes(g.kind) ||
+          ["github-review", "github-team-review", "mcp"].includes(g.kind) ||
           (g.kind === "http" && g.credential),
       )
     )
@@ -90,7 +90,9 @@ export async function createSecuritySession(options: {
             out.PHANTOMBOT_PERSONA = persona;
             return out;
           },
-          secret: (name) => vault?.get(name),
+          // Opened on first use: a turn that never touches GitHub never
+          // opens the vault (and a persona without one still runs).
+          secret: async (name) => (await needVault()).get(name),
           signal,
         })
       : undefined;

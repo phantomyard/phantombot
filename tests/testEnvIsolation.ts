@@ -127,3 +127,13 @@ process.on("exit", () => {
 // test about badge text. The sync itself is covered directly, with an injected
 // spawn, in tests/lib-embeddedPi-syncPiModels.test.ts.
 process.env.PHANTOMBOT_PI_MODELS_SYNC_OFF = "1";
+
+/**
+ * GHSA-w7w8 (#783): bounded security is ON by default for untrusted turns,
+ * which needs a harness that can run a security session. Most of the suite
+ * drives runTurn with mock harnesses to test OTHER things, so with no policy
+ * file it gets the pre-#783 default (off). security-default-on.test.ts puts
+ * the real default back and proves it; the seam is unreachable from src/.
+ */
+import { setDefaultSecurityPolicyForTests } from "../src/security/policy.ts";
+setDefaultSecurityPolicyForTests(() => ({ version: 1, enabled: false, grants: [] }));

@@ -40,17 +40,21 @@ A sender that passes `allowed_npubs` is treated as the owner speaking: trusted `
 <a id="inv-88"></a>
 ### 88. Bounded turns replace classifier guesses with OS isolation and immutable broker grants.
 
-An enabled owner policy (`security-policy.json`) is snapshotted in `runTurn`,
-after the input screen and before the native harness. Only a harness with
-`supportsSecuritySession` can run it. Native discovery and alternate tools are
+The persona's policy (`security-policy.json`, or the default-on workflow grants
+when absent, GHSA-w7w8) is snapshotted in `runTurn`, after the input screen and
+before the harness. Only a harness with `supportsSecuritySession` can run it
+(native, claude); none left holds the turn. Native discovery and alternate tools are
 disabled; the security extension blocks every tool except sandbox/broker. Do not
 pass model-derived policy objects, expose vault values on IPC, or fall back to
-legacy tools after a sandbox failure. Absent policy preserves the legacy path
-during rollout; a malformed policy must fail instead of disabling enforcement.
+legacy tools after a sandbox failure. Only `enabled:false` restores the legacy
+in-harness escort; a malformed policy must fail instead of disabling enforcement.
 
 The process that holds credentials also enforces deterministic operation/target/
 expiry bounds. Repository bytes, API results and model prose cannot expand them.
-Authorized calls never invoke Escort's classifier. A scope refusal does not
+Nothing inside the sandbox invokes Escort. Of brokered calls only memory
+writes and owner-granted host commands do (escortGate.ts), and the
+"mentions allowances" guard does not apply to them: the PR loop must never be
+held. A scope refusal does not
 create a grant. The engine's `persona.security.configure` is a privileged host
 API, not a model tool. The standalone and embedded runtime use this same path.
 

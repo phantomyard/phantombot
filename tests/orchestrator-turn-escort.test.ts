@@ -24,6 +24,14 @@ let memory: MemoryStore;
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), "phantombot-turn-escort-"));
   await writeFile(join(agentDir, "BOOT.md"), "# I am Phantom", "utf8");
+  // These cover the in-harness escort, which runs only when the owner has
+  // opted OUT of the default-on sandbox (GHSA-w7w8; see
+  // security-default-on.test.ts for the default).
+  await writeFile(
+    join(agentDir, "security-policy.json"),
+    JSON.stringify({ version: 1, enabled: false, grants: [] }),
+    "utf8",
+  );
   memory = await openMemoryStore(":memory:");
 });
 afterEach(async () => {
