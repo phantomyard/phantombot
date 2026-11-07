@@ -1,5 +1,5 @@
 /** Applied only in a clean self-exec child, immediately before exec. No compiler. */
-import { sendListener } from "./linux-notify.ts";
+import { prepareListenerSend } from "./linux-notify.ts";
 import { dlopen, ptr } from "bun:ffi";
 import { realpathSync } from "node:fs";
 
@@ -217,11 +217,16 @@ export function linuxSandbox(
   const prog = Buffer.alloc(16);
   prog.writeUInt16LE(instructions.length);
   prog.writeBigUInt64LE(BigInt(ptr(filter)), 8);
-  const listener = check(
-    syscall(x64 ? 317 : 277, 1, 8, ptr(prog)),
-    "seccomp notification",
-  );
-  sendListener(listener);
+  // Everything the install->send window needs is built first; see
+  // prepareListenerSend. Collect now so no GC footprint probe lands inside it.
+  const sendListener = prepareListenerSend();
+  const rawSyscall = lib.symbols.syscall,
+    seccompNr = x64 ? 317 : 277,
+    progPtr = ptr(prog);
+  Bun.gc(true);
+  const listener = Number(rawSyscall(seccompNr, 1, 8, progPtr, 0, 0, 0));
+  if (listener >= 0) sendListener(listener);
+  check(listener, "seccomp notification");
   check(syscall(436, 3, 0xffffffff, 0), "close inherited descriptors");
   const words = [executable, ...argv].map(cstr);
   const pointers = Buffer.alloc((words.length + 1) * 8);

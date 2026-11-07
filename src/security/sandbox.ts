@@ -8,6 +8,7 @@ import { linuxSandbox } from "./linux.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 
 export const SANDBOX_SUBCOMMAND = "__sandbox_exec";
+const LISTENER_DEADLINE_MS = 15_000;
 const MAX_OUTPUT = 512 * 1024;
 export interface SandboxResult {
   exitCode: number;
@@ -221,9 +222,17 @@ export async function runSandbox(
   let supervision: Promise<void> | undefined;
   let supervisorStopped = false;
   let listenerPending = !!sockets;
+  // A child that never hands over its listener can never finish (its trapped
+  // opens wait on us), so fail fast instead of hanging until the turn timeout.
+  const listenerDeadline = Date.now() + LISTENER_DEADLINE_MS;
   const listenerTimer = sockets
     ? setInterval(() => {
         if (!listenerPending) return;
+        if (Date.now() > listenerDeadline) {
+          read(Buffer.from("sandbox unavailable: supervisor listener not received\n"));
+          stop();
+          return;
+        }
         try {
           const fd = receiveListener(sockets[0]);
           if (fd === undefined) return;

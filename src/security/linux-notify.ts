@@ -15,11 +15,19 @@ export function socketPair(): [number, number] {
     lib.close();
   }
 }
-/** Transfer the seccomp listener once, before exec and before closing fd 3. */
-export function sendListener(listener: number): void {
+/**
+ * Build the listener transfer BEFORE the notify filter is installed. Once it
+ * is, any open/openat on this thread (including the runtime's own
+ * /proc/self/statm footprint probe on an allocation slow path) blocks until a
+ * supervisor holds the listener, so nothing between install and send may
+ * allocate, dlopen or touch the filesystem. The returned sender only writes
+ * an int into a prebuilt buffer and calls sendmsg.
+ */
+export function prepareListenerSend(): (listener: number) => void {
   const lib = dlopen("libc.so.6", {
     sendmsg: { args: ["i32", "ptr", "i32"], returns: "i64" },
   });
+  const sendmsg = lib.symbols.sendmsg;
   const byte = Buffer.from([1]),
     iov = Buffer.alloc(16),
     control = Buffer.alloc(24),
@@ -29,17 +37,16 @@ export function sendListener(listener: number): void {
   control.writeBigUInt64LE(20n);
   control.writeInt32LE(1, 8);
   control.writeInt32LE(1, 12);
-  control.writeInt32LE(listener, 16);
   msg.writeBigUInt64LE(BigInt(ptr(iov)), 16);
   msg.writeBigUInt64LE(1n, 24);
   msg.writeBigUInt64LE(BigInt(ptr(control)), 32);
   msg.writeBigUInt64LE(24n, 40);
-  try {
-    if (Number(lib.symbols.sendmsg(3, msg, 0)) !== 1)
+  const msgPtr = ptr(msg);
+  return (listener: number) => {
+    control.writeInt32LE(listener, 16);
+    if (Number(sendmsg(3, msgPtr, 0)) !== 1)
       throw new Error("sandbox listener transfer failed");
-  } finally {
-    lib.close();
-  }
+  };
 }
 export function receiveListener(socket: number): number | undefined {
   const lib = dlopen("libc.so.6", {
