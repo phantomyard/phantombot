@@ -54,7 +54,8 @@ on IPC, or fall back to host tools after a sandbox failure.
 The sandbox has network and the whole persona vault in its env
 (`sandboxSecretEnv` drops loader/runtime names). Its ONLY writable dir is the
 turn's untrusted scratch (`scratchWorkspace` refuses anything else); read-only
-it gets `~/.local/bin` and `~/.ssh/*.pub` (`defaultSandboxHostPaths`).
+it gets `~/.local/bin`, `~/.ssh/*.pub`, git logins and `~/.config` minus the
+runtime's own folders and browser profiles (`defaultSandboxHostPaths`).
 It never gets the persona folder, SSH private keys, `identity.json`, other host
 files or non-inet sockets. Never widen the writable set: a writable host path
 is a write that later runs outside the sandbox. That a missed

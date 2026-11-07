@@ -15,7 +15,11 @@ it would on the host. Filesystem:
   `<persona>/scratch/untrusted/<conversation>/<turn>/`), which is also the
   command's cwd and is deleted at turn end. The sandboxed-turn prompt tells the
   model this is the only place to work.
-- **Read-only:** `~/.local/bin` (on `PATH`) and `~/.ssh/*.pub`,
+- **Read-only:** `~/.local/bin` (on `PATH`), `~/.ssh/*.pub`, `~/.gitconfig`,
+  `~/.git-credentials` and every child of `~/.config` except `phantombot`,
+  `phantomchat` and Chromium/Electron profiles (cookies or web storage, in the
+  folder or one level down: browser sessions are not in the vault), so tool logins (gh, gog,
+  gcloud, helm) work without a list,
   linked into the sandbox's neutral `HOME` so `~/…` resolves (Linux and macOS;
   Windows would need ACL changes on host folders, so it gets none).
 - **Hidden:** everything else, including the persona folder (`identity.json`,
