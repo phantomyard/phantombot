@@ -340,12 +340,11 @@ describe("phantombot device call", () => {
     // Plain human shell: no turn context, allowed.
     expect(untrustedReason({})).toBeUndefined();
     // A harness turn with NO evidence either way (e.g. scratch provisioning
-    // failed, not escorted) must fail CLOSED.
+    // failed) must fail CLOSED.
     expect(untrustedReason({ PHANTOMBOT_TURN_ID: "t-1", PHANTOMBOT_PERSONA: "ana" })).toBeDefined();
     expect(untrustedReason({ PHANTOMBOT_CONVERSATION: "telegram:1" })).toBeDefined();
     expect(untrustedReason({ PHANTOMBOT_TURN_ID: "t-1", PHANTOMBOT_TRUSTED: "0" })).toBeDefined();
     expect(untrustedReason({ PHANTOMBOT_TURN_ID: "t-1", PHANTOMBOT_TRUSTED: "1" })).toBeUndefined();
-    expect(untrustedReason({ PHANTOMBOT_TURN_ID: "t-1", PHANTOMBOT_TRUSTED: "1", PHANTOMBOT_ESCORT: "1" })).toBeDefined();
     const env = { ...ENV, PHANTOMBOT_TURN_ID: "t-1" };
     const err = sink();
     expect(await runDeviceCall({ ...base(), env, device: "desk", tool: "bash", args: "{}", err })).toBe(1);

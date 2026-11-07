@@ -120,6 +120,10 @@ test("sandbox env carries runtime-supplied secrets but never reserved names", ()
   expect(env.HOME).toBe("/neutral");
   expect(env.PATH).not.toContain("/evil");
 });
+test.skipIf(process.platform === "win32")("sandbox PATH includes /usr/local/bin (gog and other local installs)", () => {
+  const env = sandboxEnvironment("/work", "/neutral");
+  expect(String(env.PATH).split(":")).toContain("/usr/local/bin");
+});
 test("sandboxed command sees the secrets it was given", async () => {
   const workspace = fresh();
   const r = await runSandbox(

@@ -12,7 +12,7 @@
  * id (from PHANTOMBOT_CONVERSATION) and the app runs it only in a Session with
  * this persona.
  *
- * Trusted tier only: an escorted or otherwise untrusted turn is refused here,
+ * Trusted tier only: an untrusted turn is refused here,
  * on top of the perimeter that already screens what such a turn may run.
  */
 
@@ -59,11 +59,10 @@ export interface DeviceRunInput {
  * Fail-closed inside a harness turn: the tier must be stated POSITIVELY by the
  * orchestrator (PHANTOMBOT_TRUSTED=1, set by withPersonaEnv only for trusted
  * turns). Missing evidence of untrust is not trust: scratch is provisioned
- * fail-open and PHANTOMBOT_ESCORT marks only the escorted subset. A plain human
+ * fail-open. A plain human
  * shell carries no turn context, so it still works from a terminal.
  */
 export function untrustedReason(env: NodeJS.ProcessEnv): string | undefined {
-  if (env.PHANTOMBOT_ESCORT) return "this is an escorted (untrusted) turn";
   const inTurn = !!(env.PHANTOMBOT_TURN_ID || env.PHANTOMBOT_CONVERSATION);
   if (inTurn && env[TRUSTED_ENV_VAR] !== "1") return "this is not a trusted turn";
   return undefined;

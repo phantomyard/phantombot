@@ -1,6 +1,5 @@
 import { readSecurityPolicy } from "../security/policy.ts";
 import { createSecuritySession } from "../security/session.ts";
-import { sessionEscortGate } from "../security/escortGate.ts";
 /**
  * Single-turn coordinator.
  *
@@ -26,16 +25,9 @@ import { sessionEscortGate } from "../security/escortGate.ts";
  * to catch them and present cleanly.
  */
 
-import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { runWithFallback } from "./fallback.ts";
-import {
-  drainEscortHolds,
-  escortContext,
-  type EscortContext,
-  type EscortHold,
-} from "../lib/escort.ts";
 import { createAuditSink } from "../lib/auditLog.ts";
 import { createHarnessFailureSink } from "../lib/harnessFailureLog.ts";
 import { log } from "../lib/logger.ts";
@@ -561,12 +553,6 @@ async function* runTurnBody(
   const screening: "screened" | "unscreened" | "trusted" =
     input.trusted === true ? "trusted" : "unscreened";
   let effectiveScreening: "screened" | "unscreened" | "trusted" = screening;
-  // The escort (issue #702): set when the screen PASSED an untrusted turn and
-  // a decision model is configured. Every tool call of this turn is then
-  // checked by the decision model before it runs (lib/escort.ts).
-  let escort: EscortContext | undefined;
-  // Issue #768: where the escort records what it held, and who to tell.
-  let onEscortHolds: ((holds: EscortHold[]) => Promise<void>) | undefined;
   if (input.trusted !== true) {
     let verdict: ScreenVerdict | undefined;
     try {
@@ -584,22 +570,6 @@ async function* runTurnBody(
       }
       if (verdict?.action === "pass") {
         effectiveScreening = "screened";
-        if (verdict.escort) {
-          // The hold log lives in the persona's own tmp dir (as harness temp
-          // files do, #365), one file per turn; drained in the finally below.
-          let holdLog: string | undefined;
-          if (verdict.onEscortHolds) {
-            try {
-              const dir = join(input.agentDir, "tmp");
-              mkdirSync(dir, { recursive: true });
-              holdLog = join(dir, `escort-holds-${turnId}.jsonl`);
-              onEscortHolds = verdict.onEscortHolds;
-            } catch {
-              holdLog = undefined;
-            }
-          }
-          escort = escortContext(verdict.escort, input.userMessage, holdLog);
-        }
       }
     } catch (e) {
       if (input.signal?.aborted) {
@@ -701,24 +671,20 @@ async function* runTurnBody(
     }
   }
 
-  // An escorted turn runs only on harnesses that can block a tool call before
-  // it runs (issue #702). The rest (codex, a host pi) are left out of THIS
-  // turn's chain; with none left the turn does not run at all — an escort
-  // that cannot be enforced is not silently dropped (fail closed, as #703).
+  // A sandboxed turn runs only on harnesses that can drive the security
+  // session; with none left the turn does not run at all (fail closed).
   const securityPolicy = input.trusted !== true && input.toolsMode !== "none" ? readSecurityPolicy(input.agentDir) : undefined;
   const boundedSecurity = securityPolicy?.enabled === true;
   const chainHarnesses = boundedSecurity
     ? input.harnesses.filter(h => h.supportsSecuritySession === true)
-    : escort
-    ? input.harnesses.filter((h) => h.supportsEscort === true)
     : input.harnesses;
-  if ((escort || boundedSecurity) && chainHarnesses.length === 0) {
-    log.error("turn: no harness in the chain supports the escort, holding the turn", {
+  if (boundedSecurity && chainHarnesses.length === 0) {
+    log.error("turn: no harness in the chain supports the sandbox, holding the turn", {
       persona: input.persona,
       chain: input.harnesses.map((h) => h.id),
     });
     const held =
-      "🔒 None of my AI engines can run this request under the safety escort, " +
+      "🔒 None of my AI engines can run this request in the sandbox, " +
       "so I've paused it. Nothing was done.";
     yield { type: "text", text: held };
     yield { type: "done", finalText: held, meta: { screenedHold: true } };
@@ -1119,8 +1085,7 @@ async function* runTurnBody(
   let securitySession: Awaited<ReturnType<typeof createSecuritySession>> | undefined;
   try {
     // GHSA-w7w8: an untrusted turn runs sandboxed by default (network + the
-    // persona vault, no host files). The escort, when on, judges each
-    // sandbox command at the session boundary (escortGate.ts).
+    // persona vault, no host files).
     if (boundedSecurity && securityPolicy) securitySession = await createSecuritySession({
       personaDir: input.agentDir,
       persona: input.persona,
@@ -1131,7 +1096,6 @@ async function* runTurnBody(
       ...(scratch?.ephemeral ? { workspace: scratch.dir } : {}),
       signal: input.signal,
       audit: event => log.info("security: operation", { ...event }),
-      ...(escort ? { gate: sessionEscortGate(escort, { signal: input.signal }) } : {}),
     });
     // #580 (second half): withhold pre-tool narration that is confidently in
     // a language the user did not write in. Applied HERE, above every
@@ -1188,7 +1152,6 @@ async function* runTurnBody(
           startupTimeoutMs: input.startupTimeoutMs,
           mcpMode: input.mcpMode,
           toolsMode: input.toolsMode,
-          ...(escort && !boundedSecurity ? { escort } : {}),
           ...(securitySession ? { securitySession: securitySession.descriptor } : {}),
           signal: input.signal,
         },
@@ -1299,18 +1262,6 @@ async function* runTurnBody(
   } finally {
     await securitySession?.close();
     flushDigest();
-    // Issue #768: a held action is never parked silently. Whatever the escort
-    // held during this turn reaches the principal once, here, as one line.
-    if (escort?.holdLog) {
-      const holds = drainEscortHolds(escort.holdLog);
-      if (holds.length > 0 && onEscortHolds) {
-        try {
-          await onEscortHolds(holds);
-        } catch (e) {
-          log.warn("turn: escort hold notice failed", { error: (e as Error).message });
-        }
-      }
-    }
   }
 
   // Mark delivered only now that the turn actually SUCCEEDED. At-least-once by

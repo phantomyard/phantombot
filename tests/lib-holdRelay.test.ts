@@ -44,7 +44,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 describe("the hold-notice record", () => {
   test("publish then read, oldest first, text capped and one line", () => {
     publishHoldNotice(dir, { source: "judge", count: 1, text: "🔒 first\nsecond line" }, 1000);
-    publishHoldNotice(dir, { source: "escort", count: 2, text: "x".repeat(1000) }, 2000);
+    publishHoldNotice(dir, { source: "judge", count: 2, text: "x".repeat(1000) }, 2000);
     const n = readHoldNotices(dir);
     expect(n.map((x) => x.at)).toEqual([1000, 2000]);
     expect(n[0]!.text).toBe("🔒 first second line");
@@ -68,7 +68,7 @@ describe("the hold-notice record", () => {
 
   test("the private line is the latest notice, plus how many more", () => {
     const a = { at: 1, source: "judge" as const, count: 1, text: "A" };
-    const b = { at: 2, source: "escort" as const, count: 2, text: "B" };
+    const b = { at: 2, source: "judge" as const, count: 2, text: "B" };
     expect(privateHoldLine([a])).toBe("A");
     expect(privateHoldLine([a, b])).toBe("B (+1 more, see DM)");
     expect(holdCount([a, b])).toBe(3);
@@ -114,7 +114,7 @@ describe("HoldThreadRelay", () => {
     const relay = new HoldThreadRelay(dir, { startedAt: 0 });
     relay.touch("group:a", 1000);
     publishHoldNotice(dir, { source: "judge", count: 1, text: "one" }, 2000);
-    publishHoldNotice(dir, { source: "escort", count: 2, text: "two" }, 2001);
+    publishHoldNotice(dir, { source: "judge", count: 2, text: "two" }, 2001);
     const [d] = relay.due(3000);
     expect(holdCount(d!.notices)).toBe(3);
   });
@@ -156,7 +156,7 @@ describe("TUI: a hold shows as a system line straight away", () => {
     });
     try {
       await sleep(5);
-      publishHoldNotice(join(dir, "robbie"), { source: "escort", count: 1, text: "🔒 Held in scheduled task 12: push code." });
+      publishHoldNotice(join(dir, "robbie"), { source: "judge", count: 1, text: "🔒 Held in scheduled task 12: push code." });
       await sleep(80);
       const msgs = session.transcript.getSnapshot();
       expect(msgs).toHaveLength(1);
@@ -277,7 +277,7 @@ describe("ACP: a hold joins the reply being streamed, or opens the next one", ()
       const sid = lines.find((o) => o.id === 1).result.sessionId;
       send(prompt(2, sid));
       await until(() => lines.some((o) => o.id === 2));
-      publishHoldNotice(pdir(), { source: "escort", count: 1, text: "🔒 Held in scheduled task 12: push code." });
+      publishHoldNotice(pdir(), { source: "judge", count: 1, text: "🔒 Held in scheduled task 12: push code." });
       await sleep(60);
       // Nothing unprompted while idle.
       expect(chunks(lines)).toEqual(["working"]);

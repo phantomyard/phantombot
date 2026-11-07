@@ -224,7 +224,7 @@ export function discardSandboxHome(home: string): void {
  * and anything a loader or runtime acts on. The Linux/Windows launcher runs
  * before confinement with this env, so a loader variable would act outside
  * the boundary. Everything else in the persona vault passes (GHSA-w7w8:
- * untrusted turns get the whole vault; the judge and escort are the guard).
+ * untrusted turns get the whole vault; the judge is the guard).
  */
 const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const RESERVED_SECRET =
@@ -247,7 +247,7 @@ export function sandboxSecretEnv(
 /**
  * The turn context a trusted turn's tools see (envBootstrap.withPersonaEnv),
  * runtime-supplied, never model input. `session` lets `phantombot` inside the
- * sandbox reach memory and notify through the session (escort-judged).
+ * sandbox reach memory and notify through the session.
  */
 export interface SandboxContext {
   persona?: string;
@@ -295,7 +295,7 @@ export function sandboxEnvironment(
     PATH:
       process.platform === "win32"
         ? `${windowsSystemPath(process.env).join(";")};${join(workspace, ".tools")}${extra}`
-        : `${process.platform === "darwin" ? "/opt/homebrew/bin:/usr/local/bin:" : ""}/usr/bin:/bin:/usr/sbin:/sbin:${join(workspace, ".tools")}${extra}`,
+        : `${process.platform === "darwin" ? "/opt/homebrew/bin:" : ""}/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${join(workspace, ".tools")}${extra}`,
     HOME: home,
     USERPROFILE: home,
     TMPDIR: join(workspace, ".tmp"),

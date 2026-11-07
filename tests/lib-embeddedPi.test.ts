@@ -161,28 +161,10 @@ describe("the real engine", () => {
   }, 60_000);
 });
 
-// The escort extension is the ONLY enforcement point of the escort for
-// `native` (issue #702). Pin both links: the factory list registers it, and
-// runEmbeddedPi hands pi exactly that list (PR #706 review).
+// runEmbeddedPi hands pi exactly the factory list (PR #706 review).
 describe("embedded pi extensions", () => {
-  test("the factory list includes the escort, which arms on an escort context", () => {
-    const prev = process.env.PHANTOMBOT_ESCORT;
-    process.env.PHANTOMBOT_ESCORT = "{malformed"; // present → must register (fail closed)
-    try {
-      const events: string[] = [];
-      const api = { on: (event: string) => { events.push(event); } };
-      for (const f of embeddedPiExtensionFactories()) (f as (pi: unknown) => unknown)(api);
-      expect(events).toContain("tool_call");
-    } finally {
-      if (prev === undefined) delete process.env.PHANTOMBOT_ESCORT;
-      else process.env.PHANTOMBOT_ESCORT = prev;
-    }
-  });
-
-  test("the factory list includes the body-path guard, armed with no escort (#718)", async () => {
-    const prev = process.env.PHANTOMBOT_ESCORT;
-    delete process.env.PHANTOMBOT_ESCORT;
-    try {
+  test("the factory list includes the body-path guard (#718)", async () => {
+    {
       const handlers: Array<(e: { toolName: string; input: unknown }) => unknown> = [];
       const api = { on: (_event: string, h: (e: { toolName: string; input: unknown }) => unknown) => { handlers.push(h); } };
       for (const f of embeddedPiExtensionFactories()) (f as (pi: unknown) => unknown)(api);
@@ -190,8 +172,6 @@ describe("embedded pi extensions", () => {
         handlers.map((h) => h({ toolName: "bash", input: { command: "gh pr review 1 --body @/tmp/r.md" } })),
       );
       expect(results.some((r) => (r as { block?: boolean } | undefined)?.block === true)).toBe(true);
-    } finally {
-      if (prev !== undefined) process.env.PHANTOMBOT_ESCORT = prev;
     }
   });
 

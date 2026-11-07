@@ -1,7 +1,7 @@
 /**
  * Hold notices, relayed into the owner's open threads (#768).
  *
- * A judge or escort hold reaches the owner as a DM (`phantombot notify`). But
+ * A judge hold reaches the owner as a DM (`phantombot notify`). But
  * the owner is often working somewhere else when it happens — a group, the
  * TUI, an editor's ACP panel — and none of those heard about it. This is the
  * shared record that lets each of them pick the notice up:
@@ -21,8 +21,8 @@
  * Groups only ever get a count ("details in my DM"), never what was held.
  *
  * Every word a reader shows is either this module's own or a notice phantombot
- * itself wrote; the record lives in the persona dir, which an escorted turn can
- * write, so readers that show more than a count (TUI, ACP) are the owner's own
+ * itself wrote; the record lives in the persona dir, which an untrusted turn could
+ * once write, so readers that show more than a count (TUI, ACP) are the owner's own
  * local sessions, and each text is capped.
  */
 
@@ -41,7 +41,7 @@ export const HOLD_NOTICE_TEXT_CAP = 400;
 /** Past this size the record is rewritten with only the recent lines. */
 const HOLD_NOTICES_MAX_BYTES = 64 * 1024;
 
-export type HoldNoticeSource = "judge" | "escort";
+export type HoldNoticeSource = "judge";
 
 export interface HoldNotice {
   /** Epoch ms when the hold was announced. */
@@ -62,7 +62,7 @@ function parseLine(line: string): HoldNotice | undefined {
     const v = JSON.parse(line) as Record<string, unknown>;
     if (
       typeof v.at !== "number" || !Number.isFinite(v.at) ||
-      (v.source !== "judge" && v.source !== "escort") ||
+      v.source !== "judge" ||
       typeof v.count !== "number" || !(v.count >= 1) ||
       typeof v.text !== "string"
     ) {

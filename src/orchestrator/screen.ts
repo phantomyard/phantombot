@@ -155,18 +155,6 @@ import {
 } from "../lib/decisionModelJudge.ts";
 import { recordDecisionModelOutcome } from "../lib/decisionModelHealth.ts";
 import {
-  ESCORT_BRIEFING_CAP_BYTES,
-  escortHoldNotice,
-  escortAllowanceBriefing,
-  escortHoldSource,
-  freshEscortHolds,
-  markEscortHoldsAnnounced,
-  readEscortRulings,
-  type EscortAllowKind,
-  type EscortHold,
-  type EscortSettings,
-} from "../lib/escort.ts";
-import {
   confirmAlertDelivered,
   noteAlertDeliveryFailed,
   noteScreeningReachable,
@@ -199,18 +187,6 @@ export interface ScreenVerdict {
   question?: string;
   /** What runTurn shows the untrusted caller in place of a real reply. */
   heldMessage?: string;
-  /**
-   * Pass only, and only when the decision-model judge is configured: the
-   * settings the escort (issue #702) checks every tool call of this turn
-   * with. Absent = no decision model, so the turn runs unescorted as before.
-   */
-  escort?: EscortSettings;
-  /**
-   * Pass + escort only (issue #768): tell the principal about the actions the
-   * escort held during the turn — ONE short line per turn, repeats of the same
-   * held action suppressed. runTurn calls it once the turn ends. Never throws.
-   */
-  onEscortHolds?: (holds: EscortHold[]) => Promise<void>;
 }
 
 /**
@@ -531,59 +507,6 @@ export function makeScreener(
     });
   };
 
-  // The escort's briefing (issue #768). Never throws.
-  // `task` is the turn's own message: rulings and norms that match it come
-  // first, so the cap cannot cut the one about this kind of task.
-  const escortBriefing = async (task: string): Promise<{ briefing?: string; deny?: EscortAllowKind[] }> => {
-    // A denied kind is refused in code (see EscortSettings.deny), so it rides
-    // along even when the briefing read below fails.
-    const rulings = readEscortRulings(holdLedgerDir);
-    const deny = rulings.deny.length > 0 ? { deny: rulings.deny } : {};
-    try {
-      // The principal's rulings go FIRST and outside the drawer packing,
-      // so the cap can never cut one (see escortAllowanceBriefing).
-      const allowances = escortAllowanceBriefing(rulings.allow, rulings.deny);
-      const room = ESCORT_BRIEFING_CAP_BYTES - (allowances ? Buffer.byteLength(allowances, "utf8") + 2 : 0);
-      const b = room > 0 ? await readBriefingDrawersCapped(config, persona, room, task) : undefined;
-      const parts = [allowances, b && b.trim() !== "" ? b : undefined].filter(
-        (x): x is string => !!x,
-      );
-      return parts.length > 0 ? { briefing: parts.join("\n\n"), ...deny } : deny;
-    } catch {
-      return deny;
-    }
-  };
-
-  // Escort holds → the principal, once (issue #768). One plain line per turn,
-  // no scores; the same held action is not announced again inside the repeat
-  // window. Delivery is best-effort: a failed notify never fails the turn,
-  // and never consumes the hold — the ledger is written only after a
-  // delivered notice, so the next turn tries again.
-  const onEscortHolds = async (holds: EscortHold[]): Promise<void> => {
-    try {
-      const fresh = freshEscortHolds(holdLedgerDir, holds);
-      const rulings = readEscortRulings(holdLedgerDir);
-      const notice = escortHoldNotice(fresh, {
-        source: escortHoldSource(_conversation),
-        allowed: new Set(rulings.allow),
-        denied: new Set(rulings.deny),
-      });
-      if (!notice) return;
-      const code = await notify(notice);
-      if (code === 0) {
-        markEscortHoldsAnnounced(holdLedgerDir, fresh);
-        // Tell the owner's other open threads too (groups, TUI, ACP).
-        publishHoldNotice(holdLedgerDir, {
-          source: "escort",
-          count: new Set(fresh.map((h) => h.summary)).size,
-          text: notice.split("\n")[0]!,
-        });
-      } else log.warn("screen: escort hold notice not delivered", { code });
-    } catch (e) {
-      log.warn("screen: escort hold notice failed", { error: (e as Error).message });
-    }
-  };
-
   return async (content: string, signal?: AbortSignal): Promise<ScreenVerdict> => {
     // 1. Optional legacy recall (best-effort; never throws → ""). Production
     //    leaves recall unset; the persona context is the briefing now.
@@ -798,26 +721,6 @@ export function makeScreener(
         action: "pass",
         score: v.score,
         reason: v.reason,
-        // The escort rides on the DECISION MODEL being configured, not on
-        // which judge happened to answer this screen: a pass from the harness
-        // judge during a Jev outage is still escorted, and its tool calls
-        // then fail closed until the decision model answers again.
-        ...(decisionModelJudgeOn
-          ? {
-              escort: {
-                baseUrl: jev!.baseUrl!,
-                model: jev!.model,
-                keyEnv: jev!.keyEnv,
-                timeoutMs: jev!.judge.timeoutMs,
-                threshold: jev!.judge.threshold,
-                // The same ranked rows the judge briefs from (issue #768), so
-                // the escort knows what is routine in the owner's world.
-                // Best-effort: no briefing ⇒ the escort judges as before.
-                ...(await escortBriefing(content)),
-              },
-              onEscortHolds,
-            }
-          : {}),
       };
     }
 

@@ -9,7 +9,7 @@
  * `gh api -F body=@<path>` (typed `-F` DOES read the file), so neither is
  * matched here.
  *
- * DETERMINISTIC AND ALWAYS ON, unlike the escort: no model is asked, and every
+ * DETERMINISTIC AND ALWAYS ON: no model is asked, and every
  * turn gets it, trusted or not. A false positive costs one retry with the
  * right flag; a miss costs a review nobody can read. It only matches a value
  * that is PATH-SHAPED: `@/`, `@~/`, `@./`, `@../`, or a bare relative path
@@ -17,7 +17,7 @@
  * value. So a body that merely opens with an `@mention` (`"@kai thanks"`,
  * `-f body=@lena`) is untouched.
  *
- * WHERE IT HOOKS: the same two seams as the escort (lib/escort.ts). On native
+ * WHERE IT HOOKS: two seams. On native
  * it is an inline pi extension on `tool_call`. On claude it is a `PreToolUse`
  * hook, matcher `Bash`, that runs `<phantombot> __body_guard`. This is a lint,
  * not a security gate, so an unreadable hook event ALLOWS the call.
@@ -129,7 +129,7 @@ export function phantombotBodyGuardExtension(pi: BodyGuardToolCallApi): void {
   });
 }
 
-/** POSIX-sh double-quote one argv word (same rule as the escort hook). */
+/** POSIX-sh double-quote one argv word. */
 function quoteArg(s: string): string {
   return `"${s.replace(/(["\\$`])/g, "\\$1")}"`;
 }

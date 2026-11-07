@@ -9,7 +9,7 @@
  * else keeps its ranked order behind them, so the cap still trims the weakest.
  *
  * Used by the standing-memory block (commitments, matched against the user's
- * message) and by the threat judge and the escort (decisions, people and
+ * message) and by the threat judge (decisions, people and
  * norms, matched against what is being judged).
  *
  * The query can be untrusted text (an email, a webhook, a task's wake

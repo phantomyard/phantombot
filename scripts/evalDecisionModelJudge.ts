@@ -3,8 +3,6 @@
  *
  *   bun scripts/evalDecisionModelJudge.ts            # threat-judge corpus (default)
  *   bun scripts/evalDecisionModelJudge.ts --router   # brain-swap router corpus
- *   bun scripts/evalDecisionModelJudge.ts --escort   # escort corpus (#702/#768)
- *       [--no-briefing]                              # …without the briefing
  *
  * Requires a working credential, exactly like production: an API key in the
  * env (default PHANTOMBOT_JEV_API_KEY; override with --key-env NAME) and a
@@ -25,7 +23,6 @@ import { join } from "node:path";
 
 import { decisionModelJudgeThreat } from "../src/lib/decisionModelJudge.ts";
 import { decisionModelRoute } from "../src/lib/decisionModelRouter.ts";
-import { escortCheck, escortContext } from "../src/lib/escort.ts";
 import {
   DECISION_MODEL_DEFAULT_KEY_ENV,
   DECISION_MODEL_DEFAULT_MODEL,
@@ -50,19 +47,6 @@ interface RouterCase {
   text: string;
   history?: string[];
   note?: string;
-}
-interface EscortCase {
-  id: string;
-  kind: "routine" | "injection";
-  expect: "hold" | "allow";
-  task: string;
-  briefing?: string;
-  action: { tool: string; input: unknown };
-  note?: string;
-}
-interface EscortCorpus {
-  threshold: number;
-  cases: EscortCase[];
 }
 interface RouterCorpus {
   cases: RouterCase[];
@@ -91,8 +75,6 @@ const settings = { baseUrl, apiKey, model };
 
 if (has("--router")) {
   await evalRouter();
-} else if (has("--escort")) {
-  await evalEscort();
 } else {
   await evalJudge();
 }
@@ -207,65 +189,6 @@ async function evalRouter(): Promise<void> {
       `\n${errors} case(s) ERRORED — the eval routed ${judged}/${corpus.cases.length}. ` +
         "Fix the endpoint, key or contract and rerun. Failing.",
     );
-    process.exit(1);
-  }
-}
-
-/**
- * The escort corpus (issue #768). Both directions gate: an injection the
- * escort lets run is an unescorted hijack, and a routine PR-loop action it
- * holds is exactly the stall #768 exists to end. --no-briefing reproduces the
- * pre-#768 escort (task + action only) and is report-only.
- */
-async function evalEscort(): Promise<void> {
-  const path = join(import.meta.dir, "../tests/fixtures/jev-escort-corpus.json");
-  const corpus = JSON.parse(await readFile(path, "utf8")) as EscortCorpus;
-  const threshold = Number(arg("--threshold")) || corpus.threshold;
-  const noBriefing = has("--no-briefing");
-  console.log(
-    `jev escort eval — ${corpus.cases.length} cases, threshold ${threshold}, ` +
-      `${noBriefing ? "NO briefing" : "with briefing"}, ${baseUrl}, ${model}\n`,
-  );
-  let falseNegatives = 0;
-  let falsePositives = 0;
-  let errors = 0;
-  for (const c of corpus.cases) {
-    const ctx = escortContext(
-      {
-        baseUrl,
-        model,
-        keyEnv,
-        timeoutMs: 30_000,
-        threshold,
-        ...(c.briefing && !noBriefing ? { briefing: c.briefing } : {}),
-      },
-      c.task,
-    );
-    const d = await escortCheck(ctx, c.action);
-    if (!d.allow && d.score === undefined) {
-      errors++;
-      console.log(`ERR   ${c.id}: ${d.reason}`);
-      continue;
-    }
-    const held = !d.allow;
-    const expected = c.expect === "hold";
-    const miss = held !== expected;
-    if (miss && expected) falseNegatives++;
-    if (miss && !expected) falsePositives++;
-    const mark = miss ? (expected ? "FN ✗" : "FP ✗") : "ok  ";
-    console.log(
-      `${mark}  ${c.id}  score=${d.score} expect=${c.expect}` +
-        (miss && c.note ? `\n       ${c.note}` : ""),
-    );
-  }
-  console.log(
-    `\n${corpus.cases.length - errors}/${corpus.cases.length} judged (${errors} errors) · ` +
-      `false negatives (hijack allowed): ${falseNegatives} · ` +
-      `false positives (routine held): ${falsePositives}`,
-  );
-  if (noBriefing) return;
-  if (errors > 0 || falseNegatives > 0 || falsePositives > 0) {
-    console.error("\nescort eval failed: errors, missed hijacks or held routine work.");
     process.exit(1);
   }
 }

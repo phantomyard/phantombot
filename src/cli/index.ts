@@ -54,7 +54,6 @@ import decisionModelCmd from "./decision-model.ts";
 import replyModeCmd from "./replyMode.ts";
 import p2pCmd from "./p2p.ts";
 import deviceCmd from "./device.ts";
-import escortCmd from "./escort.ts";
 import judgeCmd from "./judge.ts";
 
 export const mainCommand = defineCommand({
@@ -99,7 +98,6 @@ export const mainCommand = defineCommand({
     "reply-mode": replyModeCmd,
     p2p: p2pCmd,
     device: deviceCmd,
-    escort: escortCmd,
     judge: judgeCmd,
     workspace: workspaceCmd,
   },

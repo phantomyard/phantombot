@@ -54,9 +54,8 @@ import {
   resolveNativeDataHome,
 } from "./nativeAgentDir.ts";
 import { withPersonaEnv } from "./envBootstrap.ts";
-import { phantombotEscortExtension, type ToolCallHookApi } from "./escort.ts";
 import { phantombotSecurityExtension } from "../security/extension.ts";
-import { phantombotBodyGuardExtension } from "./bodyPathGuard.ts";
+import { type BodyGuardToolCallApi, phantombotBodyGuardExtension } from "./bodyPathGuard.ts";
 
 /** Hidden argv[2] that turns the phantombot binary into the pi CLI. */
 export const EMBEDDED_PI_SUBCOMMAND = "__pi";
@@ -135,26 +134,22 @@ export function embeddedPiCommand(
 }
 
 /**
- * The inline extensions the embedded pi runs with. The escort extension is
- * THE enforcement point of the escort for `native` (issue #702): it is inert
- * unless the harness set an escort context in this process's env. Kept as a
- * function so tests pin that runEmbeddedPi registers it.
+ * The inline extensions the embedded pi runs with. Kept as a function so
+ * tests pin that runEmbeddedPi registers them.
  */
 export function embeddedPiExtensionFactories(): Array<(pi: never) => unknown> {
   return [
     phantombotAttributionExtension as never,
     phantombotSecurityExtension as never,
-    ((pi: ToolCallHookApi) => phantombotEscortExtension(pi)) as never,
     // Always on, every turn (#718): refuses a `gh` call that would publish a
     // literal `@/path` body. See lib/bodyPathGuard.ts.
-    ((pi: ToolCallHookApi) => phantombotBodyGuardExtension(pi)) as never,
+    ((pi: BodyGuardToolCallApi) => phantombotBodyGuardExtension(pi)) as never,
   ];
 }
 
 /**
  * The argv prefix that re-enters THIS phantombot (no subcommand): the binary
- * itself when compiled, `bun <entry>` from source. The escort's claude hook
- * runs `<this> __escort` (lib/escort.ts).
+ * itself when compiled, `bun <entry>` from source.
  */
 export function phantombotSelfCommand(
   opts: { execPath?: string; moduleUrl?: string; entry?: string } = {},

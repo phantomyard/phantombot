@@ -24,7 +24,7 @@
  *     diagnostic is already in the journal via the orchestrator's logs.
  *   - Tool-free STRUCTURALLY: toolsMode "none" + mcpMode "none", not just
  *     the prompt. Recovery re-feeds the same (possibly untrusted) message to
- *     a fresh run that has no escort (issue #702), so it must not be able to
+ *     a fresh run with no sandbox, so it must not be able to
  *     act — only write the snag note.
  */
 

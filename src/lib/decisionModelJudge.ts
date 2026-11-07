@@ -110,8 +110,7 @@ export const DECISION_MODEL_JUDGE_CONTENT_CAP_BYTES = 48 * 1024;
 export const DECISION_MODEL_JUDGE_DEFAULT_TIMEOUT_MS = 4000;
 
 /**
- * The Jev judge's default hold threshold, shared by the escort (same
- * [jev.judge] threshold). 90 since GHSA-w7w8 (owner's call): a hold below
+ * The Jev judge's default hold threshold. 90 since GHSA-w7w8 (owner's call): a hold below
  * that cost far more in self-inflicted denial of service (routine PR-loop
  * work held at 71-76) than it bought. The harness backup judge holds at the
  * same 90 (THREAT_THRESHOLD), so either backend behaves the same. The level

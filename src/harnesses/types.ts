@@ -11,7 +11,6 @@
  */
 
 import type { ToolCallDetail } from "./toolNote.ts";
-import type { EscortContext } from "../lib/escort.ts";
 
 export interface HistoryTurn {
   role: "user" | "assistant";
@@ -186,14 +185,6 @@ export interface HarnessRequest {
    * connector-startup hang). Optional; normal turns omit.
    */
   mcpMode?: "none";
-  /**
-   * The escort (issue #702): set ONLY on a judge-passed untrusted turn when a
-   * decision model is configured. The harness must run the decision-model
-   * check before every tool call (see lib/escort.ts) and refuse the calls it
-   * holds. A harness that cannot do that sets no `supportsEscort` and is never
-   * handed an escorted request. Omitted = no escort, today's behaviour.
-   */
-  escort?: EscortContext;
   securitySession?: import("../security/types.ts").SessionDescriptor;
 }
 
@@ -351,12 +342,6 @@ export interface Harness {
    */
   readonly maxPayloadBytes?: number;
 
-  /**
-   * True when this harness honours `HarnessRequest.escort` — it has a hook
-   * that can BLOCK a tool call before it runs. Absent = no such hook, and the
-   * orchestrator leaves this harness out of an escorted turn's chain.
-   */
-  readonly supportsEscort?: boolean;
   readonly supportsSecuritySession?: boolean;
 
   /** Quick check: is the binary present and minimally callable? */

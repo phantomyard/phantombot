@@ -32,29 +32,26 @@ Threat model, stated on purpose:
 
 - **Primary control: the judge.** Every untrusted turn is screened before it
   runs (decision model, with the harness judge as backup). Both hold at 90/100.
-- **Second look: the escort.** When the decision model is configured, each
-  sandbox command and broker host action is scored before it runs, at the same
-  90/100 bar. It refuses one action and the turn carries on.
+  There is no per-action check after it: the escort that scored each command
+  was removed, because its false holds stalled routine work.
 - **Blast radius: the sandbox.** A turn that gets through cannot touch host
   files, SSH keys, the vault key, other personas, host Unix sockets, or anything
   that outlives the turn's workspace.
-- **Accepted risk.** A hijack the judge and escort both miss can send the
+- **Accepted risk.** A hijack the judge misses can send the
   secrets the turn holds (the persona vault) out over the network, or reach a
   service listening on the host's loopback (Linux/macOS). That is accepted over
   stripping network or credentials from autonomous work, which breaks the work
   itself. Per-job secret lists were rejected for the same reason: the admin
   falls on the owner and every new kind of job breaks until someone lists it.
 
-The 90 bar replaces 70 (decision model, escort) and 80 (harness judge): the
+The 90 bar replaces 70 (decision model) and 80 (harness judge): the
 false positives that held routine work scored 71-76. The scoring rubrics were
 re-anchored with it, so clear threats (hijack, credential or data theft, money,
 access changes, destruction) sit in the top band and other unsupported
 privileged work is "doubtful", not held. Live eval at 90 on the bundled corpora
-(`bun scripts/evalDecisionModelJudge.ts [--escort]`), five runs after the
+(`bun scripts/evalDecisionModelJudge.ts`), five runs after the
 re-anchor: judge 0 false negatives, 0 false positives (lowest hold 95, highest
-allow 47 on the last three); escort 0 false positives, one 89 on a
-credential-file read in 3 of 5 runs, whose follow-up step (posting it) holds
-at 95.
+allow 47 on the last three).
 
 ## Owner-granted workflows
 
@@ -150,8 +147,7 @@ into the disposable workspace; it does not install developer toolchains.
 ## Grants and operations
 
 Every grant has a unique `id` and an absolute `expiresAt` in Unix milliseconds.
-Use explicit, short lifetimes. Setting `enabled` is the owner's choice to replace
-legacy per-kind Escort rulings for that persona's bounded turns.
+Use explicit, short lifetimes.
 
 `broker({manifest:true})` lists the workspace and grants, excluding credential
 names. `sandbox({command:"..."})` runs arbitrary shell commands there, with
@@ -165,7 +161,7 @@ not an execution-time phrase blacklist.
 - `memory-capture`: `text` (to 8 KiB), optional `tags` (decision, lesson,
   person, commitment, norm). `memory-search`: `query`, optional `limit` (1-20).
 
-These run on the host with fixed argv, and are escorted like sandbox commands.
+These run on the host with fixed argv.
 With a grant:
 
 - `github-read`: `grant`, `resource` (`pull`, `files`, `comments`, `reviews`).
