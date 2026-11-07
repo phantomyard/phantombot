@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   defaultSandboxHostPaths,
+  sandboxConfigEntries,
   runSandbox,
   sandboxEnvironment,
   windowsSystemPath,
@@ -225,8 +226,6 @@ test("defaultSandboxHostPaths grants ~/.local/bin and only public SSH keys", () 
   expect(paths.read).toEqual([
     join(home, ".local", "bin"),
     join(home, ".ssh", "id_ed25519.pub"),
-    join(home, ".config", "gh"),
-    join(home, ".config", "git"),
     join(home, ".gitconfig"),
     join(home, ".git-credentials"),
   ]);
@@ -290,8 +289,24 @@ test("sandbox env carries the trusted turn's PHANTOMBOT_* context", () => {
   expect(sandboxEnvironment("/work", "/neutral", { PHANTOMBOT_PERSONA: "evil" })).not.toHaveProperty("PHANTOMBOT_PERSONA");
 });
 
+test("~/.config is mirrored per child, minus runtime folders and browser profiles", () => {
+  const home = fresh(),
+    config = join(home, ".config");
+  for (const d of ["gogcli", join("gh", "sub"), "phantombot", "PhantomChat", "chromium", "obsidian", join("Electron", "Local Storage"), join("BraveSoftware", "Brave-Browser")])
+    mkdirSync(join(config, d), { recursive: true });
+  writeFileSync(join(config, "chromium", "Local State"), "{}");
+  writeFileSync(join(config, "obsidian", "obsidian.json"), "{}");
+  writeFileSync(join(config, "BraveSoftware", "Brave-Browser", "Local State"), "{}");
+  writeFileSync(join(config, "mimeapps.list"), "");
+  expect(sandboxConfigEntries(home).map((p) => p.slice(config.length + 1))).toEqual(
+    ["gh", "gogcli", "mimeapps.list", "obsidian"],
+  );
+  expect(defaultSandboxHostPaths(home).read).toContain(join(config, "gogcli"));
+  expect(sandboxConfigEntries(fresh())).toEqual([]);
+});
+
 test.skipIf(win)(
-  "gh/git logins: readable inside like a trusted turn, never writable",
+  "tool logins (gh, git, ~/.config): readable like a trusted turn, never writable; runtime config hidden",
   async () => {
     const home = fresh(),
       ws = fresh();
@@ -299,12 +314,19 @@ test.skipIf(win)(
     writeFileSync(join(home, ".config", "gh", "hosts.yml"), "github.com:\n    oauth_token: GH-LOGIN\n");
     writeFileSync(join(home, ".gitconfig"), "[user]\n\tname = Login Name\n");
     writeFileSync(join(home, ".git-credentials"), "https://u:CRED@github.com\n");
+    mkdirSync(join(home, ".config", "gogcli"));
+    writeFileSync(join(home, ".config", "gogcli", "credentials.json"), "GOG-LOGIN");
+    mkdirSync(join(home, ".config", "phantombot"));
+    writeFileSync(join(home, ".config", "phantombot", "config.toml"), "PB-CONFIG");
     const r = await runSandbox(
       ws,
       [
         'cat "$XDG_CONFIG_HOME/gh/hosts.yml"',
         "git config --global user.name",
         "cat ~/.git-credentials",
+        'cat "$XDG_CONFIG_HOME/gogcli/credentials.json"',
+        'cat "$XDG_CONFIG_HOME/phantombot/config.toml" || echo runtime-hidden',
+        'cat ' + JSON.stringify(join(home, ".config", "phantombot", "config.toml")) + " || echo runtime-hidden",
         'echo x >> "$XDG_CONFIG_HOME/gh/hosts.yml" || echo gh-readonly',
         "echo x >> ~/.gitconfig || echo git-readonly",
         'echo "scratch=$PHANTOMBOT_SCRATCH persona=$PHANTOMBOT_PERSONA"',
@@ -315,6 +337,9 @@ test.skipIf(win)(
     expect(r.output).toContain("Login Name");
     expect(r.output).toContain("CRED");
     expect(r.output).toContain("gh-readonly");
+    expect(r.output).toContain("GOG-LOGIN");
+    expect(r.output).toContain("runtime-hidden");
+    expect(r.output).not.toContain("PB-CONFIG");
     expect(r.output).toContain("git-readonly");
     expect(r.output).toContain(`scratch=${realpathSync(ws)} persona=p1`);
   },

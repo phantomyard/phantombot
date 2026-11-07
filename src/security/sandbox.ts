@@ -38,18 +38,66 @@ export interface SandboxHostPaths {
 /**
  * The user's own tool logins, read-only, so `gh` and `git` authenticate in a
  * sandboxed turn exactly as they do in a trusted one (no extra vault names).
+ * `~/.config` is mirrored too, per child: see sandboxConfigEntries.
  */
-export const SANDBOX_TOOL_LOGINS = [
-  [".config", "gh"],
-  [".config", "git"],
-  [".gitconfig"],
-  [".git-credentials"],
+export const SANDBOX_TOOL_LOGINS = [[".gitconfig"], [".git-credentials"]];
+
+/** `~/.config` children that are never mirrored: the runtime's own state. */
+export const SANDBOX_HIDDEN_CONFIG = new Set(["phantombot", "phantomchat"]);
+
+/** Files only a Chromium/Electron profile has (cookies, web storage). */
+const BROWSER_MARKERS = [
+  "Local State",
+  "Cookies",
+  join("Network", "Cookies"),
+  "Local Storage",
+  "Session Storage",
 ];
 
 /**
+ * A Chromium/Electron profile (browsers, Electron apps), at the folder itself
+ * or one level down (`BraveSoftware/Brave-Browser`): cookies are live web
+ * sessions, which are not in the vault, so they stay hidden.
+ */
+function isBrowserProfile(dir: string): boolean {
+  const marked = (d: string) => BROWSER_MARKERS.some((n) => existsSync(join(d, n)));
+  if (marked(dir)) return true;
+  try {
+    return readdirSync(dir, { withFileTypes: true }).some(
+      (e) => e.isDirectory() && marked(join(dir, e.name)),
+    );
+  } catch {
+    return false; // a file, or unreadable: nothing to hide inside
+  }
+}
+
+/**
+ * Every child of `~/.config`, read-only, except the runtime's own folders and
+ * browser profiles. Enumerated rather than listed, so a new tool's login
+ * (gog, gcloud, helm, ...) works without anyone maintaining a list. Each
+ * child is its own read rule because Landlock cannot hide a folder inside an
+ * allowed one.
+ */
+export function sandboxConfigEntries(home: string): string[] {
+  const config = join(home, ".config");
+  let names: string[] = [];
+  try {
+    names = readdirSync(config);
+  } catch {
+    return [];
+  }
+  return names
+    .filter((n) => !SANDBOX_HIDDEN_CONFIG.has(n.toLowerCase()))
+    .map((n) => join(config, n))
+    .filter((p) => !isBrowserProfile(p))
+    .sort();
+}
+
+/**
  * The owner's model (GHSA-w7w8): the only WRITABLE directory is the turn's
- * scratch workspace. Read-only: ~/.local/bin, SSH PUBLIC keys and the tool
- * logins above. Everything else in the home folder, including every persona
+ * scratch workspace. Read-only: ~/.local/bin, SSH PUBLIC keys, the tool
+ * logins above and ~/.config (minus the runtime's own folders and browser
+ * profiles). Everything else in the home folder, including every persona
  * folder (so identity.json, the vault, prompts, config and policy), stays
  * unreachable.
  */
@@ -64,7 +112,10 @@ export function defaultSandboxHostPaths(home = homedir()): SandboxHostPaths {
   } catch {
     /* no ~/.ssh */
   }
-  const logins = SANDBOX_TOOL_LOGINS.map((p) => join(home, ...p));
+  const logins = [
+    ...SANDBOX_TOOL_LOGINS.map((p) => join(home, ...p)),
+    ...sandboxConfigEntries(home),
+  ];
   return { read: [bin, ...pub, ...logins], path: [bin], home };
 }
 
