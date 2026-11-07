@@ -92,11 +92,12 @@ import {
   phantomchatInfo,
   startHostedChannel,
 } from "./phantomchat.ts";
-import { checkVoice, validateVoiceDirection, voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
-import { checkDecisionModel } from "./decisionModels.ts";
-import { checkEmbeddings } from "./embeddings.ts";
+import { checkVoice, resolveVoiceProvider, supportsModality, validateVoiceDirection, voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
+import { checkDecisionModel, decisionModelProviders } from "./decisionModels.ts";
+import { checkEmbeddings, embeddingsProviders, resolveEmbeddingsProvider } from "./embeddings.ts";
 import { refreshPersonaIndex } from "../lib/indexRefresh.ts";
 import { checkProvider, listProviders } from "./providers.ts";
+import { customProviderSpec } from "../lib/piCustomProvider.ts";
 import {
   parseJsonReply,
   structuredOutputInstruction,
@@ -108,8 +109,11 @@ import type {
   DecideOptions,
   DecisionAnswer,
   DecisionModelCheck,
+  DecisionModelProviderInfo,
   EmbeddingsCheck,
   EmbeddingsCheckInput,
+  EmbeddingsProviderInfo,
+  NativeBrainInfo,
   MemoryRefreshResult,
   DecisionResult,
   EngineEvent,
@@ -264,6 +268,8 @@ export class Engine {
    * `persona.configure({ decisionModel: { provider, model, apiKey } })`.
    */
   readonly decisionModels: {
+    /** Providers that serve decision models (filtered by model type). */
+    providers(): Promise<DecisionModelProviderInfo[]>;
     check(provider: string, apiKey: string): Promise<DecisionModelCheck>;
   };
 
@@ -278,6 +284,8 @@ export class Engine {
    * `persona.configure({ embeddings: { ..., dims } })`.
    */
   readonly embeddings: {
+    /** Gemini, Pi providers with an embeddings API, and bring-your-own endpoint. */
+    providers(): Promise<EmbeddingsProviderInfo[]>;
     check(input: EmbeddingsCheckInput): Promise<EmbeddingsCheck>;
   };
 
@@ -317,9 +325,11 @@ export class Engine {
       check: (input) => this.run(() => checkVoice(input)),
     };
     this.decisionModels = {
+      providers: () => this.run(async () => decisionModelProviders()),
       check: (provider, apiKey) => this.run(() => checkDecisionModel(provider, apiKey)),
     };
     this.embeddings = {
+      providers: () => this.run(async () => embeddingsProviders()),
       check: (input) => this.run(() => checkEmbeddings(input)),
     };
   }
@@ -625,6 +635,54 @@ export class Persona {
     configure(policy: SecurityPolicy): Promise<void>;
     policy(): Promise<SecurityPolicy>;
   };
+  /**
+   * The native engine's current provider and model, as `configure({ brain })`
+   * last wrote them, and whether a provider key is stored. Never the key.
+   */
+  brain(): Promise<NativeBrainInfo> {
+    return this.#run(async () => {
+      const config = await loadConfig(this.name);
+      const dir = personaDir(config, this.name);
+      if (!existsSync(dir)) throw notFound(this.name);
+      const toml = await readTomlTable(personaConfigPath(config.personasDir, this.name));
+      const harnesses = toml.harnesses as Record<string, unknown> | undefined;
+      const pi = harnesses?.pi as Record<string, unknown> | undefined;
+      const routing = (pi?.routing ?? {}) as Record<string, unknown>;
+      const provider = asStr(routing.provider)?.trim();
+      const model = asStr(routing.primary_model)?.trim();
+      // Only a bring-your-own-endpoint provider uses base_url; a leftover one
+      // under a catalog provider is dead config and is not reported.
+      const baseUrl = provider && customProviderSpec(provider) ? asStr(routing.base_url)?.trim() : undefined;
+      return {
+        ...(provider ? { provider } : {}),
+        ...(model ? { model } : {}),
+        ...(baseUrl ? { baseUrl } : {}),
+        hasKey: await this.#hasSecret(ENV_PI_API_KEY, dir),
+      };
+    });
+  }
+
+  /**
+   * `engine.providers.check` with the STORED native key, for the provider it
+   * was stored for: the app learns the verdict and the model list, never the
+   * key, and the key only ever goes to its own provider. No stored provider
+   * or key: `unverified` with no models.
+   */
+  brainCheck(): Promise<ProviderCheck> {
+    return this.#run(async () => {
+      const info = await this.brain();
+      if (!info.provider || !info.hasKey) return { status: "unverified", detail: "no stored key", models: [] };
+      const vault = await openPersonaVault(await this.#dir());
+      let key: string | undefined;
+      try {
+        key = vault.get(ENV_PI_API_KEY);
+      } finally {
+        vault.close();
+      }
+      return checkProvider(info.provider, key ?? "", info.baseUrl ? { baseUrl: info.baseUrl } : {});
+    });
+  }
+
   readonly secrets: {
     /** Store a credential in this persona's encrypted vault (verified by read-back). */
     set(name: string, value: string): Promise<void>;
@@ -861,7 +919,12 @@ export class Persona {
         for (const direction of ["tts", "stt"] as const) {
           const d = settings.voice[direction];
           if (d === undefined) continue;
-          const { apiKey, ...metadata } = d;
+          const { apiKey, ...requested } = d;
+          if (requested.enabled && !supportsModality(requested.provider, direction)) {
+            throw new EngineError("invalid_argument", `voice provider '${requested.provider}' has no ${direction.toUpperCase()} models`);
+          }
+          // A Pi preset is stored as the transport it runs on (openai-compatible + its URL).
+          const metadata = resolveVoiceProvider(requested);
           validateVoiceDirection(metadata);
           const block = table(table(toml, "voice"), direction);
           // A changed endpoint must never reuse a key from a previous provider.
@@ -1002,7 +1065,7 @@ export class Persona {
         }
       }
 
-      const em = settings.embeddings;
+      const em = resolveEmbeddingsProvider(settings.embeddings);
       let embeddingKey: { name: string; value: string | undefined } | undefined;
       if (em) {
         const block = table(toml, "embeddings");
@@ -1048,7 +1111,7 @@ export class Persona {
         } else {
           throw new EngineError(
             "invalid_argument",
-            "embeddings.provider must be one of: none, gemini, openai-compatible",
+            "embeddings.provider must be none, gemini, openai-compatible or a provider from embeddings.providers()",
           );
         }
       }

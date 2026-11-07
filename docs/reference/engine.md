@@ -276,6 +276,8 @@ if (check.status !== "invalid") {
 - `models` starts with the default (`typesafe/jev-1.13`), then OpenRouter's
   decisions catalogue or TypeSafe's list. It is `[]` when the key was rejected
   or not given.
+- `engine.decisionModels.providers()` lists the transports with a decisions
+  API: `[{ id: "openrouter", label }, { id: "typesafe", label, defaultModel }]`.
 - Any other provider is `invalid_argument`. A custom decisions provider needs a
   `baseUrl`, and this method deliberately takes none, so it makes no
   caller-directed requests.
@@ -304,6 +306,16 @@ if (proof.status === "verified") {
 - Gemini has one model (`gemini-embedding-001`, the default). OpenAI-compatible
   models come from the endpoint's Models API, filtered to embedding models; `[]`
   when it lists none, so offer a typed model id.
+- `engine.embeddings.providers()` lists `gemini`, the Pi presets (`openai`,
+  `openrouter`, `mistral`, `together`, `fireworks`) and `openai-compatible`
+  (`needsBaseUrl: true`, `keyOptional: true`). Each preset carries
+  `transport: { provider: "openai-compatible", baseUrl }`.
+- A preset id works in `check` and `configure` in place of `baseUrl`: its own
+  endpoint always wins (a caller `baseUrl` is ignored); `check` without a key
+  answers `"unchecked"`, `configure` requires one and stores the choice as
+  `openai-compatible` + the preset URL. When the
+  preset's `/models` lists nothing recognisable, its known embedding models
+  are returned instead.
 - `apiKey` is optional for OpenAI-compatible (local llama-server, Ollama).
 - `baseUrl` must be http(s) without credentials, query or fragment.
 - `detail` never contains the key.
@@ -335,6 +347,7 @@ await aria.configure({
   },
   embeddings: { provider: "gemini", apiKey, model?, dims? }
             | { provider: "openai-compatible", baseUrl, model, apiKey?, dims? }
+            | { provider: "<preset id>", model, apiKey, dims? }   // from embeddings.providers()
             | { provider: "none" },                // hybrid memory search
 });
 ```
@@ -344,6 +357,13 @@ running PhantomChat channel is restarted to pick them up. If that restart
 fails, `configure` still resolves (the settings are saved) and the channel's
 status turns `"failed"`. An `openai-compatible` call without `apiKey` removes
 any stored key, so a key for the previous endpoint is never sent to the new one.
+
+`persona.brain()` reads the native routing back for an edit screen:
+`{ provider?, model?, baseUrl?, hasKey }` (`baseUrl` only for a
+bring-your-own-endpoint provider; never the key). `persona.brainCheck()` runs
+`providers.check` with the STORED key against that provider (and its stored
+`baseUrl`) only, returning a `ProviderCheck`; with no stored provider or key it
+answers `"unverified"` with no models.
 
 Other secret helpers: `persona.secrets.set(name, value)`, `.has(name)` and
 `.delete(name)`.
@@ -581,16 +601,23 @@ on top. The child sees that copy; nothing is written back.
 
 ## Voice models
 
-`engine.voiceModels.providers()` exposes the TUI's ElevenLabs and OpenAI-compatible
-transports. `voiceModels.check({modality: 'tts' | 'stt', provider, apiKey, baseUrl?,
+`engine.voiceModels.providers()` lists the Pi presets (`openai`: TTS+STT,
+`openrouter`: TTS+STT, `groq`: STT, `mistral`: STT), then the TUI's `elevenlabs`
+and `openai-compatible` (`needsBaseUrl: true`) transports. Each entry carries
+`modalities`; each preset carries `transport: { provider: "openai-compatible",
+baseUrl }`. `voiceModels.check({modality: 'tts' | 'stt', provider, apiKey, baseUrl?,
 model?, voice?})` reuses the TUI's key validation and separate speech/transcription
-catalogues. No key is saved by discovery; `models` may be empty on an endpoint
-without modality metadata, where the TUI's typed model fallback remains available.
+catalogues. For a preset its own endpoint always wins (a caller `baseUrl` is
+ignored), a key is required, a modality it does not serve is `invalid_argument`,
+and its known models fill the list when `/models` has no audio metadata. No key
+is saved by discovery; `models` may be empty on an endpoint without modality
+metadata, where the TUI's typed model fallback remains available.
 TTS voices belong to the selected model; supplying `voice` also proves an
 unlisted pair with the TUI's validation helper.
 
 `persona.configure({voice: {tts?, stt?}})` writes independent directions. Each
-full direction has `enabled`, `provider`, `model`, `keyEnv`, optional `baseUrl`,
+full direction has `enabled`, `provider` (a preset id is stored as
+`openai-compatible` + its URL), `model`, `keyEnv`, optional `baseUrl`,
 `voice`, `speed` and `apiKey`. Secrets go into the persona vault before metadata
 is saved. An endpoint/provider change requires a new key. `{enabled: false}`
 retains configuration and keys. Re-enable with the full retained metadata and

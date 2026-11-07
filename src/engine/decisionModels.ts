@@ -18,11 +18,12 @@
 
 import { EngineError } from "./errors.ts";
 import {
+  DECISION_MODEL_DEFAULT_MODEL,
   DECISION_MODEL_TYPESAFE_BASE_URL,
   fetchDecisionModels,
 } from "../lib/decisionModel.ts";
 import { probeKeyEndpoint, probeProviderKey, type KeyProbeResult } from "../lib/providerKeyProbe.ts";
-import type { DecisionModelCheck, DecisionModelProvider } from "./types.ts";
+import type { DecisionModelCheck, DecisionModelProvider, DecisionModelProviderInfo } from "./types.ts";
 
 /** @internal Test seams; not exported from `index.ts`. */
 export interface DecisionModelBackends {
@@ -55,6 +56,18 @@ export function _setDecisionModelBackendsForTesting(b: DecisionModelBackends | u
 
 const PROVIDERS: readonly DecisionModelProvider[] = ["openrouter", "typesafe"];
 const MAX_KEY_CHARS = 4096;
+
+/**
+ * The providers that serve decision models. A decision model answers on the
+ * decisions API (`/api/alpha/decisions`), which no other Pi provider offers,
+ * so this is the whole list once filtered by model type.
+ */
+export function decisionModelProviders(): DecisionModelProviderInfo[] {
+  return [
+    { id: "openrouter", label: "OpenRouter" },
+    { id: "typesafe", label: "TypeSafe", defaultModel: DECISION_MODEL_DEFAULT_MODEL },
+  ];
+}
 
 /**
  * Check `apiKey` against a built-in decision-model provider and list its

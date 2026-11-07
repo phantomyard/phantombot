@@ -129,9 +129,14 @@ export type EmbeddingsConfig = {
     /** Default 1536. */
     dims?: number;
 } | {
-    provider: "openai-compatible";
+    /**
+     * `"openai-compatible"` with your `baseUrl`, or a Pi provider id from
+     * `embeddings.providers()` (its own endpoint; `baseUrl` is ignored,
+     * saved as openai-compatible + that URL).
+     */
+    provider: string;
     /** http(s) endpoint of an OpenAI-compatible /embeddings server. */
-    baseUrl: string;
+    baseUrl?: string;
     model: string;
     /** Omit for an unauthenticated server; any stored key is then removed. */
     apiKey?: string;
@@ -139,8 +144,22 @@ export type EmbeddingsConfig = {
     dims?: number;
 };
 /** Input of `engine.embeddings.check()`. */
+/** One entry of `engine.embeddings.providers()`. */
+export interface EmbeddingsProviderInfo {
+    id: string;
+    label: string;
+    needsBaseUrl: boolean;
+    /** True only for bring-your-own endpoints (a local server may need no key). */
+    keyOptional: boolean;
+    /** How a config stores this choice; absent for gemini and openai-compatible. */
+    transport?: {
+        provider: "openai-compatible";
+        baseUrl: string;
+    };
+}
 export interface EmbeddingsCheckInput {
-    provider: "gemini" | "openai-compatible";
+    /** "gemini", "openai-compatible" or an id from `embeddings.providers()`. */
+    provider: string;
     /** Gemini: required to check. OpenAI-compatible: optional (local servers). */
     apiKey?: string;
     /** OpenAI-compatible only: the `/v1` base URL. */
@@ -178,7 +197,11 @@ export interface MemoryRefreshResult {
 }
 export interface VoiceDirectionSettings {
     enabled: boolean;
-    provider?: "elevenlabs" | "openai-compatible";
+    /**
+     * `"elevenlabs"`, `"openai-compatible"` (with `baseUrl`), or a Pi provider
+     * id from `voiceModels.providers()`, saved as openai-compatible + its URL.
+     */
+    provider?: string;
     baseUrl?: string;
     keyEnv?: string;
     model?: string;
@@ -306,8 +329,25 @@ export interface ProviderCheck {
      */
     models: ProviderModel[];
 }
+/** Result of `persona.brain()`. */
+export interface NativeBrainInfo {
+    /** Absent when the persona has no native routing configured. */
+    provider?: string;
+    model?: string;
+    /** The stored endpoint (`[harnesses.pi.routing].base_url`), for bring-your-own-endpoint providers only. */
+    baseUrl?: string;
+    /** A provider key is stored in the vault (the key itself is never returned). */
+    hasKey: boolean;
+}
 /** A built-in decision-model transport `engine.decisionModels.check()` can verify. */
 export type DecisionModelProvider = "openrouter" | "typesafe";
+/** One entry of `engine.decisionModels.providers()`. */
+export interface DecisionModelProviderInfo {
+    id: DecisionModelProvider;
+    label: string;
+    /** The model to preselect, when the provider has a recommended one. */
+    defaultModel?: string;
+}
 /** Result of `engine.decisionModels.check()`. */
 export interface DecisionModelCheck {
     /**

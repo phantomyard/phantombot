@@ -14,9 +14,13 @@
  * Nothing here stores anything. The key is sent to the provider (Gemini, or
  * the endpoint the caller names, as `voiceModels.check` does) and dropped.
  */
-import type { EmbeddingsCheck, EmbeddingsCheckInput } from "./types.ts";
+import type { EmbeddingsCheck, EmbeddingsCheckInput, EmbeddingsConfig, EmbeddingsProviderInfo } from "./types.ts";
 export declare const GEMINI_EMBEDDING_MODEL = "gemini-embedding-001";
 export declare const GEMINI_EMBEDDING_DIMS = 1536;
+/** Gemini, Pi providers with an embeddings API, then bring-your-own endpoint. */
+export declare function embeddingsProviders(): EmbeddingsProviderInfo[];
+/** A preset id becomes openai-compatible + the preset's own URL, for storage. */
+export declare function resolveEmbeddingsProvider<T extends EmbeddingsConfig | undefined>(em: T): T;
 /**
  * List the provider's embedding models and, when a model is given (Gemini
  * always has one), prove it with a live embed.
