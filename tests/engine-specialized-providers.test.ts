@@ -164,3 +164,18 @@ test("persona.brain(): provider and model as configured, key presence only", asy
   expect(JSON.stringify(info)).not.toContain("secret-brain");
   expect(await rejects(engine.persona("nobody").brain())).toBeTruthy();
 });
+
+test("persona.brainCheck(): checks the stored key with its own provider only", async () => {
+  const p = engine.persona("p");
+  expect(await p.brainCheck()).toEqual({ status: "unverified", detail: "no stored key", models: [] });
+  await p.configure({ brain: { native: { provider: "openai", model: "gpt-x", apiKey: "stored-key" } } });
+  requests = [];
+  const r = await p.brainCheck();
+  expect(r.status).toBe("verified");
+  expect(requests.length).toBeGreaterThan(0);
+  for (const q of requests) {
+    expect(q.url.startsWith("https://api.openai.com/")).toBe(true);
+    expect(q.auth).toBe("Bearer stored-key");
+  }
+  expect(JSON.stringify(r)).not.toContain("stored-key");
+});

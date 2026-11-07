@@ -657,6 +657,27 @@ export class Persona {
     });
   }
 
+  /**
+   * `engine.providers.check` with the STORED native key, for the provider it
+   * was stored for: the app learns the verdict and the model list, never the
+   * key, and the key only ever goes to its own provider. No stored provider
+   * or key: `unverified` with no models.
+   */
+  brainCheck(): Promise<ProviderCheck> {
+    return this.#run(async () => {
+      const info = await this.brain();
+      if (!info.provider || !info.hasKey) return { status: "unverified", detail: "no stored key", models: [] };
+      const vault = await openPersonaVault(await this.#dir());
+      let key: string | undefined;
+      try {
+        key = vault.get(ENV_PI_API_KEY);
+      } finally {
+        vault.close();
+      }
+      return checkProvider(info.provider, key ?? "");
+    });
+  }
+
   readonly secrets: {
     /** Store a credential in this persona's encrypted vault (verified by read-back). */
     set(name: string, value: string): Promise<void>;
