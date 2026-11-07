@@ -437,22 +437,18 @@ bun run build
 
 Phantombot is built by [Phantomyard](https://github.com/phantomyard).
 
-### Bounded development workflows (opt-in)
+### Sandboxed untrusted turns (default)
 
-Set an owner-authored `security-policy.json` in the persona directory, or use
-`persona.security.configure(policy)` in an embedding application. After the
-Judge passes an untrusted turn, the native engine exposes only sandboxed shell
-commands and a credential broker. Authorized calls bypass Escort's classifier.
-
-The OS confines files and direct networking; credentials stay in the parent
-runtime. Linux uses Landlock/seccomp, macOS Seatbelt, and Windows AppContainer/Job
-Objects. No Docker, separate sandbox installation or elevated setup is required;
-unsupported facilities refuse execution without falling back to a host shell.
-
-Grants cover specified PRs or verified, revocation-aware team review requests, public npm staging
-for frozen offline installs, fixed HTTPS endpoints, and exact MCP calls. They
-expire and cannot expand from model/repository text. The daemon and embedded
-engine share enforcement. Existing behavior remains until enabled; migrate
-integrations requiring host files or direct IMAP/SMTP before enabling their tasks.
+Every untrusted turn the judge passes runs in an OS sandbox: a disposable
+workspace with network and the persona's vault in its environment, but no
+host files, home directory, SSH keys, vault key or other personas. Host
+actions (notify, memory) go through a broker. `enabled:false` in the persona's
+`security-policy.json` opts out. Linux uses Landlock/seccomp, macOS Seatbelt,
+and Windows AppContainer/Job Objects; no Docker or elevated setup is needed, and
+an unsupported facility refuses execution rather than falling back to a host
+shell. The judge and escort both hold at 90/100; a hijack both checks
+miss can leak the secrets the turn holds, which is the stated, accepted risk.
+Owner grants (specified PRs, npm staging, fixed HTTPS endpoints, exact MCP
+calls) still add credentialed operations that never leave the parent runtime.
 See [the security contract](docs/reference/bounded-security.md) for policy examples,
 operation schemas, platform limits and rollout gates.

@@ -1,13 +1,65 @@
 import { socketPair, receiveListener, superviseProc } from "./linux-notify.ts";
-import { closeSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from "node:fs";
 import { spawn } from "node:child_process";
-import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { windowsSandbox } from "./windows.ts";
 import { linuxSandbox } from "./linux.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 
 export const SANDBOX_SUBCOMMAND = "__sandbox_exec";
+/** Runtime-set (PHANTOMBOT_ is a reserved secret prefix): host read-only paths. */
+export const ENV_SANDBOX_READ = "PHANTOMBOT_SANDBOX_READ";
+
+/** Host paths a sandboxed command may READ (never write). */
+export interface SandboxHostPaths {
+  /** Files or directories, absolute. Missing ones are skipped. */
+  read: string[];
+  /** Directories appended to PATH (each must also be in `read`). */
+  path: string[];
+  /**
+   * The real home. `read` entries below it are linked at the same relative
+   * path in the sandbox's neutral HOME, so `~/.ssh/id.pub` works inside.
+   */
+  home?: string;
+}
+
+/**
+ * The owner's model (GHSA-w7w8): the only WRITABLE directory is the turn's
+ * scratch workspace. Read-only: ~/.local/bin and SSH PUBLIC keys.
+ * Everything else in the home folder, including every persona folder (so
+ * identity.json, the vault, prompts, config and policy), stays unreachable.
+ */
+export function defaultSandboxHostPaths(home = homedir()): SandboxHostPaths {
+  const bin = join(home, ".local", "bin"),
+    ssh = join(home, ".ssh");
+  let pub: string[] = [];
+  try {
+    pub = readdirSync(ssh)
+      .filter((n) => n.endsWith(".pub"))
+      .map((n) => join(ssh, n));
+  } catch {
+    /* no ~/.ssh */
+  }
+  return { read: [bin, ...pub], path: [bin], home };
+}
+
+function encodeReadPaths(paths: string[]): string {
+  for (const p of paths)
+    if (!isAbsolute(p) || /[\x00-\x1f]/.test(p))
+      throw new Error("invalid sandbox read path");
+  return paths.join("\n");
+}
+const LISTENER_DEADLINE_MS = 15_000;
 const MAX_OUTPUT = 512 * 1024;
 export interface SandboxResult {
   exitCode: number;
@@ -29,15 +81,26 @@ export function sandboxExecChild(args: string[]): never {
     process.exit(windowsSandbox(realpathSync(workspace), executable));
   if (process.platform !== "linux")
     throw new Error("unsupported sandbox launcher");
+  const readPaths = (process.env[ENV_SANDBOX_READ] ?? "")
+    .split("\n")
+    .filter((p) => isAbsolute(p));
   process.chdir(realpathSync(workspace));
-  return linuxSandbox(realpathSync(workspace), realpathSync(executable), argv);
+  return linuxSandbox(
+    realpathSync(workspace),
+    realpathSync(executable),
+    argv,
+    readPaths,
+  );
 }
 
 function seatbeltString(s: string): string {
   if (/[\x00-\x1f]/.test(s)) throw new Error("invalid sandbox path");
   return JSON.stringify(s);
 }
-export function seatbeltProfile(workspace: string): string {
+export function seatbeltProfile(
+  workspace: string,
+  readPaths: string[] = [],
+): string {
   const system = [
     "/System/Library",
     "/System/Cryptexes",
@@ -67,7 +130,11 @@ export function seatbeltProfile(workspace: string): string {
 (allow file-read* file-map-executable ${runtimePaths})
 (allow file-read* (literal "/dev/random") (literal "/dev/urandom") (literal "/private/etc/localtime") (literal "/private/etc/passwd"))
 (allow file-read* file-write* (literal "/dev/null"))
-(allow file* (subpath ${seatbeltString(workspace)}))`;
+(allow file* (subpath ${seatbeltString(workspace)}))${readPaths.map((p) => `\n(allow file-read* file-map-executable (subpath ${seatbeltString(p)}))`).join("")}
+; GHSA-w7w8: untrusted turns need the network (git, gh, APIs) and DNS/TLS.
+(allow network*)
+(allow mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.trustd") (global-name "com.apple.trustd.agent") (global-name "com.apple.SecurityServer") (global-name "com.apple.SystemConfiguration.configd") (global-name "com.apple.SystemConfiguration.DNSConfiguration"))
+(allow file-read* (literal "/private/etc/hosts") (literal "/private/etc/resolv.conf") (literal "/private/var/run/resolv.conf") (literal "/private/etc/services") (literal "/private/etc/protocols") (literal "/private/etc/group") (subpath "/private/etc/ssl") (subpath "/Library/Keychains") (subpath "/usr/local") (subpath "/opt/homebrew"))`;
 }
 
 /**
@@ -84,16 +151,50 @@ export function discardSandboxHome(home: string): void {
   rmSync(home, { recursive: true, force: true });
 }
 
-/** No ambient credential, proxy, loader, shell-startup or engine variable survives. */
+/**
+ * Names a secret may NOT take inside the sandbox: the fixed variables below,
+ * and anything a loader or runtime acts on. The Linux/Windows launcher runs
+ * before confinement with this env, so a loader variable would act outside
+ * the boundary. Everything else in the persona vault passes (GHSA-w7w8:
+ * untrusted turns get the whole vault; the judge and escort are the guard).
+ */
+const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const RESERVED_SECRET =
+  /^(?:LD_|DYLD_|BUN_|NODE_|PHANTOMBOT_|GIT_CONFIG|XDG_)|^(?:PATH|HOME|USERPROFILE|TMPDIR|TMP|TEMP|OPENSSL_CONF|CI|GIT_TERMINAL_PROMPT|LANG|LOCALAPPDATA|APPDATA|SystemRoot|ComSpec|PATHEXT|BASH_ENV|ENV|SHELLOPTS|PS4|IFS)$/i;
+export function sandboxSecretEnv(
+  secrets: Record<string, string | undefined> | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(secrets ?? {}))
+    if (
+      typeof v === "string" &&
+      !v.includes("\0") &&
+      SECRET_NAME.test(k) &&
+      !RESERVED_SECRET.test(k)
+    )
+      out[k] = v;
+  return out;
+}
+
+/**
+ * The fixed variables, plus the persona's secrets when the runtime passes
+ * them. No ambient proxy, loader, shell-startup or engine variable survives,
+ * and no secret can override a fixed variable.
+ */
 export function sandboxEnvironment(
   workspace: string,
   home: string,
+  secrets?: Record<string, string | undefined>,
+  extraPath: string[] = [],
 ): NodeJS.ProcessEnv {
+  const sep = process.platform === "win32" ? ";" : ":";
+  const extra = extraPath.length ? sep + extraPath.join(sep) : "";
   return {
+    ...sandboxSecretEnv(secrets),
     PATH:
       process.platform === "win32"
-        ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32;${join(workspace, ".tools")}`
-        : `/usr/bin:/bin:/usr/sbin:/sbin:${join(workspace, ".tools")}`,
+        ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32;${join(workspace, ".tools")}${extra}`
+        : `/usr/bin:/bin:/usr/sbin:/sbin:${join(workspace, ".tools")}${extra}`,
     HOME: home,
     USERPROFILE: home,
     TMPDIR: join(workspace, ".tmp"),
@@ -127,10 +228,25 @@ export async function runSandbox(
     signal?: AbortSignal;
     timeoutMs?: number;
     stdin?: Uint8Array;
+    /** Persona secrets for the sandboxed command (runtime-supplied, never model input). */
+    secrets?: Record<string, string | undefined>;
+    /**
+     * Read-only host paths (runtime-supplied, never model input). Linux and
+     * macOS only: on Windows they would need ACL changes on host folders.
+     */
+    hostPaths?: SandboxHostPaths;
     /** Test/runtime host self-exec override; never from model input. */ launcher?: string[];
   } = {},
 ): Promise<SandboxResult> {
   workspace = realpathSync(workspace);
+  const readable =
+    process.platform === "win32" ? [] : resolveReadPaths(opts.hostPaths?.read);
+  const extraPath =
+    process.platform === "win32"
+      ? []
+      : resolveReadPaths(opts.hostPaths?.path).filter((p) =>
+          readable.includes(p),
+        );
   for (const path of [".tmp", ".cache", ".config", ".tools"])
     mkdirSync(join(workspace, path), { recursive: true, mode: 0o700 });
   let invocation: string[];
@@ -147,7 +263,7 @@ export async function runSandbox(
     invocation = [
       "/usr/bin/sandbox-exec",
       "-p",
-      seatbeltProfile(workspace),
+      seatbeltProfile(workspace, readable),
       "/bin/sh",
       "-c",
       command,
@@ -162,6 +278,8 @@ export async function runSandbox(
   else throw new Error("sandbox unavailable on this platform");
   if (opts.signal?.aborted) throw new Error("sandbox cancelled");
   const home = neutralSandboxHome();
+  if (readable.length && opts.hostPaths?.home)
+    linkHomePaths(home, opts.hostPaths.home, opts.hostPaths.read);
   const sockets = process.platform === "linux" ? socketPair() : undefined;
   const child = spawn(invocation[0]!, invocation.slice(1), {
     // The launcher itself must not discover bunfig/preloads from the repo.
@@ -171,7 +289,12 @@ export async function runSandbox(
         : process.platform === "win32"
           ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32`
           : "/",
-    env: launcherEnvironment(workspace, home),
+    env: {
+      ...launcherEnvironment(workspace, home, opts.secrets, extraPath),
+      ...(process.platform === "linux" && readable.length
+        ? { [ENV_SANDBOX_READ]: encodeReadPaths(readable) }
+        : {}),
+    },
     stdio: [
       opts.stdin ? "pipe" : "ignore",
       "pipe",
@@ -184,9 +307,17 @@ export async function runSandbox(
   let supervision: Promise<void> | undefined;
   let supervisorStopped = false;
   let listenerPending = !!sockets;
+  // A child that never hands over its listener can never finish (its trapped
+  // opens wait on us), so fail fast instead of hanging until the turn timeout.
+  const listenerDeadline = Date.now() + LISTENER_DEADLINE_MS;
   const listenerTimer = sockets
     ? setInterval(() => {
         if (!listenerPending) return;
+        if (Date.now() > listenerDeadline) {
+          read(Buffer.from("sandbox unavailable: supervisor listener not received\n"));
+          stop();
+          return;
+        }
         try {
           const fd = receiveListener(sockets[0]);
           if (fd === undefined) return;
@@ -250,8 +381,10 @@ export async function runSandbox(
 function launcherEnvironment(
   workspace: string,
   home: string,
+  secrets?: Record<string, string | undefined>,
+  extraPath: string[] = [],
 ): NodeJS.ProcessEnv {
-  const env = sandboxEnvironment(workspace, home);
+  const env = sandboxEnvironment(workspace, home, secrets, extraPath);
   if (process.platform === "win32") {
     for (const key of [
       "LOCALAPPDATA",
@@ -264,4 +397,36 @@ function launcherEnvironment(
     }
   }
   return env;
+}
+
+/** Resolved, existing, absolute paths only (a symlink grants its target). */
+function resolveReadPaths(paths: string[] | undefined): string[] {
+  const out: string[] = [];
+  for (const p of paths ?? []) {
+    if (!isAbsolute(p)) continue;
+    try {
+      statSync(p);
+      const r = realpathSync(p);
+      if (!out.includes(r)) out.push(r);
+    } catch {
+      /* missing: skipped */
+    }
+  }
+  return out;
+}
+
+/** `~/x` inside = the granted host path; only for paths below the real home. */
+function linkHomePaths(neutral: string, realHome: string, paths: string[]): void {
+  for (const p of paths) {
+    const rel = relative(realHome, p);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
+    try {
+      statSync(p);
+      const at = join(neutral, rel);
+      mkdirSync(dirname(at), { recursive: true, mode: 0o700 });
+      symlinkSync(p, at);
+    } catch {
+      /* missing or not linkable: the path just is not mirrored */
+    }
+  }
 }

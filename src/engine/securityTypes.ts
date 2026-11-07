@@ -1,7 +1,7 @@
 /** Owner-authored authority. These objects are never built from model text. */
 export interface SecurityPolicy {
   version: 1;
-  /** Explicit opt-in while the cross-platform rollout is validated. */
+  /** On by default (no policy file); `false` is the owner's explicit opt-out. */
   enabled: boolean;
   grants: NetworkGrant[];
 }

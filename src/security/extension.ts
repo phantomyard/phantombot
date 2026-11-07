@@ -20,14 +20,10 @@ export interface SecurityExtensionApi {
     handler: (event: { toolName: string; input: unknown }) => unknown,
   ): void;
 }
-/** ONLY two trusted tool implementations execute in a bounded turn. */
-export function phantombotSecurityExtension(
-  pi: SecurityExtensionApi,
-  env = process.env,
-): void {
+/** Parse the runtime-issued session descriptor; anything malformed = none. */
+export function sessionFromEnv(env: NodeJS.ProcessEnv = process.env): SessionDescriptor | undefined {
   const raw = env[ENV_SECURITY_SESSION];
-  if (raw === undefined) return;
-  let session: SessionDescriptor | undefined;
+  if (raw === undefined) return undefined;
   try {
     const s = JSON.parse(raw) as SessionDescriptor;
     const u = new URL(s.url);
@@ -37,10 +33,54 @@ export function phantombotSecurityExtension(
       u.pathname === "/operation" &&
       /^[a-f0-9]{64}$/.test(s.token)
     )
-      session = s;
+      return s;
   } catch {
-    /* registers a closed hook */
+    /* treated as no session */
   }
+  return undefined;
+}
+
+export const SANDBOX_TOOL_DESCRIPTION =
+  "Run shell commands in this turn's scratch workspace (cwd, $PHANTOMBOT_SCRATCH): the ONLY writable place, deleted at turn end. Read-only: ~/.local/bin (on PATH), ~/.ssh/*.pub. Network and the persona's credentials (env) are available: git, gh, curl, APIs. No other host files, persona files or SSH private keys.";
+export const BROKER_TOOL_DESCRIPTION =
+  "Host actions the sandbox cannot do. operation:{kind:'notify',message} tells the owner; {kind:'memory-capture',text,tags?:[decision|lesson|person|commitment|norm]}; {kind:'memory-search',query,limit?}. " +
+  "{manifest:true} lists any owner grants; operation:{kind,grant,...} uses one: npm-package {name,version}, github-checkout/github-read/github-review, http (exact URL/method), mcp (exact arguments).";
+
+/** The wire body each of the two session tools sends to the runtime. */
+export function sessionToolBody(
+  tool: "sandbox" | "broker",
+  params: Record<string, unknown>,
+): unknown {
+  if (tool === "sandbox") return { kind: "sandbox", command: params.command };
+  return params.manifest === true
+    ? { kind: "manifest" }
+    : { kind: "broker", operation: params.operation };
+}
+
+export async function invokeSession(
+  session: SessionDescriptor,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<{ text: string; ok: boolean }> {
+  const response = await fetch(session.url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${session.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+  return { text: await response.text(), ok: response.ok };
+}
+
+/** ONLY two trusted tool implementations execute in a bounded turn. */
+export function phantombotSecurityExtension(
+  pi: SecurityExtensionApi,
+  env = process.env,
+): void {
+  if (env[ENV_SECURITY_SESSION] === undefined) return;
+  const session = sessionFromEnv(env);
   pi.on("tool_call", (e) =>
     !session || !["sandbox", "broker"].includes(e.toolName)
       ? {
@@ -52,45 +92,27 @@ export function phantombotSecurityExtension(
   );
   if (!session) return;
   const invoke = async (body: unknown, signal?: AbortSignal) => {
-    const response = await fetch(session!.url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${session!.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
-    const result = await response.text();
+    const r = await invokeSession(session, body, signal);
     return {
-      content: [{ type: "text", text: result }],
-      ...(response.ok ? {} : { isError: true }),
+      content: [{ type: "text", text: r.text }],
+      ...(r.ok ? {} : { isError: true }),
     };
   };
   pi.registerTool({
     name: "sandbox",
     label: "Sandbox",
-    description:
-      "Run shell commands in the disposable workspace. No credentials, host files or direct network. Reads, edits, installs from cached dependencies, tests and cleanup are permitted without further model checks.",
+    description: SANDBOX_TOOL_DESCRIPTION,
     parameters: Type.Object({ command: Type.String() }),
-    execute: (_id, p, signal) =>
-      invoke({ kind: "sandbox", command: p.command }, signal),
+    execute: (_id, p, signal) => invoke(sessionToolBody("sandbox", p), signal),
   });
   pi.registerTool({
     name: "broker",
     label: "Granted API",
-    description:
-      "Call credentialed APIs under exact owner grants. Call {manifest:true} to list grants; otherwise supply operation: {kind,grant,...}. GitHub: github-checkout head (extracts into repository/); github-read resource pull/files/comments/reviews; github-review head,event,body,comments. HTTP uses granted URL/method. MCP requires exact granted arguments. npm-package name/version stages a package into the Bun offline cache under an npm-registry grant; install with bun install --offline. Team review grants also require pullRequest. No model permission checks.",
+    description: BROKER_TOOL_DESCRIPTION,
     parameters: Type.Object({
       manifest: Type.Optional(Type.Boolean()),
       operation: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     }),
-    execute: (_id, p, signal) =>
-      invoke(
-        p.manifest === true
-          ? { kind: "manifest" }
-          : { kind: "broker", operation: p.operation },
-        signal,
-      ),
+    execute: (_id, p, signal) => invoke(sessionToolBody("broker", p), signal),
   });
 }

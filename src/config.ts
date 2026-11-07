@@ -1012,9 +1012,8 @@ export interface DecisionModelConsumerSettings {
 /** The threat judge's Jev settings — the SECURITY control's consumer. */
 export interface DecisionModelJudgeSettings extends DecisionModelConsumerSettings {
   /**
-   * Hold at/above this score. Defaults to DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD (70)
-   * — calibrated on the bundled corpus for Jev's decile-compressed scale,
-   * deliberately NOT the harness judge's 80 (see lib/decisionModelJudge.ts).
+   * Hold at/above this score. Defaults to DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD (90),
+   * the same bar as the harness judge (see lib/decisionModelJudge.ts).
    */
   threshold: number;
   /**

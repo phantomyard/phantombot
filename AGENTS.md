@@ -139,7 +139,7 @@ One line per rule: its stable number, then its title. Click through for the full
 - [24](docs/contributing/invariants/security-perimeter.md#inv-24) The phantomchat allowlist IS the principal list — bridges get their own, lower tier (issue #400).
 - [63](docs/contributing/invariants/security-perimeter.md#inv-63) Jev talks to the DECISIONS API, never chat/completions — and its security numbers are calibrated, not assumed (issue #597).
 
-- [88](docs/contributing/invariants/security-perimeter.md#inv-88) Bounded turns replace classifier guesses with OS isolation and immutable broker grants.
+- [88](docs/contributing/invariants/security-perimeter.md#inv-88) Untrusted turns run sandboxed by default: OS isolation for host files, network and the vault inside (GHSA-w7w8).
 
 ### Personas, config and credentials — [personas-and-config.md](docs/contributing/invariants/personas-and-config.md)
 

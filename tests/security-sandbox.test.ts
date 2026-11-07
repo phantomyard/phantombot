@@ -9,7 +9,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSandbox, sandboxEnvironment } from "../src/security/sandbox.ts";
+import {
+  defaultSandboxHostPaths,
+  runSandbox,
+  sandboxEnvironment,
+} from "../src/security/sandbox.ts";
 import { deleteWindowsProfile } from "../src/security/windows.ts";
 import { prepareSandboxTools } from "../src/security/workspace.ts";
 const dirs: string[] = [];
@@ -75,7 +79,34 @@ test("repository child process inherits restrictions", async () => {
   expect(r.exitCode).not.toBe(0);
   expect(r.output).not.toContain("host-secret");
 }, 15000);
-test("real sockets cannot reach a host API", async () => {
+test("sandbox env carries runtime-supplied secrets but never reserved names", () => {
+  const env = sandboxEnvironment("/work", "/neutral", {
+    GH_TOKEN: "gh-secret",
+    LD_PRELOAD: "/evil.so",
+    NODE_OPTIONS: "--require /evil",
+    BUN_OPTIONS: "--preload /evil",
+    PATH: "/evil",
+    HOME: "/evil",
+    PHANTOMBOT_SECURITY_SESSION: "x",
+    "BAD-NAME": "x",
+  });
+  expect(env.GH_TOKEN).toBe("gh-secret");
+  for (const k of ["LD_PRELOAD", "NODE_OPTIONS", "BUN_OPTIONS", "PHANTOMBOT_SECURITY_SESSION", "BAD-NAME"])
+    expect(env).not.toHaveProperty(k);
+  expect(env.HOME).toBe("/neutral");
+  expect(env.PATH).not.toContain("/evil");
+});
+test("sandboxed command sees the secrets it was given", async () => {
+  const workspace = fresh();
+  const r = await runSandbox(
+    workspace,
+    win ? "echo %PROBE_SECRET%" : 'echo "$PROBE_SECRET"',
+    { secrets: { PROBE_SECRET: "probe-value-1" } },
+  );
+  expect(r.exitCode, r.output).toBe(0);
+  expect(r.output).toContain("probe-value-1");
+}, 15000);
+test("sandbox has TCP network (GHSA-w7w8); Windows AppContainer still cannot reach host loopback", async () => {
   const workspace = fresh();
   let calls = 0;
   const server = Bun.serve({
@@ -83,21 +114,38 @@ test("real sockets cannot reach a host API", async () => {
     port: 0,
     fetch: () => {
       calls++;
-      return new Response("host-secret");
+      return new Response("net-ok");
     },
   });
   try {
     const r = await runSandbox(
       workspace,
-      `${win ? "curl.exe" : "curl"} --connect-timeout 1 --max-time 2 http://127.0.0.1:${server.port}/`,
+      `${win ? "curl.exe" : "curl"} -s --connect-timeout 2 --max-time 4 http://127.0.0.1:${server.port}/`,
     );
-    expect(r.exitCode).not.toBe(0);
-    expect(calls).toBe(0);
-    expect(r.output).not.toContain("host-secret");
+    if (win) {
+      expect(r.exitCode).not.toBe(0);
+      expect(calls).toBe(0);
+    } else {
+      expect(r.exitCode, r.output).toBe(0);
+      expect(r.output).toContain("net-ok");
+    }
   } finally {
     await server.stop(true);
   }
 }, 15000);
+test.skipIf(process.platform !== "linux")(
+  "Linux sandbox refuses non-inet sockets (no host Unix sockets)",
+  async () => {
+    const workspace = fresh();
+    const r = await runSandbox(
+      workspace,
+      "python3 -c 'import socket; socket.socket(socket.AF_UNIX)' 2>&1; echo rc=$?",
+    );
+    expect(r.output).toContain("Address family not supported");
+    expect(r.output).toContain("rc=1");
+  },
+  15000,
+);
 test("process timeout terminates descendants", async () => {
   const workspace = fresh();
   const r = await runSandbox(
@@ -142,3 +190,57 @@ test("launcher never executes repository Bun preloads outside confinement", asyn
   expect(r.exitCode, r.output).toBe(0);
   expect(() => readFileSync(canary)).toThrow();
 }, 15000);
+
+// The owner's model: only the workspace is writable; tool dirs and SSH PUBLIC
+// keys are read-only; everything else in the home stays hidden.
+test("defaultSandboxHostPaths grants ~/.local/bin and only public SSH keys", () => {
+  const home = fresh();
+  mkdirSync(join(home, ".ssh"));
+  writeFileSync(join(home, ".ssh", "id_ed25519"), "PRIVATE");
+  writeFileSync(join(home, ".ssh", "id_ed25519.pub"), "ssh-ed25519 PUB");
+  const paths = defaultSandboxHostPaths(home);
+  expect(paths.read).toEqual([
+    join(home, ".local", "bin"),
+    join(home, ".ssh", "id_ed25519.pub"),
+  ]);
+  expect(paths.path).toEqual([join(home, ".local", "bin")]);
+});
+
+test.skipIf(win)(
+  "read-only host paths: readable via ~, bin on PATH, private key and rest of home hidden",
+  async () => {
+    const home = fresh(),
+      ws = fresh();
+    for (const d of [".local/bin", "tools", ".ssh"])
+      mkdirSync(join(home, d), { recursive: true });
+    writeFileSync(join(home, ".local/bin/pbtool"), "#!/bin/sh\necho tool-ran\n", { mode: 0o755 });
+    writeFileSync(join(home, "tools", "script.txt"), "tool-file");
+    writeFileSync(join(home, ".ssh", "id_x.pub"), "ssh-ed25519 PUBKEY");
+    writeFileSync(join(home, ".ssh", "id_x"), "PRIVATE-KEY");
+    writeFileSync(join(home, ".bashrc"), "HOME-SECRET");
+    const r = await runSandbox(
+      ws,
+      [
+        "pbtool",
+        `cat ${quote(join(home, "tools", "script.txt"))} || echo tools-hidden`,
+        "cat ~/.ssh/id_x.pub; echo",
+        `cat ${quote(join(home, ".ssh", "id_x"))} || echo private-hidden`,
+        `cat ${quote(join(home, ".bashrc"))} || echo home-hidden`,
+        `touch ~/.ssh/new || echo ssh-readonly`,
+        "touch here && echo workspace-writable",
+      ].join("\n"),
+      { hostPaths: { ...defaultSandboxHostPaths(home), home } },
+    );
+    expect(r.output).toContain("tool-ran");
+    expect(r.output).toContain("tools-hidden");
+    expect(r.output).not.toContain("tool-file");
+    expect(r.output).toContain("PUBKEY");
+    expect(r.output).toContain("private-hidden");
+    expect(r.output).not.toContain("PRIVATE-KEY");
+    expect(r.output).toContain("home-hidden");
+    expect(r.output).not.toContain("HOME-SECRET");
+    expect(r.output).toContain("ssh-readonly");
+    expect(r.output).toContain("workspace-writable");
+  },
+  20000,
+);
