@@ -1107,7 +1107,7 @@ This turn runs in a disposable sandbox with two tools:
 - \`sandbox\` — a shell whose working directory is this turn's scratch
   (\`$PHANTOMBOT_SCRATCH\`). It is the ONLY writable place: clone, build and
   write files there and nowhere else; it is deleted when the turn ends.
-  Read-only: \`~/.local/bin\` (on PATH), \`~/tools\` and \`~/.ssh/*.pub\`.
+  Read-only: \`~/.local/bin\` (on PATH) and \`~/.ssh/*.pub\`.
   The rest of the home folder, the persona folder, SSH private keys and host
   files are not reachable. Network and your usual credentials are in the
   environment (gh, git, curl, APIs all work). \`bun\` and \`node\` are in

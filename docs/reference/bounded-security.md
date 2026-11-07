@@ -15,7 +15,7 @@ it would on the host. Filesystem:
   `<persona>/scratch/untrusted/<conversation>/<turn>/`), which is also the
   command's cwd and is deleted at turn end. The sandboxed-turn prompt tells the
   model this is the only place to work.
-- **Read-only:** `~/.local/bin` (on `PATH`), `~/tools` and `~/.ssh/*.pub`,
+- **Read-only:** `~/.local/bin` (on `PATH`) and `~/.ssh/*.pub`,
   linked into the sandbox's neutral `HOME` so `~/…` resolves (Linux and macOS;
   Windows would need ACL changes on host folders, so it gets none).
 - **Hidden:** everything else, including the persona folder (`identity.json`,

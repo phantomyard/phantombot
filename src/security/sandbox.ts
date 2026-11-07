@@ -28,20 +28,19 @@ export interface SandboxHostPaths {
   path: string[];
   /**
    * The real home. `read` entries below it are linked at the same relative
-   * path in the sandbox's neutral HOME, so `~/tools` works inside.
+   * path in the sandbox's neutral HOME, so `~/.ssh/id.pub` works inside.
    */
   home?: string;
 }
 
 /**
  * The owner's model (GHSA-w7w8): the only WRITABLE directory is the turn's
- * scratch workspace. Read-only: the user's tool dirs and SSH PUBLIC keys.
+ * scratch workspace. Read-only: ~/.local/bin and SSH PUBLIC keys.
  * Everything else in the home folder, including every persona folder (so
  * identity.json, the vault, prompts, config and policy), stays unreachable.
  */
 export function defaultSandboxHostPaths(home = homedir()): SandboxHostPaths {
   const bin = join(home, ".local", "bin"),
-    tools = join(home, "tools"),
     ssh = join(home, ".ssh");
   let pub: string[] = [];
   try {
@@ -51,7 +50,7 @@ export function defaultSandboxHostPaths(home = homedir()): SandboxHostPaths {
   } catch {
     /* no ~/.ssh */
   }
-  return { read: [bin, tools, ...pub], path: [bin], home };
+  return { read: [bin, ...pub], path: [bin], home };
 }
 
 function encodeReadPaths(paths: string[]): string {

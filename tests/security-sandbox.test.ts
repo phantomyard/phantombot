@@ -193,7 +193,7 @@ test("launcher never executes repository Bun preloads outside confinement", asyn
 
 // The owner's model: only the workspace is writable; tool dirs and SSH PUBLIC
 // keys are read-only; everything else in the home stays hidden.
-test("defaultSandboxHostPaths grants tool dirs and only public SSH keys", () => {
+test("defaultSandboxHostPaths grants ~/.local/bin and only public SSH keys", () => {
   const home = fresh();
   mkdirSync(join(home, ".ssh"));
   writeFileSync(join(home, ".ssh", "id_ed25519"), "PRIVATE");
@@ -201,7 +201,6 @@ test("defaultSandboxHostPaths grants tool dirs and only public SSH keys", () => 
   const paths = defaultSandboxHostPaths(home);
   expect(paths.read).toEqual([
     join(home, ".local", "bin"),
-    join(home, "tools"),
     join(home, ".ssh", "id_ed25519.pub"),
   ]);
   expect(paths.path).toEqual([join(home, ".local", "bin")]);
@@ -223,23 +222,24 @@ test.skipIf(win)(
       ws,
       [
         "pbtool",
-        "cat ~/tools/script.txt; echo",
+        `cat ${quote(join(home, "tools", "script.txt"))} || echo tools-hidden`,
         "cat ~/.ssh/id_x.pub; echo",
         `cat ${quote(join(home, ".ssh", "id_x"))} || echo private-hidden`,
         `cat ${quote(join(home, ".bashrc"))} || echo home-hidden`,
-        `touch ${quote(join(home, "tools", "new"))} || echo tools-readonly`,
+        `touch ~/.ssh/new || echo ssh-readonly`,
         "touch here && echo workspace-writable",
       ].join("\n"),
       { hostPaths: { ...defaultSandboxHostPaths(home), home } },
     );
     expect(r.output).toContain("tool-ran");
-    expect(r.output).toContain("tool-file");
+    expect(r.output).toContain("tools-hidden");
+    expect(r.output).not.toContain("tool-file");
     expect(r.output).toContain("PUBKEY");
     expect(r.output).toContain("private-hidden");
     expect(r.output).not.toContain("PRIVATE-KEY");
     expect(r.output).toContain("home-hidden");
     expect(r.output).not.toContain("HOME-SECRET");
-    expect(r.output).toContain("tools-readonly");
+    expect(r.output).toContain("ssh-readonly");
     expect(r.output).toContain("workspace-writable");
   },
   20000,
