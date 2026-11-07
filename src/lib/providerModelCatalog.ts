@@ -99,7 +99,8 @@ function endpointFor(
  * Three shapes cover every endpoint we call: OpenAI-compatible and Anthropic
  * both return `{ data: [{ id }] }`, Google returns `{ models: [{ name }] }`
  * with a `models/` prefix to strip, and OpenRouter returns the OpenAI shape
- * plus an `architecture.input_modalities` array we read image support from.
+ * plus an `architecture.input_modalities` array we read image support from;
+ * OpenCode puts MIME types under `modalities.input` instead.
  */
 function parseModels(providerId: string, body: unknown): PiModel[] {
   const rows: PiModel[] = [];
@@ -131,11 +132,17 @@ function parseModels(providerId: string, body: unknown): PiModel[] {
     // Vision is only claimed when the provider says so. An unknown capability
     // counts as text-only, so the wizard still ASKS for a vision delegate
     // rather than silently routing images at a model that cannot see them.
-    const supportsImages = modalities
-      ? modalities.includes("image")
-      : Array.isArray(e.input_modalities)
-        ? (e.input_modalities as unknown[]).includes("image")
-        : false;
+    // OpenCode lists MIME types (`image/png`) under `modalities.input`.
+    const oc = e.modalities as Record<string, unknown> | undefined;
+    const inputs = modalities
+      ?? (Array.isArray(e.input_modalities)
+        ? (e.input_modalities as unknown[])
+        : oc && Array.isArray(oc.input)
+          ? (oc.input as unknown[])
+          : []);
+    const supportsImages = inputs.some(
+      (m) => typeof m === "string" && (m === "image" || m.startsWith("image/")),
+    );
     push(e.id ?? e.name, supportsImages);
   }
   return rows;

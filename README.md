@@ -401,6 +401,8 @@ bun run build
 
 Voice Models apps can discover TUI-supported speech/transcription models and configure independent TTS/STT directions through the engine; keys stay in each persona vault. Authenticated remote PhantomChat model selection reuses the remote endpoint and key. See [the voice API](docs/reference/engine.md#voice-models).
 
+Embedding apps verify a provider key and fill a model picker with `engine.providers.check`: the provider's live model list, or Pi's bundled list for that provider when no live list can be read (never for a rejected key or a bring-your-own endpoint). See [the provider API](docs/reference/engine.md#providers-engineproviders).
+
 Embedding apps can also set up semantic memory search the way `phantombot embedding` does: `engine.embeddings.check` lists a provider's embedding models and proves a choice with a live embed, and `persona.memory.refresh()` embeds the persona's notes (the engine runs no heartbeat, so the app calls it). See [the embeddings API](docs/reference/engine.md#embeddings-engineembeddings).
 
 The engine can also be embedded in a Bun/TypeScript application with isolated
