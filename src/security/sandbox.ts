@@ -148,7 +148,9 @@ export function seatbeltProfile(
 ; GHSA-w7w8: untrusted turns need the network (git, gh, APIs) and DNS/TLS.
 (allow network*)
 (allow mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.trustd") (global-name "com.apple.trustd.agent") (global-name "com.apple.SecurityServer") (global-name "com.apple.SystemConfiguration.configd") (global-name "com.apple.SystemConfiguration.DNSConfiguration"))
-(allow file-read* (literal "/private/etc/hosts") (literal "/private/etc/resolv.conf") (literal "/private/var/run/resolv.conf") (literal "/private/etc/services") (literal "/private/etc/protocols") (literal "/private/etc/group") (subpath "/private/etc/ssl") (subpath "/Library/Keychains") (subpath "/usr/local") (subpath "/opt/homebrew"))`;
+(allow file-read* (literal "/private/etc/hosts") (literal "/private/etc/resolv.conf") (literal "/private/var/run/resolv.conf") (literal "/private/etc/services") (literal "/private/etc/protocols") (literal "/private/etc/group") (subpath "/private/etc/ssl") (subpath "/Library/Keychains") (subpath "/usr/local") (subpath "/opt/homebrew"))
+; /usr/bin/git and friends are xcrun shims into the developer tools.
+(allow file-read* file-map-executable (subpath "/Library/Developer/CommandLineTools") (regex #"^/Applications/Xcode[^/]*\.app/") (literal "/private/var/db/xcode_select_link") (subpath "/private/var/select"))`;
 }
 
 /**
@@ -241,7 +243,7 @@ export function sandboxEnvironment(
     PATH:
       process.platform === "win32"
         ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32;${join(workspace, ".tools")}${extra}`
-        : `/usr/bin:/bin:/usr/sbin:/sbin:${join(workspace, ".tools")}${extra}`,
+        : `${process.platform === "darwin" ? "/opt/homebrew/bin:/usr/local/bin:" : ""}/usr/bin:/bin:/usr/sbin:/sbin:${join(workspace, ".tools")}${extra}`,
     HOME: home,
     USERPROFILE: home,
     TMPDIR: join(workspace, ".tmp"),
