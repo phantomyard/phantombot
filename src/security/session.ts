@@ -17,15 +17,6 @@ import { loadRegistry } from "../mcp/registry.ts";
 import { McpHub } from "../mcp/hub.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 
-/**
- * A pre-run check on what the turn is about to do (the escort, GHSA-w7w8):
- * resolves to a refusal message, or undefined to let it run.
- */
-export type SessionGate = (action: {
-  tool: string;
-  input: unknown;
-}) => Promise<string | undefined>;
-
 const MEMORY_TAGS = new Set(["decision", "lesson", "person", "commitment", "norm"]);
 /** Model text never starts an argv word with "-" (no flag injection). */
 const argText = (s: string) => (s.startsWith("-") ? ` ${s}` : s);
@@ -54,24 +45,6 @@ async function runSelf(
   return { code, output: (out + err).slice(0, 64 * 1024) };
 }
 
-/** One line for the escort: what a broker host action does, and to what. */
-function describeOperation(
-  op: Record<string, unknown> | undefined,
-  policy: SecurityPolicy,
-): string {
-  const kind = typeof op?.kind === "string" ? op.kind : "invalid";
-  const g = policy.grants.find((x) => x.id === op?.grant) as
-    | Record<string, unknown>
-    | undefined;
-  const target = g
-    ? [g.repository, g.pullRequest && `#${g.pullRequest}`, g.method, g.url, g.server, g.tool]
-        .filter(Boolean)
-        .join(" ")
-    : "no matching grant";
-  const { kind: _k, grant: _g, ...rest } = op ?? {};
-  return `broker ${kind} via grant ${String(op?.grant)} (${target}): ${JSON.stringify(rest).slice(0, 4096)}`;
-}
-
 export const ENV_SECURITY_SESSION = "PHANTOMBOT_SECURITY_SESSION";
 /** The owner/runtime creates this; neither model text nor repository files can. */
 export async function createSecuritySession(options: {
@@ -79,8 +52,6 @@ export async function createSecuritySession(options: {
   policy: SecurityPolicy;
   signal?: AbortSignal;
   audit?: (event: SecurityAudit) => void;
-  /** The escort for this turn; absent = nothing is judged here. */
-  gate?: SessionGate;
   /** Persona name for notify/memory; default = the persona dir's name. */
   persona?: string;
   /** The turn's conversation and id, passed to sandboxed commands as on a trusted turn. */
@@ -127,10 +98,6 @@ export async function createSecuritySession(options: {
       : null;
     return (secrets = Object.fromEntries(read?.values ?? []));
   };
-  const judged = async (tool: string, input: unknown) => {
-    const refusal = await options.gate?.({ tool, input });
-    if (refusal !== undefined) throw new PolicyError("policy_denied", refusal);
-  };
   // Load secrets in the parent only. There is no credential endpoint on IPC.
   try {
     if (
@@ -155,7 +122,7 @@ export async function createSecuritySession(options: {
     });
     const token = randomBytes(32).toString("hex");
     // Set once the server listens; sandboxed `phantombot` uses it to reach
-    // memory and notify through this session (judged like the broker tool).
+    // memory and notify through this session.
     let sessionEnv: string | undefined;
     let closed = false;
     const requests = new Set<Promise<unknown>>();
@@ -191,7 +158,6 @@ export async function createSecuritySession(options: {
               typeof v.command === "string" &&
               v.command.length <= 256 * 1024
             ) {
-              await judged("bash", { command: v.command });
               return Response.json(
                 await runSandbox(workspace, v.command, {
                   signal,
@@ -213,28 +179,24 @@ export async function createSecuritySession(options: {
               );
             const op = v.operation as Record<string, unknown> | undefined;
             // The persona's own notify and memory, on the host (the sandbox
-            // has no identity.json): fixed argv, judged like any action.
+            // has no identity.json): fixed argv.
             if (op?.kind === "notify" && typeof op.message === "string" && op.message.length <= 4096) {
-              await judged("bash", { command: `phantombot notify --message ${JSON.stringify(op.message)}` });
               const r = await runSelf(["notify", "--persona", persona, "--message", argText(op.message)], signal);
               if (r.code !== 0) throw new PolicyError("unavailable", "notify failed");
               return Response.json({ result: { sent: true } });
             }
             if (op?.kind === "memory-capture" && typeof op.text === "string" && op.text.length <= 8192) {
               const tags = Array.isArray(op.tags) ? op.tags.filter((t): t is string => typeof t === "string" && MEMORY_TAGS.has(t)) : [];
-              await judged("bash", { command: `phantombot memory capture ${JSON.stringify(op.text)}${tags.map((t) => ` --tag ${t}`).join("")}` });
               const r = await runSelf(["memory", "capture", argText(op.text), "--persona", persona, ...tags.flatMap((t) => ["--tag", t])], signal);
               if (r.code !== 0) throw new PolicyError("unavailable", "memory capture failed");
               return Response.json({ result: { captured: true } });
             }
             if (op?.kind === "memory-search" && typeof op.query === "string" && op.query.length <= 1024) {
               const limit = typeof op.limit === "number" && op.limit >= 1 && op.limit <= 20 ? Math.floor(op.limit) : 8;
-              await judged("bash", { command: `phantombot memory search ${JSON.stringify(op.query)} --limit ${limit}` });
               const r = await runSelf(["memory", "search", argText(op.query), "--persona", persona, "--limit", String(limit)], signal);
               if (r.code !== 0) throw new PolicyError("unavailable", "memory search failed");
               return Response.json({ result: r.output });
             }
-            await judged("broker", { operation: describeOperation(op, policy) });
             const result = await broker.execute(v.operation as BrokerOperation);
             if (result instanceof SandboxArchive) {
               // Directory comes only from the typed broker, never an arbitrary

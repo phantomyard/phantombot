@@ -580,6 +580,9 @@ function windowsSandboxInHome(
     startup.writeBigUInt64LE(BigInt(ptr(attrs)), 104);
     if (surface.name)
       startup.writeBigUInt64LE(BigInt(ptr(surface.name)), 16); // lpDesktop
+    // The handle list must not repeat a handle (Win32 87 when stdout and
+    // stderr are one handle, e.g. `2>&1` to a file).
+    const listed: bigint[] = [];
     for (let i = 0; i < 3; i++) {
       const handle = kernel.symbols.GetStdHandle(-10 - i);
       check(handle, "stdio handle");
@@ -587,8 +590,12 @@ function windowsSandboxInHome(
         kernel.symbols.SetHandleInformation(handle, 1, 1),
         "stdio inheritance",
       );
-      handles.writeBigUInt64LE(BigInt(Number(handle)), i * 8);
-      startup.writeBigUInt64LE(BigInt(Number(handle)), 80 + i * 8);
+      const value = BigInt(Number(handle));
+      if (!listed.includes(value)) {
+        handles.writeBigUInt64LE(value, listed.length * 8);
+        listed.push(value);
+      }
+      startup.writeBigUInt64LE(value, 80 + i * 8);
     }
     const job = kernel.symbols.CreateJobObjectW(null, null);
     check(job, "job");
@@ -619,7 +626,7 @@ function windowsSandboxInHome(
           0,
           0x20002,
           handles,
-          24,
+          listed.length * 8,
           null,
           null,
         ),

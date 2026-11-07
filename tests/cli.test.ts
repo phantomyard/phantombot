@@ -28,7 +28,6 @@ describe("phantombot CLI dispatcher", () => {
       "doctor",
       "embedding",
       "env",
-      "escort",
       "fix-signing",
       "harness",
       "heartbeat",

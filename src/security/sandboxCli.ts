@@ -2,8 +2,7 @@
  * Inside a sandboxed turn the persona folder is hidden, so `phantombot memory
  * search|capture` and `phantombot notify` cannot open it. When the runtime set
  * a session (PHANTOMBOT_SECURITY_SESSION, sandbox.ts) they forward to it
- * instead: the same host operations the broker tool runs, judged the same
- * way, so the CLI works in a sandboxed turn as it does in a trusted one.
+ * instead: the same host operations the broker tool runs, so the CLI works in a sandboxed turn as it does in a trusted one.
  */
 import { invokeSession, sessionFromEnv } from "./extension.ts";
 

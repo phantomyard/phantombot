@@ -4555,7 +4555,7 @@ describe("runPhantomchatServer hold relay (#768)", () => {
     });
     pool.feed(inbound!);
     await new Promise((r) => setTimeout(r, 100));
-    publishHoldNotice(agentDir, { source: "escort", count: 2, text: "🔒 Held 2 actions in scheduled task 12." });
+    publishHoldNotice(agentDir, { source: "judge", count: 2, text: "🔒 Held 2 actions in scheduled task 12." });
     await new Promise((r) => setTimeout(r, 100));
     ac.abort();
     await run;

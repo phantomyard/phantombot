@@ -51,10 +51,8 @@ Each side of the perimeter has exactly one check.
   things. There is no second "ask the owner first" step afterwards: the owner
   is not on the line to answer it, and an approval they have to repeat forever
   is not a control. The persona still treats everything it reads as data, never
-  as instructions, and reports content that tries to steer it. If you configure
-  a [decision model](decision-model.md#escort), it also escorts the passed
-  turn: each tool call is scored before it runs, and a call it holds is refused
-  (not escalated) while the rest of the job continues.
+  as instructions, and reports content that tries to steer it. The passed turn
+  runs in the sandbox (see [bounded security](../reference/bounded-security.md)).
 - **Interactive work has no security gate.** When the owner is on the line
   their instructions are genuine and are acted on. The persona still outlines
   a plan and asks before a long job or one it cannot easily undo, which the
@@ -91,32 +89,14 @@ the persona fetches while working — a web page, an API response, another
 email — is not screened; it is covered only by the data-not-instructions
 discipline.
 
-## Escorted turns
+## After the screen
 
 Screening reads the message that wakes a turn, not the actions taken while
-carrying it out. A judge-passed turn can therefore still be steered mid-flight
-by a page it fetches. The escort closes that gap — but only when a
-[decision model](decision-model.md#escort) is configured, and only on turns the
-judge screened. Trusted turns are never escorted.
-
-- Every tool call is scored before it runs: given the capped wake message and
-  the proposed action, is this something the task plausibly needs, or does it
-  look like a hijack?
-- A call at or above the threshold is refused, the model is told why, and the
-  rest of the job continues. It is not escalated, and the owner is not paged
-  mid-run.
-- Enforcement lives inside the harness subprocess, where the tool loop actually
-  runs: the native harness blocks on an inline `tool_call` extension, Claude
-  Code blocks through a `PreToolUse` hook that runs `phantombot __escort` and
-  exits 2. Harnesses without a blocking pre-tool hook — Codex, a host Pi — are
-  left out of an escorted turn's chain; if nothing is left, the turn does not
-  run.
-- It fails closed. No decision, a malformed context, a missing key, a timeout,
-  or an unreadable answer all refuse the call. The escort never falls open into
-  "the call runs".
-- The context rides in the harness's environment, and the API key is named
-  there rather than carried. A tool call cannot reach up and change its parent's
-  environment, so a running turn cannot switch its own escort off.
+carrying it out. A judge-passed turn could therefore still be steered
+mid-flight by a page it fetches. That turn runs in the sandbox: it can reach
+the network and the persona's vault, but not the host's files. There is no
+per-action check (the escort that did this was removed: its false holds
+stalled routine work far more often than it caught anything).
 
 Model trust does not travel with the model. A remote message quoted in the
 editor or a tool result is data, whichever client it arrives through.

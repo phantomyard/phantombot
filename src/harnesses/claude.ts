@@ -58,7 +58,6 @@ import { buildToolCall } from "./toolNote.ts";
 import { DEFAULT_REASONING_REPLAY, type ParseEventResult, type ReasoningReplayConfig } from "./reasoningReplay.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
 import { harnessSpawnEnv } from "../lib/vault.ts";
-import { applyEscortEnv, claudeEscortSettings } from "../lib/escort.ts";
 import { claudeBodyGuardHookEntry } from "../lib/bodyPathGuard.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 import { ENV_SECURITY_SESSION } from "../security/session.ts";
@@ -96,8 +95,6 @@ export interface ClaudeHarnessConfig {
 
 export class ClaudeHarness implements Harness {
   readonly id = "claude";
-  /** Escort (issue #702): enforced by a PreToolUse hook in --settings. */
-  readonly supportsEscort = true;
   /**
    * GHSA-w7w8: a sandboxed (untrusted) turn runs with claude's built-in tools
    * OFF and only the runtime's sandbox + broker served over MCP. The claude
@@ -204,7 +201,6 @@ export class ClaudeHarness implements Harness {
       systemPromptFile,
       bounded ? undefined : req.mcpMode,
       foregroundMcpConfig,
-      !bounded && req.escort !== undefined,
       bounded,
     );
     log.debug("claude.invoke spawning", {
@@ -249,9 +245,6 @@ export class ClaudeHarness implements Harness {
       req.scratchDir,
       req.trusted,
     );
-    // The escort hook reads its context from the env claude hands it (set or
-    // CLEARED here, never inherited — see applyEscortEnv).
-    applyEscortEnv(env, bounded ? undefined : req.escort);
     const envMap = env as Record<string, string>;
     delete envMap[ENV_SECURITY_SESSION];
     if (req.securitySession) envMap[ENV_SECURITY_SESSION] = JSON.stringify(req.securitySession);
@@ -316,8 +309,6 @@ export class ClaudeHarness implements Harness {
     // Foreground turns only: the `--mcp-config` payload pointing at phantombot's
     // own registry/proxy. Undefined on background turns (mcpMode "none").
     foregroundMcpConfig?: string,
-    // Escorted turn (issue #702): add the PreToolUse escort hook.
-    escorted = false,
     // Bounded turn (GHSA-w7w8): built-ins already off via toolsMode "none";
     // the settings deny them by name too, belt and braces.
     bounded = false,
@@ -415,20 +406,14 @@ export class ClaudeHarness implements Harness {
     // running `claude` directly on this host (e.g. for emergency repairs) is
     // unaffected. See PHANTOMBOT_INJECTED_CLAUDE_SETTINGS for the policy.
     //
-    // An escorted turn also gets the escort's PreToolUse hook here. It lives in
-    // the --settings ARGV, not in any file, so the running turn has nothing it
-    // can edit to remove it.
-    //
-    // EVERY turn also gets the body-path guard (#718): a Bash-only PreToolUse
+    // EVERY turn gets the body-path guard (#718): a Bash-only PreToolUse
     // hook that refuses a `gh` call about to publish a literal `@/path` body.
-    // It sits in the same PreToolUse list as the escort's hook, so neither
-    // replaces the other.
     args.push(
       "--settings",
       JSON.stringify(
         bounded
           ? claudeBoundedSettings()
-          : claudeTurnSettings(phantombotSelfCommand(), escorted),
+          : claudeTurnSettings(phantombotSelfCommand()),
       ),
     );
     if (systemPromptFile) {
@@ -498,27 +483,13 @@ export function boundedClaudeEnv(source: NodeJS.ProcessEnv): Record<string, stri
 }
 
 /**
- * The per-invocation --settings object: the injected policy, the body-path
- * guard on every turn (#718), and the escort hook on an escorted one (#702).
+ * The per-invocation --settings object: the injected policy and the body-path
+ * guard on every turn (#718).
  */
-export function claudeTurnSettings(
-  self: string[],
-  escorted: boolean,
-): Record<string, unknown> {
-  const guard = claudeBodyGuardHookEntry(self);
-  if (!escorted) {
-    return {
-      ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
-      hooks: { PreToolUse: [guard] },
-    };
-  }
-  const escort = claudeEscortSettings(self) as {
-    hooks: { PreToolUse: unknown[] };
-  };
+export function claudeTurnSettings(self: string[]): Record<string, unknown> {
   return {
     ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
-    ...escort,
-    hooks: { ...escort.hooks, PreToolUse: [...escort.hooks.PreToolUse, guard] },
+    hooks: { PreToolUse: [claudeBodyGuardHookEntry(self)] },
   };
 }
 

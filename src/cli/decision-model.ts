@@ -26,7 +26,7 @@ export default defineCommand({
   meta: {
     name: "decision-model",
     description:
-      "Configure the decision model (TypeSafe Jev) that scores the threat judge and escorts tool calls.",
+      "Configure the decision model (TypeSafe Jev) that scores the threat judge.",
   },
   args: {
     persona: {

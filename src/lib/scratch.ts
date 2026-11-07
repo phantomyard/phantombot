@@ -64,6 +64,8 @@ export interface ScratchProvisionInput {
   conversation: string;
   /** Turn id — the untrusted per-turn dir name. Ignored for trusted. */
   turnId?: string;
+  /** Test seam: the platform that picks the dir naming. */
+  platform?: NodeJS.Platform;
   /** Test seam: fixed clock. */
   now?: Date;
 }
@@ -90,11 +92,15 @@ export async function provisionScratch(
   input: ScratchProvisionInput,
 ): Promise<TurnScratch> {
   const root = scratchRoot(input.agentDir);
-  const conv = scratchDirName(input.conversation);
-  const conversationDir = join(root, input.tier, conv);
   const ephemeral = input.tier === "untrusted";
+  // Windows untrusted scratch gets short names: see windowsScratchDirName.
+  const name = ephemeral && (input.platform ?? process.platform) === "win32"
+    ? windowsScratchDirName
+    : scratchDirName;
+  const conv = name(input.conversation);
+  const conversationDir = join(root, input.tier, conv);
   const dir = ephemeral
-    ? join(conversationDir, scratchDirName(input.turnId ?? "turn"))
+    ? join(conversationDir, name(input.turnId ?? "turn"))
     : conversationDir;
 
   await sweepScratch(input.agentDir, { now: input.now });
@@ -214,6 +220,17 @@ export function sanitizeScratchName(raw: string): string {
 export function scratchDirName(raw: string): string {
   const digest = createHash("sha256").update(raw, "utf8").digest("hex");
   return `${sanitizeScratchName(raw)}-${digest}`;
+}
+
+/**
+ * Windows untrusted dir name: 32 hex of the sha256, no slug. Windows hangs any
+ * process whose TMP is longer than MAX_PATH (CreateProcessW spins in
+ * GetTempPathW), and the sandbox sets TMP=<workspace>\.tmp. Full slug+digest
+ * names made tick workspaces ~259 chars. 128 bits keeps a collision out of
+ * reach (2^64 birthday work), unlike the 12 hex rejected in #662.
+ */
+export function windowsScratchDirName(raw: string): string {
+  return createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 32);
 }
 
 /**

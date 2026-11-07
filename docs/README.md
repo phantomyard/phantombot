@@ -52,7 +52,7 @@ New here? Start with [Install Phantombot](getting-started/install.md), then
 - [Architecture](concepts/architecture.md) — how messages, trust, context,
   harnesses, memory, and replies fit together.
 - [Security and trust](concepts/security-and-trust.md) — principal versus
-  untrusted input, threat screening, escorted tool calls, and capability
+  untrusted input, threat screening, the sandbox, and capability
   boundaries.
 - [Memory lifecycle](concepts/memory-lifecycle.md) — conversations, journal,
   drawers, nightly distillation, knowledge base, and retrieval.

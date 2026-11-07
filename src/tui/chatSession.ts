@@ -308,7 +308,7 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
   // survive every screen switch.
   const runner = createTurnRunner(send, transcript);
 
-  // Hold notices (#768): a judge or escort hold anywhere for this persona
+  // Hold notices (#768): a judge hold anywhere for this persona
   // shows here as a system line straight away, mid-reply or idle. An open
   // session is always an open thread; nothing is written to memory.
   const holdRelay = new HoldThreadRelay(agentDir, { windowMs: Number.POSITIVE_INFINITY });

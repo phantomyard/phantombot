@@ -4,16 +4,18 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { windowsScratchTarget } from "../src/security/windowsScratch.ts";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 
 import {
   buildScratchNotice,
   provisionScratch,
   sanitizeScratchName,
   scratchDirName,
+  windowsScratchDirName,
   SCRATCH_SWEEP_MAX_AGE_MS,
   sweepScratch,
   teardownScratch,
@@ -439,6 +441,39 @@ describe("runTurn integration", () => {
     } finally {
       clearPromptCacheEpochs();
       await memory.close();
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Windows untrusted scratch names", () => {
+  // Windows hangs a process whose TMP is longer than MAX_PATH (260) inside
+  // CreateProcessW, and the sandbox sets TMP=<workspace>\.tmp.
+  test("worst-case TMP stays well under MAX_PATH", () => {
+    const sid = "S-1-5-21-4294967295-4294967295-4294967295-4294967295";
+    const base = windowsScratchTarget("C:", sid, "C:\\x\\" + "p".repeat(80));
+    const conv = windowsScratchDirName("phantomchat:group:" + "f".repeat(128));
+    const turn = windowsScratchDirName("t".repeat(200));
+    const tmp = win32.join(base, conv, turn, ".tmp");
+    expect(tmp.length).toBeLessThan(220);
+  });
+
+  test("names are 32 hex, distinct and stable", () => {
+    expect(windowsScratchDirName("a")).toMatch(/^[0-9a-f]{32}$/);
+    expect(windowsScratchDirName("matrix:room/a")).not.toBe(windowsScratchDirName("matrix:room:a"));
+    expect(windowsScratchDirName("x")).toBe(windowsScratchDirName("x"));
+  });
+
+  test("untrusted provisioning uses them on win32 only", async () => {
+    const agentDir = await tempAgentDir();
+    try {
+      const w = await provisionScratch({ agentDir, tier: "untrusted", conversation: "email:9", turnId: "t1", platform: "win32" });
+      expect(w.dir).toBe(join(agentDir, "scratch", "untrusted", windowsScratchDirName("email:9"), windowsScratchDirName("t1")));
+      const l = await provisionScratch({ agentDir, tier: "untrusted", conversation: "email:9", turnId: "t1", platform: "linux" });
+      expect(l.dir).toBe(join(agentDir, "scratch", "untrusted", scratchDirName("email:9"), scratchDirName("t1")));
+      const t = await provisionScratch({ agentDir, tier: "trusted", conversation: "email:9", platform: "win32" });
+      expect(t.dir).toBe(join(agentDir, "scratch", "trusted", scratchDirName("email:9")));
+    } finally {
       await rm(agentDir, { recursive: true, force: true });
     }
   });

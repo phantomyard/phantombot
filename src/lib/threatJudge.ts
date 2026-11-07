@@ -104,7 +104,7 @@ import type { CooldownStore } from "./cooldown.ts";
 
 /**
  * At or above this score, escalate to the principal. 90 since GHSA-w7w8, the
- * same bar as the Jev judge and escort (DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD).
+ * same bar as the Jev judge (DECISION_MODEL_JUDGE_DEFAULT_THRESHOLD).
  */
 export const THREAT_THRESHOLD = 90;
 

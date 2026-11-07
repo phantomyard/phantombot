@@ -118,7 +118,7 @@ describe("generateRecoveryReply", () => {
 
   test("runs STRUCTURALLY tool-free (toolsMode/mcpMode none), not just by prompt", async () => {
     // Recovery re-feeds the same, possibly untrusted, message to a run with no
-    // escort (issue #702), so it must not be able to act (PR #706 review).
+    // sandbox, so it must not be able to act (PR #706 review).
     const harness = new FakeHarness("fake", [
       { type: "done", finalText: "Snag — try again?" },
     ]);
@@ -128,6 +128,5 @@ describe("generateRecoveryReply", () => {
     });
     expect(harness.lastRequest?.toolsMode).toBe("none");
     expect(harness.lastRequest?.mcpMode).toBe("none");
-    expect(harness.lastRequest?.escort).toBeUndefined();
   });
 });

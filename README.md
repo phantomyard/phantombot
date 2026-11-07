@@ -19,7 +19,7 @@ and updates.
 | **One continuous persona** | The same identity, preferences, and context across chat, terminal, and editor sessions. |
 | **Memory that compounds** | Local journals, structured decisions and lessons, durable knowledge, and meaning-based retrieval. |
 | **Bring your own brain** | Built-in native harness, plus Pi, Claude Code, and Codex as primary or fallback options. |
-| **Safe by origin** | Trusted owners act directly; untrusted email, webhooks, bridges, and scheduled task wakes are screened before a capable model runs, and an escorted turn has every tool call scored. |
+| **Safe by origin** | Trusted owners act directly; untrusted email, webhooks, bridges, and scheduled task wakes are screened before a capable model runs, then run in a sandbox. |
 | **Real background work** | Persistent scheduled tasks, health checks, notifications, and service management survive restarts. |
 | **Local control** | Persona state and encrypted secrets stay on your machine. Model-provider privacy terms still apply to prompts sent to that provider. |
 
@@ -156,7 +156,6 @@ flowchart TD
 | `phantombot mcp …` | Discover and use external integrations lazily. |
 | `phantombot vault …` | Manage encrypted persona-scoped credentials. |
 | `phantombot notify …` | Send a material background update to configured owners. |
-| `phantombot escort …` | Allow, deny, revoke or list kinds of action background tasks may do (the answer to an escort hold notice). |
 | `phantombot judge rule …` | File the owner's ruling on a request the threat judge held, so the judge finds it next time. |
 | `phantombot doctor` | Check channels, timers, connectors, harnesses, and memory health. |
 | `phantombot start\|stop\|restart\|logs` | Manage the installed service. |
@@ -311,10 +310,6 @@ looks.
 - Suspicious requests are held and surfaced to the owner for a trusted
   conversation. The judge is the only gate on autonomous work: a request it
   passes is carried through without a second approval step.
-- With a decision model configured, a passed request is also escorted: each
-  tool call is scored before it runs, and one that looks like a hijack is
-  refused while the rest of the job continues. Without a decision model,
-  nothing changes.
 - A request nobody could screen is held too. If no judge answers — provider
   outage, timeout, no network — the request does not run: the owner gets
   `🔒 I held an untrusted request because I could not screen it`, with the
@@ -416,7 +411,7 @@ state, explicit trust, memory, harness fallback, and validated decisions. See
 - [`docs/how-to/editors.md`](docs/how-to/editors.md) — registering Phantombot
   with VS Code, Zed, JetBrains, and OpenCode.
 - [`docs/concepts/security-and-trust.md`](docs/concepts/security-and-trust.md)
-  — the perimeter: origin-based trust, the judge, and the escort on tool calls.
+  — the perimeter: origin-based trust, the judge, and the sandbox.
 - [`AGENTS.md`](AGENTS.md) — the contributor guide and the index of invariants;
   the lessons written in blood live under
   [`docs/contributing/invariants/`](docs/contributing/invariants/README.md).
@@ -446,8 +441,7 @@ actions (notify, memory) go through a broker. `enabled:false` in the persona's
 `security-policy.json` opts out. Linux uses Landlock/seccomp, macOS Seatbelt,
 and Windows AppContainer/Job Objects; no Docker or elevated setup is needed, and
 an unsupported facility refuses execution rather than falling back to a host
-shell. The judge and escort both hold at 90/100; a hijack both checks
-miss can leak the secrets the turn holds, which is the stated, accepted risk.
+shell. The judge holds at 90/100; a hijack it misses can leak the secrets the turn holds, which is the stated, accepted risk.
 Owner grants (specified PRs, npm staging, fixed HTTPS endpoints, exact MCP
 calls) still add credentialed operations that never leave the parent runtime.
 See [the security contract](docs/reference/bounded-security.md) for policy examples,

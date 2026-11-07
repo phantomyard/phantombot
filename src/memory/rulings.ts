@@ -2,19 +2,16 @@
  * The owner's rulings on held work, filed as decisions (#768).
  *
  * A ruling used to live only where someone remembered to capture it. Now the
- * commands that record one (`phantombot escort allow|deny|revoke`,
- * `phantombot judge rule`) file it straight into the `decisions` drawer, so
- * the judge and the escort — which brief from decisions first-by-relevance —
- * see it on the next check that touches the same sender or action kind.
+ * command that records one (`phantombot judge rule`) files it straight into
+ * the `decisions` drawer, so the judge — which briefs from decisions
+ * first-by-relevance — sees it on the next check that touches the same sender.
  *
- * Every ruling carries a stable key (`[ruling escort:push]`,
- * `[ruling judge:billing@vendor.com]`). Filing a new ruling for a key retires
+ * Every ruling carries a stable key (`[ruling judge:billing@vendor.com]`). Filing a new ruling for a key retires
  * the live one before it (superseded), so a deny after an allow is the only
  * ruling the readers see, and a withdrawal leaves none. The stamp in the text
  * makes every ruling a new row; re-ruling never collides with a retired one.
  *
- * Never throws into the caller's real job: the escort's own file is the
- * enforcement record, the drawer row is the briefing copy.
+ * Never throws into the caller's real job.
  */
 
 import { memoryIndexPath } from "../config.ts";
@@ -24,7 +21,7 @@ import { syncDrawerIndex } from "./drawerIndex.ts";
 import { openDrawerStore } from "./drawerSync.ts";
 
 /** Normalise a ruling subject into its key: lowercase, single spaces, capped. */
-export function rulingKey(scope: "escort" | "judge", subject: string): string {
+export function rulingKey(scope: "judge", subject: string): string {
   const s = subject.toLowerCase().replace(/[\[\]\n\r]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
   return `${scope}:${s}`;
 }
