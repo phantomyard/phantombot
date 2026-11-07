@@ -15,6 +15,7 @@ import {
   runSandbox,
   sandboxEnvironment,
   windowsSystemPath,
+  windowsModulePath,
 } from "../src/security/sandbox.ts";
 import {
   deleteWindowsProfile,
@@ -329,6 +330,12 @@ test("withTraverseAce adds one read-attributes ACE after the explicit ACEs", () 
     "D:(XA;;FX;;;WD;(Member_of {SID(BA)}))",
   );
 });
+test("windowsModulePath lists only built-in and machine-wide module folders", () => {
+  expect(windowsModulePath({ SystemRoot: "C:\\Windows", ProgramFiles: "C:\\Program Files" })).toBe(
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules",
+  );
+});
+
 test("windowsSystemPath keeps only Windows/Program Files PATH entries", () => {
   const path = windowsSystemPath({
     SystemRoot: "C:\\Windows",

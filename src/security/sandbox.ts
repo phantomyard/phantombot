@@ -271,6 +271,10 @@ export function sandboxEnvironment(
           ComSpec: `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`,
           // Standard machine variables PowerShell/.NET and installers expect.
           ...windowsMachineEnv(process.env),
+          // Without it Windows PowerShell falls back to the machine module path,
+          // which can list folders the AppContainer cannot read (CI runners'
+          // C:\Modules), and then core cmdlets like Set-Content fail to load.
+          PSModulePath: windowsModulePath(process.env),
           // Files the elevated host made are owned by Administrators, not the
           // sandbox's user, so git refuses them as "dubious ownership". The
           // workspace is the sandbox's own disposable directory.
@@ -328,6 +332,14 @@ const WINDOWS_MACHINE_ENV = [
   "PROCESSOR_REVISION",
   "PATHEXT",
 ] as const;
+/** Windows PowerShell's built-in and machine-wide module folders only. */
+export function windowsModulePath(env: NodeJS.ProcessEnv): string {
+  const root = env.SystemRoot ?? "C:\\Windows";
+  const out = [`${root}\\System32\\WindowsPowerShell\\v1.0\\Modules`];
+  if (env.ProgramFiles) out.push(`${env.ProgramFiles}\\WindowsPowerShell\\Modules`);
+  return out.join(";");
+}
+
 function windowsMachineEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};
   for (const key of WINDOWS_MACHINE_ENV) {
