@@ -52,6 +52,24 @@ async function runSelf(
   return { code, output: (out + err).slice(0, 64 * 1024) };
 }
 
+/** One line for the escort: what a broker host action does, and to what. */
+function describeOperation(
+  op: Record<string, unknown> | undefined,
+  policy: SecurityPolicy,
+): string {
+  const kind = typeof op?.kind === "string" ? op.kind : "invalid";
+  const g = policy.grants.find((x) => x.id === op?.grant) as
+    | Record<string, unknown>
+    | undefined;
+  const target = g
+    ? [g.repository, g.pullRequest && `#${g.pullRequest}`, g.method, g.url, g.server, g.tool]
+        .filter(Boolean)
+        .join(" ")
+    : "no matching grant";
+  const { kind: _k, grant: _g, ...rest } = op ?? {};
+  return `broker ${kind} via grant ${String(op?.grant)} (${target}): ${JSON.stringify(rest).slice(0, 4096)}`;
+}
+
 export const ENV_SECURITY_SESSION = "PHANTOMBOT_SECURITY_SESSION";
 /** The owner/runtime creates this; neither model text nor repository files can. */
 export async function createSecuritySession(options: {
@@ -182,10 +200,12 @@ export async function createSecuritySession(options: {
             }
             if (op?.kind === "memory-search" && typeof op.query === "string" && op.query.length <= 1024) {
               const limit = typeof op.limit === "number" && op.limit >= 1 && op.limit <= 20 ? Math.floor(op.limit) : 8;
+              await judged("bash", { command: `phantombot memory search ${JSON.stringify(op.query)} --limit ${limit}` });
               const r = await runSelf(["memory", "search", argText(op.query), "--persona", persona, "--limit", String(limit)], signal);
               if (r.code !== 0) throw new PolicyError("unavailable", "memory search failed");
               return Response.json({ result: r.output });
             }
+            await judged("broker", { operation: describeOperation(op, policy) });
             const result = await broker.execute(v.operation as BrokerOperation);
             if (result instanceof SandboxArchive) {
               // Directory comes only from the typed broker, never an arbitrary

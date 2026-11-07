@@ -1,7 +1,7 @@
 /**
  * GHSA-w7w8 close-out (#783): untrusted turns run sandboxed by default, with
  * network and the persona's vault in the sandbox env. The escort (when on)
- * judges each sandbox command at the session boundary.
+ * judges each sandbox command and broker host action at the session boundary.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -156,6 +156,61 @@ describe("session: vault in, escort at the boundary", () => {
       expect(r.status).toBe(409);
       expect(String(r.json.error)).toContain("Blocked by phantombot's escort");
       expect(seen).toEqual([{ tool: "bash", input: { command: "echo should-not-run > ran.txt" } }]);
+    } finally {
+      await session.close();
+    }
+  }, 20000);
+
+  test("every host action is judged before it runs; deny-all refuses each one", async () => {
+    const seen: { tool: string; input: unknown }[] = [];
+    const far = Date.now() + 3_600_000;
+    const session = await createSecuritySession({
+      personaDir: agentDir,
+      policy: {
+        version: 1,
+        enabled: true,
+        grants: [
+          { id: "npm", kind: "npm-registry", expiresAt: far },
+          { id: "gh", kind: "github-review", repository: "o/r", pullRequest: 1, expiresAt: far },
+          { id: "h", kind: "http", url: "https://example.invalid/x", method: "POST", expiresAt: far },
+          { id: "m", kind: "mcp", server: "s", tool: "t", arguments: {}, expiresAt: far },
+        ],
+      },
+      gate: async (action) => {
+        seen.push(action);
+        return "Blocked by phantombot's escort: deny-all";
+      },
+    });
+    const head = "a".repeat(40);
+    const ops: Record<string, unknown>[] = [
+      { kind: "notify", message: "hi" },
+      { kind: "memory-capture", text: "t", tags: ["lesson"] },
+      { kind: "memory-search", query: "q" },
+      { kind: "npm-package", grant: "npm", name: "left-pad", version: "1.3.0" },
+      { kind: "github-read", grant: "gh", resource: "pull" },
+      { kind: "github-checkout", grant: "gh", head },
+      { kind: "github-review", grant: "gh", head, event: "COMMENT", body: "b" },
+      { kind: "http", grant: "h", body: "payload" },
+      { kind: "mcp", grant: "m", arguments: {} },
+    ];
+    try {
+      for (const operation of ops) {
+        const before = seen.length;
+        const r = await post(session, { kind: "broker", operation });
+        expect(r.status).toBe(409);
+        // The gate's own refusal: it ran, and refused, before the action.
+        expect(String(r.json.error)).toContain("deny-all");
+        expect(seen.length).toBe(before + 1);
+      }
+      expect(seen.slice(0, 3).map((a) => String((a.input as { command: string }).command).split(" ").slice(0, 3).join(" "))).toEqual([
+        "phantombot notify --message",
+        "phantombot memory capture",
+        "phantombot memory search",
+      ]);
+      for (const [i, a] of seen.slice(3).entries()) {
+        expect(a.tool).toBe("broker");
+        expect(String((a.input as { operation: string }).operation)).toStartWith(`broker ${String(ops[i + 3]!.kind)} via grant`);
+      }
     } finally {
       await session.close();
     }
