@@ -35,6 +35,7 @@
  *                              supersedes the row it names (#437)
  */
 
+import { forwardToSandboxSession } from "../security/sandboxCli.ts";
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -147,6 +148,14 @@ export async function runMemorySearch(
 ): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
+  if (!input.config) {
+    const forwarded = await forwardToSandboxSession(
+      { kind: "memory-search", query: input.query, ...(input.limit ? { limit: input.limit } : {}) },
+      out,
+      err,
+    );
+    if (forwarded !== undefined) return forwarded;
+  }
   const config = input.config ?? (await loadConfig());
   const { persona, dir } = resolvePersonaDir(config, input.persona);
 
@@ -704,6 +713,14 @@ export async function runMemoryCapture(
 ): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
+  if (!input.config) {
+    const forwarded = await forwardToSandboxSession(
+      { kind: "memory-capture", text: input.text, tags: input.tags },
+      out,
+      err,
+    );
+    if (forwarded !== undefined) return forwarded;
+  }
   const config = input.config ?? (await loadConfig());
   const { persona, dir } = resolvePersonaDir(config, input.persona);
 

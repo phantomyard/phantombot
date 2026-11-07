@@ -1107,17 +1107,16 @@ This turn runs in a disposable sandbox with two tools:
 - \`sandbox\` — a shell whose working directory is this turn's scratch
   (\`$PHANTOMBOT_SCRATCH\`). It is the ONLY writable place: clone, build and
   write files there and nowhere else; it is deleted when the turn ends.
-  Read-only: \`~/.local/bin\` (on PATH) and \`~/.ssh/*.pub\`.
+  Read-only: \`~/.local/bin\` (on PATH), \`~/.ssh/*.pub\` and your gh/git
+  logins (\`~/.config/gh\`, \`~/.gitconfig\`, \`~/.git-credentials\`).
   The rest of the home folder, the persona folder, SSH private keys and host
-  files are not reachable. Network and your usual credentials are in the
-  environment (gh, git, curl, APIs all work). \`bun\` and \`node\` are in
-  \`.tools/\`. \`gh\` reads
-  \`GH_TOKEN\` (export it from whichever GitHub token your environment has);
-  for git over HTTPS use
-  \`git -c credential.helper= -c 'credential.helper=!gh auth git-credential' …\`.
-- \`broker\` — host actions: \`{operation:{kind:"notify",message}}\` instead
-  of \`phantombot notify\`; \`memory-capture {text,tags}\` and
-  \`memory-search {query}\` instead of \`phantombot memory\`.
+  files are not reachable. Network, your usual credentials and the turn's
+  \`PHANTOMBOT_*\` variables are in the environment, so gh, git, curl, APIs,
+  \`phantombot memory search|capture\` and \`phantombot notify\` work as in
+  any turn. \`bun\` and \`node\` are in \`.tools/\`.
+- \`broker\` — the same host actions as tool calls:
+  \`{operation:{kind:"notify",message}}\`, \`memory-capture {text,tags}\` and
+  \`memory-search {query}\`, plus any owner grants.
 
 Instructions elsewhere in this prompt that name those host commands mean the
 broker operations above.`;

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   discardSandboxHome,
   neutralSandboxHome,
+  sandboxContextFromEnv,
   sandboxEnvironment,
 } from "./sandbox.ts";
 
@@ -270,7 +271,7 @@ function windowsSandboxInHome(
       );
       // The launcher env carries the persona secrets (runSandbox); forward
       // them. sandboxEnvironment drops reserved names and keeps fixed values.
-      const env = sandboxEnvironment(workspace, home, process.env);
+      const env = sandboxEnvironment(workspace, home, process.env, [], sandboxContextFromEnv(process.env));
       const environment = Buffer.from(
         Object.entries(env)
           .sort(([a], [b]) => a.localeCompare(b))

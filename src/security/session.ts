@@ -37,6 +37,8 @@ async function runSelf(
 ): Promise<{ code: number; output: string }> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+  // The host-side command must run for real, never forward back to a session.
+  delete env[ENV_SECURITY_SESSION];
   const proc = Bun.spawn([...phantombotSelfCommand(), ...args], {
     env,
     stdin: "ignore",
@@ -81,6 +83,9 @@ export async function createSecuritySession(options: {
   gate?: SessionGate;
   /** Persona name for notify/memory; default = the persona dir's name. */
   persona?: string;
+  /** The turn's conversation and id, passed to sandboxed commands as on a trusted turn. */
+  conversation?: string;
+  turnId?: string;
   /**
    * The turn's untrusted scratch dir (PHANTOMBOT_SCRATCH): the sandbox's ONLY
    * writable directory. Must be a fresh, empty dir under
@@ -149,6 +154,9 @@ export async function createSecuritySession(options: {
       },
     });
     const token = randomBytes(32).toString("hex");
+    // Set once the server listens; sandboxed `phantombot` uses it to reach
+    // memory and notify through this session (judged like the broker tool).
+    let sessionEnv: string | undefined;
     let closed = false;
     const requests = new Set<Promise<unknown>>();
     const server = Bun.serve({
@@ -189,6 +197,12 @@ export async function createSecuritySession(options: {
                   signal,
                   secrets: await sandboxSecrets(),
                   hostPaths,
+                  context: {
+                    persona,
+                    conversation: options.conversation,
+                    turnId: options.turnId,
+                    session: sessionEnv,
+                  },
                 }),
               );
             }
@@ -259,6 +273,11 @@ export async function createSecuritySession(options: {
           requests.delete(result);
         }
       },
+    });
+    sessionEnv = JSON.stringify({
+      url: `http://127.0.0.1:${server.port}/operation`,
+      token,
+      workspace,
     });
     const close = async () => {
       if (closed) return;

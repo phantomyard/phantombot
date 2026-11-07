@@ -41,7 +41,7 @@ export function sessionFromEnv(env: NodeJS.ProcessEnv = process.env): SessionDes
 }
 
 export const SANDBOX_TOOL_DESCRIPTION =
-  "Run shell commands in this turn's scratch workspace (cwd, $PHANTOMBOT_SCRATCH): the ONLY writable place, deleted at turn end. Read-only: ~/.local/bin (on PATH), ~/.ssh/*.pub. Network and the persona's credentials (env) are available: git, gh, curl, APIs. No other host files, persona files or SSH private keys.";
+  "Run shell commands in this turn's scratch workspace (cwd, $PHANTOMBOT_SCRATCH): the ONLY writable place, deleted at turn end. Read-only: ~/.local/bin (on PATH), ~/.ssh/*.pub, your gh/git logins. Network, the persona's credentials (env) and the turn's PHANTOMBOT_* variables are available: git, gh, curl, APIs, and `phantombot memory search|capture` / `phantombot notify` work as usual. No other host files, persona files or SSH private keys.";
 export const BROKER_TOOL_DESCRIPTION =
   "Host actions the sandbox cannot do. operation:{kind:'notify',message} tells the owner; {kind:'memory-capture',text,tags?:[decision|lesson|person|commitment|norm]}; {kind:'memory-search',query,limit?}. " +
   "{manifest:true} lists any owner grants; operation:{kind,grant,...} uses one: npm-package {name,version}, github-checkout/github-read/github-review, http (exact URL/method), mcp (exact arguments).";

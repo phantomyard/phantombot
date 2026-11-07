@@ -1124,6 +1124,8 @@ async function* runTurnBody(
     if (boundedSecurity && securityPolicy) securitySession = await createSecuritySession({
       personaDir: input.agentDir,
       persona: input.persona,
+      conversation: input.conversation,
+      turnId,
       policy: securityPolicy,
       // The turn's untrusted scratch is the sandbox's only writable dir.
       ...(scratch?.ephemeral ? { workspace: scratch.dir } : {}),
