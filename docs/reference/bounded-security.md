@@ -104,6 +104,35 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
   writable ACL and low-integrity label. Launch uses a stdio-only handle list,
   suspended creation and mandatory Job assignment before resume. Job closure
   kills descendants; a 2 GiB aggregate memory limit and 128-process limit apply.
+  Each run gets a private window station and desktop (only the user, SYSTEM
+  and that AppContainer may open them; both vanish with the run), so tools that
+  load user32 (PowerShell, git) start. PowerShell, git and cmd stat every
+  parent of their working folder, which an AppContainer may not do above its
+  own workspace, and only an administrator could change that for `C:\Users`.
+  So no admin step is needed: untrusted scratch (`<persona>\scratch\untrusted`)
+  is a junction to `C:\phantom-sandbox\<user SID>\<persona>-<hash>`, which
+  the user creates and owns (the user folder is private to that user; the
+  shared root lets users add a folder but not list others). Each folder on the
+  way down carries one read-attributes ACE (not inherited, no listing or
+  reading) for a fixed capability every sandbox holds,
+  `phantombotSandboxTraverse`; git never stats the drive root. Each run also
+  maps its workspace to a free drive letter (this logon session only, removed
+  after the run) and starts there, so PowerShell sees no parents. If `C:\`
+  does not allow new folders, scratch stays in the profile (one log line):
+  PowerShell and cmd still work, git only for network commands such as
+  `ls-remote`. PATH is System32, Windows PowerShell and the host PATH
+  entries under the Windows/Program Files folders.
+- Windows builds that close NUL to AppContainers fail open. git (and most
+  MSYS/mingw tools) open the NUL device on every start; its DACL grants ALL
+  APPLICATION PACKAGES only from Windows 11 26H2 (build 26300). Server
+  2022/2025, Windows 11 24H2 (build 26100) and older do not, and only an
+  administrator could change that. phantombot reads NUL's DACL once per
+  process; where AppContainers are not granted, untrusted commands run
+  unconfined (no AppContainer) in their scratch folder with the same clean
+  environment, after the threat judge screened the turn, and one warning is
+  logged. Only Windows 11 26H2+ gets the filesystem boundary.
+  `PHANTOMBOT_WINDOWS_APPCONTAINER=force` keeps the AppContainer regardless
+  (stricter only; CI uses it to exercise the shipped launcher).
 
 POSIX commands have a two-minute wall-clock ceiling and bounded output. Linux
 also sets CPU, file-size, descriptor and per-user process limits. These are not

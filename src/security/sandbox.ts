@@ -13,7 +13,8 @@ import {
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
-import { windowsSandbox } from "./windows.ts";
+import { windowsAppContainerUsable, windowsSandbox } from "./windows.ts";
+import { log } from "../lib/logger.ts";
 import { linuxSandbox } from "./linux.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 
@@ -242,7 +243,7 @@ export function sandboxEnvironment(
     PHANTOMBOT_SCRATCH: workspace,
     PATH:
       process.platform === "win32"
-        ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32;${join(workspace, ".tools")}${extra}`
+        ? `${windowsSystemPath(process.env).join(";")};${join(workspace, ".tools")}${extra}`
         : `${process.platform === "darwin" ? "/opt/homebrew/bin:/usr/local/bin:" : ""}/usr/bin:/bin:/usr/sbin:/sbin:${join(workspace, ".tools")}${extra}`,
     HOME: home,
     USERPROFILE: home,
@@ -269,9 +270,87 @@ export function sandboxEnvironment(
           APPDATA: join(home, ".config"),
           SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
           ComSpec: `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`,
+          // Standard machine variables PowerShell/.NET and installers expect.
+          ...windowsMachineEnv(process.env),
+          // Without it Windows PowerShell falls back to the machine module path,
+          // which can list folders the AppContainer cannot read (CI runners'
+          // C:\Modules), and then core cmdlets like Set-Content fail to load.
+          PSModulePath: windowsModulePath(process.env),
+          // Files the elevated host made are owned by Administrators, not the
+          // sandbox's user, so git refuses them as "dubious ownership". The
+          // workspace is the sandbox's own disposable directory.
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "safe.directory",
+          GIT_CONFIG_VALUE_0: "*",
+          // The workspace is a mapped drive letter; git resolves it to the
+          // real path and would refuse to cross that "filesystem" boundary.
+          GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
         }
       : {}),
   };
+}
+
+/**
+ * Windows PATH inside the AppContainer: System32, Windows PowerShell, and the
+ * host PATH entries under the Windows or Program Files folders (git, gh,
+ * pwsh, node installs). Those are readable to ALL APPLICATION PACKAGES by
+ * default; per-user folders are not, so they are left out. The launcher
+ * recomputes this from the PATH it was given, so it must be idempotent.
+ */
+export function windowsSystemPath(env: NodeJS.ProcessEnv): string[] {
+  const root = env.SystemRoot ?? "C:\\Windows";
+  const bases = [root, env.ProgramFiles, env["ProgramFiles(x86)"], env.ProgramW6432]
+    .filter((b): b is string => !!b)
+    .map((b) => b.replace(/[\\/]+$/, "").toLowerCase() + "\\");
+  const out = [`${root}\\System32`, `${root}\\System32\\WindowsPowerShell\\v1.0`];
+  const seen = new Set(out.map((p) => p.toLowerCase()));
+  for (const raw of (env.PATH ?? env.Path ?? "").split(";")) {
+    const entry = raw.trim().replace(/[\\/]+$/, "");
+    const key = entry.toLowerCase();
+    if (!entry || seen.has(key) || /[%"\n\r]/.test(entry)) continue;
+    if (!bases.some((b) => key.startsWith(b))) continue;
+    seen.add(key);
+    out.push(entry);
+  }
+  return out;
+}
+
+const WINDOWS_MACHINE_ENV = [
+  "SystemDrive",
+  "windir",
+  "ProgramData",
+  "ALLUSERSPROFILE",
+  "ProgramFiles",
+  "ProgramFiles(x86)",
+  "ProgramW6432",
+  "CommonProgramFiles",
+  "CommonProgramFiles(x86)",
+  "CommonProgramW6432",
+  "PUBLIC",
+  "COMPUTERNAME",
+  "OS",
+  "NUMBER_OF_PROCESSORS",
+  "PROCESSOR_ARCHITECTURE",
+  "PROCESSOR_IDENTIFIER",
+  "PROCESSOR_LEVEL",
+  "PROCESSOR_REVISION",
+  "PATHEXT",
+] as const;
+/** Windows PowerShell's built-in and machine-wide module folders only. */
+export function windowsModulePath(env: NodeJS.ProcessEnv): string {
+  const root = env.SystemRoot ?? "C:\\Windows";
+  const out = [`${root}\\System32\\WindowsPowerShell\\v1.0\\Modules`];
+  if (env.ProgramFiles) out.push(`${env.ProgramFiles}\\WindowsPowerShell\\Modules`);
+  return out.join(";");
+}
+
+function windowsMachineEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of WINDOWS_MACHINE_ENV) {
+    const v = env[key];
+    if (typeof v === "string" && v && !/[\x00\n\r]/.test(v)) out[key] = v;
+  }
+  return out;
 }
 
 /** Arbitrary repository code executes only below this boundary. */
@@ -306,6 +385,7 @@ export async function runSandbox(
   for (const path of [".tmp", ".cache", ".config", ".tools"])
     mkdirSync(join(workspace, path), { recursive: true, mode: 0o700 });
   let invocation: string[];
+  let unconfined = false;
   if (process.platform === "linux")
     invocation = [
       ...(opts.launcher ?? phantombotSelfCommand()),
@@ -324,7 +404,16 @@ export async function runSandbox(
       "-c",
       command,
     ];
-  else if (process.platform === "win32")
+  else if (process.platform === "win32" && !windowsAppContainerUsable()) {
+    // Fail open (never deny service): this Windows build's NUL device is
+    // closed to AppContainers, so git and most tools could not start inside
+    // one. Run in the scratch folder with the sandbox env, unconfined; the
+    // threat judge still screened the turn.
+    windowsUnconfinedNotice();
+    unconfined = true;
+    const cmd = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`;
+    invocation = [cmd, `/d /s /c "${command}"`];
+  } else if (process.platform === "win32")
     invocation = [
       ...(opts.launcher ?? phantombotSelfCommand()),
       SANDBOX_SUBCOMMAND,
@@ -340,13 +429,15 @@ export async function runSandbox(
   const child = spawn(invocation[0]!, invocation.slice(1), {
     // The launcher itself must not discover bunfig/preloads from the repo.
     cwd:
-      process.platform === "darwin"
+      process.platform === "darwin" || unconfined
         ? workspace
         : process.platform === "win32"
           ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32`
           : "/",
     env: {
-      ...launcherEnvironment(workspace, home, opts.secrets, extraPath, opts.context),
+      ...(unconfined
+        ? sandboxEnvironment(workspace, home, opts.secrets, extraPath, opts.context)
+        : launcherEnvironment(workspace, home, opts.secrets, extraPath, opts.context)),
       ...(process.platform === "linux" && readable.length
         ? { [ENV_SANDBOX_READ]: encodeReadPaths(readable) }
         : {}),
@@ -359,6 +450,7 @@ export async function runSandbox(
     ],
     detached: process.platform !== "win32",
     windowsHide: true,
+    windowsVerbatimArguments: unconfined,
   });
   let supervision: Promise<void> | undefined;
   let supervisorStopped = false;
@@ -431,6 +523,15 @@ export async function runSandbox(
     await supervision;
     discardSandboxHome(home);
   }
+}
+
+let unconfinedNoticeShown = false;
+function windowsUnconfinedNotice(): void {
+  if (unconfinedNoticeShown) return;
+  unconfinedNoticeShown = true;
+  log.warn(
+    "Windows sandbox off: this Windows build blocks AppContainers from the NUL device (git cannot run); untrusted commands run unconfined in their scratch folder. Windows 11 26H2 (build 26300) or later runs them sandboxed.",
+  );
 }
 
 /** AppContainer resolution uses the caller's LocalAppData, never the child's. */

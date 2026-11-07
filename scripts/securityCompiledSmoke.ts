@@ -21,7 +21,8 @@ try {
       ? `echo compiled-ok & type "${secret}"`
       : `echo compiled-ok; cat '${secret}'`;
   const run = spawnSync(binary, ["__sandbox_run", workspace, command], {
-    env: sandboxEnvironment(workspace, home),
+    // Exercise the AppContainer even where NUL is closed (Server 2022 CI).
+    env: { ...sandboxEnvironment(workspace, home), PHANTOMBOT_WINDOWS_APPCONTAINER: "force" },
     encoding: "utf8",
     timeout: 15000,
   });
