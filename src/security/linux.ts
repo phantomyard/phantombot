@@ -1,12 +1,14 @@
 /** Applied only in a clean self-exec child, immediately before exec. No compiler. */
 import { prepareListenerSend } from "./linux-notify.ts";
 import { dlopen, ptr } from "bun:ffi";
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 
 export function linuxSandbox(
   workspace: string,
   executable: string,
   argv: string[],
+  /** Read-only host paths (runtime-supplied via ENV_SANDBOX_READ). */
+  readPaths: string[] = [],
 ): never {
   if (process.arch !== "x64" && process.arch !== "arm64")
     throw new Error("unsupported sandbox architecture");
@@ -113,6 +115,18 @@ export function linuxSandbox(
     add(p, read);
   for (const p of ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"])
     add(p, (1 << 1) | (1 << 2));
+  // The owner's model: tool dirs and SSH public keys, read-only. A file rule
+  // may carry only file rights (Landlock rejects READ_DIR on a file).
+  for (const p of readPaths) {
+    let dir: boolean;
+    try {
+      dir = statSync(p).isDirectory();
+    } catch {
+      continue;
+    }
+    add(p, dir ? read : (1 << 0) | (1 << 2));
+  }
+  // The ONLY writable path: the turn's scratch workspace.
   add(workspace, handled, true);
   add(executable, (1 << 0) | (1 << 2), true);
   // A fresh environment is supplied by the parent. Nothing besides stdio may

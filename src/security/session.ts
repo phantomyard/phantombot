@@ -1,11 +1,11 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { basename, join, relative, sep } from "node:path";
 import { CapabilityBroker, PolicyError, SandboxArchive } from "./broker.ts";
 import { publicGrant, validatePolicy } from "./policy.ts";
 import { deleteWindowsProfile } from "./windows.ts";
 import { prepareSandboxTools } from "./workspace.ts";
-import { runSandbox } from "./sandbox.ts";
+import { defaultSandboxHostPaths, runSandbox, type SandboxHostPaths } from "./sandbox.ts";
 import type {
   BrokerOperation,
   SecurityAudit,
@@ -81,12 +81,26 @@ export async function createSecuritySession(options: {
   gate?: SessionGate;
   /** Persona name for notify/memory; default = the persona dir's name. */
   persona?: string;
+  /**
+   * The turn's untrusted scratch dir (PHANTOMBOT_SCRATCH): the sandbox's ONLY
+   * writable directory. Must be a fresh, empty dir under
+   * <persona>/scratch/untrusted/; absent (scratch is fail-open) = a private
+   * runtime dir under <persona>/sandbox/.
+   */
+  workspace?: string;
+  /** Read-only host paths; default = defaultSandboxHostPaths(). */
+  hostPaths?: SandboxHostPaths;
 }): Promise<{ descriptor: SessionDescriptor; close(): Promise<void> }> {
   const policy = validatePolicy(options.policy);
   if (!policy.enabled) throw new Error("bounded security is disabled");
-  const root = join(options.personaDir, "sandbox");
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  const workspace = mkdtempSync(join(root, "run-"));
+  const workspace = options.workspace
+    ? scratchWorkspace(options.personaDir, options.workspace)
+    : (() => {
+        const root = join(options.personaDir, "sandbox");
+        mkdirSync(root, { recursive: true, mode: 0o700 });
+        return mkdtempSync(join(root, "run-"));
+      })();
+  const hostPaths = options.hostPaths ?? defaultSandboxHostPaths();
   prepareSandboxTools(workspace);
   const abort = new AbortController();
   const signal = options.signal
@@ -174,6 +188,7 @@ export async function createSecuritySession(options: {
                 await runSandbox(workspace, v.command, {
                   signal,
                   secrets: await sandboxSecrets(),
+                  hostPaths,
                 }),
               );
             }
@@ -269,4 +284,15 @@ export async function createSecuritySession(options: {
     rmSync(workspace, { recursive: true, force: true });
     throw error;
   }
+}
+
+/** Only a fresh, empty dir under <persona>/scratch/untrusted/ is accepted. */
+function scratchWorkspace(personaDir: string, dir: string): string {
+  const root = realpathSync(join(personaDir, "scratch", "untrusted"));
+  const real = realpathSync(dir);
+  const rel = relative(root, real);
+  if (!rel || rel.startsWith("..") || rel.split(sep).includes(".."))
+    throw new Error("sandbox workspace must be untrusted scratch");
+  if (readdirSync(real).length) throw new Error("sandbox workspace not empty");
+  return real;
 }

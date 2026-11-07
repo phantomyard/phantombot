@@ -5,6 +5,7 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -86,7 +87,7 @@ describe("default-on sandbox for untrusted turns", () => {
     const a = recorder("native", { sandbox: true, escort: true });
     await turn([a.h], { action: "pass", score: 5, reason: "ok", escort: SETTINGS });
     expect(a.reqs).toHaveLength(1);
-    expect(a.reqs[0]!.securitySession?.workspace).toStartWith(join(agentDir, "sandbox"));
+    expect(a.reqs[0]!.securitySession?.workspace).toContain(join("scratch", "untrusted"));
     // The escort runs at the session boundary, not in the harness.
     expect(a.reqs[0]!.escort).toBeUndefined();
     expect(a.reqs[0]!.systemPrompt).toContain("# Sandboxed turn");
@@ -97,6 +98,17 @@ describe("default-on sandbox for untrusted turns", () => {
     const final = await turn([codex.h], { action: "pass", score: 5, reason: "ok" });
     expect(codex.reqs).toHaveLength(0);
     expect(final).toContain("paused");
+  });
+
+  test("the sandbox's only writable dir is the turn's untrusted scratch", async () => {
+    const a = recorder("native", { sandbox: true });
+    await turn([a.h], { action: "pass", score: 5, reason: "ok" });
+    const req = a.reqs[0]!;
+    expect(req.scratchDir).toBeDefined();
+    expect(req.scratchDir!).toContain(join("scratch", "untrusted"));
+    // Same dir (the session holds its realpath; both are gone after the turn).
+    expect(req.securitySession!.workspace).toEndWith(req.scratchDir!.slice(agentDir.length));
+    expect(req.systemPrompt).toContain("ONLY writable place");
   });
 
   test("trusted turns are never sandboxed", async () => {
@@ -140,6 +152,18 @@ describe("session: vault in, escort at the boundary", () => {
       await session.close();
     }
   }, 20000);
+
+  test("a workspace outside untrusted scratch is refused", async () => {
+    const outside = join(agentDir, "not-scratch");
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(join(agentDir, "scratch", "untrusted"), { recursive: true });
+    await expect(
+      createSecuritySession({ personaDir: agentDir, policy: { version: 1, enabled: true, grants: [] }, workspace: outside }),
+    ).rejects.toThrow("untrusted scratch");
+    await expect(
+      createSecuritySession({ personaDir: agentDir, policy: { version: 1, enabled: true, grants: [] }, workspace: agentDir }),
+    ).rejects.toThrow("untrusted scratch");
+  });
 
   test("a refused command never runs; the model gets the refusal", async () => {
     const seen: unknown[] = [];

@@ -7,12 +7,22 @@ runs sandboxed by default. No policy file is needed; `{"version":1,"enabled":fal
 in `security-policy.json` is the owner's opt-out. Trusted principal turns are
 never sandboxed.
 
-Inside the sandbox a turn has a disposable workspace, **network**, and the
-**whole persona vault in its environment**, so the work it was asked to do
-(git, gh, curl, APIs) runs as it would on the host. It cannot read the
-persona's home, SSH keys, `identity.json` (the vault key), other personas or
-other host files. Host-only actions (notify, memory capture/search) go through
-the broker.
+Inside the sandbox a turn has **network** and the **whole persona vault in
+its environment**, so the work it was asked to do (git, gh, curl, APIs) runs as
+it would on the host. Filesystem:
+
+- **Writable:** only the turn's untrusted scratch dir (`$PHANTOMBOT_SCRATCH`,
+  `<persona>/scratch/untrusted/<conversation>/<turn>/`), which is also the
+  command's cwd and is deleted at turn end. The sandboxed-turn prompt tells the
+  model this is the only place to work.
+- **Read-only:** `~/.local/bin` (on `PATH`), `~/tools` and `~/.ssh/*.pub`,
+  linked into the sandbox's neutral `HOME` so `~/…` resolves (Linux and macOS;
+  Windows would need ACL changes on host folders, so it gets none).
+- **Hidden:** everything else, including the persona folder (`identity.json`,
+  the vault, prompt files, config and policy), SSH private keys, other personas
+  and the rest of the home.
+
+Host-only actions (notify, memory capture/search) go through the broker.
 
 Threat model, stated on purpose:
 
@@ -75,8 +85,8 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
 ## OS boundaries
 
 - Linux: glibc, x64/arm64, Landlock ABI 3 or newer, seccomp user notification and
-  ADDFD are required. Filesystem writes and arbitrary file reads are confined to
-  the workspace. System executables/libraries/headers/share data, CPU counts,
+  ADDFD are required. Filesystem writes are confined to the workspace; reads to
+  the workspace plus the read-only host paths above. System executables/libraries/headers/share data, CPU counts,
   timezone and random/null devices are readable, as are DNS, TLS-root and
   `/usr/local` runtime files. OpenSSL and Git use clean configuration.
   AF_INET/AF_INET6 sockets are allowed; every other socket family (host Unix
@@ -87,7 +97,7 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
   through Landlock, even if their path changes after inspection. No environment,
   file descriptor, host socket or loader setting is forwarded beyond stdio.
 - macOS: `/usr/bin/sandbox-exec` applies a default-deny Seatbelt profile. Only
-  system runtime files, DNS/TLS files, `/usr/local`, `/opt/homebrew` and the disposable workspace are accessible; network is allowed; arbitrary Mach IPC is denied; only system logging/user lookup, DNS and trust services are reachable. The OS must still provide this deprecated system facility.
+  system runtime files, DNS/TLS files, `/usr/local`, `/opt/homebrew`, the read-only host paths and the disposable workspace are accessible; network is allowed; arbitrary Mach IPC is denied; only system logging/user lookup, DNS and trust services are reachable. The OS must still provide this deprecated system facility.
 - Windows: a private AppContainer profile with only the `internetClient`
   capability supplies the filesystem boundary (outbound network allowed; the
   host's loopback stays unreachable). Only the disposable directory gets an inherited

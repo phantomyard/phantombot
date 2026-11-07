@@ -1125,6 +1125,8 @@ async function* runTurnBody(
       personaDir: input.agentDir,
       persona: input.persona,
       policy: securityPolicy,
+      // The turn's untrusted scratch is the sandbox's only writable dir.
+      ...(scratch?.ephemeral ? { workspace: scratch.dir } : {}),
       signal: input.signal,
       audit: event => log.info("security: operation", { ...event }),
       ...(escort ? { gate: sessionEscortGate(escort, { signal: input.signal }) } : {}),

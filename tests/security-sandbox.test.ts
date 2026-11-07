@@ -9,7 +9,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSandbox, sandboxEnvironment } from "../src/security/sandbox.ts";
+import {
+  defaultSandboxHostPaths,
+  runSandbox,
+  sandboxEnvironment,
+} from "../src/security/sandbox.ts";
 import { deleteWindowsProfile } from "../src/security/windows.ts";
 import { prepareSandboxTools } from "../src/security/workspace.ts";
 const dirs: string[] = [];
@@ -186,3 +190,57 @@ test("launcher never executes repository Bun preloads outside confinement", asyn
   expect(r.exitCode, r.output).toBe(0);
   expect(() => readFileSync(canary)).toThrow();
 }, 15000);
+
+// The owner's model: only the workspace is writable; tool dirs and SSH PUBLIC
+// keys are read-only; everything else in the home stays hidden.
+test("defaultSandboxHostPaths grants tool dirs and only public SSH keys", () => {
+  const home = fresh();
+  mkdirSync(join(home, ".ssh"));
+  writeFileSync(join(home, ".ssh", "id_ed25519"), "PRIVATE");
+  writeFileSync(join(home, ".ssh", "id_ed25519.pub"), "ssh-ed25519 PUB");
+  const paths = defaultSandboxHostPaths(home);
+  expect(paths.read).toEqual([
+    join(home, ".local", "bin"),
+    join(home, "tools"),
+    join(home, ".ssh", "id_ed25519.pub"),
+  ]);
+  expect(paths.path).toEqual([join(home, ".local", "bin")]);
+});
+
+test.skipIf(win)(
+  "read-only host paths: readable via ~, bin on PATH, private key and rest of home hidden",
+  async () => {
+    const home = fresh(),
+      ws = fresh();
+    for (const d of [".local/bin", "tools", ".ssh"])
+      mkdirSync(join(home, d), { recursive: true });
+    writeFileSync(join(home, ".local/bin/pbtool"), "#!/bin/sh\necho tool-ran\n", { mode: 0o755 });
+    writeFileSync(join(home, "tools", "script.txt"), "tool-file");
+    writeFileSync(join(home, ".ssh", "id_x.pub"), "ssh-ed25519 PUBKEY");
+    writeFileSync(join(home, ".ssh", "id_x"), "PRIVATE-KEY");
+    writeFileSync(join(home, ".bashrc"), "HOME-SECRET");
+    const r = await runSandbox(
+      ws,
+      [
+        "pbtool",
+        "cat ~/tools/script.txt; echo",
+        "cat ~/.ssh/id_x.pub; echo",
+        `cat ${quote(join(home, ".ssh", "id_x"))} || echo private-hidden`,
+        `cat ${quote(join(home, ".bashrc"))} || echo home-hidden`,
+        `touch ${quote(join(home, "tools", "new"))} || echo tools-readonly`,
+        "touch here && echo workspace-writable",
+      ].join("\n"),
+      { hostPaths: { ...defaultSandboxHostPaths(home), home } },
+    );
+    expect(r.output).toContain("tool-ran");
+    expect(r.output).toContain("tool-file");
+    expect(r.output).toContain("PUBKEY");
+    expect(r.output).toContain("private-hidden");
+    expect(r.output).not.toContain("PRIVATE-KEY");
+    expect(r.output).toContain("home-hidden");
+    expect(r.output).not.toContain("HOME-SECRET");
+    expect(r.output).toContain("tools-readonly");
+    expect(r.output).toContain("workspace-writable");
+  },
+  20000,
+);

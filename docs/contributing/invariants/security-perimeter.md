@@ -52,8 +52,12 @@ sandbox/broker. Do not pass model-derived policy objects, expose vault values
 on IPC, or fall back to host tools after a sandbox failure.
 
 The sandbox has network and the whole persona vault in its env
-(`sandboxSecretEnv` drops loader/runtime names). It never gets host files, the
-persona home, SSH keys, `identity.json` or non-inet sockets. That a missed
+(`sandboxSecretEnv` drops loader/runtime names). Its ONLY writable dir is the
+turn's untrusted scratch (`scratchWorkspace` refuses anything else); read-only
+it gets `~/.local/bin`, `~/tools` and `~/.ssh/*.pub` (`defaultSandboxHostPaths`).
+It never gets the persona folder, SSH private keys, `identity.json`, other host
+files or non-inet sockets. Never widen the writable set: a writable host path
+is a write that later runs outside the sandbox. That a missed
 hijack can send the vault out is the ACCEPTED risk, stated in the reference:
 do not "fix" it by stripping network or secrets, or by per-job secret lists.
 The judge is the primary control; the escort (when on) judges each sandbox
