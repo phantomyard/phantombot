@@ -18,7 +18,8 @@ import { geminiEmbed, type EmbedResult } from "../lib/geminiEmbed.ts";
 import { openaiCompatibleEmbed } from "../lib/openaiCompatibleEmbed.ts";
 import { fetchEmbeddingModels } from "../lib/embeddingModels.ts";
 import { timeoutSignal } from "../lib/fetchTimeout.ts";
-import type { EmbeddingsCheck, EmbeddingsCheckInput } from "./types.ts";
+import { EMBEDDINGS_PRESETS, embeddingsPreset } from "../lib/specializedProviders.ts";
+import type { EmbeddingsCheck, EmbeddingsCheckInput, EmbeddingsConfig, EmbeddingsProviderInfo } from "./types.ts";
 
 export const GEMINI_EMBEDDING_MODEL = "gemini-embedding-001";
 export const GEMINI_EMBEDDING_DIMS = 1536;
@@ -48,6 +49,30 @@ let backendsForTesting: EmbeddingsBackends | undefined;
 /** @internal Tests only. Pass undefined to restore the real network calls. */
 export function _setEmbeddingsBackendsForTesting(b: EmbeddingsBackends | undefined): void {
   backendsForTesting = b;
+}
+
+/** Gemini, Pi providers with an embeddings API, then bring-your-own endpoint. */
+export function embeddingsProviders(): EmbeddingsProviderInfo[] {
+  return [
+    { id: "gemini", label: "Google Gemini", needsBaseUrl: false, keyOptional: false },
+    ...EMBEDDINGS_PRESETS.map((p) => ({
+      id: p.id,
+      label: p.label,
+      needsBaseUrl: false,
+      keyOptional: false,
+      transport: { provider: "openai-compatible" as const, baseUrl: p.baseUrl },
+    })),
+    { id: "openai-compatible", label: "OpenAI Compatible", needsBaseUrl: true, keyOptional: true },
+  ];
+}
+
+/** A preset id becomes openai-compatible + the preset's own URL, for storage. */
+export function resolveEmbeddingsProvider<T extends EmbeddingsConfig | undefined>(em: T): T {
+  const preset = em ? embeddingsPreset(em.provider) : undefined;
+  if (preset && (typeof (em as { apiKey?: unknown }).apiKey !== "string" || !(em as { apiKey: string }).apiKey.trim())) {
+    throw new EngineError("invalid_argument", `embeddings.apiKey is required for ${preset.label}`);
+  }
+  return preset ? ({ ...em, provider: "openai-compatible", baseUrl: preset.baseUrl } as T) : em;
 }
 
 function validateEndpoint(baseUrl: unknown): string {
@@ -93,14 +118,18 @@ export async function checkEmbeddings(input: EmbeddingsCheckInput): Promise<Embe
   if (!input || typeof input !== "object") {
     throw new EngineError("invalid_argument", "embeddings check input must be an object");
   }
-  const provider = (input as { provider?: unknown }).provider;
-  if (provider !== "gemini" && provider !== "openai-compatible") {
+  const requested = (input as { provider?: unknown }).provider;
+  const preset = embeddingsPreset(requested);
+  if (requested !== "gemini" && requested !== "openai-compatible" && !preset) {
     throw new EngineError(
       "invalid_argument",
-      "embeddings provider must be 'gemini' or 'openai-compatible'",
-      { provider: String(provider) },
+      "embeddings provider must be 'gemini', 'openai-compatible' or a provider from embeddings.providers()",
+      { provider: String(requested) },
     );
   }
+  // A preset always uses its own endpoint, whatever baseUrl the caller sent.
+  const provider = preset ? "openai-compatible" : requested;
+  if (preset) input = { ...input, baseUrl: preset.baseUrl };
   const key = optionalString(input.apiKey, "apiKey", MAX_KEY_CHARS);
   const model = optionalString(input.model, "model", MAX_MODEL_CHARS);
   const b = backendsForTesting ?? realBackends;
@@ -115,8 +144,11 @@ export async function checkEmbeddings(input: EmbeddingsCheckInput): Promise<Embe
       : { status: "failed", detail: redact(r.error, key), models: [id] };
   }
 
+  if (preset && !key) return { status: "unchecked", detail: "no key to check", models: [...preset.models] };
   const baseUrl = validateEndpoint(input.baseUrl);
-  const models = await b.models(baseUrl, key, signal).catch(() => [] as string[]);
+  const live = await b.models(baseUrl, key, signal).catch(() => [] as string[]);
+  // No embedding models in the live list: the provider's known ones.
+  const models = live.length || !preset ? live : [...preset.models];
   if (!model) return { status: "unchecked", detail: "choose a model", models };
   const r = await b.openai({ baseUrl, model, ...(key ? { apiKey: key } : {}) }, signal);
   return r.ok

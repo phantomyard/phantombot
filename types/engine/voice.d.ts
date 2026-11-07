@@ -3,7 +3,11 @@
 export type VoiceModality = "tts" | "stt";
 export interface VoiceCheckInput {
     modality: VoiceModality;
-    provider: "openai-compatible" | "elevenlabs";
+    /**
+     * `"openai-compatible"` (caller's `baseUrl`), `"elevenlabs"`, or a Pi
+     * provider id from `providers()` (fixed endpoint; `baseUrl` is ignored).
+     */
+    provider: string;
     apiKey: string;
     baseUrl?: string;
     model?: string;
@@ -18,10 +22,32 @@ export interface VoiceCheck {
     }>;
     voices: string[];
 }
-export declare function voiceProviders(): {
+export interface VoiceProviderInfo {
     id: string;
     label: string;
-    modalities: string[];
+    /** Which directions this provider can serve; the model lists are filtered to these. */
+    modalities: VoiceModality[];
     needsBaseUrl: boolean;
-}[];
+    /**
+     * How a config stores this choice: Pi presets are saved as
+     * `openai-compatible` + `baseUrl`. Absent for the two built-in transports.
+     */
+    transport?: {
+        provider: "openai-compatible";
+        baseUrl: string;
+    };
+}
+/** Pi providers with a voice API, then ElevenLabs, then bring-your-own endpoint. */
+export declare function voiceProviders(): VoiceProviderInfo[];
+/**
+ * A preset provider id becomes the transport it runs on; anything else is
+ * returned as given. The preset's base URL always wins, so a preset never
+ * sends a key to a caller-chosen host.
+ */
+export declare function resolveVoiceProvider<T extends {
+    provider?: unknown;
+    baseUrl?: unknown;
+}>(v: T): T;
+/** False only for a preset that offers no models of `modality`. */
+export declare const supportsModality: (provider: unknown, modality: VoiceModality) => boolean;
 export declare function checkVoice(input: VoiceCheckInput): Promise<VoiceCheck>;

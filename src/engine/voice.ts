@@ -6,11 +6,16 @@ import {
   type VoiceDirectionConfig,
 } from "../lib/voice.ts";
 import { timeoutSignal } from "../lib/fetchTimeout.ts";
+import { VOICE_PRESETS, voicePreset } from "../lib/specializedProviders.ts";
 
 export type VoiceModality = "tts" | "stt";
 export interface VoiceCheckInput {
   modality: VoiceModality;
-  provider: "openai-compatible" | "elevenlabs";
+  /**
+   * `"openai-compatible"` (caller's `baseUrl`), `"elevenlabs"`, or a Pi
+   * provider id from `providers()` (fixed endpoint; `baseUrl` is ignored).
+   */
+  provider: string;
   apiKey: string;
   baseUrl?: string;
   model?: string;
@@ -23,12 +28,49 @@ export interface VoiceCheck {
   voices: string[];
 }
 
-export function voiceProviders() {
+export interface VoiceProviderInfo {
+  id: string;
+  label: string;
+  /** Which directions this provider can serve; the model lists are filtered to these. */
+  modalities: VoiceModality[];
+  needsBaseUrl: boolean;
+  /**
+   * How a config stores this choice: Pi presets are saved as
+   * `openai-compatible` + `baseUrl`. Absent for the two built-in transports.
+   */
+  transport?: { provider: "openai-compatible"; baseUrl: string };
+}
+
+/** Pi providers with a voice API, then ElevenLabs, then bring-your-own endpoint. */
+export function voiceProviders(): VoiceProviderInfo[] {
   return [
-    { id: "openai-compatible", label: "OpenAI Compatible", modalities: ["tts", "stt"], needsBaseUrl: true },
+    ...VOICE_PRESETS.map((p) => ({
+      id: p.id,
+      label: p.label,
+      modalities: (["tts", "stt"] as const).filter((m) => p.models[m] !== undefined),
+      needsBaseUrl: false,
+      transport: { provider: "openai-compatible" as const, baseUrl: p.baseUrl },
+    })),
     { id: "elevenlabs", label: "ElevenLabs", modalities: ["tts", "stt"], needsBaseUrl: false },
+    { id: "openai-compatible", label: "OpenAI Compatible", modalities: ["tts", "stt"], needsBaseUrl: true },
   ];
 }
+
+/**
+ * A preset provider id becomes the transport it runs on; anything else is
+ * returned as given. The preset's base URL always wins, so a preset never
+ * sends a key to a caller-chosen host.
+ */
+export function resolveVoiceProvider<T extends { provider?: unknown; baseUrl?: unknown }>(v: T): T {
+  const preset = voicePreset(v.provider);
+  return preset ? { ...v, provider: "openai-compatible", baseUrl: preset.baseUrl } : v;
+}
+
+/** False only for a preset that offers no models of `modality`. */
+export const supportsModality = (provider: unknown, modality: VoiceModality) => {
+  const preset = voicePreset(provider);
+  return !preset || preset.models[modality] !== undefined;
+};
 
 /** @internal */
 export function validateVoiceDirection(value: unknown): asserts value is VoiceDirectionConfig {
@@ -37,6 +79,10 @@ export function validateVoiceDirection(value: unknown): asserts value is VoiceDi
   if (typeof v.enabled !== "boolean") throw new EngineError("invalid_argument", "voice.enabled must be boolean");
   // An off-only patch retains the previous provider, model and credential.
   if (!v.enabled && Object.keys(v).length === 1) return;
+  if (voicePreset(v.provider)) {
+    validateVoiceDirection(resolveVoiceProvider(v));
+    return;
+  }
   if (v.provider !== "openai-compatible" && v.provider !== "elevenlabs") throw new EngineError("invalid_argument", "unsupported voice provider");
   for (const field of ["model", "keyEnv"] as const) {
     if (typeof v[field] !== "string" || !v[field] || (v[field] as string).length > 512) throw new EngineError("invalid_argument", `voice.${field} is required`);
@@ -58,6 +104,17 @@ export function validateVoiceEndpoint(baseUrl: unknown): asserts baseUrl is stri
 
 export async function checkVoice(input: VoiceCheckInput): Promise<VoiceCheck> {
   if (input?.modality !== "tts" && input?.modality !== "stt") throw new EngineError("invalid_argument", "modality must be tts or stt");
+  const preset = voicePreset(input.provider);
+  if (preset) {
+    if (!supportsModality(preset.id, input.modality)) {
+      throw new EngineError("invalid_argument", `${preset.label} has no ${input.modality.toUpperCase()} models`);
+    }
+    const check = await checkVoice({ ...input, provider: "openai-compatible", baseUrl: preset.baseUrl });
+    const fallback = preset.models[input.modality] ?? [];
+    if (!check.ok || check.models.length || !fallback.length) return check;
+    // The live list carried no audio metadata: offer the provider's known models.
+    return { ...check, models: fallback.map((id) => ({ id, voices: [] as string[] })) };
+  }
   if (input.provider !== "openai-compatible" && input.provider !== "elevenlabs") throw new EngineError("invalid_argument", "unsupported voice provider");
   if (typeof input.apiKey !== "string" || input.apiKey.length > 65536) throw new EngineError("invalid_argument", "invalid voice apiKey");
   if (!input.apiKey.trim()) return { ok: false, error: "Enter an API key", models: [], voices: [] };

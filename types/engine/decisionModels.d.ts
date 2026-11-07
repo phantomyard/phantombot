@@ -17,7 +17,13 @@
  * Nothing here stores anything. The key is used for the provider's own
  * endpoints and then dropped; it reaches the vault only through `configure`.
  */
-import type { DecisionModelCheck } from "./types.ts";
+import type { DecisionModelCheck, DecisionModelProviderInfo } from "./types.ts";
+/**
+ * The providers that serve decision models. A decision model answers on the
+ * decisions API (`/api/alpha/decisions`), which no other Pi provider offers,
+ * so this is the whole list once filtered by model type.
+ */
+export declare function decisionModelProviders(): DecisionModelProviderInfo[];
 /**
  * Check `apiKey` against a built-in decision-model provider and list its
  * decision models.

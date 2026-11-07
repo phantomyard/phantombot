@@ -92,9 +92,9 @@ import {
   phantomchatInfo,
   startHostedChannel,
 } from "./phantomchat.ts";
-import { checkVoice, validateVoiceDirection, voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
-import { checkDecisionModel } from "./decisionModels.ts";
-import { checkEmbeddings } from "./embeddings.ts";
+import { checkVoice, resolveVoiceProvider, supportsModality, validateVoiceDirection, voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
+import { checkDecisionModel, decisionModelProviders } from "./decisionModels.ts";
+import { checkEmbeddings, embeddingsProviders, resolveEmbeddingsProvider } from "./embeddings.ts";
 import { refreshPersonaIndex } from "../lib/indexRefresh.ts";
 import { checkProvider, listProviders } from "./providers.ts";
 import {
@@ -108,8 +108,10 @@ import type {
   DecideOptions,
   DecisionAnswer,
   DecisionModelCheck,
+  DecisionModelProviderInfo,
   EmbeddingsCheck,
   EmbeddingsCheckInput,
+  EmbeddingsProviderInfo,
   MemoryRefreshResult,
   DecisionResult,
   EngineEvent,
@@ -264,6 +266,8 @@ export class Engine {
    * `persona.configure({ decisionModel: { provider, model, apiKey } })`.
    */
   readonly decisionModels: {
+    /** Providers that serve decision models (filtered by model type). */
+    providers(): Promise<DecisionModelProviderInfo[]>;
     check(provider: string, apiKey: string): Promise<DecisionModelCheck>;
   };
 
@@ -278,6 +282,8 @@ export class Engine {
    * `persona.configure({ embeddings: { ..., dims } })`.
    */
   readonly embeddings: {
+    /** Gemini, Pi providers with an embeddings API, and bring-your-own endpoint. */
+    providers(): Promise<EmbeddingsProviderInfo[]>;
     check(input: EmbeddingsCheckInput): Promise<EmbeddingsCheck>;
   };
 
@@ -317,9 +323,11 @@ export class Engine {
       check: (input) => this.run(() => checkVoice(input)),
     };
     this.decisionModels = {
+      providers: () => this.run(async () => decisionModelProviders()),
       check: (provider, apiKey) => this.run(() => checkDecisionModel(provider, apiKey)),
     };
     this.embeddings = {
+      providers: () => this.run(async () => embeddingsProviders()),
       check: (input) => this.run(() => checkEmbeddings(input)),
     };
   }
@@ -861,7 +869,12 @@ export class Persona {
         for (const direction of ["tts", "stt"] as const) {
           const d = settings.voice[direction];
           if (d === undefined) continue;
-          const { apiKey, ...metadata } = d;
+          const { apiKey, ...requested } = d;
+          if (requested.enabled && !supportsModality(requested.provider, direction)) {
+            throw new EngineError("invalid_argument", `voice provider '${requested.provider}' has no ${direction.toUpperCase()} models`);
+          }
+          // A Pi preset is stored as the transport it runs on (openai-compatible + its URL).
+          const metadata = resolveVoiceProvider(requested);
           validateVoiceDirection(metadata);
           const block = table(table(toml, "voice"), direction);
           // A changed endpoint must never reuse a key from a previous provider.
@@ -1002,7 +1015,7 @@ export class Persona {
         }
       }
 
-      const em = settings.embeddings;
+      const em = resolveEmbeddingsProvider(settings.embeddings);
       let embeddingKey: { name: string; value: string | undefined } | undefined;
       if (em) {
         const block = table(toml, "embeddings");
@@ -1048,7 +1061,7 @@ export class Persona {
         } else {
           throw new EngineError(
             "invalid_argument",
-            "embeddings.provider must be one of: none, gemini, openai-compatible",
+            "embeddings.provider must be none, gemini, openai-compatible or a provider from embeddings.providers()",
           );
         }
       }

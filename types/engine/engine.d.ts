@@ -2,7 +2,7 @@
 // Regenerate with `bun run build:engine-types` and commit the result.
 import type { SecurityPolicy } from "./securityTypes.ts";
 import { voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
-import type { CreatePersonaOptions, DecideOptions, DecisionModelCheck, EmbeddingsCheck, EmbeddingsCheckInput, MemoryRefreshResult, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
+import type { CreatePersonaOptions, DecideOptions, DecisionModelCheck, DecisionModelProviderInfo, EmbeddingsCheck, EmbeddingsCheckInput, EmbeddingsProviderInfo, MemoryRefreshResult, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
 /**
  * Open an engine on `options.root`. Rejects with `invalid_root` or
  * `root_locked`. Always `close()` it (or use `await using`).
@@ -38,6 +38,8 @@ export declare class Engine {
      * `persona.configure({ decisionModel: { provider, model, apiKey } })`.
      */
     readonly decisionModels: {
+        /** Providers that serve decision models (filtered by model type). */
+        providers(): Promise<DecisionModelProviderInfo[]>;
         check(provider: string, apiKey: string): Promise<DecisionModelCheck>;
     };
     readonly voiceModels: {
@@ -50,6 +52,8 @@ export declare class Engine {
      * `persona.configure({ embeddings: { ..., dims } })`.
      */
     readonly embeddings: {
+        /** Gemini, Pi providers with an embeddings API, and bring-your-own endpoint. */
+        providers(): Promise<EmbeddingsProviderInfo[]>;
         check(input: EmbeddingsCheckInput): Promise<EmbeddingsCheck>;
     };
     /** A handle on `name`. Cheap; existence is checked on use. */
