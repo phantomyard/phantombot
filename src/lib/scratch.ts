@@ -34,6 +34,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readdir, rm, rmdir, stat, utimes } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 
+import { prepareWindowsUntrustedScratch } from "../security/windowsScratch.ts";
 import { inertText } from "./promptSafeText.ts";
 
 /** Env var handed to harness subprocesses. Runtime-owned — never ambient. */
@@ -97,6 +98,9 @@ export async function provisionScratch(
     : conversationDir;
 
   await sweepScratch(input.agentDir, { now: input.now });
+  // Windows: untrusted scratch moves under C:\phantom-sandbox (junction) so
+  // PowerShell and git work in the sandbox without an admin step.
+  if (ephemeral) prepareWindowsUntrustedScratch(join(root, "untrusted"), input.agentDir);
 
   await mkdir(dir, { recursive: true, mode: 0o700 });
   // Stamp "last use" on the conversation dir so an active conversation that

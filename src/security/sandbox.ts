@@ -281,6 +281,9 @@ export function sandboxEnvironment(
           GIT_CONFIG_COUNT: "1",
           GIT_CONFIG_KEY_0: "safe.directory",
           GIT_CONFIG_VALUE_0: "*",
+          // The workspace is a mapped drive letter; git resolves it to the
+          // real path and would refuse to cross that "filesystem" boundary.
+          GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
         }
       : {}),
   };

@@ -1,9 +1,8 @@
 /** Windows' built-in AppContainer + kill-on-close Job. No installer/admin. */
 import { dlopen, ptr, read, type Pointer } from "bun:ffi";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { TRAVERSE_CAPABILITY, TRAVERSE_MASK } from "./windowsScratch.ts";
 import {
   discardSandboxHome,
   neutralSandboxHome,
@@ -22,10 +21,28 @@ const readWide = (p: Pointer, max = 1024): string => {
   }
   return out;
 };
-/** Fixed per-host capability every sandbox carries (see grantParents). */
-export const TRAVERSE_CAPABILITY = "phantombotSandboxTraverse";
-/** SYNCHRONIZE | FILE_READ_ATTRIBUTES: stat only; no list, no read. */
-const TRAVERSE_MASK = "0x100080";
+export { TRAVERSE_CAPABILITY };
+
+/** Free drive letters, Z: first; A:-C: are never used. */
+export function freeDriveLetters(logicalDrives: number): string[] {
+  const out: string[] = [];
+  for (let i = 25; i >= 3; i--)
+    if (!(logicalDrives & (1 << i))) out.push(`${String.fromCharCode(65 + i)}:`);
+  return out;
+}
+
+/** A drive-letter target left behind by a killed launcher (workspace gone). */
+export function isStaleSandboxDrive(
+  targets: string[],
+  exists: (path: string) => boolean,
+): boolean {
+  if (targets.length !== 1 || !targets[0]!.startsWith("\\??\\")) return false;
+  const path = targets[0]!.slice(4);
+  return (
+    /\\(?:phantom-sandbox|scratch\\untrusted|sandbox\\run-)/i.test(path) &&
+    !exists(path)
+  );
+}
 
 /** Every parent of `folder`, drive root first, excluding `folder` itself. */
 export function windowsParents(folder: string): string[] {
@@ -179,6 +196,11 @@ function windowsSandboxInHome(
     CloseHandle: { args: ["ptr"], returns: "bool" },
     GetCurrentProcess: { args: [], returns: "ptr" },
     GetLongPathNameW: { args: ["ptr", "ptr", "u32"], returns: "u32" },
+    DefineDosDeviceW: { args: ["u32", "ptr", "ptr"], returns: "bool" },
+    QueryDosDeviceW: { args: ["ptr", "ptr", "u32"], returns: "u32" },
+    GetLogicalDrives: { args: [], returns: "u32" },
+    CreateMutexW: { args: ["ptr", "bool", "ptr"], returns: "ptr" },
+    ReleaseMutex: { args: ["ptr"], returns: "bool" },
   });
   // PowerShell expands 8.3 names (C:\Users\RUNNER~1) by listing each
   // parent, which the AppContainer may not do. Work on the long path; the
@@ -322,6 +344,8 @@ function windowsSandboxInHome(
   };
   const grantParents = (folder: string, capability: string) => {
     for (const parent of windowsParents(folder)) {
+      // Only our own tree (windowsScratch.ts): never the user's profile.
+      if (!/\\phantom-sandbox(?:\\|$)/i.test(parent)) continue;
       const sddl = readDacl(parent);
       if (sddl === undefined) continue;
       const next = withTraverseAce(sddl, capability);
@@ -368,6 +392,53 @@ function windowsSandboxInHome(
       return readWide(address(out), 1 << 16);
     } finally {
       kernel.symbols.LocalFree(address(out));
+    }
+  };
+  // PowerShell (and cmd's cd/dir) stat every parent of the working folder,
+  // which the AppContainer may not do above its own workspace. Map the
+  // workspace to its own drive letter and start there: no parents to stat.
+  // The letter lives in this logon session only and is removed after the
+  // run. Fail open: without a free letter the run starts in the real path.
+  const mapDrive = (): { root: string; remove(): void } | null => {
+    const RAW = 1,
+      REMOVE = 2,
+      EXACT = 4,
+      QUIET = 8;
+    const targets = (letter: string) => {
+      const out = Buffer.alloc(65536);
+      const n = kernel.symbols.QueryDosDeviceW(wide(letter), out, 32768);
+      return n ? out.toString("utf16le", 0, n * 2).split("\0").filter(Boolean) : [];
+    };
+    const target = `\\??\\${workspace}`;
+    const mutex = kernel.symbols.CreateMutexW(null, false, wide("Local\\phantombot-sandbox-drive"));
+    if (mutex) kernel.symbols.WaitForSingleObject(mutex, 5000);
+    try {
+      const used = kernel.symbols.GetLogicalDrives();
+      // Letters left by a killed launcher point at deleted workspaces.
+      for (let i = 3; i < 26; i++) {
+        if (!(used & (1 << i))) continue;
+        const letter = `${String.fromCharCode(65 + i)}:`;
+        const old = targets(letter);
+        if (isStaleSandboxDrive(old, existsSync))
+          kernel.symbols.DefineDosDeviceW(RAW | REMOVE | EXACT | QUIET, wide(letter), wide(old[0]!));
+      }
+      for (const letter of freeDriveLetters(kernel.symbols.GetLogicalDrives())) {
+        if (!kernel.symbols.DefineDosDeviceW(RAW | QUIET, wide(letter), wide(target))) continue;
+        const now = targets(letter);
+        const remove = () =>
+          kernel.symbols.DefineDosDeviceW(RAW | REMOVE | EXACT | QUIET, wide(letter), wide(target));
+        if (now.length === 1 && now[0]!.toLowerCase() === target.toLowerCase())
+          return { root: `${letter}\\`, remove };
+        remove(); // someone else's letter appeared meanwhile
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      if (mutex) {
+        kernel.symbols.ReleaseMutex(mutex);
+        kernel.symbols.CloseHandle(mutex);
+      }
     }
   };
   const name = wide(windowsProfileName(given));
@@ -472,11 +543,12 @@ function windowsSandboxInHome(
     // their working folder. One fixed capability may read those parents'
     // attributes (this folder only: no listing, no reading, no inheritance)
     // the workspace's parents; granted once and idempotent, never per turn.
+    const drive = mapDrive();
     const traverse = traverseCapability();
     try {
       grantParents(workspace, traverse.text);
     } catch {
-      // Best effort: a parent we may not change (C:\\ without admin) stays as is.
+      // Best effort: a parent we may not change (C:\\, another user's root) stays as is.
     }
     const size = Buffer.alloc(8);
     kernel.symbols.InitializeProcThreadAttributeList(null, 2, 0, size);
@@ -573,7 +645,7 @@ function windowsSandboxInHome(
           true,
           0x80000 | 0x400 | 0x4,
           environment,
-          wide(workspace),
+          wide(drive?.root ?? workspace),
           startup,
           info,
         ),
@@ -608,6 +680,7 @@ function windowsSandboxInHome(
       kernel.symbols.CloseHandle(job);
       kernel.symbols.DeleteProcThreadAttributeList(attrs);
       surface.close();
+      drive?.remove();
     }
   } finally {
     if (address(netSidOut)) kernel.symbols.LocalFree(address(netSidOut));
@@ -616,24 +689,6 @@ function windowsSandboxInHome(
   }
 }
 
-export const WINDOWS_SANDBOX_SETUP_SUBCOMMAND = "__sandbox_setup";
-/**
- * `C:\\` and `C:\\Users` only take the traverse ACE from an administrator; the
- * runtime grants everything below the user's profile itself. Run once,
- * elevated, per PC: one throwaway sandbox launch from under the profile.
- * Without it the sandbox still runs (fail open), but PowerShell and git
- * cannot start in their working folder.
- */
-export function windowsSandboxSetup(): number {
-  if (process.platform !== "win32") return 0;
-  const workspace = mkdtempSync(join(tmpdir(), "pb-sandbox-setup-"));
-  try {
-    return windowsSandbox(workspace, "echo phantombot sandbox ready");
-  } finally {
-    deleteWindowsProfile(workspace);
-    rmSync(workspace, { recursive: true, force: true });
-  }
-}
 
 export function deleteWindowsProfile(workspace: string): void {
   if (process.platform !== "win32") return;

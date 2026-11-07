@@ -106,15 +106,21 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
   kills descendants; a 2 GiB aggregate memory limit and 128-process limit apply.
   Each run gets a private window station and desktop (only the user, SYSTEM
   and that AppContainer may open them; both vanish with the run), so tools that
-  load user32 (PowerShell, git) start. Every sandbox also carries one fixed
-  capability, `phantombotSandboxTraverse`, granted once on the workspace's
-  parent folders for read-attributes only (no listing, no reading, not
-  inherited, written without re-walking children): PowerShell, git and cmd
-  stat those parents. `C:\` and `C:\Users` take that ACE only from an
-  administrator, so run `phantombot __sandbox_setup` once per PC from an
-  elevated prompt (CI runners and elevated hosts grant it on first launch).
-  Without it the sandbox still runs, but PowerShell and git cannot start in
-  their working folder. PATH is System32, Windows PowerShell and the host PATH
+  load user32 (PowerShell, git) start. PowerShell, git and cmd stat every
+  parent of their working folder, which an AppContainer may not do above its
+  own workspace, and only an administrator could change that for `C:\Users`.
+  So no admin step is needed: untrusted scratch (`<persona>\scratch\untrusted`)
+  is a junction to `C:\phantom-sandbox\<user SID>\<persona>-<hash>`, which
+  the user creates and owns (the user folder is private to that user; the
+  shared root lets users add a folder but not list others). Each folder on the
+  way down carries one read-attributes ACE (not inherited, no listing or
+  reading) for a fixed capability every sandbox holds,
+  `phantombotSandboxTraverse`; git never stats the drive root. Each run also
+  maps its workspace to a free drive letter (this logon session only, removed
+  after the run) and starts there, so PowerShell sees no parents. If `C:\`
+  does not allow new folders, scratch stays in the profile (one log line):
+  PowerShell and cmd still work, git only for network commands such as
+  `ls-remote`. PATH is System32, Windows PowerShell and the host PATH
   entries under the Windows/Program Files folders.
 
 POSIX commands have a two-minute wall-clock ceiling and bounded output. Linux
