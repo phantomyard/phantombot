@@ -102,6 +102,13 @@ export interface ChannelMessage {
    */
   groupMemberHexes?: string[];
   /**
+   * HISTORY (phantomchat groups only). True for a group message read back from
+   * the relays' backlog (startup pull / pre-EOSE replay) rather than delivered
+   * live. Context only: the server adds it to the group catch-up buffer and
+   * never runs a turn, sends a receipt or updates routing for it.
+   */
+  history?: true;
+  /**
    * ORIGINATING MESSAGE ID (optional; currently only the phantomchat channel
    * sets it). The sender-side application message id the remote client uses to
    * track delivery — for phantomchat it is the DM envelope's `id` field, which

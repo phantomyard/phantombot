@@ -609,6 +609,27 @@ export async function runPhantomchatServer(
     while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
   };
 
+  /** HISTORY path: a group message read back from the relays after a restart
+   *  (msg.history). Refills the catch-up buffer the restart wiped; never runs a
+   *  turn, sends a receipt or touches routing. Same trust rule as live: only an
+   *  allow-listed sender opens a group's buffer, everyone else is buffered only
+   *  into a group that already has one. Our own message is a marker: everything
+   *  buffered before it was already in a turn we answered, so it is marked
+   *  delivered instead of being replayed in the next preamble. */
+  const recordGroupHistory = async (msg: ChannelMessage): Promise<void> => {
+    if (!msg.groupId) return;
+    const hex = msg.senderId.toLowerCase();
+    if (hex === ourHex) {
+      const state = groupChats.get(msg.conversationId);
+      if (state) for (const e of state.buffer) e.delivered = true;
+      return;
+    }
+    if (allowedSet.has(hex) && !groupChats.has(msg.conversationId)) {
+      groupChats.set(msg.conversationId, { lastAddressed: [], buffer: [] });
+    }
+    await observeGroupMessage(msg);
+  };
+
   const handle = async (
     msg: ChannelMessage,
     alsoReceipt?: string[],
@@ -1754,6 +1775,17 @@ export async function runPhantomchatServer(
   }, input.holdRelayPollMs);
   try {
     for await (const msg of channel.listen(input.signal)) {
+      // History is context only: filed in arrival order, before any live
+      // message behind it, and kept away from the coalescer, media download
+      // and the turn path entirely.
+      if (msg.history) {
+        await recordGroupHistory(msg).catch((e: unknown) =>
+          log.debug("phantomchat: group history entry failed", {
+            error: (e as Error).message,
+          }),
+        );
+        continue;
+      }
       coalescer.accept(msg);
     }
   } finally {
