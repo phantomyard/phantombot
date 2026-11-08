@@ -64,6 +64,7 @@ import {
   decideGroupReply,
   formatGroupContext,
   GROUP_BUFFER_MAX,
+  GROUP_BUFFER_TEXT_MAX,
   type GroupChatState,
   matchPersonaNames,
 } from "../core/routing.ts";
@@ -555,20 +556,35 @@ export async function runPhantomchatServer(
   const holdRelay = new HoldThreadRelay(input.agentDir);
   const holdGroups = new Map<string, { groupId: string; members: string[] }>();
 
-  /** What a group message contributes to the catch-up buffer: its text, or a
-   *  short label for bare media so the thread stays coherent. */
+  /** What a group message contributes to the catch-up buffer: its text
+   *  (capped at GROUP_BUFFER_TEXT_MAX chars, so an untrusted member cannot
+   *  bloat the preamble), or a short label for bare media. */
   const groupBufferText = (msg: ChannelMessage): string => {
     const t = (msg.text ?? "").trim();
+    if (t.length > GROUP_BUFFER_TEXT_MAX) {
+      return t.slice(0, GROUP_BUFFER_TEXT_MAX) + " …(truncated)";
+    }
     if (t.length > 0) return t;
     return msg.media ? `[${msg.media.kind}]` : "";
   };
 
-  /** Buffer label for a sender: its kind-0 name when resolved, else the short
-   *  hex (no usernames on Nostr). formatGroupContext sanitises it. */
+  /** Is this sender's kind-0 name safe to show? Only for keys our config
+   *  vouches for (allow-listed or configured sibling). Nostr names are
+   *  self-asserted, so anyone else is labelled by short hex: a stranger named
+   *  "andrew" must not read as the principal. */
+  const nameVouched = (hex: string): boolean => {
+    const h = hex.toLowerCase();
+    return allowedSet.has(h) || configSiblingHex.has(h);
+  };
+
+  /** Buffer label for a sender: its kind-0 name when vouched and resolved,
+   *  else the short hex. formatGroupContext sanitises it. */
   const senderLabel = (hex: string): string => {
+    const short = hex.slice(0, 8) + "…";
+    if (!nameVouched(hex)) return short;
     const meta = profileCache.get(hex.toLowerCase());
     const name = (meta?.name || meta?.display_name || "").trim();
-    return name.length > 0 ? name : hex.slice(0, 8) + "…";
+    return name.length > 0 ? name : short;
   };
 
   /** OBSERVE-ONLY path for group messages we will never answer: sibling bots
@@ -584,7 +600,9 @@ export async function runPhantomchatServer(
     if (!groupChats.has(msg.conversationId)) return;
     const text = groupBufferText(msg);
     if (text.length === 0) return;
-    await ensureProfiles([hex]);
+    // Only fetch kind-0 for keys whose name we would show; a stranger must not
+    // make us fetch profiles of its choosing.
+    if (nameVouched(hex)) await ensureProfiles([hex]);
     const state = groupChats.get(msg.conversationId);
     if (!state) return;
     state.buffer.push({ from: senderLabel(hex), text, delivered: false });

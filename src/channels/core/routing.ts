@@ -109,3 +109,7 @@ export interface GroupChatState {
 
 /** Cap on buffered human messages retained per group chat. */
 export const GROUP_BUFFER_MAX = 100;
+
+/** Cap on the characters one buffered message contributes (longer text is
+ *  cut with a truncation marker), so the preamble stays bounded in size. */
+export const GROUP_BUFFER_TEXT_MAX = 2000;
