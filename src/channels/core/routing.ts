@@ -73,8 +73,9 @@ export function decideGroupReply(input: {
 }
 
 /**
- * Render the human messages a bot OBSERVED but didn't reply to (because they
- * were aimed at another bot or were thread chatter) into a context preamble.
+ * Render the messages a bot OBSERVED but didn't reply to (aimed at another
+ * bot, thread chatter, or — on PhantomChat — sibling bots' replies) into a
+ * context preamble.
  * Privacy-OFF means every bot sees every human message, so this is how a bot
  * catches up on the conversation it stayed quiet through before it's finally
  * addressed. Returns "" when there's nothing buffered. Exported for testing.
@@ -102,9 +103,13 @@ export function formatGroupContext(
 export interface GroupChatState {
   /** Persona names addressed by the most recent name-bearing message. */
   lastAddressed: string[];
-  /** Rolling buffer of recent human messages for context catch-up. */
+  /** Rolling buffer of recent group messages for context catch-up. */
   buffer: { from: string; text: string; delivered: boolean }[];
 }
 
 /** Cap on buffered human messages retained per group chat. */
 export const GROUP_BUFFER_MAX = 100;
+
+/** Cap on the characters one buffered message contributes (longer text is
+ *  cut with a truncation marker), so the preamble stays bounded in size. */
+export const GROUP_BUFFER_TEXT_MAX = 2000;

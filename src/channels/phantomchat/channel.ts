@@ -86,6 +86,16 @@ export const BACKFILL_POLL_MS = 15_000;
  */
 export const BACKFILL_POLL_WINDOW_SEC = 90;
 
+/**
+ * How far back (seconds) the one-off startup GROUP HISTORY pull reaches. After
+ * a restart the server's in-memory group catch-up buffer is empty, so we
+ * re-read our own encrypted copies of recent group messages from the relays
+ * (the same store the app rebuilds its bubble pane from) and hand them over as
+ * history: context only, never a turn. The buffer keeps only the newest
+ * GROUP_BUFFER_MAX per group, so a wide window costs a few decrypts, nothing more.
+ */
+export const GROUP_HISTORY_WINDOW_SEC = 48 * 3600;
+
 // Envelope `type` values that carry a Blossom file rather than plain text
 // (see chat-api.sendFileMessage / GroupAPI.sendFile in the PWA). Matches the
 // PWA's ChatMessageType media kinds.
@@ -153,6 +163,13 @@ export interface PhantomchatChannelInput {
    * tests can drive the poll without a 15s wait.
    */
   backfillPollMs?: number;
+  /**
+   * Startup group-history pull window (seconds). When > 0, `listen()` first
+   * pulls the last N seconds of wraps addressed to us and yields the GROUP
+   * messages among them with `history: true` (context only, never a turn).
+   * Production passes GROUP_HISTORY_WINDOW_SEC; omitted / 0 = off.
+   */
+  groupHistoryWindowSec?: number;
 }
 
 /**
@@ -210,6 +227,7 @@ export function createPhantomchatChannel(
   const { secretKey, publicKeyHex, transport } = input;
   const healCheckMs = input.healCheckMs ?? SUBSCRIPTION_HEAL_CHECK_MS;
   const backfillPollMs = input.backfillPollMs ?? BACKFILL_POLL_MS;
+  const groupHistoryWindowSec = input.groupHistoryWindowSec ?? 0;
 
   return {
     id: "phantomchat",
@@ -303,8 +321,14 @@ export function createPhantomchatChannel(
         // for multi-device recovery; on the bot that self-copy would otherwise
         // look like an inbound message from ourselves. The sender is the
         // cryptographic rumor.pubkey.
+        // EXCEPTION: a non-live GROUP self-copy is kept as a history marker
+        // (it tells the server which buffered messages we already answered).
         const senderHex = rumor.pubkey.toLowerCase();
-        if (senderHex === publicKeyHex.toLowerCase()) return;
+        const fromSelf = senderHex === publicKeyHex.toLowerCase();
+        const isGroupRumor = rumor.tags.some(
+          (t) => t[0] === "group" && typeof t[1] === "string" && t[1].length > 0,
+        );
+        if (fromSelf && (liveAtArrival || !isGroupRumor)) return;
 
         // (4) Dedup by rumor id — the SAME logical message can arrive via more
         // than one wrap; the rumor id is stable across them.
@@ -417,7 +441,11 @@ export function createPhantomchatChannel(
         // runs when its turn in the ingest chain comes up, so a wrap delivered
         // before EOSE can still be queued when EOSE fires. Reading `live` here
         // would admit that backlog as if it had arrived live.
-        if (!liveAtArrival) {
+        //
+        // GROUP backlog is the one exception: it is yielded as HISTORY (see
+        // step 8), which the server only buffers as catch-up context. A history
+        // message never runs a turn, sends a receipt or touches routing.
+        if (!liveAtArrival && !isGroupRumor) {
           log.debug("phantomchat: skipping backlog gift-wrap (pre-EOSE)");
           return;
         }
@@ -488,6 +516,7 @@ export function createPhantomchatChannel(
             groupId,
             groupMemberHexes: memberHexes,
             ...(media ? { media } : {}),
+            ...(liveAtArrival ? {} : { history: true }),
           });
           wake?.();
           return;
@@ -519,15 +548,20 @@ export function createPhantomchatChannel(
       // overtake the attachment it belongs to (the server coalesces a bare
       // attachment with the text that follows it). Chain the calls instead so
       // the queue sees ARRIVAL order — the order the sender's client published.
+      type IngestUnit =
+        | { event: NTNostrEvent; live: boolean }
+        | { run: () => Promise<void> };
       const ingest = createSerializedIngest(
-        (arrived: { event: NTNostrEvent; live: boolean }) =>
-          onWrap(arrived.event, arrived.live),
+        (unit: IngestUnit) =>
+          "run" in unit ? unit.run() : onWrap(unit.event, unit.live),
         (e: unknown) => {
           log.warn("phantomchat: inbound wrap failed", {
             error: (e as Error).message,
           });
         },
       );
+
+      const historyIngest = (run: () => Promise<void>): void => ingest({ run });
 
       // The live-gate flag (see onWrap step 6). Flipped true on EOSE — or after
       // a fallback timeout, in case a slow/dead relay never sends EOSE and would
@@ -550,6 +584,43 @@ export function createPhantomchatChannel(
       const deliver = (event: NTNostrEvent): void => {
         ingest({ event, live });
       };
+
+      // STARTUP GROUP HISTORY. Queued on the ingest chain BEFORE the live
+      // subscription exists, so every live wrap is processed after the history
+      // and the server's buffer is refilled before the first post-restart turn.
+      // Only wraps older than the catch-up poll's window count as history:
+      // anything newer is left unseen for the live subscription AND the poll,
+      // so a message the relay stored but never pushed is still answered by
+      // the poll instead of being swallowed as context. Relies on truthful wrap
+      // timestamps (nostrCrypto: no backdating). Best-effort: a slow/failed
+      // pull just means an emptier buffer (fetchGiftWrapsSince has its own
+      // short timeout).
+      if (groupHistoryWindowSec > 0) {
+        const startedSec = Math.floor(Date.now() / 1000);
+        historyIngest(async () => {
+          let events: NTNostrEvent[];
+          try {
+            events = await transport.fetchGiftWrapsSince(
+              publicKeyHex,
+              startedSec - groupHistoryWindowSec,
+            );
+          } catch (e) {
+            log.debug("phantomchat: group history pull failed", {
+              error: (e as Error).message,
+            });
+            return;
+          }
+          const historyCutoff = startedSec - BACKFILL_POLL_WINDOW_SEC;
+          const old = events
+            .filter((e) => e.kind === 1059 && e.created_at < historyCutoff)
+            .sort((a, b) => a.created_at - b.created_at);
+          for (const event of old) {
+            if (closed) break;
+            await onWrap(event, false);
+          }
+          log.info("phantomchat: group history pulled", { wraps: old.length });
+        });
+      }
 
       let sub = transport.subscribeGiftWraps(publicKeyHex, deliver, goLive);
 

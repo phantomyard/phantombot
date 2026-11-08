@@ -23,8 +23,10 @@
  *                              →  gift-wrap (kind 1059, signed by an EPHEMERAL key)
  * Each layer is NIP-44 v2 encrypted. The gift-wrap's `#p` tag routes it to the
  * recipient; its ephemeral signer hides the sender's identity from relays.
- * `created_at` on the seal and wrap is randomized up to 48h into the PAST for
- * metadata privacy — which is why receivers MUST NOT filter on it.
+ * `created_at` on the seal and wrap is the REAL send time — no backdating (the
+ * NIP-59 48h randomization was dropped), so receivers may filter and order on
+ * it: the live `since` window, the catch-up poll and the group-history cutoff
+ * all rely on that.
  * ============================================================================
  */
 

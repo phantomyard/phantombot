@@ -64,6 +64,7 @@ import {
   decideGroupReply,
   formatGroupContext,
   GROUP_BUFFER_MAX,
+  GROUP_BUFFER_TEXT_MAX,
   type GroupChatState,
   matchPersonaNames,
 } from "../core/routing.ts";
@@ -555,6 +556,80 @@ export async function runPhantomchatServer(
   const holdRelay = new HoldThreadRelay(input.agentDir);
   const holdGroups = new Map<string, { groupId: string; members: string[] }>();
 
+  /** What a group message contributes to the catch-up buffer: its text
+   *  (capped at GROUP_BUFFER_TEXT_MAX chars, so an untrusted member cannot
+   *  bloat the preamble), or a short label for bare media. */
+  const groupBufferText = (msg: ChannelMessage): string => {
+    const t = (msg.text ?? "").trim();
+    if (t.length > GROUP_BUFFER_TEXT_MAX) {
+      return t.slice(0, GROUP_BUFFER_TEXT_MAX) + " …(truncated)";
+    }
+    if (t.length > 0) return t;
+    return msg.media ? `[${msg.media.kind}]` : "";
+  };
+
+  /** Is this sender's kind-0 name safe to show? Only for keys our config
+   *  vouches for (allow-listed or configured sibling). Nostr names are
+   *  self-asserted, so anyone else is labelled by short hex: a stranger named
+   *  "andrew" must not read as the principal. */
+  const nameVouched = (hex: string): boolean => {
+    const h = hex.toLowerCase();
+    return allowedSet.has(h) || configSiblingHex.has(h);
+  };
+
+  /** Buffer label for a sender: its kind-0 name when vouched and resolved,
+   *  else the short hex. formatGroupContext sanitises it. */
+  const senderLabel = (hex: string): string => {
+    const short = hex.slice(0, 8) + "…";
+    if (!nameVouched(hex)) return short;
+    const meta = profileCache.get(hex.toLowerCase());
+    const name = (meta?.name || meta?.display_name || "").trim();
+    return name.length > 0 ? name : short;
+  };
+
+  /** OBSERVE-ONLY path for group messages we will never answer: sibling bots
+   *  and non-allowed members. Their words join the catch-up buffer so the next
+   *  turn this bot IS addressed in reads the whole room. Only buffers into a
+   *  group that already has state, i.e. one an authorised sender opened with
+   *  us; a stranger's own group never gets a buffer. Never replies, never
+   *  touches routing (`lastAddressed`). */
+  const observeGroupMessage = async (msg: ChannelMessage): Promise<void> => {
+    if (!msg.groupId) return;
+    const hex = msg.senderId.toLowerCase();
+    if (hex === ourHex) return;
+    if (!groupChats.has(msg.conversationId)) return;
+    const text = groupBufferText(msg);
+    if (text.length === 0) return;
+    // Only fetch kind-0 for keys whose name we would show; a stranger must not
+    // make us fetch profiles of its choosing.
+    if (nameVouched(hex)) await ensureProfiles([hex]);
+    const state = groupChats.get(msg.conversationId);
+    if (!state) return;
+    state.buffer.push({ from: senderLabel(hex), text, delivered: false });
+    while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
+  };
+
+  /** HISTORY path: a group message read back from the relays after a restart
+   *  (msg.history). Refills the catch-up buffer the restart wiped; never runs a
+   *  turn, sends a receipt or touches routing. Same trust rule as live: only an
+   *  allow-listed sender opens a group's buffer, everyone else is buffered only
+   *  into a group that already has one. Our own message is a marker: everything
+   *  buffered before it was already in a turn we answered, so it is marked
+   *  delivered instead of being replayed in the next preamble. */
+  const recordGroupHistory = async (msg: ChannelMessage): Promise<void> => {
+    if (!msg.groupId) return;
+    const hex = msg.senderId.toLowerCase();
+    if (hex === ourHex) {
+      const state = groupChats.get(msg.conversationId);
+      if (state) for (const e of state.buffer) e.delivered = true;
+      return;
+    }
+    if (allowedSet.has(hex) && !groupChats.has(msg.conversationId)) {
+      groupChats.set(msg.conversationId, { lastAddressed: [], buffer: [] });
+    }
+    await observeGroupMessage(msg);
+  };
+
   const handle = async (
     msg: ChannelMessage,
     alsoReceipt?: string[],
@@ -562,7 +637,12 @@ export async function runPhantomchatServer(
     const senderHex = msg.senderId;
 
     const tier = authorize(msg);
-    if (tier === "drop") return;
+    if (tier === "drop") {
+      // Not allowed to command us, but may still be someone we can LISTEN to:
+      // another member of a group our principal already talks to us in.
+      await observeGroupMessage(msg);
+      return;
+    }
 
     // ===================== PROFILE RESOLUTION + BOT GATE =====================
     // Resolve the kind-0 profiles this decision needs: always the sender (for the
@@ -579,6 +659,10 @@ export async function runPhantomchatServer(
     // conversation, so a bot's own reply can't trigger another. Drop silently —
     // no receipt, no state change — exactly like a non-allowed sender.
     if (isBot(senderHex)) {
+      // Never REPLY to a bot, but keep what it said as group context so a
+      // later "Robbie, what do you think?" sees Kai's answer, not just the
+      // question. Our own echo is skipped (it is already in our history).
+      await observeGroupMessage(msg);
       log.info("phantomchat: ignoring message from a bot", {
         persona: input.persona,
         ...(msg.groupId ? { group: msg.groupId } : {}),
@@ -633,14 +717,8 @@ export async function runPhantomchatServer(
 
         // What to keep in the rolling buffer for context catch-up. Text keeps its
         // words; a media message keeps a short label so the thread stays coherent.
-        const bufText =
-          matchText.trim().length > 0
-            ? matchText.trim()
-            : msg.media
-              ? `[${msg.media.kind}]`
-              : "";
-        // No usernames on Nostr — label the buffer entry by the short sender hex.
-        const fromLabel = senderHex.slice(0, 8) + "…";
+        const bufText = groupBufferText(msg);
+        const fromLabel = senderLabel(senderHex);
 
         if (!decision.reply) {
           if (bufText.length > 0) {
@@ -1697,6 +1775,17 @@ export async function runPhantomchatServer(
   }, input.holdRelayPollMs);
   try {
     for await (const msg of channel.listen(input.signal)) {
+      // History is context only: filed in arrival order, before any live
+      // message behind it, and kept away from the coalescer, media download
+      // and the turn path entirely.
+      if (msg.history) {
+        await recordGroupHistory(msg).catch((e: unknown) =>
+          log.debug("phantomchat: group history entry failed", {
+            error: (e as Error).message,
+          }),
+        );
+        continue;
+      }
       coalescer.accept(msg);
     }
   } finally {

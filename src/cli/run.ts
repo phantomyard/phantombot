@@ -17,7 +17,10 @@ import {
 } from "../channels/telegram.ts";
 import { TELEGRAM_BOT_COMMANDS } from "../channels/commands.ts";
 import { createVoiceModelsHandler } from "../channels/phantomchat/voiceModels.ts";
-import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
+import {
+  createPhantomchatChannel,
+  GROUP_HISTORY_WINDOW_SEC,
+} from "../channels/phantomchat/channel.ts";
 import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
 import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
 import {
@@ -1395,6 +1398,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           secretKey: identity.secretKey,
           publicKeyHex: identity.publicKeyHex,
           transport,
+          groupHistoryWindowSec: GROUP_HISTORY_WINDOW_SEC,
           inboundSink: p2pBridge,
           voiceModels: createVoiceModelsHandler({persona: spec.persona, config: personaConfig,
             allowedNpubs: spec.config.allowedNpubs, secretKey: identity.secretKey,
