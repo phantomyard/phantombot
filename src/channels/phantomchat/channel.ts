@@ -588,10 +588,13 @@ export function createPhantomchatChannel(
       // STARTUP GROUP HISTORY. Queued on the ingest chain BEFORE the live
       // subscription exists, so every live wrap is processed after the history
       // and the server's buffer is refilled before the first post-restart turn.
-      // Only wraps created before this listener started count as history: a
-      // newer one is left unseen for the live subscription, so a fresh message
-      // can never be swallowed as context. Best-effort: a slow/failed pull just
-      // means an emptier buffer (fetchGiftWrapsSince has its own short timeout).
+      // Only wraps older than the catch-up poll's window count as history:
+      // anything newer is left unseen for the live subscription AND the poll,
+      // so a message the relay stored but never pushed is still answered by
+      // the poll instead of being swallowed as context. Relies on truthful wrap
+      // timestamps (nostrCrypto: no backdating). Best-effort: a slow/failed
+      // pull just means an emptier buffer (fetchGiftWrapsSince has its own
+      // short timeout).
       if (groupHistoryWindowSec > 0) {
         const startedSec = Math.floor(Date.now() / 1000);
         historyIngest(async () => {
@@ -607,8 +610,9 @@ export function createPhantomchatChannel(
             });
             return;
           }
+          const historyCutoff = startedSec - BACKFILL_POLL_WINDOW_SEC;
           const old = events
-            .filter((e) => e.kind === 1059 && e.created_at < startedSec)
+            .filter((e) => e.kind === 1059 && e.created_at < historyCutoff)
             .sort((a, b) => a.created_at - b.created_at);
           for (const event of old) {
             if (closed) break;

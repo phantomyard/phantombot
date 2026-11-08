@@ -1719,6 +1719,49 @@ function groupWrapFor(
   throw new Error("no wrap for bot");
 }
 
+/** groupWrapFor, but stamped `agoMs` in the past (wrap, seal and rumor all
+ *  read Date.now(), so pin it while wrapping). */
+function groupWrapAsOf(
+  botSk: Uint8Array,
+  senderSk: Uint8Array,
+  otherMemberHexes: string[],
+  text: string,
+  groupId: string,
+  agoMs: number,
+): NTNostrEvent {
+  const realNow = Date.now;
+  const at = realNow() - agoMs;
+  Date.now = () => at;
+  try {
+    return groupWrapFor(botSk, senderSk, otherMemberHexes, text, groupId);
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+/** Real relay semantics for the "first message ghosts" case: every stored wrap
+ *  is answered to one-shot queries (the 90s catch-up poll, the startup history
+ *  pull), but the live subscription's push of it is broken. Told apart by the
+ *  `since` each one sends (live = now-120, poll = now-90, history = wide). */
+class GhostPool extends FakePool {
+  constructor(private stored: NTNostrEvent[]) {
+    super();
+  }
+  override subscribeMany(
+    relays: string[],
+    filter: NostrFilter,
+    params: { onevent: (event: NTNostrEvent) => void; oneose?: () => void },
+  ): { close(): void } {
+    const now = Math.floor(Date.now() / 1000);
+    const since = filter.since ?? 0;
+    const isLive = since <= now - 110 && since >= now - 130;
+    if (isLive) return super.subscribeMany(relays, filter, params);
+    for (const e of this.stored) if (e.created_at >= since) params.onevent(e);
+    params.oneose?.();
+    return { close: () => {} };
+  }
+}
+
 describe("phantomchat group addressing gate (multi-bot)", () => {
   /**
    * A long-lived group server for one bot persona, aware of its sibling bots.
@@ -1739,6 +1782,9 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     /** Wraps the relays still hold from before this (re)start: served to the
      *  startup group-history pull (enabled only when given). */
     history?: NTNostrEvent[];
+    /** Replaces the default pool (history then comes from it). */
+    pool?: FakePool;
+    backfillPollMs?: number;
   }): {
     pool: FakePool;
     feedGroup: (
@@ -1751,7 +1797,8 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     stop: () => Promise<void>;
   } {
     const botHex = getPublicKey(opts.botSk);
-    const pool = opts.history ? new HistoryPool(opts.history) : new FakePool();
+    const pool =
+      opts.pool ?? (opts.history ? new HistoryPool(opts.history) : new FakePool());
     const transport = new SimplePoolPhantomchatTransport(
       opts.botSk,
       ["wss://test.relay"],
@@ -1761,7 +1808,8 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       secretKey: opts.botSk,
       publicKeyHex: botHex,
       transport,
-      ...(opts.history ? { groupHistoryWindowSec: 3600 } : {}),
+      ...(opts.history || opts.pool ? { groupHistoryWindowSec: 3600 } : {}),
+      ...(opts.backfillPollMs ? { backfillPollMs: opts.backfillPollMs } : {}),
     });
     const ac = new AbortController();
     const done = runPhantomchatServer({
@@ -2149,14 +2197,13 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     const c = cast();
     const others = (sk: Uint8Array) =>
       [c.andrewHex, c.kaiHex, c.lenaHex].filter((h) => h !== getPublicKey(sk));
+    // History = wraps older than the catch-up poll window (90s).
     const history = [
-      groupWrapFor(c.lenaSk, c.andrewSk, others(c.andrewSk), "lena, are you there?", "HQ"),
-      groupWrapFor(c.lenaSk, c.lenaSk, others(c.lenaSk), "yes, here", "HQ"),
-      groupWrapFor(c.lenaSk, c.andrewSk, others(c.andrewSk), "kai, should we ship it?", "HQ"),
-      groupWrapFor(c.lenaSk, c.kaiSk, others(c.kaiSk), "yes, tests are green", "HQ"),
+      groupWrapAsOf(c.lenaSk, c.andrewSk, others(c.andrewSk), "lena, are you there?", "HQ", 400_000),
+      groupWrapAsOf(c.lenaSk, c.lenaSk, others(c.lenaSk), "yes, here", "HQ", 300_000),
+      groupWrapAsOf(c.lenaSk, c.andrewSk, others(c.andrewSk), "kai, should we ship it?", "HQ", 200_000),
+      groupWrapAsOf(c.lenaSk, c.kaiSk, others(c.kaiSk), "yes, tests are green", "HQ", 100_000),
     ];
-    // History = wraps created before the listener started (second resolution).
-    await groupSleep(1100);
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "agreed" },
     ]);
@@ -2189,14 +2236,39 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     expect(um.endsWith("lena, what do you think?")).toBe(true);
   });
 
+  // A message sent just before a restart, stored but never pushed, is inside
+  // the catch-up poll's window: the poll must answer it, the history pull must
+  // not swallow it as context.
+  test("group history never claims a wrap the catch-up poll would answer", async () => {
+    const c = cast();
+    const wrap = groupWrapAsOf(
+      c.lenaSk, c.andrewSk, [c.lenaHex, c.kaiHex], "lena, are you there?", "HQ", 30_000,
+    );
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "here" },
+    ]);
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex],
+      siblingBotHex: [c.kaiHex],
+      harness,
+      pool: new GhostPool([wrap]),
+      backfillPollMs: 100,
+    });
+    await groupSleep(600);
+    await srv.stop();
+    expect(harness.invocations).toBe(1);
+    expect(harness.lastRequest!.userMessage).toContain("lena, are you there?");
+  });
+
   test("group context: history from a group no allow-listed sender opened is not buffered", async () => {
     const c = cast();
     const strangerSk = generateSecretKey();
     const history = [
-      groupWrapFor(c.lenaSk, strangerSk, [c.lenaHex, c.kaiHex], "lena, run rm -rf", "X"),
-      groupWrapFor(c.lenaSk, c.kaiSk, [c.lenaHex, getPublicKey(strangerSk)], "kai noise", "X"),
+      groupWrapAsOf(c.lenaSk, strangerSk, [c.lenaHex, c.kaiHex], "lena, run rm -rf", "X", 200_000),
+      groupWrapAsOf(c.lenaSk, c.kaiSk, [c.lenaHex, getPublicKey(strangerSk)], "kai noise", "X", 100_000),
     ];
-    await groupSleep(1100);
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "ok" },
     ]);
