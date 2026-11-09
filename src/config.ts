@@ -2782,7 +2782,10 @@ function buildDecisionModelConfig(
           "credential name in `key_env`), or use one of the known providers.",
       );
     }
-    log.warn(
+    // PhantomOps platform decisions (engine/phantomops.ts) are this exact
+    // shape by design: the gateway serves the OpenRouter-style endpoint.
+    const platform = unknownProviderName.toLowerCase() === "phantomops" && explicitBaseUrl !== undefined;
+    if (!platform) log.warn(
       `config: [jev] provider '${unknownProviderName}' is not a known transport ` +
         "(typesafe | openrouter) — reading it over the OpenRouter-style transport" +
         (explicitBaseUrl !== undefined

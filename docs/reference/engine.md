@@ -365,6 +365,35 @@ bring-your-own-endpoint provider; never the key). `persona.brainCheck()` runs
 `baseUrl`) only, returning a `ProviderCheck`; with no stored provider or key it
 answers `"unverified"` with no models.
 
+#### PhantomOps platform models
+
+A persona whose native brain is `phantomops` can inherit the models its
+PhantomOps server configured centrally. `persona.platformModels()` asks the
+gateway with the STORED token (it never leaves the engine) and returns
+`{ status, detail, embeddings?, decision?, tts?: { model, voices }, stt? }`;
+a missing field means the server has none for that slot. Configure a present
+slot with `provider: "phantomops"` and no key or endpoint:
+
+```ts
+await ops.configure({
+  embeddings: { provider: "phantomops", model: "phantomops/embeddings" },
+  decisionModel: { provider: "phantomops", judge: true, router: true },
+  voice: {
+    tts: { enabled: true, provider: "phantomops", voice: "nova" },  // a Voice ID from platformModels().tts.voices
+    stt: { enabled: true, provider: "phantomops" },
+  },
+});
+```
+
+Every slot uses the brain's endpoint and token, so there is one credential:
+voice and the decision model read the brain key by name, embeddings keep a copy
+that is refreshed whenever the brain key changes. The gateway picks the model.
+`configure` refuses `phantomops` on any other brain, and refuses an `apiKey`,
+`baseUrl`, `keyEnv` or `keyName` with it. Switching the brain away from
+PhantomOps turns every borrowed slot off (embeddings to `none`, the decision
+judge and router off, voice off), so the new provider's key is never sent to
+PhantomOps.
+
 Other secret helpers: `persona.secrets.set(name, value)`, `.has(name)` and
 `.delete(name)`.
 

@@ -100,6 +100,10 @@ export interface DecisionModelConfig {
    * — the engine never guesses where to send a credential. Changing the
    * provider resets `model`, `baseUrl` and `keyName` to the new provider's
    * defaults unless you pass them in the same call.
+   *
+   * `"phantomops"` (PhantomOps persona only): the server's decision model
+   * over the brain's own token and endpoint; pass no `apiKey`, `baseUrl` or
+   * `keyName`.
    */
   provider?: string;
   /** Model id. Default: the transport's default decision model. */
@@ -138,7 +142,9 @@ export type EmbeddingsConfig =
       /**
        * `"openai-compatible"` with your `baseUrl`, or a Pi provider id from
        * `embeddings.providers()` (its own endpoint; `baseUrl` is ignored,
-       * saved as openai-compatible + that URL).
+       * saved as openai-compatible + that URL). `"phantomops"` (PhantomOps
+       * persona only): the server's model over the brain's token and
+       * endpoint; pass no `apiKey` or `baseUrl` (`model` is not used).
        */
       provider: string;
       /** http(s) endpoint of an OpenAI-compatible /embeddings server. */
@@ -208,6 +214,8 @@ export interface VoiceDirectionSettings {
   /**
    * `"elevenlabs"`, `"openai-compatible"` (with `baseUrl`), or a Pi provider
    * id from `voiceModels.providers()`, saved as openai-compatible + its URL.
+   * `"phantomops"` (PhantomOps persona only): the server's model over the
+   * brain's own token and endpoint; pass no `apiKey`, `baseUrl` or `keyEnv`.
    */
   provider?: string;
   baseUrl?: string;
@@ -362,6 +370,30 @@ export interface NativeBrainInfo {
   baseUrl?: string;
   /** A provider key is stored in the vault (the key itself is never returned). */
   hasKey: boolean;
+}
+
+/**
+ * Result of `persona.platformModels()`: the models a PhantomOps persona
+ * inherits from its server. A missing field = the server has none configured
+ * for that slot; configure the slot only when it is present.
+ */
+export interface PlatformModels {
+  /**
+   * "available": the server answered (fields below are what it has).
+   * "unavailable": not a PhantomOps persona, no stored token, the token was
+   * rejected or the server could not be reached; `detail` says which.
+   */
+  status: "available" | "unavailable";
+  /** Human-readable reason when unavailable. Never contains the token. */
+  detail: string;
+  /** The platform embeddings model id. */
+  embeddings?: string;
+  /** The platform decision model id (the server's decision switch is on). */
+  decision?: string;
+  /** The platform text-to-speech model and the Voice IDs it offers. */
+  tts?: { model: string; voices: string[] };
+  /** The platform speech-to-text model id. */
+  stt?: string;
 }
 
 // ─── decision models ───────────────────────────────────────────────────────

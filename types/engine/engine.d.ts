@@ -2,7 +2,7 @@
 // Regenerate with `bun run build:engine-types` and commit the result.
 import type { SecurityPolicy } from "./securityTypes.ts";
 import { voiceProviders, type VoiceCheck, type VoiceCheckInput } from "./voice.ts";
-import type { CreatePersonaOptions, DecideOptions, DecisionModelCheck, DecisionModelProviderInfo, EmbeddingsCheck, EmbeddingsCheckInput, EmbeddingsProviderInfo, NativeBrainInfo, MemoryRefreshResult, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
+import type { CreatePersonaOptions, DecideOptions, DecisionModelCheck, DecisionModelProviderInfo, EmbeddingsCheck, EmbeddingsCheckInput, EmbeddingsProviderInfo, NativeBrainInfo, MemoryRefreshResult, DecisionResult, EngineOptions, MemoryHit, MemorySearchOptions, PersonaConfig, PhantomchatAllowResult, PhantomchatDisallowResult, PhantomchatInfo, PhantomchatStartOptions, PhantomchatStatus, StructuredResult, PlatformModels, ProviderCheck, ProviderCheckOptions, ProviderInfo, StructuredTurnOptions, TurnOptions, TurnResult, TurnStream } from "./types.ts";
 /**
  * Open an engine on `options.root`. Rejects with `invalid_root` or
  * `root_locked`. Always `close()` it (or use `await using`).
@@ -87,6 +87,14 @@ export declare class Persona {
      * or key: `unverified` with no models.
      */
     brainCheck(): Promise<ProviderCheck>;
+    /**
+     * The models a PhantomOps persona inherits from its server (embeddings,
+     * decision, text-to-speech with its Voice IDs, speech-to-text), asked with
+     * the STORED brain token, which never leaves the engine. Configure a slot
+     * with `provider: "phantomops"` only when its field is present. Any other
+     * persona, or a missing or rejected token: `status: "unavailable"`.
+     */
+    platformModels(): Promise<PlatformModels>;
     readonly secrets: {
         /** Store a credential in this persona's encrypted vault (verified by read-back). */
         set(name: string, value: string): Promise<void>;
