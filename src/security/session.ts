@@ -16,6 +16,7 @@ import { openPersonaVault, readAllVaultValues, vaultPath, type Vault } from "../
 import { loadRegistry } from "../mcp/registry.ts";
 import { McpHub } from "../mcp/hub.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
+import { notifyLanded } from "../lib/notifySummary.ts";
 
 const MEMORY_TAGS = new Set(["decision", "lesson", "person", "commitment", "norm"]);
 /** Model text never starts an argv word with "-" (no flag injection). */
@@ -182,7 +183,10 @@ export async function createSecuritySession(options: {
             // has no identity.json): fixed argv.
             if (op?.kind === "notify" && typeof op.message === "string" && op.message.length <= 4096) {
               const r = await runSelf(["notify", "--persona", persona, "--message", argText(op.message)], signal);
-              if (r.code !== 0) throw new PolicyError("unavailable", "notify failed");
+              // A non-zero exit after a reported delivery (a notify that sent but
+              // was killed on the timeout) is still SENT — calling it
+              // "unavailable" makes the turn retry and the owner sees a duplicate.
+              if (!notifyLanded(r.code, r.output)) throw new PolicyError("unavailable", "notify failed");
               return Response.json({ result: { sent: true } });
             }
             if (op?.kind === "memory-capture" && typeof op.text === "string" && op.text.length <= 8192) {

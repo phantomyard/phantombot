@@ -54,6 +54,7 @@ import {
 import { type AudioSupport, synthesize, ttsSupport } from "../lib/audio.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import { formatNotifySummary } from "../lib/notifySummary.ts";
 import {
   openMemoryStore,
   type MemoryStore,
@@ -345,9 +346,13 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   const channels = [
     tgTargets.length > 0 ? "telegram" : undefined,
     pcTarget ? "phantomchat" : undefined,
-  ].filter(Boolean);
+  ].filter((c): c is string => c !== undefined);
   out.write(
-    `notify: persona=${persona} channels=[${channels.join(", ")}] telegram(text=${textSent} voice=${voiceSent}) phantomchat(text=${pcSent})\n`,
+    formatNotifySummary(persona, channels, {
+      telegramText: textSent,
+      telegramVoice: voiceSent,
+      phantomchatText: pcSent,
+    }),
   );
   // At least one channel was configured (we'd have returned 2 otherwise). Exit 0
   // when something actually went out to any recipient; exit 1 when nothing could
@@ -373,6 +378,35 @@ function describeAudioFailure(
   return `key missing for ${s.provider} (vault key ${s.envVar})`;
 }
 
+/**
+ * Flush stdout/stderr, then exit with `code` — HARD.
+ *
+ * notify is a one-shot command, but its sends can leave handles behind (a
+ * relay websocket whose close never completes, a keep-alive HTTP agent) that
+ * hold the event loop open after the work is done. Setting process.exitCode
+ * and returning then hangs the process indefinitely: callers wrapping it in a
+ * timeout see a kill/non-zero exit for a notify that DID deliver, and the
+ * security broker reported such runs as "unavailable", so sandboxed turns
+ * retried and the owner got duplicates. Every send has settled and the summary
+ * is written by the time runNotify returns, so exiting here loses nothing.
+ * `exit` is injectable for tests.
+ */
+export async function exitAfterFlush(
+  code: number,
+  exit: (code: number) => void = (c) => process.exit(c),
+): Promise<void> {
+  const drain = (s: NodeJS.WriteStream) =>
+    new Promise<void>((resolve) => {
+      try {
+        s.write("", () => resolve());
+      } catch {
+        resolve();
+      }
+    });
+  await Promise.all([drain(process.stdout), drain(process.stderr)]);
+  exit(code);
+}
+
 export default defineCommand({
   meta: {
     name: "notify",
@@ -396,10 +430,11 @@ export default defineCommand({
     },
   },
   async run({ args }) {
-    process.exitCode = await runNotify({
+    const code = await runNotify({
       message: args.message as string | undefined,
       voice: args.voice as string | undefined,
       persona: args.persona as string | undefined,
     });
+    await exitAfterFlush(code);
   },
 });
