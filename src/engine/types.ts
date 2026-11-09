@@ -130,6 +130,15 @@ export interface DecisionModelConfig {
 export type EmbeddingsConfig =
   | { provider: "none" }
   | {
+      /**
+       * PhantomOps persona only: the server's embeddings model over the
+       * brain's token and endpoint. Pass no `apiKey`, `baseUrl` or `model`.
+       */
+      provider: "phantomops";
+      /** Vector width; omitted = measured with one embed at configure time. */
+      dims?: number;
+    }
+  | {
       provider: "gemini";
       /** Stored in the persona's vault, never in config.toml. */
       apiKey: string;
@@ -142,9 +151,7 @@ export type EmbeddingsConfig =
       /**
        * `"openai-compatible"` with your `baseUrl`, or a Pi provider id from
        * `embeddings.providers()` (its own endpoint; `baseUrl` is ignored,
-       * saved as openai-compatible + that URL). `"phantomops"` (PhantomOps
-       * persona only): the server's model over the brain's token and
-       * endpoint; pass no `apiKey` or `baseUrl` (`model` is not used).
+       * saved as openai-compatible + that URL).
        */
       provider: string;
       /** http(s) endpoint of an OpenAI-compatible /embeddings server. */
@@ -388,6 +395,11 @@ export interface PlatformModels {
   detail: string;
   /** The platform embeddings model id. */
   embeddings?: string;
+  /**
+   * The platform embeddings vector width, from one live embed. Absent when
+   * the probe failed; `configure` then probes again (or takes `dims`).
+   */
+  embeddingsDims?: number;
   /** The platform decision model id (the server's decision switch is on). */
   decision?: string;
   /** The platform text-to-speech model and the Voice IDs it offers. */

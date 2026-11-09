@@ -23,6 +23,7 @@
  */
 
 import { timeoutSignal } from "../lib/fetchTimeout.ts";
+import { openaiCompatibleEmbed } from "../lib/openaiCompatibleEmbed.ts";
 import { PHANTOOPS_DEFAULT_BASE_URL, PHANTOOPS_PROVIDER } from "../lib/piCustomProvider.ts";
 import type { PlatformModels } from "./types.ts";
 
@@ -54,7 +55,7 @@ export function sameEndpoint(a: unknown, b: string): boolean {
 
 type ModelRow = { id?: unknown; supported_voices?: unknown; architecture?: { output_modalities?: unknown } };
 
-/** @internal Test seam. */
+/** The fetch `fetchPlatformModels` uses (a test seam; defaults to `fetch`). */
 export type PlatformFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 /**
@@ -92,6 +93,27 @@ async function platformModel(
 class PlatformAuthError extends Error {}
 
 /**
+ * The platform embeddings width, from one live embed (`/models` rows carry no
+ * dimension). Without it the persona resolves no embedder at all.
+ */
+export async function probePlatformEmbeddingDims(
+  baseUrl: string,
+  key: string,
+  doFetch: PlatformFetch = fetch,
+): Promise<{ ok: true; dims: number } | { ok: false; error: string }> {
+  const r = await openaiCompatibleEmbed("phantombot embedding validation test", {
+    baseUrl,
+    model: PHANTOMOPS_PLATFORM_MODELS.embeddings,
+    apiKey: key,
+    fetchImpl: doFetch as typeof fetch,
+    signal: timeoutSignal(20_000),
+  });
+  if (!r.ok) return { ok: false, error: r.error.split(key).join("[key]") };
+  if (!Number.isInteger(r.dims) || r.dims <= 0) return { ok: false, error: "no embedding returned" };
+  return { ok: true, dims: r.dims };
+}
+
+/**
  * Ask the gateway for every platform model. Never throws: a server that
  * cannot be reached, or rejects the token, is `status: "unavailable"` with
  * the reason, and the caller configures nothing from it.
@@ -109,10 +131,12 @@ export async function fetchPlatformModels(
       platformModel(baseUrl, key, "speech", doFetch, signal),
       platformModel(baseUrl, key, "transcription", doFetch, signal),
     ]);
+    const width = embeddings ? await probePlatformEmbeddingDims(baseUrl, key, doFetch) : undefined;
     return {
       status: "available",
       detail: "",
       ...(embeddings ? { embeddings: embeddings.id } : {}),
+      ...(width?.ok ? { embeddingsDims: width.dims } : {}),
       ...(decision ? { decision: decision.id } : {}),
       ...(tts ? { tts: { model: tts.id, voices: tts.voices } } : {}),
       ...(stt ? { stt: stt.id } : {}),

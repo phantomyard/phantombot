@@ -41,6 +41,19 @@ export declare const PHANTOMOPS_PLATFORM_MODELS: {
 export declare function phantomopsBaseUrl(routingBaseUrl: string | undefined): string;
 /** Same endpoint, ignoring a trailing slash. */
 export declare function sameEndpoint(a: unknown, b: string): boolean;
+/** The fetch `fetchPlatformModels` uses (a test seam; defaults to `fetch`). */
+export type PlatformFetch = (url: string, init: RequestInit) => Promise<Response>;
+/**
+ * The platform embeddings width, from one live embed (`/models` rows carry no
+ * dimension). Without it the persona resolves no embedder at all.
+ */
+export declare function probePlatformEmbeddingDims(baseUrl: string, key: string, doFetch?: PlatformFetch): Promise<{
+    ok: true;
+    dims: number;
+} | {
+    ok: false;
+    error: string;
+}>;
 /**
  * Ask the gateway for every platform model. Never throws: a server that
  * cannot be reached, or rejects the token, is `status: "unavailable"` with

@@ -26,6 +26,7 @@ import {
 import {
   ENV_CODING_MODEL,
   ENV_IMAGE_MODEL,
+  ENV_PI_API_KEY,
   ENV_PI_PROVIDER,
   ENV_PRIMARY_MODEL,
   type PiRoutingConfig,
@@ -43,6 +44,7 @@ import {
   stripHostOnlyKeys,
 } from "./lib/personaConfig.ts";
 import type { TomlObject } from "./lib/configWriter.ts";
+import { PHANTOOPS_DEFAULT_BASE_URL, PHANTOOPS_PROVIDER } from "./lib/piCustomProvider.ts";
 import { loadState } from "./state.ts";
 import { usablePersistedBin } from "./lib/harnessBinPath.ts";
 import {
@@ -1599,7 +1601,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
     routingConfigured: routingIsConfigured(piRouting),
   };
 
-  return {
+  return containPlatformSlots({
     defaultPersona:
       hostLocationEnv("PHANTOMBOT_DEFAULT_PERSONA") ??
       state.default_persona ??
@@ -1801,7 +1803,55 @@ export async function loadConfig(persona?: string): Promise<Config> {
     }),
 
     p2p: buildP2PConfig(tomlP2p),
-  };
+  }, piRouting);
+}
+
+/**
+ * PhantomOps platform slots (engine/phantomops.ts) are valid only while the
+ * brain IS PhantomOps. Enforced here, where the slots are resolved, so every
+ * writer of the brain (persona.configure, the `phantombot brain` wizard, a
+ * hand edit) is covered: a voice/decision slot whose key is the brain key
+ * (`PHANTOMBOT_PI_API_KEY`) would otherwise send the NEXT provider's key to
+ * the PhantomOps endpoint (AGENTS invariant 63). Only the PhantomOps path
+ * writes that key name into those slots. Embeddings on the PhantomOps
+ * endpoint are dropped too, so a switched-away persona never keeps calling it.
+ */
+export function containPlatformSlots(cfg: Config, routing: PiRoutingConfig | undefined): Config {
+  if (routing?.provider?.trim().toLowerCase() === PHANTOOPS_PROVIDER) return cfg;
+  const off: string[] = [];
+  for (const direction of ["tts", "stt"] as const) {
+    const d = cfg.voice?.[direction];
+    if (d?.enabled && d.keyEnv === ENV_PI_API_KEY) {
+      cfg.voice[direction] = { ...d, enabled: false };
+      off.push(`voice.${direction}`);
+    }
+  }
+  const jev = cfg.jev;
+  if (
+    jev && (jev.judge.enabled || jev.router.enabled) &&
+    (jev.keyEnv === ENV_PI_API_KEY || jev.statedProvider?.toLowerCase() === PHANTOOPS_PROVIDER)
+  ) {
+    cfg.jev = {
+      ...jev,
+      apiKey: undefined,
+      judge: { ...jev.judge, enabled: false },
+      router: { ...jev.router, enabled: false },
+    };
+    off.push("jev");
+  }
+  const oc = cfg.embeddings.openaiCompatible;
+  if (
+    cfg.embeddings.provider === "openai-compatible" && oc &&
+    (oc.model === "phantomops/embeddings" ||
+      oc.baseUrl.trim().replace(/\/+$/, "") === PHANTOOPS_DEFAULT_BASE_URL)
+  ) {
+    cfg.embeddings = { ...cfg.embeddings, provider: "none" };
+    off.push("embeddings");
+  }
+  if (off.length) {
+    log.warn(`config: ${off.join(", ")} inherit PhantomOps but the brain is not PhantomOps; turned off`);
+  }
+  return cfg;
 }
 
 /**

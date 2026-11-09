@@ -11,6 +11,9 @@ import {join} from "node:path";
 import {createEngine, type Engine} from "../src/engine/index.ts";
 import {loadConfig} from "../src/config.ts";
 import {synthesize} from "../src/lib/audio.ts";
+import {resolveEmbedders} from "../src/lib/embedder.ts";
+import {applyRouting} from "../src/cli/harness.ts";
+import {setPersonaSecret} from "../src/lib/vaultSecrets.ts";
 
 let engine: Engine;
 let root: string;
@@ -40,6 +43,10 @@ beforeEach(async () => {
       const row = platform[m];
       return Response.json({object: "list", data: row ? [{...row, architecture: {output_modalities: [m]}}] : []});
     }
+    if (url.pathname.endsWith("/embeddings")) {
+      if (!platform.embeddings) return Response.json({error: {message: "no embeddings model"}}, {status: 400});
+      return Response.json({object: "list", data: [{object: "embedding", index: 0, embedding: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]}]});
+    }
     if (url.pathname.endsWith("/audio/speech")) return new Response(new Uint8Array([73, 68, 51, 1]), {headers: {"content-type": "audio/mpeg"}});
     return Response.json({error: "unexpected"}, {status: 404});
   }});
@@ -59,7 +66,7 @@ async function tomlPath() {
   return join((await engine.run(() => loadConfig("ops"))).personasDir, "ops", "config.toml");
 }
 const inheritAll = {
-  embeddings: {provider: "phantomops", model: "x"},
+  embeddings: {provider: "phantomops"},
   decisionModel: {provider: "phantomops", judge: true, router: true},
   voice: {tts: {enabled: true, provider: "phantomops", voice: "nova"}, stt: {enabled: true, provider: "phantomops"}},
 } as const;
@@ -69,12 +76,14 @@ test("platformModels lists the server's models and voices with the stored token"
   expect(models).toEqual({
     status: "available", detail: "",
     embeddings: "openai/text-embedding-3-small",
+    embeddingsDims: 6,
     decision: "typesafe/jev-1.13",
     tts: {model: "openai/gpt-4o-mini-tts", voices: ["alloy", "nova"]},
     stt: "openai/whisper-1",
   });
-  expect(calls.length).toBe(4);
-  expect(calls.every(c => c.key === "Bearer pok_first" && c.path.startsWith("/api/v1/models?output_modalities="))).toBe(true);
+  expect(calls.length).toBe(5);
+  expect(calls.every(c => c.key === "Bearer pok_first")).toBe(true);
+  expect(calls.filter(c => c.path.startsWith("/api/v1/models?output_modalities=")).length).toBe(4);
   expect(JSON.stringify(models)).not.toContain("pok_");
 });
 
@@ -101,7 +110,9 @@ test("configure inherits every slot over the brain token and endpoint", async ()
   await engine.persona("ops").configure(inheritAll);
   const c = await config();
   expect(c.embeddings.provider).toBe("openai-compatible");
-  expect(c.embeddings.openaiCompatible).toMatchObject({baseUrl, apiKey: "pok_first", dims: 0});
+  expect(c.embeddings.openaiCompatible).toMatchObject({baseUrl, apiKey: "pok_first", dims: 6});
+  // The slot resolves to a working embedder, not lexical-only.
+  expect(Object.keys(resolveEmbedders(c)).length).toBeGreaterThan(0);
   expect(c.jev!).toMatchObject({statedProvider: "phantomops", baseUrl, keyEnv: "PHANTOMBOT_PI_API_KEY", apiKey: "pok_first"});
   expect(c.jev!.judge.enabled).toBe(true);
   expect((await engine.run(async () => synthesize(await config(), "hello"))).ok).toBe(true);
@@ -141,13 +152,13 @@ test("switching the brain away turns every borrowed slot off", async () => {
 
 test("phantomops slots refuse a non-PhantomOps brain and a caller key or endpoint", async () => {
   await engine.personas.create("plain");
-  await expect(engine.persona("plain").configure({embeddings: {provider: "phantomops", model: "x"}})).rejects.toThrow("needs a PhantomOps brain");
+  await expect(engine.persona("plain").configure({embeddings: {provider: "phantomops"}})).rejects.toThrow("needs a PhantomOps brain");
   await expect(engine.persona("plain").configure({decisionModel: {provider: "phantomops"}})).rejects.toThrow("needs a PhantomOps brain");
   await expect(engine.persona("plain").configure({voice: {stt: {enabled: true, provider: "phantomops"}}})).rejects.toThrow("needs a PhantomOps brain");
   const ops = engine.persona("ops");
   await expect(ops.configure({decisionModel: {provider: "phantomops", apiKey: "k"}})).rejects.toThrow("do not pass apiKey");
   await expect(ops.configure({voice: {tts: {enabled: true, provider: "phantomops", voice: "nova", baseUrl: "https://evil.example/v1"}}})).rejects.toThrow("do not pass baseUrl");
-  await expect(ops.configure({embeddings: {provider: "phantomops", model: "x", apiKey: "k"}})).rejects.toThrow("do not pass apiKey");
+  await expect(ops.configure({embeddings: {provider: "phantomops", apiKey: "k"} as never})).rejects.toThrow("do not pass apiKey");
   await expect(ops.configure({voice: {tts: {enabled: true, provider: "phantomops"}}})).rejects.toThrow("TTS voice is required");
 });
 
@@ -158,4 +169,28 @@ test("engine.platformModels.check never asks a caller-chosen host", async () => 
   expect(r.status).toBe("unavailable");
   await expect(engine.platformModels.check(42 as unknown as string)).rejects.toThrow("apiKey");
   expect(calls.length).toBe(before);
+});
+
+test("switching the brain through the wizard (applyRouting + vault) also stops every borrowed slot", async () => {
+  await engine.persona("ops").configure(inheritAll);
+  // `phantombot brain` writes these two facts directly, never via configure.
+  await applyRouting(await tomlPath(), {provider: "openrouter", primaryModel: "anthropic/claude-x"});
+  await engine.run(async () => setPersonaSecret(await config(), "PHANTOMBOT_PI_API_KEY", "sk-or-NEWPROVIDERKEY", "ops"));
+  const c = await config();
+  expect(c.voice?.tts?.enabled ?? false).toBe(false);
+  expect(c.voice?.stt?.enabled ?? false).toBe(false);
+  expect(c.jev!.judge.enabled).toBe(false);
+  expect(c.jev!.router.enabled).toBe(false);
+  expect(c.jev!.apiKey).toBeUndefined();
+  expect(c.embeddings.provider).toBe("none");
+  const before = calls.length;
+  await engine.run(async () => synthesize(await config(), "hello")).catch(() => {});
+  expect(calls.slice(before).some(c => c.key === "Bearer sk-or-NEWPROVIDERKEY")).toBe(false);
+});
+
+test("embeddings refuse to store an inert slot when the width cannot be read", async () => {
+  delete platform.embeddings;
+  await expect(engine.persona("ops").configure({embeddings: {provider: "phantomops"}})).rejects.toThrow("embedding width");
+  await engine.persona("ops").configure({embeddings: {provider: "phantomops", dims: 1536}});
+  expect((await config()).embeddings.openaiCompatible?.dims).toBe(1536);
 });

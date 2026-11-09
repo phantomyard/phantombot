@@ -103,6 +103,7 @@ import {
   PHANTOMOPS_PLATFORM,
   PHANTOMOPS_PLATFORM_MODELS,
   phantomopsBaseUrl,
+  probePlatformEmbeddingDims,
   sameEndpoint,
 } from "./phantomops.ts";
 import {
@@ -1221,12 +1222,28 @@ export class Persona {
         // (and re-copied whenever the brain key changes, below).
         const token = brain?.native?.apiKey ?? await this.#brainKey(dir);
         if (!token) throw new EngineError("invalid_argument", "embeddings provider 'phantomops' needs the PhantomOps token stored first");
+        // dims = 0 resolves NO embedder, silently; take the caller's width or
+        // measure it with one embed, and refuse rather than store an inert slot.
+        let dims = given.dims;
+        if (dims !== undefined && (!Number.isInteger(dims) || dims <= 0)) {
+          throw new EngineError("invalid_argument", "embeddings dims must be a positive integer");
+        }
+        if (dims === undefined) {
+          const width = await probePlatformEmbeddingDims(platformBase, token);
+          if (!width.ok) {
+            throw new EngineError(
+              "invalid_argument",
+              `embeddings provider 'phantomops': could not read the embedding width from PhantomOps (${width.error})`,
+            );
+          }
+          dims = width.dims;
+        }
         emSettings = {
           provider: "openai-compatible",
           baseUrl: platformBase,
           model: PHANTOMOPS_PLATFORM_MODELS.embeddings,
           apiKey: token,
-          ...(given.dims !== undefined ? { dims: given.dims } : {}),
+          dims,
         };
       } else if (!emSettings && onPhantomops && brain?.native?.apiKey !== undefined) {
         // A new PhantomOps token reaches the embeddings copy too.

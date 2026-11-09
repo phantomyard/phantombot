@@ -370,7 +370,7 @@ answers `"unverified"` with no models.
 A persona whose native brain is `phantomops` can inherit the models its
 PhantomOps server configured centrally. `persona.platformModels()` asks the
 gateway with the STORED token (it never leaves the engine) and returns
-`{ status, detail, embeddings?, decision?, tts?: { model, voices }, stt? }`;
+`{ status, detail, embeddings?, embeddingsDims?, tts?: { model, voices }, decision?, stt? }`;
 a missing field means the server has none for that slot. Before a persona
 holds the token (an add-contact screen), `engine.platformModels.check(apiKey)`
 answers the same question against the PhantomOps endpoint (never a
@@ -379,7 +379,7 @@ slot with `provider: "phantomops"` and no key or endpoint:
 
 ```ts
 await ops.configure({
-  embeddings: { provider: "phantomops", model: "phantomops/embeddings" },
+  embeddings: { provider: "phantomops" },  // width: platformModels().embeddingsDims, or measured here
   decisionModel: { provider: "phantomops", judge: true, router: true },
   voice: {
     tts: { enabled: true, provider: "phantomops", voice: "nova" },  // a Voice ID from platformModels().tts.voices
@@ -395,7 +395,12 @@ that is refreshed whenever the brain key changes. The gateway picks the model.
 `baseUrl`, `keyEnv` or `keyName` with it. Switching the brain away from
 PhantomOps turns every borrowed slot off (embeddings to `none`, the decision
 judge and router off, voice off), so the new provider's key is never sent to
-PhantomOps.
+PhantomOps. The same rule holds at load time for every other writer of the
+brain (`phantombot brain`, a hand edit): while the brain is not PhantomOps, a
+voice or decision slot keyed to the brain key, and embeddings on the
+PhantomOps endpoint, are treated as off. Embeddings need a vector width:
+`configure` takes `dims` or measures it with one embed, and refuses when it
+cannot.
 
 Other secret helpers: `persona.secrets.set(name, value)`, `.has(name)` and
 `.delete(name)`.
