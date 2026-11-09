@@ -396,7 +396,7 @@ that is refreshed whenever the brain key changes. The gateway picks the model.
 PhantomOps turns every borrowed slot off (embeddings to `none`, the decision
 judge and router off, voice off), so the new provider's key is never sent to
 PhantomOps. The same rule holds at load time for every other writer of the
-brain (`phantombot brain`, a hand edit): while the brain is not PhantomOps, a
+brain (the `phantombot harness` brain wizard, a hand edit): while the brain is not PhantomOps, a
 voice or decision slot keyed to the brain key, and embeddings on the
 PhantomOps endpoint, are treated as off. Embeddings need a vector width:
 `configure` takes `dims` or measures it with one embed, and refuses when it

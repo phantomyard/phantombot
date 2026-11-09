@@ -1809,7 +1809,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
 /**
  * PhantomOps platform slots (engine/phantomops.ts) are valid only while the
  * brain IS PhantomOps. Enforced here, where the slots are resolved, so every
- * writer of the brain (persona.configure, the `phantombot brain` wizard, a
+ * writer of the brain (persona.configure, the `phantombot harness` brain wizard, a
  * hand edit) is covered: a voice/decision slot whose key is the brain key
  * (`PHANTOMBOT_PI_API_KEY`) would otherwise send the NEXT provider's key to
  * the PhantomOps endpoint (AGENTS invariant 63). Only the PhantomOps path
