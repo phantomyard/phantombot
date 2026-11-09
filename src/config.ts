@@ -26,6 +26,7 @@ import {
 import {
   ENV_CODING_MODEL,
   ENV_IMAGE_MODEL,
+  ENV_PI_API_KEY,
   ENV_PI_PROVIDER,
   ENV_PRIMARY_MODEL,
   type PiRoutingConfig,
@@ -43,6 +44,7 @@ import {
   stripHostOnlyKeys,
 } from "./lib/personaConfig.ts";
 import type { TomlObject } from "./lib/configWriter.ts";
+import { PHANTOOPS_DEFAULT_BASE_URL, PHANTOOPS_PROVIDER } from "./lib/piCustomProvider.ts";
 import { loadState } from "./state.ts";
 import { usablePersistedBin } from "./lib/harnessBinPath.ts";
 import {
@@ -1599,7 +1601,22 @@ export async function loadConfig(persona?: string): Promise<Config> {
     routingConfigured: routingIsConfigured(piRouting),
   };
 
-  return {
+  // PhantomOps embeddings read the brain key BY NAME (like voice and the
+  // decision model), so a brain-key rotation by any writer reaches them with
+  // nothing to re-copy. Vault first, then env with the injection guard.
+  let platformKey: string | undefined;
+  if (piRouting?.provider?.trim().toLowerCase() === PHANTOOPS_PROVIDER) {
+    const fromVault = (await readDecisionModelSecretsFromVault(personaDirPath, [ENV_PI_API_KEY]))[ENV_PI_API_KEY];
+    const fromEnv = process.env[ENV_PI_API_KEY];
+    platformKey =
+      fromVault ??
+      (fromEnv !== undefined && fromEnv !== "" &&
+      (!isVaultInjectedEnvKey(ENV_PI_API_KEY) || isVaultLoadedPersonaDir(personaDirPath))
+        ? fromEnv
+        : undefined);
+  }
+
+  return containPlatformSlots({
     defaultPersona:
       hostLocationEnv("PHANTOMBOT_DEFAULT_PERSONA") ??
       state.default_persona ??
@@ -1801,7 +1818,72 @@ export async function loadConfig(persona?: string): Promise<Config> {
     }),
 
     p2p: buildP2PConfig(tomlP2p),
-  };
+  }, piRouting, platformKey);
+}
+
+/**
+ * PhantomOps platform slots (engine/phantomops.ts) are valid only while the
+ * brain IS PhantomOps. Enforced here, where the slots are resolved, so every
+ * writer of the brain (persona.configure, the `phantombot harness` brain wizard, a
+ * hand edit) is covered: a voice/decision slot whose key is the brain key
+ * (`PHANTOMBOT_PI_API_KEY`) would otherwise send the NEXT provider's key to
+ * the PhantomOps endpoint (AGENTS invariant 63). Only the PhantomOps path
+ * writes that key name into those slots. Embeddings on the PhantomOps
+ * endpoint are dropped too, so a switched-away persona never keeps calling it.
+ */
+export function containPlatformSlots(
+  cfg: Config,
+  routing: PiRoutingConfig | undefined,
+  platformKey?: string,
+): Config {
+  if (routing?.provider?.trim().toLowerCase() === PHANTOOPS_PROVIDER) {
+    // Embeddings on the brain's own endpoint use the brain key, resolved by
+    // name at load: there is no stored copy to go stale on rotation.
+    const oc = cfg.embeddings.openaiCompatible;
+    const norm = (u: string) => u.trim().replace(/\/+$/, "");
+    if (
+      cfg.embeddings.provider === "openai-compatible" && oc && platformKey &&
+      oc.model === "phantomops/embeddings" &&
+      norm(oc.baseUrl) === norm(routing.baseUrl ?? PHANTOOPS_DEFAULT_BASE_URL)
+    ) {
+      cfg.embeddings = { ...cfg.embeddings, openaiCompatible: { ...oc, apiKey: platformKey } };
+    }
+    return cfg;
+  }
+  const off: string[] = [];
+  for (const direction of ["tts", "stt"] as const) {
+    const d = cfg.voice?.[direction];
+    if (d?.enabled && d.keyEnv === ENV_PI_API_KEY) {
+      cfg.voice[direction] = { ...d, enabled: false };
+      off.push(`voice.${direction}`);
+    }
+  }
+  const jev = cfg.jev;
+  if (
+    jev && (jev.judge.enabled || jev.router.enabled) &&
+    (jev.keyEnv === ENV_PI_API_KEY || jev.statedProvider?.toLowerCase() === PHANTOOPS_PROVIDER)
+  ) {
+    cfg.jev = {
+      ...jev,
+      apiKey: undefined,
+      judge: { ...jev.judge, enabled: false },
+      router: { ...jev.router, enabled: false },
+    };
+    off.push("jev");
+  }
+  const oc = cfg.embeddings.openaiCompatible;
+  if (
+    cfg.embeddings.provider === "openai-compatible" && oc &&
+    (oc.model === "phantomops/embeddings" ||
+      oc.baseUrl.trim().replace(/\/+$/, "") === PHANTOOPS_DEFAULT_BASE_URL)
+  ) {
+    cfg.embeddings = { ...cfg.embeddings, provider: "none" };
+    off.push("embeddings");
+  }
+  if (off.length) {
+    log.warn(`config: ${off.join(", ")} inherit PhantomOps but the brain is not PhantomOps; turned off`);
+  }
+  return cfg;
 }
 
 /**
@@ -2782,7 +2864,10 @@ function buildDecisionModelConfig(
           "credential name in `key_env`), or use one of the known providers.",
       );
     }
-    log.warn(
+    // PhantomOps platform decisions (engine/phantomops.ts) are this exact
+    // shape by design: the gateway serves the OpenRouter-style endpoint.
+    const platform = unknownProviderName.toLowerCase() === "phantomops" && explicitBaseUrl !== undefined;
+    if (!platform) log.warn(
       `config: [jev] provider '${unknownProviderName}' is not a known transport ` +
         "(typesafe | openrouter) — reading it over the OpenRouter-style transport" +
         (explicitBaseUrl !== undefined

@@ -99,6 +99,14 @@ import { refreshPersonaIndex } from "../lib/indexRefresh.ts";
 import { checkProvider, listProviders } from "./providers.ts";
 import { customProviderSpec } from "../lib/piCustomProvider.ts";
 import {
+  fetchPlatformModels,
+  PHANTOMOPS_PLATFORM,
+  PHANTOMOPS_PLATFORM_MODELS,
+  phantomopsBaseUrl,
+  probePlatformEmbeddingDims,
+  sameEndpoint,
+} from "./phantomops.ts";
+import {
   parseJsonReply,
   structuredOutputInstruction,
   structuredRetryMessage,
@@ -130,6 +138,7 @@ import type {
   PhantomchatStartOptions,
   PhantomchatStatus,
   StructuredResult,
+  PlatformModels,
   ProviderCheck,
   ProviderCheckOptions,
   ProviderInfo,
@@ -289,6 +298,17 @@ export class Engine {
     check(input: EmbeddingsCheckInput): Promise<EmbeddingsCheck>;
   };
 
+  /**
+   * PhantomOps platform models for a `pok_` token BEFORE any persona holds
+   * it (an add-contact screen): which embeddings, decision, TTS (with its
+   * Voice IDs) and STT models the PhantomOps server offers. Always asks the
+   * PhantomOps endpoint, never a caller-chosen host. Stores nothing; after
+   * creating the persona use `persona.platformModels()` and `configure`.
+   */
+  readonly platformModels: {
+    check(apiKey: string): Promise<PlatformModels>;
+  };
+
   #scope: EngineScope;
   /** `#scope` plus `persona`, one per persona handle (identity-stable). */
   #scopes = new Map<string, EngineScope>();
@@ -331,6 +351,16 @@ export class Engine {
     this.embeddings = {
       providers: () => this.run(async () => embeddingsProviders()),
       check: (input) => this.run(() => checkEmbeddings(input)),
+    };
+    this.platformModels = {
+      check: (apiKey) =>
+        this.run(async () => {
+          if (typeof apiKey !== "string" || apiKey.length > 4096) {
+            throw new EngineError("invalid_argument", "apiKey must be a string");
+          }
+          if (!apiKey.trim()) return { status: "unavailable", detail: "no token" };
+          return fetchPlatformModels(phantomopsBaseUrl(undefined), apiKey.trim());
+        }),
     };
   }
 
@@ -628,6 +658,16 @@ interface PersonaRuntime {
   harnesses: Harness[];
 }
 
+/** Vault name of the OpenAI-compatible embeddings key (config.ts reads it). */
+const EMBEDDINGS_OPENAI_COMPATIBLE_KEY = "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY";
+
+/** `[harnesses.pi.routing]` of a parsed config.toml, read-only ({} when absent). */
+function routingOf(toml: Record<string, unknown>): Record<string, unknown> {
+  const harnesses = toml.harnesses as Record<string, unknown> | undefined;
+  const pi = harnesses?.pi as Record<string, unknown> | undefined;
+  return (pi?.routing ?? {}) as Record<string, unknown>;
+}
+
 export class Persona {
   readonly name: string;
   readonly security: {
@@ -681,6 +721,37 @@ export class Persona {
       }
       return checkProvider(info.provider, key ?? "", info.baseUrl ? { baseUrl: info.baseUrl } : {});
     });
+  }
+
+  /**
+   * The models a PhantomOps persona inherits from its server (embeddings,
+   * decision, text-to-speech with its Voice IDs, speech-to-text), asked with
+   * the STORED brain token, which never leaves the engine. Configure a slot
+   * with `provider: "phantomops"` only when its field is present. Any other
+   * persona, or a missing or rejected token: `status: "unavailable"`.
+   */
+  platformModels(): Promise<PlatformModels> {
+    return this.#run(async () => {
+      const info = await this.brain();
+      if (info.provider?.toLowerCase() !== PHANTOMOPS_PLATFORM) {
+        return { status: "unavailable", detail: "not a PhantomOps contact" };
+      }
+      if (!info.hasKey) return { status: "unavailable", detail: "no stored PhantomOps token" };
+      const key = await this.#brainKey(await this.#dir());
+      if (!key) return { status: "unavailable", detail: "no stored PhantomOps token" };
+      return fetchPlatformModels(phantomopsBaseUrl(info.baseUrl), key);
+    });
+  }
+
+  /** The stored native (brain) key, or undefined. */
+  async #brainKey(dir: string): Promise<string | undefined> {
+    const vault = await openPersonaVault(dir);
+    try {
+      const key = vault.get(ENV_PI_API_KEY);
+      return key ? key : undefined;
+    } finally {
+      vault.close();
+    }
   }
 
   readonly secrets: {
@@ -914,34 +985,11 @@ export class Persona {
       const path = personaConfigPath(config.personasDir, this.name);
       const toml = await readTomlTable(path);
 
-      const voiceSecrets: Array<{ name: string; value: string }> = [];
-      if (settings.voice) {
-        for (const direction of ["tts", "stt"] as const) {
-          const d = settings.voice[direction];
-          if (d === undefined) continue;
-          const { apiKey, ...requested } = d;
-          if (requested.enabled && !supportsModality(requested.provider, direction)) {
-            throw new EngineError("invalid_argument", `voice provider '${requested.provider}' has no ${direction.toUpperCase()} models`);
-          }
-          // A Pi preset is stored as the transport it runs on (openai-compatible + its URL).
-          const metadata = resolveVoiceProvider(requested);
-          validateVoiceDirection(metadata);
-          const block = table(table(toml, "voice"), direction);
-          // A changed endpoint must never reuse a key from a previous provider.
-          const changed = metadata.provider !== undefined && (metadata.provider !== block.provider || metadata.baseUrl !== block.base_url);
-          if (changed && !apiKey) throw new EngineError("invalid_argument", "a changed voice endpoint needs its API key");
-          if (metadata.enabled && direction === "tts" && !metadata.voice) throw new EngineError("invalid_argument", "TTS voice is required");
-          if (apiKey !== undefined) {
-            if (typeof apiKey !== "string" || !apiKey.trim() || apiKey.length > 65536) throw new EngineError("invalid_argument", "invalid voice apiKey");
-            if (!metadata.keyEnv) throw new EngineError("invalid_argument", "voice keyEnv is required with apiKey");
-            voiceSecrets.push({ name: metadata.keyEnv, value: apiKey });
-          }
-          const keys = { enabled: "enabled", provider: "provider", model: "model", baseUrl: "base_url", keyEnv: "key_env", voice: "voice", speed: "speed" } as const;
-          for (const key of Object.keys(keys) as Array<keyof typeof keys>) {
-            if (metadata[key] !== undefined) block[keys[key]] = metadata[key];
-          }
-        }
-      }
+      // The brain as it stood, for the PhantomOps switch-away rule below.
+      const routingBefore = routingOf(toml);
+      const providerBefore = asStr(routingBefore.provider)?.trim().toLowerCase();
+      const platformBaseBefore = phantomopsBaseUrl(asStr(routingBefore.base_url));
+
       const brain = settings.brain;
       if (brain) {
         const harnesses = table(toml, "harnesses");
@@ -996,6 +1044,100 @@ export class Persona {
         }
       }
 
+      // PhantomOps platform models (engine/phantomops.ts). A slot with
+      // provider "phantomops" borrows the brain's token and endpoint, so it is
+      // only valid while the brain IS PhantomOps.
+      const routingNow = routingOf(toml);
+      const onPhantomops = asStr(routingNow.provider)?.trim().toLowerCase() === PHANTOMOPS_PLATFORM;
+      const platformBase = phantomopsBaseUrl(asStr(routingNow.base_url));
+      const requirePlatform = (slot: string, extra: Record<string, unknown>) => {
+        if (!onPhantomops) {
+          throw new EngineError("invalid_argument", `${slot} provider 'phantomops' needs a PhantomOps brain`);
+        }
+        const stray = Object.keys(extra).filter((k) => extra[k] !== undefined);
+        if (stray.length) {
+          throw new EngineError(
+            "invalid_argument",
+            `${slot} provider 'phantomops' uses the brain's token and endpoint; do not pass ${stray.join(", ")}`,
+          );
+        }
+      };
+      let embeddingKey: { name: string; value: string | undefined } | undefined;
+      if (providerBefore === PHANTOMOPS_PLATFORM && !onPhantomops) {
+        // Switched away: every slot that borrowed the PhantomOps token is
+        // turned off, or the NEW provider's key (same vault slot) would be
+        // sent to PhantomOps on the next call (AGENTS invariant 63).
+        const voiceTable = toml.voice as Record<string, unknown> | undefined;
+        for (const direction of ["tts", "stt"] as const) {
+          const block = voiceTable?.[direction] as Record<string, unknown> | undefined;
+          if (block && block.key_env === ENV_PI_API_KEY) {
+            block.enabled = false;
+            delete block.key_env;
+          }
+        }
+        const jev = toml.jev as Record<string, unknown> | undefined;
+        if (jev && jev.key_env === ENV_PI_API_KEY) {
+          for (const k of ["provider", "model", "base_url", "key_env"]) delete jev[k];
+          table(jev, "judge").enabled = false;
+          table(jev, "router").enabled = false;
+        }
+        const emb = toml.embeddings as Record<string, unknown> | undefined;
+        const oc = emb?.openai_compatible as Record<string, unknown> | undefined;
+        if (emb && emb.provider === "openai-compatible" && sameEndpoint(oc?.base_url, platformBaseBefore)) {
+          emb.provider = "none";
+          embeddingKey = { name: EMBEDDINGS_OPENAI_COMPATIBLE_KEY, value: undefined };
+        }
+      }
+
+      const voiceSecrets: Array<{ name: string; value: string }> = [];
+      if (settings.voice) {
+        for (const direction of ["tts", "stt"] as const) {
+          const d = settings.voice[direction];
+          if (d === undefined) continue;
+          const { apiKey, ...requested } = d;
+          if (requested.provider === PHANTOMOPS_PLATFORM) {
+            requirePlatform("voice", { apiKey, baseUrl: requested.baseUrl, keyEnv: requested.keyEnv });
+            const metadata = {
+              ...requested,
+              provider: "openai-compatible",
+              baseUrl: platformBase,
+              keyEnv: ENV_PI_API_KEY,
+              model: requested.model?.trim() || PHANTOMOPS_PLATFORM_MODELS[direction],
+            };
+            validateVoiceDirection(metadata);
+            if (metadata.enabled && direction === "tts" && !metadata.voice) throw new EngineError("invalid_argument", "TTS voice is required");
+            const block = table(table(toml, "voice"), direction);
+            block.enabled = metadata.enabled;
+            block.provider = metadata.provider;
+            block.base_url = metadata.baseUrl;
+            block.key_env = metadata.keyEnv;
+            block.model = metadata.model;
+            if (metadata.voice !== undefined) block.voice = metadata.voice;
+            if (metadata.speed !== undefined) block.speed = metadata.speed;
+            continue;
+          }
+          if (requested.enabled && !supportsModality(requested.provider, direction)) {
+            throw new EngineError("invalid_argument", `voice provider '${requested.provider}' has no ${direction.toUpperCase()} models`);
+          }
+          // A Pi preset is stored as the transport it runs on (openai-compatible + its URL).
+          const metadata = resolveVoiceProvider(requested);
+          validateVoiceDirection(metadata);
+          const block = table(table(toml, "voice"), direction);
+          // A changed endpoint must never reuse a key from a previous provider.
+          const changed = metadata.provider !== undefined && (metadata.provider !== block.provider || metadata.baseUrl !== block.base_url);
+          if (changed && !apiKey) throw new EngineError("invalid_argument", "a changed voice endpoint needs its API key");
+          if (metadata.enabled && direction === "tts" && !metadata.voice) throw new EngineError("invalid_argument", "TTS voice is required");
+          if (apiKey !== undefined) {
+            if (typeof apiKey !== "string" || !apiKey.trim() || apiKey.length > 65536) throw new EngineError("invalid_argument", "invalid voice apiKey");
+            if (!metadata.keyEnv) throw new EngineError("invalid_argument", "voice keyEnv is required with apiKey");
+            voiceSecrets.push({ name: metadata.keyEnv, value: apiKey });
+          }
+          const keys = { enabled: "enabled", provider: "provider", model: "model", baseUrl: "base_url", keyEnv: "key_env", voice: "voice", speed: "speed" } as const;
+          for (const key of Object.keys(keys) as Array<keyof typeof keys>) {
+            if (metadata[key] !== undefined) block[keys[key]] = metadata[key];
+          }
+        }
+      }
       const dm = settings.decisionModel;
       if (dm) {
         // Stored under `[jev]` — the on-disk name predates the general
@@ -1022,6 +1164,13 @@ export class Persona {
             throw new EngineError("invalid_argument", "decisionModel.keyName must be [A-Za-z_][A-Za-z0-9_]*");
           }
           block.key_env = dm.keyName;
+        }
+        if (provider.toLowerCase() === PHANTOMOPS_PLATFORM) {
+          requirePlatform("decisionModel", { apiKey: dm.apiKey, baseUrl: dm.baseUrl, keyName: dm.keyName });
+          block.provider = PHANTOMOPS_PLATFORM;
+          block.base_url = platformBase;
+          block.key_env = ENV_PI_API_KEY;
+          if (asStr(block.model) === undefined) block.model = PHANTOMOPS_PLATFORM_MODELS.decision;
         }
         if (block.key_env === undefined) block.key_env = DECISION_MODEL_DEFAULT_KEY_ENV;
         const builtIn = ["openrouter", "typesafe"].includes(provider.toLowerCase());
@@ -1065,8 +1214,38 @@ export class Persona {
         }
       }
 
-      const em = resolveEmbeddingsProvider(settings.embeddings);
-      let embeddingKey: { name: string; value: string | undefined } | undefined;
+      let emSettings = settings.embeddings;
+      if (emSettings && emSettings.provider === PHANTOMOPS_PLATFORM) {
+        const given = emSettings as { apiKey?: unknown; baseUrl?: unknown; dims?: number };
+        requirePlatform("embeddings", { apiKey: given.apiKey, baseUrl: given.baseUrl });
+        // No key is stored for this slot: config.ts reads the brain key by
+        // name at load, so a rotation by any writer reaches it.
+        const token = brain?.native?.apiKey ?? await this.#brainKey(dir);
+        if (!token) throw new EngineError("invalid_argument", "embeddings provider 'phantomops' needs the PhantomOps token stored first");
+        // dims = 0 resolves NO embedder, silently; take the caller's width or
+        // measure it with one embed, and refuse rather than store an inert slot.
+        let dims = given.dims;
+        if (dims !== undefined && (!Number.isInteger(dims) || dims <= 0)) {
+          throw new EngineError("invalid_argument", "embeddings dims must be a positive integer");
+        }
+        if (dims === undefined) {
+          const width = await probePlatformEmbeddingDims(platformBase, token);
+          if (!width.ok) {
+            throw new EngineError(
+              "invalid_argument",
+              `embeddings provider 'phantomops': could not read the embedding width from PhantomOps (${width.error})`,
+            );
+          }
+          dims = width.dims;
+        }
+        emSettings = {
+          provider: "openai-compatible",
+          baseUrl: platformBase,
+          model: PHANTOMOPS_PLATFORM_MODELS.embeddings,
+          dims,
+        };
+      }
+      const em = resolveEmbeddingsProvider(emSettings);
       if (em) {
         const block = table(toml, "embeddings");
         if (em.provider === "none") {
@@ -1107,7 +1286,7 @@ export class Persona {
           }
           // No key = remove any stored one: a key for the previous endpoint
           // must never be sent to this one (AGENTS invariant 63).
-          embeddingKey = { name: "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY", value: em.apiKey };
+          embeddingKey = { name: EMBEDDINGS_OPENAI_COMPATIBLE_KEY, value: em.apiKey };
         } else {
           throw new EngineError(
             "invalid_argument",

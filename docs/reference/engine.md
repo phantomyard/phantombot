@@ -365,6 +365,43 @@ bring-your-own-endpoint provider; never the key). `persona.brainCheck()` runs
 `baseUrl`) only, returning a `ProviderCheck`; with no stored provider or key it
 answers `"unverified"` with no models.
 
+#### PhantomOps platform models
+
+A persona whose native brain is `phantomops` can inherit the models its
+PhantomOps server configured centrally. `persona.platformModels()` asks the
+gateway with the STORED token (it never leaves the engine) and returns
+`{ status, detail, embeddings?, embeddingsDims?, tts?: { model, voices }, decision?, stt? }`;
+a missing field means the server has none for that slot. Before a persona
+holds the token (an add-contact screen), `engine.platformModels.check(apiKey)`
+answers the same question against the PhantomOps endpoint (never a
+caller-chosen host). Configure a present
+slot with `provider: "phantomops"` and no key or endpoint:
+
+```ts
+await ops.configure({
+  embeddings: { provider: "phantomops" },  // width: platformModels().embeddingsDims, or measured here
+  decisionModel: { provider: "phantomops", judge: true, router: true },
+  voice: {
+    tts: { enabled: true, provider: "phantomops", voice: "nova" },  // a Voice ID from platformModels().tts.voices
+    stt: { enabled: true, provider: "phantomops" },
+  },
+});
+```
+
+Every slot uses the brain's endpoint and token, so there is one credential:
+voice, the decision model and embeddings all read the brain key by name, so a
+rotation by any writer reaches every slot. The gateway picks the model.
+`configure` refuses `phantomops` on any other brain, and refuses an `apiKey`,
+`baseUrl`, `keyEnv` or `keyName` with it. Switching the brain away from
+PhantomOps turns every borrowed slot off (embeddings to `none`, the decision
+judge and router off, voice off), so the new provider's key is never sent to
+PhantomOps. The same rule holds at load time for every other writer of the
+brain (the `phantombot harness` brain wizard, a hand edit): while the brain is not PhantomOps, a
+voice or decision slot keyed to the brain key, and embeddings on the
+PhantomOps endpoint, are treated as off. Embeddings need a vector width:
+`configure` takes `dims` or measures it with one embed, and refuses when it
+cannot.
+
 Other secret helpers: `persona.secrets.set(name, value)`, `.has(name)` and
 `.delete(name)`.
 

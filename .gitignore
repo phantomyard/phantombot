@@ -29,3 +29,4 @@ data/
 
 # TUI sandbox isolated data root
 .sandbox/
+.bun/
