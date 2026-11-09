@@ -56,6 +56,16 @@ export declare class Engine {
         providers(): Promise<EmbeddingsProviderInfo[]>;
         check(input: EmbeddingsCheckInput): Promise<EmbeddingsCheck>;
     };
+    /**
+     * PhantomOps platform models for a `pok_` token BEFORE any persona holds
+     * it (an add-contact screen): which embeddings, decision, TTS (with its
+     * Voice IDs) and STT models the PhantomOps server offers. Always asks the
+     * PhantomOps endpoint, never a caller-chosen host. Stores nothing; after
+     * creating the persona use `persona.platformModels()` and `configure`.
+     */
+    readonly platformModels: {
+        check(apiKey: string): Promise<PlatformModels>;
+    };
     /** A handle on `name`. Cheap; existence is checked on use. */
     persona(name: string): Persona;
     /**

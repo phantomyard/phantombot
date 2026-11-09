@@ -297,6 +297,17 @@ export class Engine {
     check(input: EmbeddingsCheckInput): Promise<EmbeddingsCheck>;
   };
 
+  /**
+   * PhantomOps platform models for a `pok_` token BEFORE any persona holds
+   * it (an add-contact screen): which embeddings, decision, TTS (with its
+   * Voice IDs) and STT models the PhantomOps server offers. Always asks the
+   * PhantomOps endpoint, never a caller-chosen host. Stores nothing; after
+   * creating the persona use `persona.platformModels()` and `configure`.
+   */
+  readonly platformModels: {
+    check(apiKey: string): Promise<PlatformModels>;
+  };
+
   #scope: EngineScope;
   /** `#scope` plus `persona`, one per persona handle (identity-stable). */
   #scopes = new Map<string, EngineScope>();
@@ -339,6 +350,16 @@ export class Engine {
     this.embeddings = {
       providers: () => this.run(async () => embeddingsProviders()),
       check: (input) => this.run(() => checkEmbeddings(input)),
+    };
+    this.platformModels = {
+      check: (apiKey) =>
+        this.run(async () => {
+          if (typeof apiKey !== "string" || apiKey.length > 4096) {
+            throw new EngineError("invalid_argument", "apiKey must be a string");
+          }
+          if (!apiKey.trim()) return { status: "unavailable", detail: "no token" };
+          return fetchPlatformModels(phantomopsBaseUrl(undefined), apiKey.trim());
+        }),
     };
   }
 

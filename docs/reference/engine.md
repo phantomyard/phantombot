@@ -371,7 +371,10 @@ A persona whose native brain is `phantomops` can inherit the models its
 PhantomOps server configured centrally. `persona.platformModels()` asks the
 gateway with the STORED token (it never leaves the engine) and returns
 `{ status, detail, embeddings?, decision?, tts?: { model, voices }, stt? }`;
-a missing field means the server has none for that slot. Configure a present
+a missing field means the server has none for that slot. Before a persona
+holds the token (an add-contact screen), `engine.platformModels.check(apiKey)`
+answers the same question against the PhantomOps endpoint (never a
+caller-chosen host). Configure a present
 slot with `provider: "phantomops"` and no key or endpoint:
 
 ```ts

@@ -102,8 +102,8 @@ test("configure inherits every slot over the brain token and endpoint", async ()
   const c = await config();
   expect(c.embeddings.provider).toBe("openai-compatible");
   expect(c.embeddings.openaiCompatible).toMatchObject({baseUrl, apiKey: "pok_first", dims: 0});
-  expect(c.jev).toMatchObject({statedProvider: "phantomops", baseUrl, keyEnv: "PHANTOMBOT_PI_API_KEY", apiKey: "pok_first"});
-  expect(c.jev.judge.enabled).toBe(true);
+  expect(c.jev!).toMatchObject({statedProvider: "phantomops", baseUrl, keyEnv: "PHANTOMBOT_PI_API_KEY", apiKey: "pok_first"});
+  expect(c.jev!.judge.enabled).toBe(true);
   expect((await engine.run(async () => synthesize(await config(), "hello"))).ok).toBe(true);
   const speech = calls.find(c => c.path === "/api/v1/audio/speech");
   expect(speech?.key).toBe("Bearer pok_first");
@@ -117,7 +117,7 @@ test("a new PhantomOps token reaches every inherited slot", async () => {
   await engine.persona("ops").configure({brain: {native: {provider: "phantomops", model: "phantomops/auto", apiKey: "pok_second"}}});
   const c = await config();
   expect(c.embeddings.openaiCompatible?.apiKey).toBe("pok_second");
-  expect(c.jev.apiKey).toBe("pok_second");
+  expect(c.jev!.apiKey).toBe("pok_second");
   await engine.run(async () => synthesize(await config(), "hello"));
   expect(calls.filter(c => c.path === "/api/v1/audio/speech").at(-1)?.key).toBe("Bearer pok_second");
 });
@@ -127,9 +127,9 @@ test("switching the brain away turns every borrowed slot off", async () => {
   await engine.persona("ops").configure({brain: {native: {provider: "openrouter", model: "openai/gpt-5", apiKey: "sk-or-other"}}});
   const c = await config();
   expect(c.embeddings.provider).toBe("none");
-  expect(c.jev.judge.enabled).toBe(false);
-  expect(c.jev.router.enabled).toBe(false);
-  expect(c.jev.baseUrl === baseUrl).toBe(false);
+  expect(c.jev!.judge.enabled).toBe(false);
+  expect(c.jev!.router.enabled).toBe(false);
+  expect(c.jev!.baseUrl === baseUrl).toBe(false);
   expect(c.voice?.tts?.enabled ?? false).toBe(false);
   expect(c.voice?.stt?.enabled ?? false).toBe(false);
   expect(await engine.persona("ops").secrets.has("PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY")).toBe(false);
@@ -149,4 +149,13 @@ test("phantomops slots refuse a non-PhantomOps brain and a caller key or endpoin
   await expect(ops.configure({voice: {tts: {enabled: true, provider: "phantomops", voice: "nova", baseUrl: "https://evil.example/v1"}}})).rejects.toThrow("do not pass baseUrl");
   await expect(ops.configure({embeddings: {provider: "phantomops", model: "x", apiKey: "k"}})).rejects.toThrow("do not pass apiKey");
   await expect(ops.configure({voice: {tts: {enabled: true, provider: "phantomops"}}})).rejects.toThrow("TTS voice is required");
+});
+
+test("engine.platformModels.check never asks a caller-chosen host", async () => {
+  // Default endpoint only: the stand-in is never contacted with this token.
+  const before = calls.length;
+  const r = await engine.platformModels.check("");
+  expect(r.status).toBe("unavailable");
+  await expect(engine.platformModels.check(42 as unknown as string)).rejects.toThrow("apiKey");
+  expect(calls.length).toBe(before);
 });
