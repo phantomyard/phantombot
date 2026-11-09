@@ -194,3 +194,14 @@ test("embeddings refuse to store an inert slot when the width cannot be read", a
   await engine.persona("ops").configure({embeddings: {provider: "phantomops", dims: 1536}});
   expect((await config()).embeddings.openaiCompatible?.dims).toBe(1536);
 });
+
+test("embeddings follow a brain-key rotation by any writer (applyRouting + vault), with no stored copy", async () => {
+  await engine.persona("ops").configure(inheritAll);
+  expect(await engine.persona("ops").secrets.has("PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY")).toBe(false);
+  // The wizard rotates the token without going through configure.
+  await applyRouting(await tomlPath(), {provider: "phantomops", primaryModel: "phantomops/auto", baseUrl});
+  await engine.run(async () => setPersonaSecret(await config(), "PHANTOMBOT_PI_API_KEY", "pok_rotated", "ops"));
+  const c = await config();
+  expect(c.embeddings.openaiCompatible?.apiKey).toBe("pok_rotated");
+  expect(c.jev!.apiKey).toBe("pok_rotated");
+});

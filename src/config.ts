@@ -1601,6 +1601,21 @@ export async function loadConfig(persona?: string): Promise<Config> {
     routingConfigured: routingIsConfigured(piRouting),
   };
 
+  // PhantomOps embeddings read the brain key BY NAME (like voice and the
+  // decision model), so a brain-key rotation by any writer reaches them with
+  // nothing to re-copy. Vault first, then env with the injection guard.
+  let platformKey: string | undefined;
+  if (piRouting?.provider?.trim().toLowerCase() === PHANTOOPS_PROVIDER) {
+    const fromVault = (await readDecisionModelSecretsFromVault(personaDirPath, [ENV_PI_API_KEY]))[ENV_PI_API_KEY];
+    const fromEnv = process.env[ENV_PI_API_KEY];
+    platformKey =
+      fromVault ??
+      (fromEnv !== undefined && fromEnv !== "" &&
+      (!isVaultInjectedEnvKey(ENV_PI_API_KEY) || isVaultLoadedPersonaDir(personaDirPath))
+        ? fromEnv
+        : undefined);
+  }
+
   return containPlatformSlots({
     defaultPersona:
       hostLocationEnv("PHANTOMBOT_DEFAULT_PERSONA") ??
@@ -1803,7 +1818,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
     }),
 
     p2p: buildP2PConfig(tomlP2p),
-  }, piRouting);
+  }, piRouting, platformKey);
 }
 
 /**
@@ -1816,8 +1831,25 @@ export async function loadConfig(persona?: string): Promise<Config> {
  * writes that key name into those slots. Embeddings on the PhantomOps
  * endpoint are dropped too, so a switched-away persona never keeps calling it.
  */
-export function containPlatformSlots(cfg: Config, routing: PiRoutingConfig | undefined): Config {
-  if (routing?.provider?.trim().toLowerCase() === PHANTOOPS_PROVIDER) return cfg;
+export function containPlatformSlots(
+  cfg: Config,
+  routing: PiRoutingConfig | undefined,
+  platformKey?: string,
+): Config {
+  if (routing?.provider?.trim().toLowerCase() === PHANTOOPS_PROVIDER) {
+    // Embeddings on the brain's own endpoint use the brain key, resolved by
+    // name at load: there is no stored copy to go stale on rotation.
+    const oc = cfg.embeddings.openaiCompatible;
+    const norm = (u: string) => u.trim().replace(/\/+$/, "");
+    if (
+      cfg.embeddings.provider === "openai-compatible" && oc && platformKey &&
+      oc.model === "phantomops/embeddings" &&
+      norm(oc.baseUrl) === norm(routing.baseUrl ?? PHANTOOPS_DEFAULT_BASE_URL)
+    ) {
+      cfg.embeddings = { ...cfg.embeddings, openaiCompatible: { ...oc, apiKey: platformKey } };
+    }
+    return cfg;
+  }
   const off: string[] = [];
   for (const direction of ["tts", "stt"] as const) {
     const d = cfg.voice?.[direction];

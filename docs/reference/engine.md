@@ -389,8 +389,8 @@ await ops.configure({
 ```
 
 Every slot uses the brain's endpoint and token, so there is one credential:
-voice and the decision model read the brain key by name, embeddings keep a copy
-that is refreshed whenever the brain key changes. The gateway picks the model.
+voice, the decision model and embeddings all read the brain key by name, so a
+rotation by any writer reaches every slot. The gateway picks the model.
 `configure` refuses `phantomops` on any other brain, and refuses an `apiKey`,
 `baseUrl`, `keyEnv` or `keyName` with it. Switching the brain away from
 PhantomOps turns every borrowed slot off (embeddings to `none`, the decision

@@ -1218,8 +1218,8 @@ export class Persona {
       if (emSettings && emSettings.provider === PHANTOMOPS_PLATFORM) {
         const given = emSettings as { apiKey?: unknown; baseUrl?: unknown; dims?: number };
         requirePlatform("embeddings", { apiKey: given.apiKey, baseUrl: given.baseUrl });
-        // Embeddings has one fixed key name, so the token is COPIED there
-        // (and re-copied whenever the brain key changes, below).
+        // No key is stored for this slot: config.ts reads the brain key by
+        // name at load, so a rotation by any writer reaches it.
         const token = brain?.native?.apiKey ?? await this.#brainKey(dir);
         if (!token) throw new EngineError("invalid_argument", "embeddings provider 'phantomops' needs the PhantomOps token stored first");
         // dims = 0 resolves NO embedder, silently; take the caller's width or
@@ -1242,16 +1242,8 @@ export class Persona {
           provider: "openai-compatible",
           baseUrl: platformBase,
           model: PHANTOMOPS_PLATFORM_MODELS.embeddings,
-          apiKey: token,
           dims,
         };
-      } else if (!emSettings && onPhantomops && brain?.native?.apiKey !== undefined) {
-        // A new PhantomOps token reaches the embeddings copy too.
-        const emb = toml.embeddings as Record<string, unknown> | undefined;
-        const oc = emb?.openai_compatible as Record<string, unknown> | undefined;
-        if (emb?.provider === "openai-compatible" && sameEndpoint(oc?.base_url, platformBase)) {
-          embeddingKey = { name: EMBEDDINGS_OPENAI_COMPATIBLE_KEY, value: brain.native.apiKey };
-        }
       }
       const em = resolveEmbeddingsProvider(emSettings);
       if (em) {
