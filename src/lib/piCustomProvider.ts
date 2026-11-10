@@ -72,6 +72,9 @@ export const PHANTOOPS_DEFAULT_BASE_URL = "https://phantomops.app/api/v1";
  */
 export const PHANTOOPS_AUTO_MODEL = "phantomops/auto";
 
+/** Pi's `models.json` input modalities. */
+export type ModelInput = "text" | "image";
+
 export interface CustomProviderSpec {
   id: string;
   /** Menu label. */
@@ -88,6 +91,14 @@ export interface CustomProviderSpec {
   defaultBaseUrl?: string;
   /** Preselected model id — the "what almost everyone wants" answer. */
   defaultModel?: string;
+  /**
+   * Input modalities of {@link defaultModel}, written into `models.json`. Pi
+   * defaults a custom model to `["text"]` and then STRIPS every image before
+   * the request leaves — a user upload and, worse, the image a `read` tool
+   * returns. PhantomOps' auto model takes images (on user messages and on
+   * local tool results), so it must say so or the phantom never sees them.
+   */
+  defaultModelInput?: readonly ModelInput[];
   /** Prompt label for the credential. */
   keyLabel: string;
   /** One line for the picker, so the choice is self-explanatory. */
@@ -110,6 +121,7 @@ export const CUSTOM_PROVIDERS: readonly CustomProviderSpec[] = [
     needsBaseUrl: false,
     defaultBaseUrl: PHANTOOPS_DEFAULT_BASE_URL,
     defaultModel: PHANTOOPS_AUTO_MODEL,
+    defaultModelInput: ["text", "image"],
     keyLabel: "PhantomOps personal API token (pok_…)",
     hint: "your personal token — runs your full phantom on the gateway",
   },
@@ -273,6 +285,8 @@ export function resolveCustomProviderBaseUrl(
 export interface CustomProviderModel {
   id: string;
   name?: string;
+  /** Omitted ⇒ pi's default, text only. */
+  input?: ModelInput[];
 }
 
 /**
@@ -291,7 +305,11 @@ export function customProviderModels(
     const model = (raw ?? "").trim();
     if (!model || seen.has(model)) continue;
     seen.add(model);
-    out.push({ id: model });
+    out.push(
+      model === spec?.defaultModel && spec.defaultModelInput
+        ? { id: model, input: [...spec.defaultModelInput] }
+        : { id: model },
+    );
   }
   return out;
 }
@@ -594,8 +612,15 @@ export function entryMatches(
   if (entry.baseUrl !== want.baseUrl) return false;
   if (entry.api !== want.api) return false;
   if (entry.apiKey !== want.apiKey) return false;
-  const have = new Set((entry.models ?? []).map((m) => m.id));
-  return want.models.every((m) => have.has(m.id));
+  const have = new Map((entry.models ?? []).map((m) => [m.id, m]));
+  // A declared modality counts as drift too: entries written before the
+  // auto model declared image input must be rewritten at the next spawn, or
+  // an /update never reaches the models.json Pi actually reads.
+  return want.models.every((m) => {
+    const got = have.get(m.id);
+    if (!got) return false;
+    return !m.input || (got.input ?? []).join(",") === m.input.join(",");
+  });
 }
 
 /**

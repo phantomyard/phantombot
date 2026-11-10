@@ -192,6 +192,15 @@ describe("customProviderModels", () => {
     ).toEqual(["phantomops/auto", "openrouter/foo"]);
   });
 
+  test("phantomops/auto declares image input; other models keep pi's text-only default", () => {
+    // Without `input: ["image"]` pi strips every image — uploads AND the
+    // image a local `read` returns — before the request reaches the gateway.
+    expect(customProviderModels(PHANTOOPS_PROVIDER, ["openrouter/foo"])).toEqual([
+      { id: "phantomops/auto", input: ["text", "image"] },
+      { id: "openrouter/foo" },
+    ]);
+  });
+
   test("openai-compatible has no default model, so the caller's list stands", () => {
     expect(customProviderModels(OPENAI_COMPATIBLE_PROVIDER, ["llama3.1:70b"]).map((m) => m.id)).toEqual([
       "llama3.1:70b",
@@ -210,7 +219,7 @@ describe("buildProviderEntry", () => {
       baseUrl: PHANTOOPS_DEFAULT_BASE_URL,
       api: "openai-completions",
       apiKey: "$PHANTOOPS_API_KEY",
-      models: [{ id: "phantomops/auto" }],
+      models: [{ id: "phantomops/auto", input: ["text", "image"] }],
     });
     // A `$` reference, not a literal: pin it explicitly — a regression here
     // would put a credential in a world-readable agent dir.
@@ -362,6 +371,23 @@ describe("entryMatches — the drift check", () => {
     expect(
       entryMatches({ ...want, models: [...want.models, { id: "extra/model" }] }, want),
     ).toBe(true);
+  });
+  test("a pre-image entry for phantomops/auto drifts, so the next spawn heals it", async () => {
+    // Installs written before the auto model declared image input must be
+    // rewritten by /update alone — nobody hand-edits models.json.
+    const legacy = { ...want, models: [{ id: "phantomops/auto" }, { id: "openrouter/foo" }] };
+    expect(entryMatches(legacy, want)).toBe(false);
+    const dir = await scratchAgentDir();
+    await writeCustomProviderEntry(dir, PHANTOOPS_PROVIDER, legacy);
+    const res = await ensureCustomProviderEntry(dir, PHANTOOPS_PROVIDER, {
+      baseUrl: PHANTOOPS_DEFAULT_BASE_URL,
+    });
+    expect(res.ok && res.changed).toBe(true);
+    const doc = JSON.parse(await readFile(modelsJsonPath(dir), "utf8"));
+    expect(doc.providers[PHANTOOPS_PROVIDER].models).toEqual([
+      { id: "phantomops/auto", input: ["text", "image"] },
+      { id: "openrouter/foo" },
+    ]);
   });
 });
 
