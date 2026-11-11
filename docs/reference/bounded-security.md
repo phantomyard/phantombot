@@ -134,6 +134,13 @@ Closing the turn aborts local work, closes the broker and removes its workspace.
   logged. Only Windows 11 26H2+ gets the filesystem boundary.
   `PHANTOMBOT_WINDOWS_APPCONTAINER=force` keeps the AppContainer regardless
   (stricter only; CI uses it to exercise the shipped launcher).
+- Linux kernels without Landlock ABI 3 fail open the same way. Raspberry Pi OS
+  kernels are built without `CONFIG_SECURITY_LANDLOCK`, and kernels older than
+  6.2 or without `landlock` in the active LSM list do not provide ABI 3 either.
+  phantombot probes the ABI once per process; where it is missing, untrusted
+  commands run unconfined in their scratch folder with the same clean
+  environment, after the threat judge screened the turn, and one warning naming
+  the missing requirement is logged (#795).
 
 POSIX commands have a two-minute wall-clock ceiling and bounded output. Linux
 also sets CPU, file-size, descriptor and per-user process limits. These are not

@@ -15,7 +15,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { windowsAppContainerUsable, windowsSandbox } from "./windows.ts";
 import { log } from "../lib/logger.ts";
-import { linuxSandbox } from "./linux.ts";
+import { linuxLandlockMissing, linuxSandbox } from "./linux.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 
 export const SANDBOX_SUBCOMMAND = "__sandbox_exec";
@@ -437,7 +437,20 @@ export async function runSandbox(
     mkdirSync(join(workspace, path), { recursive: true, mode: 0o700 });
   let invocation: string[];
   let unconfined = false;
-  if (process.platform === "linux")
+  const landlockMissing =
+    process.platform === "linux" ? linuxLandlockMissing() : null;
+  if (landlockMissing) {
+    // Fail open (never deny service), as on Windows below: without Landlock
+    // the launcher cannot confine anything and every untrusted or scheduled
+    // command would die (Raspberry Pi OS kernels, #795). Run in the scratch
+    // folder with the sandbox env, unconfined; the threat judge still
+    // screened the turn.
+    unconfinedNotice(
+      `Linux sandbox off: ${landlockMissing}; untrusted commands run unconfined in their scratch folder.`,
+    );
+    unconfined = true;
+    invocation = ["/bin/sh", "-c", command];
+  } else if (process.platform === "linux")
     invocation = [
       ...(opts.launcher ?? phantombotSelfCommand()),
       SANDBOX_SUBCOMMAND,
@@ -460,7 +473,9 @@ export async function runSandbox(
     // closed to AppContainers, so git and most tools could not start inside
     // one. Run in the scratch folder with the sandbox env, unconfined; the
     // threat judge still screened the turn.
-    windowsUnconfinedNotice();
+    unconfinedNotice(
+      "Windows sandbox off: this Windows build blocks AppContainers from the NUL device (git cannot run); untrusted commands run unconfined in their scratch folder. Windows 11 26H2 (build 26300) or later runs them sandboxed.",
+    );
     unconfined = true;
     const cmd = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`;
     invocation = [cmd, `/d /s /c "${command}"`];
@@ -476,7 +491,8 @@ export async function runSandbox(
   const home = neutralSandboxHome();
   if (readable.length && opts.hostPaths?.home)
     linkHomePaths(home, opts.hostPaths.home, opts.hostPaths.read);
-  const sockets = process.platform === "linux" ? socketPair() : undefined;
+  const sockets =
+    process.platform === "linux" && !unconfined ? socketPair() : undefined;
   const child = spawn(invocation[0]!, invocation.slice(1), {
     // The launcher itself must not discover bunfig/preloads from the repo.
     cwd:
@@ -489,7 +505,7 @@ export async function runSandbox(
       ...(unconfined
         ? sandboxEnvironment(workspace, home, opts.secrets, extraPath, opts.context)
         : launcherEnvironment(workspace, home, opts.secrets, extraPath, opts.context)),
-      ...(process.platform === "linux" && readable.length
+      ...(process.platform === "linux" && !unconfined && readable.length
         ? { [ENV_SANDBOX_READ]: encodeReadPaths(readable) }
         : {}),
     },
@@ -501,7 +517,7 @@ export async function runSandbox(
     ],
     detached: process.platform !== "win32",
     windowsHide: true,
-    windowsVerbatimArguments: unconfined,
+    windowsVerbatimArguments: unconfined && process.platform === "win32",
   });
   let supervision: Promise<void> | undefined;
   let supervisorStopped = false;
@@ -577,12 +593,11 @@ export async function runSandbox(
 }
 
 let unconfinedNoticeShown = false;
-function windowsUnconfinedNotice(): void {
+/** One warning per process when the OS boundary is unavailable (fail open). */
+function unconfinedNotice(message: string): void {
   if (unconfinedNoticeShown) return;
   unconfinedNoticeShown = true;
-  log.warn(
-    "Windows sandbox off: this Windows build blocks AppContainers from the NUL device (git cannot run); untrusted commands run unconfined in their scratch folder. Windows 11 26H2 (build 26300) or later runs them sandboxed.",
-  );
+  log.warn(message);
 }
 
 /** AppContainer resolution uses the caller's LocalAppData, never the child's. */

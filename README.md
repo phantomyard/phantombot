@@ -439,8 +439,10 @@ workspace with network and the persona's vault in its environment, but no
 host files, home directory, SSH keys, vault key or other personas. Host
 actions (notify, memory) go through a broker. `enabled:false` in the persona's
 `security-policy.json` opts out. Linux uses Landlock/seccomp, macOS Seatbelt,
-and Windows AppContainer/Job Objects; no Docker or elevated setup is needed, and
-an unsupported facility refuses execution rather than falling back to a host
+and Windows AppContainer/Job Objects (a kernel without Landlock, or a Windows
+build that blocks AppContainers from NUL, runs untrusted commands unconfined in
+scratch with one warning); no Docker or elevated setup is needed, and
+an unsupported platform refuses execution rather than falling back to a host
 shell. The judge holds at 90/100; a hijack it misses can leak the secrets the turn holds, which is the stated, accepted risk.
 Owner grants (specified PRs, npm staging, fixed HTTPS endpoints, exact MCP
 calls) still add credentialed operations that never leave the parent runtime.

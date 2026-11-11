@@ -35,6 +35,10 @@ import {
   windowsScratchTarget,
 } from "../src/security/windowsScratch.ts";
 import { prepareSandboxTools } from "../src/security/workspace.ts";
+import {
+  linuxLandlockMissing,
+  setLinuxLandlockForTests,
+} from "../src/security/linux.ts";
 const dirs: string[] = [];
 const fresh = () => {
   const d = mkdtempSync(join(tmpdir(), "pb-security-"));
@@ -171,6 +175,35 @@ test.skipIf(process.platform !== "linux")(
     );
     expect(r.output).toContain("Address family not supported");
     expect(r.output).toContain("rc=1");
+  },
+  15000,
+);
+test.skipIf(process.platform !== "linux")(
+  "Linux probe finds Landlock ABI 3 on a kernel that has it (else every run fails open)",
+  () => {
+    setLinuxLandlockForTests(undefined);
+    expect(linuxLandlockMissing()).toBeNull();
+  },
+);
+test.skipIf(process.platform !== "linux")(
+  "Linux without Landlock fails open: the command runs unconfined in the scratch (#795)",
+  async () => {
+    const workspace = fresh();
+    setLinuxLandlockForTests("this kernel has no Landlock (test)");
+    try {
+      // A launcher that cannot start proves the confined path is not taken.
+      const r = await runSandbox(
+        workspace,
+        'echo ok > f.txt && pwd && echo "$PHANTOMBOT_SCRATCH" && echo "${GITHUB_TOKEN:-no-secret}"',
+        { launcher: ["/bin/false"] },
+      );
+      expect(r.exitCode, r.output).toBe(0);
+      expect(r.output).toContain(workspace);
+      expect(r.output).toContain("no-secret");
+      expect(readFileSync(join(workspace, "f.txt"), "utf8")).toContain("ok");
+    } finally {
+      setLinuxLandlockForTests(undefined);
+    }
   },
   15000,
 );
