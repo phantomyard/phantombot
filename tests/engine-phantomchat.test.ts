@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -389,6 +389,8 @@ describe("personas.delete", () => {
     expect(await e.personas.exists("ana")).toBe(false);
     expect(await e.personas.delete("ana")).toBe(false);
     await rejectsWith(e.personas.delete("../bob"), "invalid_argument");
+    // The tombstone the delete renames the dir into is gone too.
+    expect(readdirSync(join(root, "data", "phantombot", ".deleted-personas"))).toEqual([]);
 
     await e.close();
     engine = undefined;
@@ -410,6 +412,34 @@ describe("personas.delete", () => {
       db.close();
     }
   });
+  // Windows refuses to remove a file something still holds open; a recursive
+  // rm then dies half way, after identity.json is already gone. The
+  // delete must be all-or-nothing: an unremovable dir leaves the persona whole.
+  test.skipIf(process.getuid?.() === 0)("a dir that cannot be moved leaves the persona whole and retryable", async () => {
+    const e = await openEngine();
+    const ana = await e.personas.create("ana");
+    await ana.ask({ message: "remember this", source: "principal", conversation: "c1" });
+    const personas = join(root, "data", "phantombot", "personas");
+    const files = readdirSync(join(personas, "ana")).sort();
+    chmodSync(personas, 0o555);
+    try {
+      await rejectsWith(e.personas.delete("ana"), "write_failed");
+    } finally {
+      chmodSync(personas, 0o755);
+    }
+    expect(readdirSync(join(personas, "ana")).sort()).toEqual(files);
+    expect(await e.personas.exists("ana")).toBe(true);
+    const db = new Database(join(root, "data", "phantombot", "memory.sqlite"), { readonly: true });
+    try {
+      const n = (db.prepare("SELECT COUNT(*) AS n FROM turns WHERE persona = 'ana'").get() as { n: number }).n;
+      expect(n).toBeGreaterThan(0);
+    } finally {
+      db.close();
+    }
+    expect(await e.personas.delete("ana")).toBe(true);
+    expect(existsSync(join(personas, "ana"))).toBe(false);
+  });
+
   test("cancels and awaits the persona's in-flight turn first; other personas' turns run on", async () => {
     const e = await openEngine();
     const ana = await e.personas.create("ana");

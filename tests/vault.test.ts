@@ -14,7 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readlinkSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +47,35 @@ afterEach(async () => {
   // rmrf retries on Windows EBUSY: a bun:sqlite handle can linger a few ms after
   // close(), racing the recursive delete. No-op-fast on POSIX. See fixtures/rmrf.
   await rmrf(workdir);
+});
+
+/** Paths this process holds open (Linux /proc only). */
+function openFiles(): string[] {
+  return readdirSync("/proc/self/fd").flatMap((fd) => {
+    try {
+      return [readlinkSync(`/proc/self/fd/${fd}`)];
+    } catch {
+      return [];
+    }
+  });
+}
+
+describe("vault close", () => {
+  // close() used to leave a zombie connection: live prepared statements keep
+  // sqlite3_close_v2 from releasing the file until GC. On Windows that open
+  // handle makes the persona dir undeletable (personas.delete -> EBUSY).
+  test.skipIf(!existsSync("/proc/self/fd"))("releases the vault.sqlite file handle", () => {
+    const dir = join(workdir, "p");
+    const vault = openVaultWithSecret(dir, generateSecretKey());
+    vault.set("A", "1");
+    vault.get("A");
+    vault.list();
+    vault.unset("A");
+    const path = vaultPath(dir);
+    expect(openFiles()).toContain(path);
+    vault.close();
+    expect(openFiles()).not.toContain(path);
+  });
 });
 
 describe("vault crypto round-trip", () => {
