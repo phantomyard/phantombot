@@ -3,6 +3,44 @@ import { prepareListenerSend } from "./linux-notify.ts";
 import { dlopen, ptr } from "bun:ffi";
 import { realpathSync, statSync } from "node:fs";
 
+let landlockProbe: string | null | undefined;
+
+/** Tests only: `null` = usable, a string = the missing requirement. */
+export function setLinuxLandlockForTests(v: string | null | undefined): void {
+  landlockProbe = v;
+}
+
+/**
+ * Why Landlock ABI 3 is unusable on this kernel, or `null` when it is usable.
+ * Probed once per process (landlock_create_ruleset VERSION restricts nothing).
+ * Raspberry Pi OS kernels are built without CONFIG_SECURITY_LANDLOCK (#795).
+ */
+export function linuxLandlockMissing(): string | null {
+  if (landlockProbe !== undefined) return landlockProbe;
+  try {
+    const lib = dlopen("libc.so.6", {
+      syscall: {
+        args: ["i64", "i64", "i64", "i64", "i64", "i64", "i64"],
+        returns: "i64",
+      },
+    });
+    try {
+      const abi = Number(lib.symbols.syscall(444, 0, 0, 1, 0, 0, 0));
+      landlockProbe =
+        abi < 0
+          ? "this kernel has no Landlock (built without CONFIG_SECURITY_LANDLOCK, or landlock missing from the boot lsm= list)"
+          : abi < 3
+            ? `this kernel has Landlock ABI ${abi}; ABI 3 (kernel 6.2+) is required`
+            : null;
+    } finally {
+      lib.close();
+    }
+  } catch (e) {
+    landlockProbe = `the Landlock probe failed (${e instanceof Error ? e.message : String(e)})`;
+  }
+  return landlockProbe;
+}
+
 export function linuxSandbox(
   workspace: string,
   executable: string,
