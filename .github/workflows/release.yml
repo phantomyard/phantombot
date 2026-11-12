@@ -196,9 +196,17 @@ jobs:
           if [ -z "$TITLE" ]; then
             TITLE=$(git log -1 --pretty=%s)
           fi
+          # A PR labelled `behaviour-change` changes what an existing,
+          # working setup does after `phantombot update` (#797: the #785
+          # sandbox broke scheduled tasks silently because the notes were
+          # just the PR title). The flag puts a warning banner at the top
+          # of the release notes. Labels are read at release time, so the
+          # label must be on the PR before it merges.
+          BEHAVIOUR_CHANGE=$(echo "$PR_JSON" | jq -r '[.[0].labels[]?.name] | any(. == "behaviour-change")')
           echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
-          echo "Resolved PR number='$NUMBER' title='$TITLE'"
+          echo "behaviour_change=$BEHAVIOUR_CHANGE" >> "$GITHUB_OUTPUT"
+          echo "Resolved PR number='$NUMBER' title='$TITLE' behaviour_change='$BEHAVIOUR_CHANGE'"
 
       - name: Set up Bun
         # Pinned to a reviewed commit sha for the same reason as the checkout
@@ -590,6 +598,7 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           PR_TITLE: ${{ steps.pr.outputs.title }}
+          BEHAVIOUR_CHANGE: ${{ steps.pr.outputs.behaviour_change }}
           RUN_NUMBER: ${{ github.run_number }}
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
@@ -606,7 +615,20 @@ jobs:
             ORIGIN_LINE="Originating commit: ${SHA} — ${PR_TITLE}"
             PR_LINK_LINE="Commit: ${SERVER_URL}/${REPO}/commit/${SHA}"
           fi
-          cat > release-notes.md <<EOF
+          # Behaviour-change banner goes FIRST so it is the one thing a
+          # reader of a long release list cannot miss.
+          : > release-notes.md
+          if [ "$BEHAVIOUR_CHANGE" = "true" ]; then
+            cat > release-notes.md <<EOF
+          ## ⚠️ Behaviour change
+
+          This release changes how an existing setup behaves after updating.
+          Read ${PR_LINK_LINE#*: } before you update, and check whether
+          anything you rely on needs adjusting.
+
+          EOF
+          fi
+          cat >> release-notes.md <<EOF
           Automated release from workflow run #${RUN_NUMBER} (run id ${RUN_ID}).
           ${ORIGIN_LINE}
 
