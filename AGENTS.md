@@ -35,6 +35,8 @@ What's *not* user-facing and doesn't need a docs update:
 - Internal lib changes with no public API change
 - Tests
 
+If a change makes an existing, working setup behave differently after `phantombot update`, also add the `behaviour-change` label to the PR before it merges. That puts a warning banner at the top of the release notes (see [release-and-install.md](docs/contributing/invariants/release-and-install.md#release-pipeline)).
+
 If unsure, update the docs. Cheaper than the post-merge "wait, the README says X but the code does Y" archeology.
 
 ## Rules that apply to every change

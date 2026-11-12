@@ -55,6 +55,17 @@ all resolve through the host's configured ring, and `phantombot doctor` reports
 it — a bug report that does not say which ring it came from is uninterpretable
 once `latest` stops meaning "newest build".
 
+**Behaviour-change label (#797).** Release notes are generated from the
+originating PR, so on their own they say no more than its title. When a PR
+changes what an existing, working setup does after `phantombot update` (a
+default flips, something that used to work is now refused, a task or config
+needs migrating), add the `behaviour-change` label **before merging**. The
+release job reads the PR's labels and puts a `⚠️ Behaviour change` banner at the
+top of the notes, linking the PR, so the PR description must explain what
+changes and what to do about it. The banner stays when the release is promoted,
+because promotion never touches the notes. `tests/release-workflow-behaviour-change.test.ts`
+runs the workflow's real step to pin this.
+
 **Versioning is intentionally not semver.** `1.1.<RUN_NUMBER>` — patch is the
 release workflow's monotonic run number, not semantic impact and not the PR
 number (PR numbers can regress; the PR is recorded in the release title/notes).
