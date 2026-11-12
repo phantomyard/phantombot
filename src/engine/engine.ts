@@ -30,7 +30,7 @@ import type { SecurityPolicy } from "./securityTypes.ts";
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
@@ -516,15 +516,46 @@ export class Engine {
       const config = await loadConfig();
       const dir = personaDir(config, name);
       if (!existsSync(dir)) return false;
+      // All-or-nothing. A recursive rm is not atomic: on Windows it can delete
+      // identity.json and most of the dir, then hit a file some handle still
+      // holds open (EBUSY/EPERM) and throw — leaving a listed persona with no
+      // identity and no memory that a retry cannot finish either. So the dir
+      // is first RENAMED out of the personas dir: one atomic step that Windows
+      // refuses while anything inside is open. If it fails, nothing has been
+      // touched and the delete is retryable. Outside personasDir so the
+      // tombstone is never listed as a persona.
+      const trash = join(dirname(config.personasDir), ".deleted-personas");
+      const tomb = join(trash, `${name}-${Date.now()}`);
       try {
-        // Rows first: a failure here leaves the persona whole and retryable,
-        // where a removed directory with live rows would be an orphan.
-        const memory = await this.memoryStore(config);
-        await memory.deletePersona(name);
-        await rm(memoryIndexPath(name), { force: true });
-        await rm(dir, { recursive: true, force: true });
+        await mkdir(trash, { recursive: true });
+        await rename(dir, tomb);
       } catch (e) {
         throw new EngineError("write_failed", `cannot delete persona '${name}': ${(e as Error).message}`);
+      }
+      try {
+        const memory = await this.memoryStore(config);
+        await memory.deletePersona(name);
+      } catch (e) {
+        // Rows still live: put the dir back so the persona stays whole.
+        await rename(tomb, dir).catch((restore) => {
+          log.warn("persona delete: could not restore the persona dir", {
+            persona: name,
+            tomb,
+            error: (restore as Error).message,
+          });
+        });
+        throw new EngineError("write_failed", `cannot delete persona '${name}': ${(e as Error).message}`);
+      }
+      // The persona is gone from here on; leftovers are debris, never a
+      // failure the caller could act on (a second delete returns false).
+      for (const path of [memoryIndexPath(name), tomb]) {
+        await rm(path, { recursive: true, force: true }).catch((e) => {
+          log.warn("persona delete: could not remove leftover files", {
+            persona: name,
+            path,
+            error: (e as Error).message,
+          });
+        });
       }
       // Debris that lives OUTSIDE the persona dir (issue #771). Best-effort
       // and logged, never thrown: the directory is already gone, and a second

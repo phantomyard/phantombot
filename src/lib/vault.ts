@@ -156,6 +156,16 @@ class SqliteVault implements Vault {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    // Finalize every prepared statement BEFORE closing. bun:sqlite's close()
+    // is sqlite3_close_v2: with statements still live it does not close, it
+    // leaves a "zombie" connection that holds the file handle until those
+    // statements are garbage-collected. Linux doesn't care (an open file can
+    // be unlinked), but on Windows that handle makes vault.sqlite — and so
+    // the whole persona dir — undeletable: personas.delete failed with EBUSY
+    // after the persona's channel had opened its vault.
+    for (const stmt of [this.setStmt, this.getStmt, this.listStmt, this.unsetStmt]) {
+      stmt.finalize();
+    }
     this.db.close();
   }
 }
