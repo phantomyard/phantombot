@@ -37,9 +37,11 @@ An agent wake (a task without `--command`) is an untrusted turn, so once the
 judge passes it, it runs in the sandbox like any other untrusted turn. It has
 network and the persona vault in its environment, so git, gh, curl and API work
 behaves as usual. It can write only to its per-turn scratch dir
-(`$PHANTOMBOT_SCRATCH`), which is deleted when the turn ends. It cannot see SSH
-private keys, the persona folder, or any other host path, and it cannot write
-anywhere under `$HOME`. Notify and memory capture/search still work through the
+(`$PHANTOMBOT_SCRATCH`), which is deleted when the turn ends. It can read only a
+small allowlist of host config paths, read-only (`~/.local/bin`, `~/.ssh/*.pub`,
+tool logins under `~/.config`, `~/.gitconfig`, `~/.git-credentials`). It never
+sees SSH private keys, the persona folder or the rest of `$HOME`, and it cannot
+write anywhere under `$HOME`. Notify and memory capture/search still work through the
 broker. See [Bounded security](../reference/bounded-security.md).
 
 A `--command` task is not sandboxed. `phantombot tick` runs the command as an

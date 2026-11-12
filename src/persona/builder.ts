@@ -566,8 +566,9 @@ self-review prompt on quiet runs, so add \`--until\`, \`--count\`, or
 
 Sandboxed wakes — an agent task (no \`--command\`) fires as an
 untrusted turn and runs sandboxed: network and the vault work, but
-it can write only to its per-turn scratch dir, and it cannot see
-\`~/.ssh\` private keys or any host path. A task whose job is to
+it can write only to its per-turn scratch dir, it can read only a
+small read-only allowlist of tool config (logins, gitconfig, public
+keys), and it cannot see \`~/.ssh\` private keys or the rest of $HOME. A task whose job is to
 write files under \`$HOME\`, use ssh, or run a host script will fail
 on every fire. Put that work in a \`--command\` script instead —
 command tasks run on the host, unsandboxed — and have the script
