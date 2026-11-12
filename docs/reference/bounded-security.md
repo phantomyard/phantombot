@@ -28,6 +28,15 @@ it would on the host. Filesystem:
 
 Host-only actions (notify, memory capture/search) go through the broker.
 
+`--command` scheduled tasks are **not** sandboxed: `phantombot tick` runs the
+owner's command as a normal host process (minimal environment plus the
+`--secret`s it lists). That is by design. The command is code the owner chose
+to install, not untrusted content, and untrusted text reaches it only if the
+script pipes it in. A `phantombot ask` the script issues is itself an untrusted
+turn: screened and sandboxed. This is the supported way to give scheduled work
+host access (files under `$HOME`, ssh) without turning the sandbox off. See
+[Schedule work](../how-to/scheduled-tasks.md#what-a-task-wake-can-and-cannot-do).
+
 Threat model, stated on purpose:
 
 - **Primary control: the judge.** Every untrusted turn is screened before it

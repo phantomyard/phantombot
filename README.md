@@ -266,7 +266,10 @@ phantombot task log "$TASK_ID"
 phantombot task cancel "$TASK_ID"
 ```
 
-Deterministic pollers can use `--command` to run without waking a model. Use
+Deterministic pollers can use `--command` to run without waking a model.
+Agent task wakes run sandboxed (scratch-only writes, no `~/.ssh` private
+keys, only a read-only allowlist of tool config); `--command` tasks run on the host, so put file writes and ssh there.
+See [Schedule work](docs/how-to/scheduled-tasks.md). Use
 `phantombot notify` only when background work produces something the owner
 actually needs to see.
 
