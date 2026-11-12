@@ -97,6 +97,15 @@ describe("buildSystemPrompt — scheduling tools section", () => {
     expect(si).toBeGreaterThan(ti);
   });
 
+  test("warns that agent task wakes are sandboxed and points host work at --command (#797)", () => {
+    // Since #785 an agent wake is an untrusted, sandboxed turn: an agent
+    // that schedules ssh or $HOME writes as an agent task gets a task that
+    // fails on every fire. The section must say so and name the escape.
+    expect(SCHEDULING_TOOLS_SECTION).toMatch(/runs sandboxed/);
+    expect(SCHEDULING_TOOLS_SECTION).toContain("~/.ssh");
+    expect(SCHEDULING_TOOLS_SECTION).toMatch(/command tasks run on the host, unsandboxed/);
+  });
+
   test("scheduling section sits between memory and credentials sections", () => {
     // Order matters for caching: stable persona/memory/tools first, then
     // the system-level injections in a deterministic order.
