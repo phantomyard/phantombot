@@ -415,7 +415,9 @@ describe("personas.delete", () => {
   // Windows refuses to remove a file something still holds open; a recursive
   // rm then dies half way, after identity.json is already gone. The
   // delete must be all-or-nothing: an unremovable dir leaves the persona whole.
-  test.skipIf(process.getuid?.() === 0)("a dir that cannot be moved leaves the persona whole and retryable", async () => {
+  // The sabotage (read-only parent) is POSIX-only: Windows ignores the
+  // read-only attribute for directory renames, so skip there.
+  test.skipIf(process.getuid?.() === 0 || process.platform === "win32")("a dir that cannot be moved leaves the persona whole and retryable", async () => {
     const e = await openEngine();
     const ana = await e.personas.create("ana");
     await ana.ask({ message: "remember this", source: "principal", conversation: "c1" });
