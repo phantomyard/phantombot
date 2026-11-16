@@ -2642,6 +2642,99 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await srv.stop();
     expect(harness.invocations).toBe(1);
   });
+
+  // #801: the principal's /reset and /stop work in a group, addressed like any
+  // group message; nothing else in a group takes the slash path.
+  describe("group slash commands (#801)", () => {
+    const conv = "phantomchat:group:HQ";
+    function lenaServer(c: ReturnType<typeof cast>, harness: Harness) {
+      return makeGroupServer({
+        botSk: c.lenaSk,
+        persona: "lena",
+        allowedHex: [c.andrewHex, c.kaiHex],
+        groupPersonaNames: ["lena", "kai"],
+        siblingBotHex: [c.kaiHex],
+        harness,
+      });
+    }
+    async function seed(srv: ReturnType<typeof lenaServer>, c: ReturnType<typeof cast>) {
+      srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "lena, remember X", "HQ");
+      await waitUntil(
+        async () => (await memory.recentTurns("lena", conv, 50)).length > 0,
+        "the seed turn to persist",
+      );
+      await waitUntil(() => replyWraps(srv.pool).length === 3, "the seed reply broadcast");
+    }
+
+    test("'/reset lena' resets the group thread, runs no turn, replies in the group", async () => {
+      const c = cast();
+      const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "noted" }]);
+      const srv = lenaServer(c, harness);
+      await seed(srv, c);
+      const before = replyWraps(srv.pool).length;
+      srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "/reset lena", "HQ");
+      await waitUntil(
+        async () => (await memory.recentTurns("lena", conv, 50)).length === 0,
+        "the group history to be cleared",
+      );
+      await waitUntil(
+        () => replyWraps(srv.pool).length === before + 3,
+        "the /reset reply broadcast to the group",
+      );
+      await srv.stop();
+      expect(harness.invocations).toBe(1); // only the seed turn
+    });
+
+    test("bare '/reset' resets when this bot holds the thread (sticky)", async () => {
+      const c = cast();
+      const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "noted" }]);
+      const srv = lenaServer(c, harness);
+      await seed(srv, c);
+      srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "/reset", "HQ");
+      await waitUntil(
+        async () => (await memory.recentTurns("lena", conv, 50)).length === 0,
+        "the group history to be cleared",
+      );
+      await srv.stop();
+      expect(harness.invocations).toBe(1);
+    });
+
+    test("'/reset kai' and '/reset@kai' leave this bot's thread alone", async () => {
+      const c = cast();
+      const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "noted" }]);
+      const srv = lenaServer(c, harness);
+      await seed(srv, c);
+      const before = replyWraps(srv.pool).length;
+      srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "/reset kai", "HQ");
+      srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "/reset@kai", "HQ");
+      await groupSleep(200);
+      await srv.stop();
+      expect(harness.invocations).toBe(1);
+      expect(replyWraps(srv.pool).length).toBe(before);
+      expect((await memory.recentTurns("lena", conv, 50)).length).toBeGreaterThan(0);
+    });
+
+    test("a sibling bot's '/reset lena' is never a command", async () => {
+      const c = cast();
+      const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "noted" }]);
+      const srv = lenaServer(c, harness);
+      await seed(srv, c);
+      srv.feedGroup(c.kaiSk, [c.lenaHex, c.andrewHex], "/reset lena", "HQ");
+      await groupSleep(200);
+      await srv.stop();
+      expect((await memory.recentTurns("lena", conv, 50)).length).toBeGreaterThan(0);
+    });
+
+    test("process-level commands stay DM-only: a group '/restart lena' is an ordinary turn", async () => {
+      const c = cast();
+      const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "plain turn" }]);
+      const srv = lenaServer(c, harness);
+      srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "/restart lena", "HQ");
+      await waitUntil(() => harness.invocations === 1, "an ordinary turn to run");
+      await srv.stop();
+      expect(harness.invocations).toBe(1);
+    });
+  });
 });
 
 /**

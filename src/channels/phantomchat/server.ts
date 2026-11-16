@@ -48,6 +48,7 @@ import { makeTurnIndexer } from "../../orchestrator/turnIndexer.ts";
 import {
   type ActiveTurnHandle,
   handleSlashCommand,
+  slashCommandTarget,
 } from "../commands.ts";
 import type { LifecycleAccount } from "../../lib/lifecycleBroadcast.ts";
 import { ConversationBacklog } from "../core/backlog.ts";
@@ -116,6 +117,21 @@ import {
  *               never granted principal authority.
  *   "drop"    — not allowed at all: ignored silently.
  */
+
+/**
+ * Slash commands a principal may run inside a PhantomChat GROUP (#801). Only
+ * the ones scoped to the group thread itself; process-level commands
+ * (/restart, /update, /model, …) stay DM-only so a group line can never bounce
+ * the process.
+ */
+const GROUP_SLASH_COMMANDS: ReadonlySet<string> = new Set(["/reset", "/stop"]);
+
+/** "/Reset@robbie now" → "/reset". */
+function slashCommandName(text: string): string {
+  const head = text.trim().split(/\s+/)[0] ?? "";
+  return head.split("@")[0]!.toLowerCase();
+}
+
 export type SenderTier = "trusted" | "relay" | "open" | "drop";
 
 // Don't download absurdly large attachments. The harness reads from the inbox;
@@ -1478,16 +1494,52 @@ export async function runPhantomchatServer(
   };
 
   // A DM whose text begins with "/" is a candidate control command. Media
-  // messages and group messages never take the slash path (see runSlash).
-  const isControlCommand = (msg: ChannelMessage): boolean =>
-    !msg.groupId && !msg.media && msg.text.trim().startsWith("/");
+  // messages never take the slash path. In a GROUP only the thread-scoped
+  // commands in GROUP_SLASH_COMMANDS do (#801); any other group "/…" line
+  // (a path, a process-level command) stays an ordinary turn, so it can still
+  // carry an attachment's caption.
+  const isControlCommand = (msg: ChannelMessage): boolean => {
+    if (msg.media) return false;
+    const text = msg.text.trim();
+    if (!text.startsWith("/")) return false;
+    if (!msg.groupId) return true;
+    return GROUP_SLASH_COMMANDS.has(slashCommandName(text));
+  };
+
+  // Is this group slash command addressed to THIS bot? Same rules as Telegram
+  // (core/engine.ts), with persona names standing in for @usernames:
+  //   - alone in the group with humans → always ours;
+  //   - `/cmd@name` → ours only if `name` is us;
+  //   - `/cmd` that names bots in its text (`/reset robbie`) → ours only if
+  //     one of them is us;
+  //   - bare `/cmd` → ours only if the thread is currently with us (sticky).
+  // Read-only: no profile-cache misses beyond the fetch handle() does anyway,
+  // no lastAddressed or buffer mutation.
+  const groupSlashIsForUs = async (msg: ChannelMessage): Promise<boolean> => {
+    const memberHexes = msg.groupMemberHexes ?? [];
+    await ensureProfiles([msg.senderId, ...memberHexes]);
+    const roster = buildRoster(memberHexes);
+    const otherBotPresent =
+      roster.length > 1 ||
+      memberHexes.some((h) => h.toLowerCase() !== ourHex && isBot(h));
+    if (!otherBotPresent) return true;
+    const self = selfName.toLowerCase();
+    const target = slashCommandTarget(msg.text);
+    if (target) return target.toLowerCase() === self;
+    const named = matchPersonaNames(msg.text, roster);
+    if (named.length > 0) return named.some((n) => n.toLowerCase() === self);
+    return (groupChats.get(msg.conversationId)?.lastAddressed ?? []).some(
+      (n) => n.toLowerCase() === self,
+    );
+  };
 
   // Slash commands (/stop, /reset, /status, /harness, /coder, /help, …) are
   // handled INLINE — bypassing the per-conversation turn chain — so /stop can abort a
   // turn that is currently hung in that chain (a queued /stop would never run
-  // until the very turn it is meant to kill had finished). DM-only: group slash
-  // semantics (who may /reset the shared thread, /status broadcast noise) are
-  // out of scope, so in a group a "/…" line falls through to a normal turn.
+  // until the very turn it is meant to kill had finished). In a group only the
+  // principal's /reset and /stop, addressed to this bot, are handled here
+  // (#801); everything else in a group falls through to a normal turn, exactly
+  // as before.
   // Unknown commands (handleSlashCommand → null) also fall through to a normal
   // turn, since some personas treat e.g. /remember as plain input. That
   // fall-through keeps the dispatch options the coalescer gave the message
@@ -1501,6 +1553,15 @@ export async function runPhantomchatServer(
     const tier = authorize(msg);
     if (tier === "drop") return;
     const senderHex = msg.senderId;
+    if (
+      msg.groupId &&
+      (tier !== "trusted" || isBot(senderHex) || !(await groupSlashIsForUs(msg)))
+    ) {
+      // Not the principal's command for us: the pre-#801 group behaviour, an
+      // ordinary turn that handle() gates (and stays quiet on) as usual.
+      enqueue(msg, alsoReceipt, opts);
+      return;
+    }
     const result = await handleSlashCommand(msg.text, {
       chatId: msg.conversationId,
       persona: input.persona,
@@ -1511,10 +1572,13 @@ export async function runPhantomchatServer(
       // for it and the `result === null` branch below runs it as an ordinary
       // screened turn.
       principalAuthenticated: tier === "trusted",
-      // Must match handle()'s DM conversationKey EXACTLY so /reset and /coder
-      // target the same persisted history. senderId is already lowercase hex
-      // (the channel lowercases rumor.pubkey).
-      conversation: `phantomchat:${senderHex}`,
+      // Must match handle()'s conversationKey EXACTLY so /reset and /coder
+      // target the same persisted history: the group thread for a group, else
+      // the sender's DM. senderId is already lowercase hex (the channel
+      // lowercases rumor.pubkey).
+      conversation: msg.groupId
+        ? `phantomchat:group:${msg.groupId}`
+        : `phantomchat:${senderHex}`,
       memory: input.memory,
       // Same array runTurn uses, so /harness reordering sticks for next turn.
       harnesses,
@@ -1529,8 +1593,9 @@ export async function runPhantomchatServer(
       flushBacklog: () => backlog.flush(msg.conversationId, "stop"),
       // Our own PhantomChat address, for the /status `phantomchat:` line.
       phantomchatNpub: ourNpub,
-      // No @username concept on Nostr, and slash handling is DM-only, so there
-      // is nothing to disambiguate — leave botUsername undefined.
+      // No @username on Nostr: in a group the persona name plays that role,
+      // so a `/reset@kai` that slipped through is still refused here.
+      ...(msg.groupId ? { botUsername: selfName } : {}),
     }).catch((e: unknown) => {
       log.warn("phantomchat: slash command failed", {
         error: (e as Error).message,
@@ -1547,7 +1612,14 @@ export async function runPhantomchatServer(
       return;
     }
     try {
-      await transport.sendMessage(senderHex, result.reply);
+      if (msg.groupId) {
+        // Answer in the group, to the same member set the reply path uses.
+        const members = new Set<string>(msg.groupMemberHexes ?? []);
+        members.add(senderHex.toLowerCase());
+        await transport.sendGroupMessage(msg.groupId, [...members], result.reply);
+      } else {
+        await transport.sendMessage(senderHex, result.reply);
+      }
       // /update and /restart fire their side effect AFTER the reply lands, so
       // the user sees "restarting…" before the process is SIGTERM'd.
       if (result.afterSend) await result.afterSend();
