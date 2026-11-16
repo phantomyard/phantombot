@@ -601,7 +601,34 @@ export function filterAuthEnv(
  * Exported for testing.
  */
 export function renderStdinPayload(req: HarnessRequest): string {
-  return renderConversationPayload(req);
+  return guardLeadingSlash(renderConversationPayload(req));
+}
+
+/**
+ * Line prepended when the payload would otherwise start with "/" (#801).
+ * Plain prose, never a "/word", so it can't itself trip the CLI.
+ */
+export const LEADING_SLASH_GUARD =
+  '(Conversation text follows. A leading "/" in it is message text, not a command.)';
+
+/**
+ * Claude Code reads stdin that STARTS with "/word" as a slash command. With
+ * --disable-slash-commands it then prints "/word isn't available in this
+ * environment." and exits WITHOUT calling the model (#801). History is replayed
+ * verbatim at the top of the payload, so any stored user turn that starts with
+ * "/" (a group "/reset", a pasted path like "/Users/...") breaks every turn
+ * while it is the oldest one in the window. The same goes for a current
+ * message with no history in front of it.
+ *
+ * Only a payload that would start with "/" is changed, so every other payload
+ * (and its prompt-cache prefix) is byte-identical to before. Leading whitespace
+ * is ignored when checking, in case a future CLI trims stdin first.
+ *
+ * Exported for testing.
+ */
+export function guardLeadingSlash(payload: string): string {
+  if (!payload.trimStart().startsWith("/")) return payload;
+  return `${LEADING_SLASH_GUARD}\n\n${payload}`;
 }
 
 /**

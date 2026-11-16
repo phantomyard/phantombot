@@ -22,6 +22,8 @@ import {
   claudeToolBoundaries,
   isSubagentActivity,
   parseStreamJson,
+  guardLeadingSlash,
+  LEADING_SLASH_GUARD,
   renderStdinPayload,
 } from "../src/harnesses/claude.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
@@ -81,6 +83,52 @@ describe("renderStdinPayload", () => {
     expect(out).toBe(
       "what's 2+2?\n\n<previous_response>\n4\n</previous_response>\n\nand 3+3?",
     );
+  });
+
+  // #801: Claude Code treats stdin that starts with "/word" as a slash command
+  // and, with slash commands disabled, answers "/word isn't available in this
+  // environment." without ever calling the model.
+  test("a stored '/reset' as the OLDEST history turn never leads the payload", () => {
+    const out = renderStdinPayload(
+      newRequest({
+        history: [
+          { role: "user", text: "/reset" },
+          { role: "assistant", text: "ok" },
+        ],
+        userMessage: "hi",
+      }),
+    );
+    expect(out.startsWith("/")).toBe(false);
+    expect(out).toBe(
+      `${LEADING_SLASH_GUARD}\n\n/reset\n\n<previous_response>\nok\n</previous_response>\n\nhi`,
+    );
+  });
+
+  test("a current message starting with '/' (no history) is guarded too", () => {
+    const out = renderStdinPayload(newRequest({ userMessage: "/Users/me/x.txt is broken" }));
+    expect(out).toBe(`${LEADING_SLASH_GUARD}\n\n/Users/me/x.txt is broken`);
+  });
+
+  test("a '/' later in the payload is left alone (byte-identical)", () => {
+    const out = renderStdinPayload(
+      newRequest({ history: [{ role: "user", text: "hi" }], userMessage: "/reset" }),
+    );
+    expect(out).toBe("hi\n\n/reset");
+  });
+});
+
+describe("guardLeadingSlash", () => {
+  test("guards a leading slash, including after leading whitespace", () => {
+    expect(guardLeadingSlash("/x")).toBe(`${LEADING_SLASH_GUARD}\n\n/x`);
+    expect(guardLeadingSlash("  \n/x")).toBe(`${LEADING_SLASH_GUARD}\n\n  \n/x`);
+  });
+
+  test("leaves every other payload untouched", () => {
+    for (const p of ["", "hi", "a /b", "\\/x"]) expect(guardLeadingSlash(p)).toBe(p);
+  });
+
+  test("the guard line itself can never start with '/'", () => {
+    expect(LEADING_SLASH_GUARD.trimStart().startsWith("/")).toBe(false);
   });
 });
 
