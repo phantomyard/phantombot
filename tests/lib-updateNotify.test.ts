@@ -302,6 +302,33 @@ describe("last-notified dedup", () => {
 // ---------------------------------------------------------------------------
 
 describe("runUpdateFlow", () => {
+  test("mise-managed binary → refusal pointing at mise, no marker, no swap", async () => {
+    const { calls, svc } = fakeSvc();
+    let swapped = false;
+    const r = await runUpdateFlow({
+      config: baseConfig(),
+      currentVersion: "1.0.42",
+      chatId: 42,
+      fetchImpl: fakeReleaseFetch(),
+      serviceControl: svc,
+      runUpdateImpl: async () => {
+        swapped = true;
+        return 0;
+      },
+      pendingPath,
+      lastNotifiedPath: lastNotifiedPathLocal,
+      procPlatform: "linux",
+      procArch: "x64",
+      binPath: "/home/u/.local/share/mise/installs/phantombot/1.0.42/phantombot",
+      env: {},
+    });
+    expect(r.reply).toContain("mise upgrade phantombot");
+    expect(r.restart).toBeUndefined();
+    expect(swapped).toBe(false);
+    expect(await readPendingUpdate(pendingPath)).toBeUndefined();
+    expect(calls).not.toContain("restart");
+  });
+
   test("already on latest → 'nothing to do', no marker written, no restart", async () => {
     const { calls, svc } = fakeSvc();
     const r = await runUpdateFlow({
@@ -565,6 +592,29 @@ describe("runUpdateFlow", () => {
 // ---------------------------------------------------------------------------
 
 describe("checkAndNotifyOnce", () => {
+  test("mise-managed binary → no release check, no message", async () => {
+    const transport = new FakeTransport();
+    let fetched = false;
+    const r = await checkAndNotifyOnce({
+      config: baseConfig(),
+      currentVersion: "1.0.42",
+      now: new Date("2026-05-05T00:00:00Z"),
+      fetchImpl: (async () => {
+        fetched = true;
+        throw new Error("must not fetch");
+      }) as unknown as typeof fetch,
+      transport,
+      lastNotifiedPath: lastNotifiedPathLocal,
+      procPlatform: "linux",
+      procArch: "x64",
+      binPath: "/home/u/.local/share/mise/installs/phantombot/1.0.42/phantombot",
+      env: {},
+    });
+    expect(r.status).toBe("externally_managed");
+    expect(fetched).toBe(false);
+    expect(transport.sent.length).toBe(0);
+  });
+
   test("update available + nothing previously notified → sends one message per recipient, writes dedup", async () => {
     const transport = new FakeTransport();
     const r = await checkAndNotifyOnce({

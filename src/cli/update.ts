@@ -27,6 +27,10 @@ import {
 } from "../lib/binaryUpdate.ts";
 import { installCompletions } from "../lib/completionInstall.ts";
 import {
+  detectExternalUpdateManager,
+  externalUpdateMessage,
+} from "../lib/externalUpdates.ts";
+import {
   BunCommandRunner,
   resignAfterUpdate,
   type ResignAfterUpdateResult,
@@ -118,6 +122,11 @@ export interface RunUpdateInput {
   resignBinary?:
     | false
     | ((binPath: string) => Promise<ResignAfterUpdateResult>);
+  /**
+   * Environment used to detect an external package manager (MISE_DATA_DIR).
+   * Defaults to process.env. Tests override.
+   */
+  env?: Record<string, string | undefined>;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -169,6 +178,15 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
     return 1;
   }
 
+  // A package manager (mise) owns this binary: swapping it in place would
+  // desync the manager's record of what is installed. `--check` still
+  // reports, so a user can see a release exists; installing is refused.
+  const manager = detectExternalUpdateManager(rawBinPath, input.env);
+  if (manager && !input.check) {
+    err.write(`${externalUpdateMessage(manager)}\n`);
+    return 1;
+  }
+
   // 1. Discover latest release.
   const r = await findLatestRelease({
     target,
@@ -198,6 +216,7 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
         `${channelSuffix(channel, release)}\n`,
     );
     out.write(`  asset:  ${release.binary.name} (${formatBytes(release.binary.size)})\n`);
+    if (manager) out.write(`  install: ${manager.upgradeCommand}\n`);
     return 2;
   }
 

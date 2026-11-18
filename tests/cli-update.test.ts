@@ -158,6 +158,50 @@ function makeSvc(opts: { active?: boolean; restartOk?: boolean } = {}) {
   };
 }
 
+describe("runUpdate under an external package manager (mise)", () => {
+  const miseBin = "/home/u/.local/share/mise/installs/phantombot/1.0.42/phantombot";
+
+  test("install refused with exit 1 and a mise hint; nothing fetched", async () => {
+    const err = new CaptureStream();
+    let fetched = false;
+    const code = await runUpdate({
+      binPath: miseBin,
+      procArch: "x64",
+      procPlatform: "linux",
+      currentVersion: "1.0.42",
+      fetchImpl: (async () => {
+        fetched = true;
+        throw new Error("must not fetch");
+      }) as unknown as typeof fetch,
+      env: {},
+      out: new CaptureStream(),
+      err,
+      force: true,
+    });
+    expect(code).toBe(1);
+    expect(fetched).toBe(false);
+    expect(err.text).toContain("mise upgrade phantombot");
+  });
+
+  test("--check still reports, with the mise command", async () => {
+    const out = new CaptureStream();
+    const code = await runUpdate({
+      binPath: miseBin,
+      procArch: "x64",
+      procPlatform: "linux",
+      currentVersion: "1.0.42",
+      fetchImpl: fakeReleaseFetch(),
+      env: {},
+      out,
+      err: new CaptureStream(),
+      check: true,
+    });
+    expect(code).toBe(2);
+    expect(out.text).toContain("Update available");
+    expect(out.text).toContain("install: mise upgrade phantombot");
+  });
+});
+
 describe("runUpdate exit codes (cron contract)", () => {
   test("already on latest → exit 0, no download", async () => {
     const out = new CaptureStream();
