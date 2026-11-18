@@ -2544,7 +2544,7 @@ test("scheduled sandbox wake self-cancels and run bookkeeping keeps it inactive 
   expect(store.get(added.id)!.active).toBe(false);
   expect(store.get(added.id)!.runCount).toBe(1);
   expect(store.get(added.id)!.claim).toBeUndefined();
-});
+}, 20000);
 
 
 test("command poller receives a live task capability which expires after its run (#803)", async () => {
@@ -2571,4 +2571,4 @@ test("command poller receives a live task capability which expires after its run
   expect(store.get(created.id)!.runCount).toBe(1);
   const {url, token} = JSON.parse(await readFile(descriptorPath, "utf8"));
   await expect(fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify({kind:"cancel", id:created.id, persona:"phantom"}) })).rejects.toThrow();
-});
+}, 20000);

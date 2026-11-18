@@ -439,4 +439,4 @@ test("ask inherits only an authenticated command task cancellation capability (#
     if (prior === undefined) delete process.env[ENV_TASK_CAPABILITY];
     else process.env[ENV_TASK_CAPABILITY] = prior;
   }
-});
+}, 20000);

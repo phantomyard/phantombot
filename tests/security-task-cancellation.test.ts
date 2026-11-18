@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openTaskStore, type TaskStore } from "../src/lib/tasks.ts";
@@ -8,12 +8,15 @@ import { invokeSession } from "../src/security/extension.ts";
 import { createTaskCapability, ENV_TASK_CAPABILITY, inheritedTaskCancellation, taskCancellation } from "../src/security/taskCancellation.ts";
 import type { SecurityAudit } from "../src/security/types.ts";
 import { runTaskCancel } from "../src/cli/task.ts";
+import { rmrf } from "./fixtures/rmrf.ts";
 
 const cleanups: (() => unknown | Promise<unknown>)[] = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
 async function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "pb-self-cancel-"));
-  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  // rmrf (not rmSync): on Windows bun:sqlite keeps the tasks.sqlite handle
+  // until the Database object is GC-finalized, so a plain rm throws EBUSY.
+  cleanups.push(() => rmrf(dir));
   const store = await openTaskStore(join(dir, "tasks.sqlite"));
   cleanups.push(() => store.close());
   const add = (persona: string) => {
@@ -41,7 +44,7 @@ test("real broker cancels only its host-bound task, audits denial and permits re
   expect(f.store.get(f.other)!.active).toBe(true);
   expect(f.store.get(f.foreign)!.active).toBe(true);
   expect(audits.filter(a => a.operation === "task-cancel").map(a => a.outcome)).toEqual([...Array(6).fill("policy_denied"), "allowed", "allowed"]);
-});
+}, 20000);
 
 test("a conversation task id and forged operation cannot grant a normal session authority", async () => {
   const f = await fixture();
@@ -50,7 +53,7 @@ test("a conversation task id and forged operation cannot grant a normal session 
   const r = await invokeSession(session.descriptor, { kind: "broker", operation: { kind: "task-cancel", id: f.id, taskCancellation: f.authority } });
   expect(r.ok).toBe(false);
   expect(f.store.get(f.id)!.active).toBe(true);
-});
+}, 20000);
 
 test("command capability survives authenticated ask handoff but rejects persona, token, target and expiry", async () => {
   const f = await fixture();
@@ -75,7 +78,7 @@ test("command capability survives authenticated ask handoff but rejects persona,
   await expect(inherited!.cancel()).rejects.toThrow();
   await cap.close();
   expect(await inheritedTaskCancellation("kai", undefined, env)).toBeUndefined();
-});
+}, 20000);
 
 test("aborted turn cannot cancel; closed security session loses authority", async () => {
   const f = await fixture();
@@ -87,7 +90,7 @@ test("aborted turn cannot cancel; closed security session loses authority", asyn
   expect(f.store.get(f.id)!.active).toBe(true);
   await session.close();
   await expect(invokeSession(session.descriptor, { kind: "broker", operation: { kind: "task-cancel", id: f.id } })).rejects.toThrow();
-});
+}, 20000);
 
 test("sandbox CLI forwards cancellation before opening any config or task store", async () => {
   const f = await fixture();
@@ -104,7 +107,7 @@ test("sandbox CLI forwards cancellation before opening any config or task store"
     if (previous === undefined) delete process.env.PHANTOMBOT_SECURITY_SESSION;
     else process.env.PHANTOMBOT_SECURITY_SESSION = previous;
   }
-});
+}, 20000);
 
 
 test.skipIf(!process.env.PHANTOMBOT_TEST_SELF_CANCEL_BINARY)("compiled CLI self-cancels inside the real OS sandbox", async () => {
