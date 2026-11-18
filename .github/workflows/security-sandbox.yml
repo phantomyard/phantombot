@@ -18,12 +18,16 @@ jobs:
         with:
           bun-version: 1.x
       - run: bun install --frozen-lockfile
-      - run: bun test tests/security-broker.test.ts tests/security-sandbox.test.ts tests/security-session.test.ts
+      - run: bun test tests/security-broker.test.ts tests/security-sandbox.test.ts tests/security-session.test.ts tests/security-task-cancellation.test.ts
       - name: Compile the runtime and exercise the actual shipped launcher
         shell: bash
         run: |
           bun build --compile ./src/index.ts --outfile dist/phantombot-security${{ runner.os == 'Windows' && '.exe' || '' }}
           bun scripts/securityCompiledSmoke.ts ./dist/phantombot-security${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Exercise compiled self-cancellation inside the OS sandbox
+        if: runner.os != 'Windows'
+        shell: bash
+        run: PHANTOMBOT_TEST_SELF_CANCEL_BINARY="$PWD/dist/phantombot-security" bun test tests/security-task-cancellation.test.ts -t "compiled CLI"
       - name: Read macOS sandbox denials after a failed gate
         if: failure() && runner.os == 'macOS'
         run: /usr/bin/log show --last 3m --style compact --predicate 'process == "sandbox-exec" OR process == "sh" OR process == "echo"' | tail -100

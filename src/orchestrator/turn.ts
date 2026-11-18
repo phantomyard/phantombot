@@ -1,3 +1,4 @@
+import type { TaskCancellation } from "../security/taskCancellation.ts";
 import { readSecurityPolicy } from "../security/policy.ts";
 import { createSecuritySession } from "../security/session.ts";
 /**
@@ -133,6 +134,8 @@ export function boundHistoryByBytes(
 }
 
 export interface TurnInput {
+  /** Runtime-only originating task capability; never derived from prompt text. */
+  taskCancellation?: TaskCancellation;
   /** Persona name — used for memory scoping and log clarity. */
   persona: string;
   /** Conversation key — e.g. "cli:default", "telegram:42". */
@@ -1091,6 +1094,7 @@ async function* runTurnBody(
       persona: input.persona,
       conversation: input.conversation,
       turnId,
+      taskCancellation: input.taskCancellation,
       policy: securityPolicy,
       // The turn's untrusted scratch is the sandbox's only writable dir.
       ...(scratch?.ephemeral ? { workspace: scratch.dir } : {}),

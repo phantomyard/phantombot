@@ -1,3 +1,4 @@
+import { inheritedTaskCancellation } from "../security/taskCancellation.ts";
 /**
  * `phantombot ask <prompt>` — fire a single prompt through the same
  * persona + harness chain that backs the long-running `run` listener,
@@ -164,6 +165,7 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       persona,
       conversation,
       userMessage: prompt,
+      taskCancellation: await inheritedTaskCancellation(persona, input.signal),
       agentDir,
       // Interactive surface: the owner asks for work on repos all over their
       // home dir, so home stays the cwd. Explicit since #387 removed the

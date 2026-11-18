@@ -1,3 +1,4 @@
+import { createTaskCapability, ENV_TASK_CAPABILITY, taskCancellation } from "../security/taskCancellation.ts";
 /**
  * `phantombot tick` — fired every minute by the platform scheduler.
  *
@@ -456,15 +457,23 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
           process.pid,
           taskConfig.harnessHardTimeoutMs,
         );
-        const result = await runCommandTask(task.command!, {
-          timeoutMs: taskConfig.harnessHardTimeoutMs,
-          cwd: personaDir(config, task.persona),
-          env: await buildCommandEnv(
-            taskConfig,
-            task.persona,
-            task.commandSecrets,
-          ),
-        });
+        const capability = createTaskCapability(
+          taskCancellation(taskStore, task.id, task.persona),
+          AbortSignal.timeout(taskConfig.harnessHardTimeoutMs),
+        );
+        let result: Awaited<ReturnType<typeof runCommandTask>>;
+        try {
+          result = await runCommandTask(task.command!, {
+            timeoutMs: taskConfig.harnessHardTimeoutMs,
+            cwd: personaDir(config, task.persona),
+            env: {
+              ...await buildCommandEnv(taskConfig, task.persona, task.commandSecrets),
+              [ENV_TASK_CAPABILITY]: capability.descriptor,
+            },
+          });
+        } finally {
+          await capability.close();
+        }
         finalText = result.output;
         exitCode = result.exitCode;
         if (result.exitCode !== 0) {
@@ -741,6 +750,7 @@ export async function runTaskWake(
         persona: task.persona,
         conversation,
         userMessage: promptText,
+        taskCancellation: taskCancellation(taskStore, task.id, task.persona),
         agentDir,
         // Interactive surface: the owner asks for work on repos all over their
         // home dir, so home stays the cwd. Explicit since #387 removed the

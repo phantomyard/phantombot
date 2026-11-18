@@ -1,3 +1,4 @@
+import { forwardToSandboxSession } from "../security/sandboxCli.ts";
 /**
  * `phantombot task` — CRUD for scheduled tasks. Primarily for the
  * harnessed agent (called via Bash from inside a Claude session); a
@@ -448,6 +449,8 @@ export async function runTaskCancel(
 ): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
+  const forwarded = await forwardToSandboxSession({ kind: "task-cancel", id: input.id }, out, err);
+  if (forwarded !== undefined) return forwarded;
   const config = input.config ?? (await loadConfig());
   const store = input.store ?? (await openTaskStore(config.memoryDbPath));
   try {

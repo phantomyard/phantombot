@@ -1,3 +1,4 @@
+import { invokeSession } from "../src/security/extension.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -2519,3 +2520,55 @@ describe("spawnWakeChild — no-user-bus refusal and closed-store safety", () =>
     },
   );
 });
+
+
+test("scheduled sandbox wake self-cancels and run bookkeeping keeps it inactive (#803)", async () => {
+  await writeFile(join(workdir, "personas", "phantom", "security-policy.json"), JSON.stringify({ version: 1, enabled: true, grants: [] }));
+  const now = new Date("2026-05-02T10:00:00Z");
+  const added = store.add({ persona: "phantom", schedule: "*/5 * * * *", description: "spent", prompt: "retire", now: new Date(now.getTime() - 600_000) });
+  if (!added.ok) throw new Error(added.error);
+  let invoked = false;
+  const harness: Harness = {
+    id: "self-cancel", supportsSecuritySession: true,
+    async available() { return true; },
+    async *invoke(req) {
+      invoked = true;
+      expect(req.securitySession).toBeDefined();
+      const r = await invokeSession(req.securitySession!, { kind: "broker", operation: { kind: "task-cancel", id: added.id } });
+      expect(r.ok, r.text).toBe(true);
+      yield { type: "done", finalText: "retired" };
+    },
+  };
+  expect(await tickInline({ config, taskStore: store, memory, harnesses: [harness], lockPath, now, out: { write() {} } })).toBe(0);
+  expect(invoked).toBe(true);
+  expect(store.get(added.id)!.active).toBe(false);
+  expect(store.get(added.id)!.runCount).toBe(1);
+  expect(store.get(added.id)!.claim).toBeUndefined();
+}, 20000);
+
+
+test("command poller receives a live task capability which expires after its run (#803)", async () => {
+  const script = join(workdir, "cancel-command.mjs");
+  const descriptorPath = join(workdir, "capability.json");
+  await writeFile(script, `
+    import { writeFileSync } from 'node:fs';
+    const raw = process.env.PHANTOMBOT_TASK_CAPABILITY;
+    writeFileSync(process.argv[2], raw);
+    const {url, token} = JSON.parse(raw);
+    async function invoke(op) {
+      const r = await fetch(url, {method:'POST', headers:{Authorization:'Bearer '+token}, body:JSON.stringify({...op, persona:process.env.PHANTOMBOT_PERSONA})});
+      if (!r.ok) throw new Error('refused');
+      return r.json();
+    }
+    const {id} = await invoke({kind:'context'});
+    await invoke({kind:'cancel', id});
+  `);
+  const created = store.add({ persona: "phantom", description: "command self-cancel", schedule: "*/5 * * * *", prompt: "retire", command: `"${process.execPath}" "${script}" "${descriptorPath}"`, now: new Date("2026-05-02T09:30:00Z") });
+  if (!created.ok) throw new Error(created.error);
+  expect(await tickInline({ config, taskStore: store, memory, lockPath, now: new Date("2026-05-02T10:00:00Z"), out: { write() {} } })).toBe(0);
+  expect(store.taskRuns(created.id)[0]!.status).toBe("ok");
+  expect(store.get(created.id)!.active).toBe(false);
+  expect(store.get(created.id)!.runCount).toBe(1);
+  const {url, token} = JSON.parse(await readFile(descriptorPath, "utf8"));
+  await expect(fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify({kind:"cancel", id:created.id, persona:"phantom"}) })).rejects.toThrow();
+}, 20000);
