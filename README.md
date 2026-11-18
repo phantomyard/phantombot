@@ -13,7 +13,7 @@ persona from PhantomChat, Telegram, a terminal, or your editor, and it
 remembers. It ships with a native harness and can also drive your existing Pi,
 Claude Code, or Codex install.
 
-![The Phantombot terminal app](www/assets/img/terminal-screenshot.png)
+![Phantombot doctor: a runtime health check across core, channels and integrations](www/assets/img/phantombot-doctor.png)
 
 ## Part of Phantomyard
 
@@ -28,7 +28,9 @@ Phantombot is the agent runtime of [**Phantomyard**](https://phantomyard.ai):
 - [**PhantomOps**](https://phantomops.app) — the hosted control plane that
   gives teams identity, secrets, and one gate for every AI request.
 
-![PhantomChat talking to a Phantombot persona](www/assets/img/phantomchat-dark.webp)
+![Phantomyard Desktop: agents and conversations in one window](www/assets/img/phantomyard-desktop.png)
+
+![PhantomOps: the team control plane](www/assets/img/phantomops.png)
 
 ## Highlights
 
