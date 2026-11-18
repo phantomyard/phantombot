@@ -1,5 +1,10 @@
 # Phantombot
 
+[![Latest release](https://img.shields.io/github/v/release/phantomyard/phantombot?label=release)](https://github.com/phantomyard/phantombot/releases/latest)
+[![CI](https://github.com/phantomyard/phantombot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/phantomyard/phantombot/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/phantomyard/phantombot)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/phantomyard/phantombot?style=social)](https://github.com/phantomyard/phantombot/stargazers)
+
 **A persistent, local-first AI persona for your terminal, chats, and editor.**
 
 Phantombot gives an AI coding harness a durable identity, long-term memory,
@@ -340,6 +345,23 @@ This reduces the attack surface; it does not make an autonomous model
 infallible. Prompts and tool calls still go to the model provider you choose,
 under that provider's privacy and retention terms.
 
+### Sandboxed untrusted turns (default)
+
+Every untrusted turn the judge passes runs in an OS sandbox: a disposable
+workspace with network and the persona's vault in its environment, but no
+host files, home directory, SSH keys, vault key or other personas. Host
+actions (notify, memory) go through a broker. `enabled:false` in the persona's
+`security-policy.json` opts out. Linux uses Landlock/seccomp, macOS Seatbelt,
+and Windows AppContainer/Job Objects (a kernel without Landlock, or a Windows
+build that blocks AppContainers from NUL, runs untrusted commands unconfined in
+scratch with one warning); no Docker or elevated setup is needed, and
+an unsupported platform refuses execution rather than falling back to a host
+shell. The judge holds at 90/100; a hijack it misses can leak the secrets the turn holds, which is the stated, accepted risk.
+Owner grants (specified PRs, npm staging, fixed HTTPS endpoints, exact MCP
+calls) still add credentialed operations that never leave the parent runtime.
+See [the security contract](docs/reference/bounded-security.md) for policy examples,
+operation schemas, platform limits and rollout gates.
+
 ## Harnesses
 
 | Harness | Role |
@@ -428,8 +450,10 @@ state, explicit trust, memory, harness fallback, and validated decisions. See
 
 ## Contributing
 
-Read [`AGENTS.md`](AGENTS.md) before changing code. Keep behavior, tests, and
-documentation aligned.
+Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) or a
+[`good first issue`](https://github.com/phantomyard/phantombot/labels/good%20first%20issue).
+Read [`AGENTS.md`](AGENTS.md) before changing code, and keep behavior, tests,
+and documentation aligned.
 
 ```bash
 bun install
@@ -440,19 +464,4 @@ bun run build
 
 Phantombot is built by [Phantomyard](https://github.com/phantomyard).
 
-### Sandboxed untrusted turns (default)
-
-Every untrusted turn the judge passes runs in an OS sandbox: a disposable
-workspace with network and the persona's vault in its environment, but no
-host files, home directory, SSH keys, vault key or other personas. Host
-actions (notify, memory) go through a broker. `enabled:false` in the persona's
-`security-policy.json` opts out. Linux uses Landlock/seccomp, macOS Seatbelt,
-and Windows AppContainer/Job Objects (a kernel without Landlock, or a Windows
-build that blocks AppContainers from NUL, runs untrusted commands unconfined in
-scratch with one warning); no Docker or elevated setup is needed, and
-an unsupported platform refuses execution rather than falling back to a host
-shell. The judge holds at 90/100; a hijack it misses can leak the secrets the turn holds, which is the stated, accepted risk.
-Owner grants (specified PRs, npm staging, fixed HTTPS endpoints, exact MCP
-calls) still add credentialed operations that never leave the parent runtime.
-See [the security contract](docs/reference/bounded-security.md) for policy examples,
-operation schemas, platform limits and rollout gates.
+Find Phantombot useful? A ⭐ helps others discover it.
