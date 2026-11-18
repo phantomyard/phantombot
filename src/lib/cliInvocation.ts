@@ -30,3 +30,14 @@ export function isReadOnlyInvocation(argv: string[]): boolean {
     first === "_complete"
   );
 }
+
+/**
+ * True for exactly `phantombot --version` — the form citty answers. citty
+ * prints it through consola, which tags non-TTY output as `[log] 1.1.N`;
+ * package managers (mise's registry test) and scripts parse that stdout, so
+ * the entrypoint answers this one itself with the bare version.
+ */
+export function isVersionInvocation(argv: string[]): boolean {
+  const args = argv.slice(2);
+  return args.length === 1 && args[0] === "--version";
+}

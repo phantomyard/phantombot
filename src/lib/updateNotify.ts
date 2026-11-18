@@ -44,6 +44,10 @@ import {
   detectSupportedTarget,
   findLatestRelease,
 } from "./githubReleases.ts";
+import {
+  detectExternalUpdateManager,
+  externalUpdateMessage,
+} from "./externalUpdates.ts";
 import { log } from "./logger.ts";
 import {
   defaultServiceControl,
@@ -285,6 +289,10 @@ export interface RunUpdateFlowInput {
    */
   procPlatform?: string;
   procArch?: string;
+  /** Binary path for package-manager detection (test seam; process.execPath). */
+  binPath?: string;
+  /** Environment for package-manager detection (test seam; process.env). */
+  env?: Record<string, string | undefined>;
 }
 
 export interface UpdateFlowResult {
@@ -318,6 +326,12 @@ export async function runUpdateFlow(
 ): Promise<UpdateFlowResult> {
   const procPlatform = input.procPlatform ?? process.platform;
   const procArch = input.procArch ?? process.arch;
+  // mise (or another manager) owns this binary — say so before touching the
+  // network, the marker, or the binary. Checked first so the answer is the
+  // same on every platform.
+  const manager = detectExternalUpdateManager(input.binPath, input.env);
+  if (manager) return { reply: externalUpdateMessage(manager) };
+
   const target = detectSupportedTarget(procPlatform, procArch);
   if (!target) {
     return {
@@ -444,13 +458,19 @@ export interface CheckAndNotifyOnceInput {
   lastNotifiedPath?: string;
   procPlatform?: string;
   procArch?: string;
+  /** Binary path for package-manager detection (test seam; process.execPath). */
+  binPath?: string;
+  /** Environment for package-manager detection (test seam; process.env). */
+  env?: Record<string, string | undefined>;
 }
 
 export interface CheckAndNotifyOnceResult {
-  /** "no_telegram" | "no_target" | "release_check_failed" | "already_current"
-   *  | "waiting_delay" | "already_notified" | "no_allowed_users" | "notified" */
+  /** "no_telegram" | "externally_managed" | "no_target" | "release_check_failed"
+   *  | "already_current" | "waiting_delay" | "already_notified"
+   *  | "no_allowed_users" | "notified" */
   status:
     | "no_telegram"
+    | "externally_managed"
     | "no_target"
     | "release_check_failed"
     | "already_current"
@@ -478,6 +498,12 @@ export async function checkAndNotifyOnce(
 ): Promise<CheckAndNotifyOnceResult> {
   const tg = input.config.channels.telegram;
   if (!tg) return { status: "no_telegram" };
+
+  // A package manager owns updates here: pointing the user at `/update`
+  // would only earn a refusal. Skip the GitHub call entirely.
+  if (detectExternalUpdateManager(input.binPath, input.env)) {
+    return { status: "externally_managed" };
+  }
 
   const procPlatform = input.procPlatform ?? process.platform;
   const procArch = input.procArch ?? process.arch;

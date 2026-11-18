@@ -31,7 +31,11 @@ import { runMain, showUsage } from "citty";
 import { mainCommand } from "./cli/index.ts";
 import { renderRootHelp } from "./cli/help.ts";
 import { loadConfig, personaDir } from "./config.ts";
-import { isReadOnlyInvocation } from "./lib/cliInvocation.ts";
+import { VERSION } from "./version.ts";
+import {
+  isReadOnlyInvocation,
+  isVersionInvocation,
+} from "./lib/cliInvocation.ts";
 import {
   bareInvocationMode,
   currentTty,
@@ -83,6 +87,13 @@ if (process.argv[2] === "__sandbox_run") {
 }
 
 async function runPhantombotCli(): Promise<void> {
+  // `--version` answered here, not by citty: citty prints through consola,
+  // which prefixes non-TTY output with `[log] `. Package managers (mise's
+  // registry test) and scripts parse this stdout — it must be the bare version.
+  if (isVersionInvocation(process.argv)) {
+    process.stdout.write(`${VERSION}\n`);
+    return;
+  }
 
   // Hidden dynamic-completion backend. The shell stubs emitted by
   // `phantombot completion <shell>` call `phantombot _complete -- <words…>` on
