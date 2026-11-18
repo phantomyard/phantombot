@@ -9,6 +9,8 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const markdownPaths = [
   "README.md",
   "AGENTS.md",
+  "CONTRIBUTING.md",
+  "SECURITY.md",
   ...new Bun.Glob("docs/**/*.md").scanSync({ cwd: root }),
 ];
 const pages = new Map(
