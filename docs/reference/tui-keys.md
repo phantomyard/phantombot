@@ -55,6 +55,12 @@ on the alternate screen. macOS Terminal.app only does that while the
 application has switched the cursor keys to application mode, as `less` and
 `vim` do, so the TUI switches that mode on while it runs and off again on exit.
 
+In iTerm2 the app enables trackpad/wheel scrolling without changing its
+Advanced settings (the profile's default "Allow Alternate Mouse Scroll" must
+stay enabled). It restores the previous alternate-scroll mode on exit and on
+terminal handover where supported; terminals without mode save/restore keep
+alternate scrolling enabled.
+
 ## Images
 
 Drag an image file from Finder, or a screenshot thumbnail, onto the window. The

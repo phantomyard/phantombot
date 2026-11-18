@@ -54,7 +54,8 @@ also published to the search index as a virtual note at
 `memory search` and by every CLI drawer write; `memory get` resolves those
 paths back to the row. Commitments leave both when they are closed —
 `discharged` (met) or `expired` (missed) — and the nightly's distil stage
-closes the ones that are settled.
+closes the ones that are settled. In the block, commitments matching the current
+message come first, then the usual ranking.
 
 Commitments are kept to obligations a person or an interactive turn took on
 (#761). `memory capture` records the turn's conversation

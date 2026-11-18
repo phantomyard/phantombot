@@ -31,7 +31,7 @@ describe("public documentation contract", () => {
       .replace(/```[\s\S]*?```/g, " ")
       .replace(/<[^>]+>/g, " ");
     const words = prose.trim().split(/\s+/).filter(Boolean);
-    expect(words.length).toBeLessThanOrEqual(2_500);
+    expect(words.length).toBeLessThanOrEqual(700);
     expect(readme).toContain("docs/README.md");
     expect(readme).toContain("phantombot --help");
   });
@@ -78,10 +78,15 @@ describe("public documentation contract", () => {
   });
 
   test("the security overview states what an unscreened request does (issue #663)", async () => {
-    // The perimeter's user-facing contract. Each claim is checked against
-    // the code it describes, so the README cannot drift back to the
-    // fail-open wording while the screener holds.
-    const security = readme.replace(/\s+/g, " ");
+    // The perimeter's user-facing contract, which lives in the security
+    // concept page (the README links to it). Each claim is checked against
+    // the code it describes, so the docs cannot drift back to the fail-open
+    // wording while the screener holds.
+    const security = (pages.get("docs/concepts/security-and-trust.md") ?? "").replace(
+      /\s+/g,
+      " ",
+    );
+    expect(readme).toContain("docs/concepts/security-and-trust.md");
     const screenSource = readFileSync(
       resolve(root, "src/orchestrator/screen.ts"),
       "utf8",

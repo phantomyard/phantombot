@@ -42,6 +42,20 @@ assistant, or trick it into something its owner would disapprove of? Impact
 alone is not a threat — routine work from a known source scores low even when
 it is privileged.
 
+## When nobody can screen a request
+
+A request nobody could screen is held too. If no judge answers — provider
+outage, timeout, no network — the request does not run: the owner gets
+`🔒 I held an untrusted request because I could not screen it`, with the
+cause and no threat score, because nothing was rated. Say go ahead, or let it
+be retried once the judge is reachable. There is no setting that turns this
+back into a pass: the old `[jev.judge] fail_closed` key was removed and is
+ignored if still present. Expect more holds on a poor connection; the
+`screen: judge call` log lines carry each call's outcome and duration.
+
+Stopping a turn while it is being screened cancels it: nothing runs, nothing
+is held, and nobody is notified.
+
 ## One gate per channel
 
 Each side of the perimeter has exactly one check.
@@ -100,6 +114,15 @@ stalled routine work far more often than it caught anything).
 
 Model trust does not travel with the model. A remote message quoted in the
 editor or a tool result is data, whichever client it arrives through.
+
+Every untrusted turn the judge passes runs in an OS sandbox: a disposable
+workspace with network and the persona's vault in its environment, but no host
+files, home directory, SSH keys, vault key or other personas. Host actions
+(notify, memory) go through a broker. Linux uses Landlock/seccomp, macOS
+Seatbelt and Windows AppContainer/Job Objects; no Docker or elevated setup is
+needed. The judge holds at 90/100; a hijack it misses can leak the secrets the
+turn holds, which is the stated, accepted risk. Policy, opt-out, owner grants
+and platform limits are in [Bounded security](../reference/bounded-security.md).
 
 ## Boundaries
 
