@@ -134,3 +134,17 @@ Phantombot injects `PHANTOMBOT_PERSONA`, `PHANTOMBOT_CONVERSATION`,
 `PHANTOMBOT_TURN_ID`, `PHANTOMBOT_TRUST` and `PHANTOMBOT_ENGINE_SCOPE` into scoped child processes. Treat them as runtime context, not host configuration.
 `PHANTOMBOT_TEST_ISOLATION_ROOT` is test-only. Installer-only controls include
 `PHANTOMBOT_INSTALL_DIR` and `PHANTOMBOT_SKIP_TUI`.
+
+### Scratch workspace
+
+Every harness subprocess gets `PHANTOMBOT_SCRATCH`, a working directory under
+the persona's own folder (never the shared system `/tmp`):
+
+- **Trusted conversations** — `<persona dir>/scratch/trusted/<conversation>/`,
+  kept across turns and reaped after 24 hours idle.
+- **Untrusted turns** — `<persona dir>/scratch/untrusted/<conversation>/<turn>/`,
+  deleted when the turn ends.
+
+The variable is runtime-owned: an inherited value is overridden or removed,
+never trusted. Directory names are `<slug>-<full sha256 hex of the raw
+conversation key>`, so two conversations can never share a directory.

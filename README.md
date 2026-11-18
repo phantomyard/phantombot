@@ -1,55 +1,48 @@
 # Phantombot
 
+[![Latest release](https://img.shields.io/github/v/release/phantomyard/phantombot?label=release)](https://github.com/phantomyard/phantombot/releases/latest)
+[![CI](https://github.com/phantomyard/phantombot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/phantomyard/phantombot/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/phantomyard/phantombot)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/phantomyard/phantombot?style=social)](https://github.com/phantomyard/phantombot/stargazers)
+
 **A persistent, local-first AI persona for your terminal, chats, and editor.**
 
-Phantombot gives an AI coding harness a durable identity, long-term memory,
-secure credentials, scheduled work, and multiple ways to reach you. Use the
-same persona from PhantomChat, Telegram, a terminal, VS Code, Zed, JetBrains,
-or OpenCode without starting from zero each time.
+Phantombot gives an AI harness a durable identity, long-term memory, encrypted
+credentials, scheduled work, and many ways to reach you. Talk to the same
+persona from PhantomChat, Telegram, a terminal, or your editor, and it
+remembers. It ships with a native harness and can also drive your existing Pi,
+Claude Code, or Codex install.
 
-It ships with a native AI harness and can also use your existing Pi, Claude
-Code, or Codex installation. The harness keeps its own tools; Phantombot owns
-the runtime around it: identity, memory, channels, trust, scheduling, voice,
-and updates.
+![The Phantombot terminal app](www/assets/img/terminal-screenshot.png)
+
+## Part of Phantomyard
+
+Phantombot is the agent runtime of [**Phantomyard**](https://phantomyard.ai):
+
+- [**Phantomyard Desktop**](https://phantomyard.ai/#desktop) — the agent
+  workspace on your machine (Windows, macOS, Linux). Spin up personas, hand
+  them local tools, and work beside them with your team.
+- [**PhantomChat**](https://chat.phantomyard.ai) — peer-to-peer encrypted
+  messaging over Nostr, in the browser, on mobile, or inside Desktop. The
+  front door to your agents.
+- [**PhantomOps**](https://phantomops.app) — the hosted control plane that
+  gives teams identity, secrets, and one gate for every AI request.
+
+![PhantomChat talking to a Phantombot persona](www/assets/img/phantomchat-dark.webp)
 
 ## Highlights
 
-| | |
-|---|---|
-| **One continuous persona** | The same identity, preferences, and context across chat, terminal, and editor sessions. |
-| **Memory that compounds** | Local journals, structured decisions and lessons, durable knowledge, and meaning-based retrieval. |
-| **Bring your own brain** | Built-in native harness, plus Pi, Claude Code, and Codex as primary or fallback options. |
-| **Safe by origin** | Trusted owners act directly; untrusted email, webhooks, bridges, and scheduled task wakes are screened before a capable model runs, then run in a sandbox. |
-| **Real background work** | Persistent scheduled tasks, health checks, notifications, and service management survive restarts. |
-| **Local control** | Persona state and encrypted secrets stay on your machine. Model-provider privacy terms still apply to prompts sent to that provider. |
-
-## How it fits together
-
-```mermaid
-flowchart LR
-    You[You] --> Surface{Choose a surface}
-    Surface --> PC[PhantomChat]
-    Surface --> TG[Telegram]
-    Surface --> Editor[VS Code / Zed / JetBrains / OpenCode]
-    Surface --> CLI[Terminal]
-
-    PC --> Runtime[Phantombot runtime]
-    TG --> Runtime
-    Editor --> Runtime
-    CLI --> Runtime
-
-    Runtime --> Trust[Trust check]
-    Trust --> Context[Persona + history + retrieved memory]
-    Context --> Brain{Harness chain}
-    Brain --> Native[Native / Pi]
-    Brain --> Claude[Claude Code]
-    Brain --> Codex[Codex]
-    Brain --> Reply[Reply on the original surface]
-```
-
-Phantombot does not add a second tool-calling framework. It assembles the right
-context, selects the configured harness, persists the result, and routes the
-reply back to where the conversation started.
+- **One continuous persona** across chat, terminal, and editor sessions.
+- **Memory that compounds** — journals, decisions, lessons, commitments, and a
+  knowledge base, searchable locally.
+- **Bring your own brain** — native harness or Pi, Claude Code, and Codex, with
+  fallback; or any OpenAI-compatible endpoint.
+- **Safe by origin** — owners act directly; email, webhooks, and scheduled
+  wakes are screened by a threat judge, then run sandboxed.
+- **Real background work** — scheduled tasks, health checks, and notifications
+  that survive restarts.
+- **Local control** — persona state and AES-256-GCM encrypted secrets stay on
+  your machine.
 
 ## Install
 
@@ -59,400 +52,72 @@ Linux and macOS:
 curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh
 ```
 
-Windows PowerShell:
+Windows PowerShell (x64 and arm64):
 
 ```powershell
 iex ((iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1).Content.TrimStart([char]0xFEFF))
 ```
 
-Both installers download the latest stable release, verify its checksum, run
-the binary, open setup, and register the platform service. Windows supports
-x64 and arm64 and uses Task Scheduler for background services.
-
-> [!TIP]
-> The native harness is included. You only need a supported provider API key.
-> Pi, Claude Code, and Codex are optional host harnesses.
+The installer verifies the release checksum, opens setup, and registers the
+background service. You only need a model-provider API key.
 
 ## Five-minute setup
 
-Run the unified setup app:
-
 ```bash
-phantombot
+phantombot                  # setup and terminal app
+phantombot doctor           # check everything is healthy
 ```
-
-The terminal app enables trackpad/wheel scrolling in iTerm2 without changing
-its Advanced settings (the profile’s default “Allow Alternate Mouse Scroll”
-setting must remain enabled). It restores the previous alternate-scroll mode
-on exit and terminal handover where supported; terminals without mode
-save/restore support keep alternate scrolling enabled.
 
 Or configure each part directly:
 
 ```bash
 phantombot persona          # create or import a persona
 phantombot harness          # choose the brain and fallbacks
-phantombot phantomchat      # encrypted Nostr messages (optional)
-phantombot telegram         # Telegram bot and owner allowlist (optional)
-phantombot voice            # speech-to-text and voice replies (optional)
-phantombot embedding        # semantic memory provider (optional)
-phantombot install          # install and start the background service
+phantombot phantomchat      # encrypted messaging (optional)
+phantombot telegram         # Telegram bot (optional)
+phantombot voice            # speech in and out (optional)
+phantombot install          # install and start the service
 ```
 
-No chat channel is required. You can use Phantombot entirely from a terminal
-or editor:
+No chat channel required — use it from a terminal or editor:
 
 ```bash
 phantombot ask "Summarize this repository"
-phantombot acp install vscode
-phantombot acp install zed
-phantombot acp install jetbrains
-phantombot acp install opencode   # Phantombot as a selectable model in OpenCode
+phantombot acp install vscode    # also: zed, jetbrains, opencode
 ```
 
-The OpenCode install merges `providers.phantombot` into your `opencode.json` —
-one model per local persona, backed up first, other providers and comments
-untouched. Pick `Phantombot — <persona>` in OpenCode's model picker and that
-conversation runs as that persona.
-
-Check that everything is healthy:
-
-```bash
-phantombot doctor
-phantombot logs --no-follow
-```
-
-## Which command do I need?
-
-```mermaid
-flowchart TD
-    Start{What do you want to do?}
-    Start -->|Set up or change settings| Setup[phantombot or phantombot init]
-    Start -->|Talk once from a script| Ask[phantombot ask]
-    Start -->|Run chat channels| Service[phantombot install / start / stop / logs]
-    Start -->|Manage personas| Persona[phantombot persona]
-    Start -->|Inspect or teach memory| Memory[phantombot memory]
-    Start -->|Schedule work| Task[phantombot task]
-    Start -->|Connect external tools| MCP[phantombot mcp]
-    Start -->|Store a secret| Vault[phantombot vault]
-    Start -->|Diagnose the runtime| Doctor[phantombot doctor]
-    Start -->|Upgrade| Update[phantombot update]
-```
-
-### Command map
+## Everyday commands
 
 | Command | Use it for |
 |---|---|
-| `phantombot` | Open the terminal app and setup UI. |
-| `phantombot persona` | Create, import, list, or switch personas. |
-| `phantombot harness` | Configure native or host harnesses and fallbacks. |
-| `phantombot telegram` | Configure Telegram and its owner allowlist. |
-| `phantombot phantomchat` | Configure encrypted PhantomChat messaging. |
-| `phantombot voice` | Configure speech-to-text and text-to-speech. |
-| `phantombot ask "…"` | Run a one-shot local prompt. |
-| `phantombot acp install …` | Add Phantombot to a supported editor (zed, jetbrains, vscode) or as a model in OpenCode (desktop and CLI). |
-| `phantombot memory …` | Search, capture, inspect, back up, or restore memory. |
-| `phantombot task …` | Add, inspect, cancel, or audit scheduled work. |
-| `phantombot mcp …` | Discover and use external integrations lazily. |
-| `phantombot vault …` | Manage encrypted persona-scoped credentials. |
-| `phantombot notify …` | Send a material background update to configured owners. |
-| `phantombot judge rule …` | File the owner's ruling on a request the threat judge held, so the judge finds it next time. |
-| `phantombot doctor` | Check channels, timers, connectors, harnesses, and memory health. |
-| `phantombot start\|stop\|restart\|logs` | Manage the installed service. |
-| `phantombot update` | Check for or install a verified release. |
+| `phantombot memory …` | Search, capture, inspect, and back up memory. |
+| `phantombot task …` | Schedule one-off and recurring work. |
+| `phantombot mcp …` | Discover and call external integrations. |
+| `phantombot vault …` | Store encrypted, persona-scoped secrets. |
+| `phantombot notify …` | Send a background update to the owner. |
+| `phantombot start\|stop\|restart\|logs` | Manage the service. |
+| `phantombot update` | Install a verified release. |
 
-Use live help for flags and subcommands; it is always more current than copied
-documentation:
+Run `phantombot --help` or `phantombot <command> --help` for the current
+flags — it is always fresher than copied docs.
 
-```bash
-phantombot --help
-phantombot <command> --help
-```
+## Learn more
 
-## Memory, without the wall of text
-
-Each persona owns its memory. Recent conversations live in a bounded SQLite
-store; durable knowledge lives in structured drawers, a lean `MEMORY.md`, and
-an Open Knowledge Format knowledge base. Search works locally with weighted
-lexical retrieval and link expansion. Optional embeddings add semantic search.
-
-```mermaid
-flowchart TD
-    Turn[Conversation turn] --> Recall[Retrieve recent context and relevant memory]
-    Recall --> Model[Configured harness]
-    Model --> Reply[Reply]
-    Model --> Capture[Capture an important fact]
-
-    Capture --> Journal[(Journal row in SQLite)]
-    Journal --> Immediate[Immediately searchable]
-    Journal --> Heartbeat[30-minute heartbeat]
-    Heartbeat --> Drawers[(People / decisions / lessons / commitments / norms)]
-
-    Journal --> Nightly[Nightly sweep after day rollover]
-    Nightly --> LongTerm[Lean MEMORY.md]
-    Nightly --> KB[Durable KB notes]
-
-    Immediate --> Index[(Search index)]
-    Drawers --> Index
-    LongTerm --> Index
-    KB --> Index
-    Index --> Recall
-```
-
-The useful commands are deliberately small:
-
-```bash
-phantombot memory search "deployment rollback"
-phantombot memory capture "Production uses blue-green deploys" --tag decision
-phantombot memory drawers --kind decisions
-phantombot memory drawers --kind commitments --limit 20   # ids shown for closing
-phantombot memory drawers --discharge <id>                # commitment met
-phantombot memory drawers --expire <id>                   # commitment missed
-phantombot memory journal --date 2026-10-04
-phantombot memory index
-phantombot memory backup
-phantombot doctor
-```
-
-Five capture tags are supported: `decision`, `lesson`, `person`, `commitment`,
-and `norm`. The heartbeat and nightly sweep promote and distil them; agents do
-not need to hand-maintain drawer files. The top-ranked active entries of all
-five drawers reach every capable turn in a bounded "Standing memory" block,
-every active entry is searchable as `drawers/<kind>/<id>.md` (and readable in
-full with `memory get`), and the nightly closes commitments that are settled.
-Commitments in that block are ordered by relevance: the ones matching the
-current message come first, then the usual ranking. Commitment-tagged captures
-made by scheduled turns (`tick:` conversations) and the scheduler's own `task N:
-… fires …` lines are not promoted to the commitments drawer; they stay
-searchable in the journal, and their other tags still promote. The heartbeat
-expires scheduler-format commitments filed before this rule existed.
-
-For the storage model and lifecycle details, see
-[`docs/concepts/memory-lifecycle.md`](docs/concepts/memory-lifecycle.md).
-
-## Channels and editors
-
-- **[PhantomChat](https://github.com/phantomyard/phantomchat)** — encrypted
-  Nostr text and voice messages on desktop and mobile.
-- **Telegram** — text, voice, groups, attachments, and notifications.
-- **VS Code, Zed, and JetBrains** — the same persona through ACP, with editor
-  workspace context.
-- **OpenCode (desktop and CLI)** — Phantombot registers as a model provider, so
-  one model appears per local persona. It spawns the agent per conversation over
-  stdio: no daemon, no port, no token, and it keeps working while the Phantombot
-  service is down.
-- **Terminal** — interactive TUI with Emacs-style editing and drag-in images
-  ([keys](docs/reference/tui-keys.md)), plain REPL, or one-shot `ask` calls.
-  Type `/quit` (or `/q`, `/exit`) to leave the TUI or REPL; the Phantombot
-  service keeps running.
-
-Multiple personas can run inside one daemon. Each has isolated identity,
-memory, channels, harness settings, and credentials.
-
-## Scheduled work
-
-Tasks are stored in SQLite, survive restarts, and keep a run history:
-
-```bash
-# One-off
-phantombot task add "Remind me to call Sam" "Call Sam" --in 30m
-
-# Recurring
-phantombot task add "Check the release pipeline" "Release check" --every 1h --for 8h
-
-# Inspect
-phantombot task list
-phantombot task log "$TASK_ID"
-phantombot task cancel "$TASK_ID"
-```
-
-Deterministic pollers can use `--command` to run without waking a model.
-Agent task wakes run sandboxed (scratch-only writes, no `~/.ssh` private
-keys, only a read-only allowlist of tool config); `--command` tasks run on the host, so put file writes and ssh there.
-A sandboxed wake can cancel only its own originating task through the broker
-(`phantombot task cancel <id>` or broker `task-cancel`). Command pollers pass a
-short-lived authenticated capability to their `phantombot ask` children; it
-expires when the command finishes or times out. Task IDs in prompts or ordinary
-environment variables grant no authority. Other tasks and host stores stay inaccessible.
-See [Schedule work](docs/how-to/scheduled-tasks.md). Use
-`phantombot notify` only when background work produces something the owner
-actually needs to see.
-
-## Integrations and secrets
-
-MCP integrations are persona-scoped and discovered only when needed:
-
-```bash
-phantombot mcp search "GitHub pull requests"
-phantombot mcp describe github
-phantombot mcp call github TOOL_NAME --args '{"key":"value"}'
-```
-
-Credentials belong in the encrypted vault, not in notes or config files:
-
-```bash
-printf '%s' "$API_KEY" | phantombot vault set API_KEY
-phantombot vault list
-```
-
-See [`docs/how-to/mcp.md`](docs/how-to/mcp.md) for connection and
-authentication options.
-
-## Security model
-
-Phantombot decides trust from **where a request came from**, not how polite it
-looks.
-
-- Allow-listed owners and local editor sessions are trusted. ACP clients
-  (VS Code, Zed, JetBrains) and the OpenCode provider spawn Phantombot as the
-  signed-in OS user, who already owns the persona directory.
-- Chat commands (`/update`, `/restart`, `/reset`, `/harness`, …) answer only
-  an authenticated owner, on every channel. From a sender who is answered but
-  is not an owner — a Telegram bot or PhantomChat persona with no allowlist, a
-  PhantomChat bridge — a message starting with `/` is ordinary screened input,
-  not a command.
-- Email, webhooks, bridge traffic, raw `phantombot ask` calls, scheduled task
-  wakes, and other ambient inputs are untrusted.
-- Untrusted requests pass through a capability-restricted threat judge before
-  the capable harness receives conversation history or retrieved knowledge.
-- Suspicious requests are held and surfaced to the owner for a trusted
-  conversation. The judge is the only gate on autonomous work: a request it
-  passes is carried through without a second approval step.
-- A request nobody could screen is held too. If no judge answers — provider
-  outage, timeout, no network — the request does not run: the owner gets
-  `🔒 I held an untrusted request because I could not screen it`, with the
-  cause and no threat score, because nothing was rated. Say go ahead, or let
-  it be retried once the judge is reachable. There is no setting that turns
-  this back into a pass: the old `[jev.judge] fail_closed` key was removed
-  and is ignored if still present. Expect more holds on a poor connection;
-  the `screen: judge call` log lines carry each call's outcome and duration.
-- Stopping a turn while it is being screened cancels it: nothing runs,
-  nothing is held, and nobody is notified.
-- Every agent task fire is judged, including a task the owner scheduled:
-  nobody is typing when it runs, and a poller can schedule a wake whose prompt
-  is inbound text. A held fire does nothing, is recorded as `held` in
-  `phantombot task log`, and still counts as that fire — a one-off is consumed
-  rather than retried. Only system tasks, whose prompt the runtime wrote itself
-  (today the scheduler selftest), skip the judge.
-- Secrets are encrypted per persona with AES-256-GCM.
-
-This reduces the attack surface; it does not make an autonomous model
-infallible. Prompts and tool calls still go to the model provider you choose,
-under that provider's privacy and retention terms.
-
-## Harnesses
-
-| Harness | Role |
-|---|---|
-| **native** | Built in and recommended; uses configured API providers and supports primary, vision, and coding model routing. |
-| **pi-host** | Uses an existing Pi installation and its host configuration. |
-| **claude** | Uses Claude Code as a primary or fallback harness. |
-| **codex** | Uses Codex CLI as a primary or fallback harness. |
-
-Phantombot never installs an optional host harness for you. Missing fallbacks
-do not stop the daemon; `phantombot doctor` reports what is available.
-
-### Bring your own endpoint
-
-The native harness can point Pi at an endpoint that is not in Pi's own provider
-catalogue — no extension, no hand-edited config file:
-
-| Provider | What it is for |
-|---|---|
-| **openai-compatible** | Any server speaking the OpenAI Chat Completions API — vLLM, Ollama, llama.cpp, LM Studio, LocalAI, a proxy. You supply the base URL; an unauthenticated server is a valid setup. |
-| **phantomops** | A [PhantomOps](https://phantomops.app) personal API token (`pok_…`). One credential and nothing else: `phantomops/auto` runs your full phantom server-side, and the wizard asks for the token then goes straight to the connection test — no model picker. The raw catalogue models stay reachable through the normal model pickers afterwards. |
-
-Both are offered in `phantombot harness` (and Brain in the TUI) with or without
-a key. Phantombot writes the provider's entry into the native agent dir, keeps
-the key in the vault and relays it per turn like any other provider — the
-credential is never written into that entry.
-
-Native coding-model swaps retry empty replies alongside eligible provider errors: up
-to three coder attempts, then the existing primary-model fallback. An attempt that
-already streamed usable text or tool progress is never replayed.
-
-### Scratch workspace
-
-Every harness subprocess gets a workspace for working files (repro clones,
-test output, intermediate artifacts) via the `PHANTOMBOT_SCRATCH` environment
-variable — under the persona's own directory, never the shared system `/tmp`:
-
-- **Trusted conversations** — `<persona dir>/scratch/trusted/<conversation>/`,
-  kept across turns and reaped after 24 hours idle.
-- **Untrusted turns** — `<persona dir>/scratch/untrusted/<conversation>/<turn>/`,
-  deleted when the turn ends; nothing written there survives it.
-
-The variable is runtime-owned: an inherited `PHANTOMBOT_SCRATCH` is overridden
-or removed, never trusted. Directory names are `<slug>-<full sha256 hex of the
-raw conversation key>`, so two distinct conversations can never share a
-directory — the slug alone is lossy, and a truncated digest would be a
-collision away from the same failure (the full digest is the isolation
-boundary).
-
-## Build and embed
-
-Released binaries do not require Bun. Building from source does:
-
-```bash
-git clone https://github.com/phantomyard/phantombot.git
-cd phantombot
-bun install
-bun tsc --noEmit
-bun test
-bun run build
-```
-
-Voice Models apps can discover TUI-supported speech/transcription models and configure independent TTS/STT directions through the engine; keys stay in each persona vault. Authenticated remote PhantomChat model selection reuses the remote endpoint and key. See [the voice API](docs/reference/engine.md#voice-models).
-
-Embedding apps verify a provider key and fill a model picker with `engine.providers.check`: the provider's live model list, or Pi's bundled list for that provider when no live list can be read (never for a rejected key or a bring-your-own endpoint). See [the provider API](docs/reference/engine.md#providers-engineproviders).
-
-Embedding apps can also set up semantic memory search the way `phantombot embedding` does: `engine.embeddings.check` lists a provider's embedding models and proves a choice with a live embed, and `persona.memory.refresh()` embeds the persona's notes (the engine runs no heartbeat, so the app calls it). See [the embeddings API](docs/reference/engine.md#embeddings-engineembeddings).
-
-The engine can also be embedded in a Bun/TypeScript application with isolated
-state, explicit trust, memory, harness fallback, and validated decisions. See
-[`docs/reference/engine.md`](docs/reference/engine.md).
-
-## Documentation
-
-- [`docs/README.md`](docs/README.md) — indexed guides for setup, daily use,
-  operations, concepts, and the engine API.
-- [`docs/how-to/editors.md`](docs/how-to/editors.md) — registering Phantombot
-  with VS Code, Zed, JetBrains, and OpenCode.
-- [`docs/concepts/security-and-trust.md`](docs/concepts/security-and-trust.md)
-  — the perimeter: origin-based trust, the judge, and the sandbox.
-- [`AGENTS.md`](AGENTS.md) — the contributor guide and the index of invariants;
-  the lessons written in blood live under
-  [`docs/contributing/invariants/`](docs/contributing/invariants/README.md).
-- `phantombot <command> --help` — authoritative flags, defaults, and command
-  syntax for the installed version.
+- [Documentation](docs/README.md) — setup, daily use, operations, and concepts.
+- [Security and trust](docs/concepts/security-and-trust.md) — the judge, holds,
+  and the sandbox.
+- [Memory](docs/concepts/memory-lifecycle.md) ·
+  [Scheduled tasks](docs/how-to/scheduled-tasks.md) ·
+  [Harnesses and models](docs/how-to/harnesses-and-models.md) ·
+  [Editors](docs/how-to/editors.md) ·
+  [Embedding the engine](docs/reference/engine.md)
 
 ## Contributing
 
-Read [`AGENTS.md`](AGENTS.md) before changing code. Keep behavior, tests, and
-documentation aligned.
+Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) or a
+[`good first issue`](https://github.com/phantomyard/phantombot/labels/good%20first%20issue),
+and read [`AGENTS.md`](AGENTS.md) before changing code. Security reports go
+through [`SECURITY.md`](SECURITY.md).
 
-```bash
-bun install
-bun tsc --noEmit
-bun test
-bun run build
-```
-
-Phantombot is built by [Phantomyard](https://github.com/phantomyard).
-
-### Sandboxed untrusted turns (default)
-
-Every untrusted turn the judge passes runs in an OS sandbox: a disposable
-workspace with network and the persona's vault in its environment, but no
-host files, home directory, SSH keys, vault key or other personas. Host
-actions (notify, memory) go through a broker. `enabled:false` in the persona's
-`security-policy.json` opts out. Linux uses Landlock/seccomp, macOS Seatbelt,
-and Windows AppContainer/Job Objects (a kernel without Landlock, or a Windows
-build that blocks AppContainers from NUL, runs untrusted commands unconfined in
-scratch with one warning); no Docker or elevated setup is needed, and
-an unsupported platform refuses execution rather than falling back to a host
-shell. The judge holds at 90/100; a hijack it misses can leak the secrets the turn holds, which is the stated, accepted risk.
-Owner grants (specified PRs, npm staging, fixed HTTPS endpoints, exact MCP
-calls) still add credentialed operations that never leave the parent runtime.
-See [the security contract](docs/reference/bounded-security.md) for policy examples,
-operation schemas, platform limits and rollout gates.
+Built by [Phantomyard](https://phantomyard.ai). Find Phantombot useful? A ⭐
+helps others discover it.

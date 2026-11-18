@@ -44,6 +44,13 @@ sees SSH private keys, the persona folder or the rest of `$HOME`, and it cannot
 write anywhere under `$HOME`. Notify and memory capture/search still work through the
 broker. See [Bounded security](../reference/bounded-security.md).
 
+A sandboxed wake can cancel only its own originating task through the broker
+(`phantombot task cancel <id>` or broker `task-cancel`). Command pollers pass a
+short-lived authenticated capability to their `phantombot ask` children; it
+expires when the command finishes or times out. Task IDs in prompts or ordinary
+environment variables grant no authority, and other tasks and host stores stay
+inaccessible.
+
 A `--command` task is not sandboxed. `phantombot tick` runs the command as an
 ordinary process of the host user, in the persona folder, with the minimal
 environment plus any `--secret`s. Only a `phantombot ask` the script issues
