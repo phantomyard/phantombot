@@ -18,6 +18,8 @@ import { McpHub } from "../mcp/hub.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 import { notifyLanded } from "../lib/notifySummary.ts";
 
+import type { TaskCancellation } from "./taskCancellation.ts";
+
 const MEMORY_TAGS = new Set(["decision", "lesson", "person", "commitment", "norm"]);
 /** Model text never starts an argv word with "-" (no flag injection). */
 const argText = (s: string) => (s.startsWith("-") ? ` ${s}` : s);
@@ -56,6 +58,7 @@ export async function createSecuritySession(options: {
   /** Persona name for notify/memory; default = the persona dir's name. */
   persona?: string;
   /** The turn's conversation and id, passed to sandboxed commands as on a trusted turn. */
+  taskCancellation?: TaskCancellation;
   conversation?: string;
   turnId?: string;
   /**
@@ -179,6 +182,23 @@ export async function createSecuritySession(options: {
                 "unknown session operation",
               );
             const op = v.operation as Record<string, unknown> | undefined;
+            if (op?.kind === "task-cancel") {
+              const started = performance.now();
+              let outcome: SecurityAudit["outcome"] = "allowed";
+              try {
+                const authority = options.taskCancellation;
+                if (signal.aborted || !authority || authority.persona !== persona ||
+                    !Number.isSafeInteger(op.id) || op.id !== authority.id ||
+                    (op.persona !== undefined && op.persona !== persona))
+                  throw new PolicyError("policy_denied", "only the originating task may be cancelled");
+                return Response.json({ result: await authority.cancel() });
+              } catch (error) {
+                outcome = error instanceof PolicyError ? error.outcome : "unavailable";
+                throw error;
+              } finally {
+                try { options.audit?.({ operation: "task-cancel", outcome, durationMs: Math.round(performance.now() - started) }); } catch {}
+              }
+            }
             // The persona's own notify and memory, on the host (the sandbox
             // has no identity.json): fixed argv.
             if (op?.kind === "notify" && typeof op.message === "string" && op.message.length <= 4096) {

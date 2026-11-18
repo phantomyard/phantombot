@@ -1,3 +1,5 @@
+import { createTaskCapability, ENV_TASK_CAPABILITY } from "../src/security/taskCancellation.ts";
+import { invokeSession } from "../src/security/extension.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -411,4 +413,30 @@ describe("runAsk — persona override", () => {
     expect(code).toBe(0);
     expect(out.buf).toBe("from lena\n");
   });
+});
+
+
+test("ask inherits only an authenticated command task cancellation capability (#803)", async () => {
+  await writeFile(join(workdir, "personas", "phantom", "security-policy.json"), JSON.stringify({ version: 1, enabled: true, grants: [] }));
+  let cancelled = 0;
+  const cap = createTaskCapability({ id: 803, persona: "phantom", async cancel() { cancelled++; return "task 803 cancelled"; } }, new AbortController().signal);
+  const prior = process.env[ENV_TASK_CAPABILITY];
+  process.env[ENV_TASK_CAPABILITY] = cap.descriptor;
+  try {
+    const harness: Harness = {
+      id: "capability-ask", supportsSecuritySession: true,
+      async available() { return true; },
+      async *invoke(req) {
+        const result = await invokeSession(req.securitySession!, { kind: "broker", operation: { kind: "task-cancel", id: 803 } });
+        expect(result.ok, result.text).toBe(true);
+        yield { type: "done", finalText: "retired" };
+      },
+    };
+    expect(await runAsk({ config, memory, prompt: "retire", harnesses: [harness], screen: async () => ({ action: "pass", score: 0, reason: "fixture" }), out: { write() {} } })).toBe(0);
+    expect(cancelled).toBe(1);
+  } finally {
+    await cap.close();
+    if (prior === undefined) delete process.env[ENV_TASK_CAPABILITY];
+    else process.env[ENV_TASK_CAPABILITY] = prior;
+  }
 });

@@ -75,3 +75,17 @@ through Landlock. Seccomp notification IDs, not caller assertions about identity
 bind the injection. Never grant read access to the host `/proc` tree to fix a
 runtime compatibility issue. Platform limitations and rollout gates live in
 [the bounded security reference](../../reference/bounded-security.md).
+
+
+Scheduled self-cancellation uses a runtime-only `TaskCancellation` callback in
+`TurnInput` and the existing authenticated broker session. The broker checks the
+exact task ID, persona and abort state, and audits allowed/denied outcomes. The
+callback rechecks row ownership in the host store; retries are idempotent. Never
+infer authority from `tick:<id>`, prompt text, or a task-ID environment variable.
+Command tasks receive a random bearer capability for exactly their own task;
+`ask` delegates cancellation back through that endpoint and never uses returned
+IDs to open a host store. A forged endpoint therefore grants no host DB authority.
+The capability rejects other personas/targets and expires on command completion
+or timeout. Closing the turn revokes its broker. No memory writes or wider host
+filesystem access are granted by this path. Tests: `security-task-cancellation`,
+`cli-tick` and `cli-ask` (#803).

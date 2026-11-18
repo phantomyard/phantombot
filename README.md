@@ -269,6 +269,11 @@ phantombot task cancel "$TASK_ID"
 Deterministic pollers can use `--command` to run without waking a model.
 Agent task wakes run sandboxed (scratch-only writes, no `~/.ssh` private
 keys, only a read-only allowlist of tool config); `--command` tasks run on the host, so put file writes and ssh there.
+A sandboxed wake can cancel only its own originating task through the broker
+(`phantombot task cancel <id>` or broker `task-cancel`). Command pollers pass a
+short-lived authenticated capability to their `phantombot ask` children; it
+expires when the command finishes or times out. Task IDs in prompts or ordinary
+environment variables grant no authority. Other tasks and host stores stay inaccessible.
 See [Schedule work](docs/how-to/scheduled-tasks.md). Use
 `phantombot notify` only when background work produces something the owner
 actually needs to see.
