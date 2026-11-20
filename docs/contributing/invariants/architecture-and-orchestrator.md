@@ -62,6 +62,10 @@ so older runtimes fail only when browsing. It explicitly selects Chrome and
 `url:false`: never auto-attach to a person's running browser. Chrome is installed
 separately, discovered by Bun or `BUN_CHROME_PATH`; no automation dependency or
 browser download enters the binary. Preserve Chrome's sandbox flags.
+On macOS pass `--use-mock-keychain` for the dedicated automation profile: without
+it Chrome's native keychain dialog can stall navigation (zero HTTP requests in
+real macOS CI). Cookies then rely on the private profile directory's permissions,
+not the personal system keychain. Preserve this deliberate automation trade-off.
 
 Bun shares Chrome and `dataStore.directory` process-wide (first view wins).
 Therefore each persona owns a dedicated lazy process at `<persona-dir>/browser`,

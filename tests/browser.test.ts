@@ -70,6 +70,7 @@ describe("browser sessions", () => {
     const sessions = new BrowserSessions(root, Hung, 20);
     await expect(sessions.execute({ action: "open", url: "https://example.com" })).rejects.toThrow("timed out");
     expect(fake.calls.some(c => c[0] === "close")).toBe(true);
+    expect(fake.calls.some(c => c[0] === "closeAll")).toBe(true);
     await expect(sessions.execute({ action: "read" })).rejects.toThrow("not open");
     sessions.closeAll();
   });

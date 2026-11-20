@@ -130,18 +130,15 @@ export class BrowserSessions {
     try {
       return await Promise.race([
         this.perform(current, r, value => { stage = value; }),
-        new Promise<never>((_, reject) => { timer = setTimeout(async () => {
-          const state = await Promise.race([
-            current.evaluate("document.readyState").catch(() => "unavailable"),
-            Bun.sleep(250).then(() => "unresponsive"),
-          ]);
+        new Promise<never>((_, reject) => { timer = setTimeout(() => {
           current.close(); this.views.delete(name);
-          reject(new Error(`Browser operation timed out during ${stage} (document ${state}); the affected session was closed`));
+          reject(new Error(`Browser operation timed out during ${stage}; the affected session was closed`));
         }, this.timeoutMs); }),
       ]);
     } catch (e) {
       // A crashed Chrome leaves every tab unusable. Start fresh on the next open.
       current.close(); this.views.delete(name);
+      if (this.views.size === 0) this.runtime.closeAll();
       throw e;
     } finally { clearTimeout(timer); }
   }

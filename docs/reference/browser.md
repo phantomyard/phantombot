@@ -7,6 +7,9 @@ running phantombot; it never bundles a browser or attaches to your personal
 browser. On macOS it explicitly selects Chrome too. Set `BUN_CHROME_PATH` if
 automatic discovery cannot find your executable. Running from source requires
 a Bun version that provides `Bun.WebView` (verified with 1.4.2).
+On macOS the dedicated automation profile uses a mock keychain to avoid native
+keychain dialogs; its cookies rely on the private profile directory's permissions,
+and it never accesses your personal browser profile or keychain.
 
 ```bash
 phantombot browser open https://example.com  # JSON: rendered text + CSS selectors
