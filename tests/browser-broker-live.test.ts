@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { copyFile, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createSecuritySession } from "../src/security/session.ts";
@@ -9,6 +9,12 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("sandboxed compiled CLI
   const binary = process.env.PHANTOMBOT_BROWSER_TEST_BINARY;
   if (!binary) throw new Error("PHANTOMBOT_BROWSER_TEST_BINARY must name this checkout's compiled binary");
   const root = await mkdtemp(join(tmpdir(), "pb-browser-broker-"));
+  const parent = join(root, "browser-turns");
+  const stale = join(parent, "turn-stale-fixture");
+  await mkdir(stale, { recursive: true });
+  await writeFile(join(stale, "profile-data"), "abandoned");
+  const old = new Date(Date.now() - 2 * 60 * 60_000);
+  await utimes(stale, old, old);
   const isolatedCookies: string[] = [];
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
     if (new URL(req.url).pathname === "/isolation-check") isolatedCookies.push(req.headers.get("cookie") ?? "");
@@ -52,6 +58,7 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("sandboxed compiled CLI
     const denied = await invokeSession(session.descriptor, { kind: "broker", operation: { kind: "browser", root: root, request: { action: "open", url: "file:///etc/passwd" } } });
     expect(denied.ok).toBe(false);
     expect(audits).toContain("browser");
+    await expect(readFile(join(stale, "profile-data"))).rejects.toThrow();
     const dirs = await readdir(join(root, "browser-turns"));
     expect(dirs).toHaveLength(1);
     privateRoot = join(root, "browser-turns", dirs[0]!);

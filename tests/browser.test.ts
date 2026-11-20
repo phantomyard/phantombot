@@ -47,6 +47,10 @@ describe("browser sessions", () => {
     expect(override).toBeGreaterThan(0);
     expect(fake.calls[override]?.[1]).toMatchObject({ userAgent: "Chrome/156.0.0.0" });
     expect(override).toBeLessThan(fake.calls.findIndex(c => c[0] === "navigate" && c[1] === "https://example.com"));
+    const downloadPolicy = fake.calls.findIndex(c => c[0] === "Page.setDownloadBehavior");
+    expect(downloadPolicy).toBeGreaterThan(0);
+    expect(fake.calls[downloadPolicy]?.[1]).toEqual({ behavior: "deny" });
+    expect(downloadPolicy).toBeLessThan(fake.calls.findIndex(c => c[0] === "navigate" && c[1] === "https://example.com"));
     await sessions.execute({ action: "click", selector: "button" });
     expect(fake.calls.findIndex(c => c[0] === "scrollTo")).toBeLessThan(fake.calls.findIndex(c => c[0] === "click"));
     sessions.closeAll();

@@ -1,10 +1,32 @@
 /** An untrusted turn's browser lives on the host, behind the existing broker.
  * Its profile/endpoint are NEVER inside the model-writable workspace: a symlink
  * there must not redirect a privileged browser write into an arbitrary host path. */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, dirname, resolve } from "node:path";
 import { browserCall } from "./daemon.ts";
 import { validateRequest } from "./session.ts";
+
+// Age gates legacy/crashed profiles; a live owner is retained even for long
+// turns. The parent is host-only, and lstat never follows a planted symlink.
+export async function reapTurnBrowsers(parent: string, now = Date.now()): Promise<void> {
+  for (const entry of await readdir(parent, { withFileTypes: true })) {
+    if (!entry.name.startsWith("turn-") || !entry.isDirectory()) continue;
+    const path = join(parent, entry.name);
+    try {
+      const info = await lstat(path);
+      if (!info.isDirectory() || now - info.mtimeMs < 60 * 60_000) continue;
+      const owner = await readFile(join(path, "owner.pid"), "utf8").catch(() => "");
+      const pid = Number(owner);
+      if (Number.isSafeInteger(pid) && pid > 0) {
+        try { process.kill(pid, 0); continue; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue; }
+      }
+      await rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
 
 export class TurnBrowser {
   private root?: Promise<string>;
@@ -21,7 +43,10 @@ export class TurnBrowser {
     this.root ??= (async () => {
       const parent = join(this.personaDir, "browser-turns");
       await mkdir(parent, { recursive: true, mode: 0o700 });
-      return mkdtemp(join(parent, "turn-"));
+      await reapTurnBrowsers(parent);
+      const root = await mkdtemp(join(parent, "turn-"));
+      await writeFile(join(root, "owner.pid"), String(process.pid), { mode: 0o600 });
+      return root;
     })();
     const root = await this.root;
     const result = await browserCall(root, request, this.signal);

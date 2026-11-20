@@ -45,6 +45,11 @@ also returns a PNG artifact path in that turn's scratch. Screenshot artifacts
 are created exclusively at the scratch root, never through a model-writable
 subdirectory or symlink. The broker exposes only the same bounded browser
 actions; models cannot choose host paths, executable flags, profiles, or CDP calls.
+Page downloads are denied before site navigation, so pages cannot save arbitrary
+files into the owner's Downloads folder. This tool returns text and screenshots.
+
+Before creating a turn profile, abandoned `turn-*` directories older than one
+hour are removed; a live owner PID preserves even long-running turns.
 
 Each profile has its own lazy worker process, authenticated loopback endpoint,
 eight-tab limit, 30-second operation deadline and five-minute idle shutdown.

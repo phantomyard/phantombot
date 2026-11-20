@@ -149,6 +149,10 @@ export class BrowserSessions {
         // Establish the CDP session on a blank page BEFORE any site request.
         stage("Chrome startup");
         await view.navigate("about:blank");
+        // A host-side browser must not let a page save arbitrary files into
+        // the owner's Downloads directory. This tool exposes text/images only.
+        stage("download policy");
+        await view.cdp("Page.setDownloadBehavior", { behavior: "deny" });
         stage("user-agent detection");
         const ua = await view.evaluate("navigator.userAgent");
         const metadata = await view.evaluate("navigator.userAgentData ? navigator.userAgentData.getHighEntropyValues(['architecture','bitness','model','platformVersion','fullVersionList','wow64']) : undefined");

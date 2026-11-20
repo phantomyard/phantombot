@@ -74,7 +74,10 @@ and bounded `screenshots`. Sandboxed CLI calls forward to their existing
 authenticated broker; Chrome cannot run inside that sandbox (`setsid` is
 denied and command process groups are reaped). The host broker owns a fresh,
 private `browser-turns/turn-*` profile for each security session, never the
-trusted persona worker. It stops and deletes it on session close. Profile and
+trusted persona worker. It stops and deletes it on session close. Before creating
+a profile, reap abandoned turn directories older than one hour, retaining any
+live owner PID (even long-running turns). Deny page downloads before navigation
+so pages cannot write arbitrary host Downloads files. Profile and
 endpoint directories must stay OUTSIDE model-writable scratch: putting them
 there lets a model replace directories with symlinks and redirect host writes.
 Only PNG artifacts enter scratch, with random names and exclusive creation at
