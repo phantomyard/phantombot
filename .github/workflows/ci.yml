@@ -57,6 +57,45 @@ jobs:
           echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
           echo "Runtime-affecting changes: $runtime"
 
+  browser-live:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            chrome: /usr/bin/google-chrome
+            binary: dist/browser-test
+            target: --target=bun-linux-x64-baseline
+          - os: macos-latest
+            chrome: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+            binary: dist/browser-test
+            target: ""
+          - os: windows-latest
+            chrome: C:\Program Files\Google\Chrome\Application\chrome.exe
+            binary: dist/browser-test.exe
+            target: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    concurrency:
+      group: ci-browser-${{ github.head_ref }}-${{ matrix.os }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.x
+      - run: bun install --frozen-lockfile
+      - name: Compile the browser CLI for the real sandbox regression
+        run: bun build --compile ${{ matrix.target }} src/index.ts --outfile "${{ matrix.binary }}"
+      - name: Verify real Chrome rendering and profile isolation
+        run: bun test tests/browser-live.test.ts tests/browser-broker-live.test.ts
+        env:
+          PHANTOMBOT_BROWSER_LIVE: "1"
+          BUN_CHROME_PATH: ${{ matrix.chrome }}
+          PHANTOMBOT_BROWSER_TEST_BINARY: ${{ matrix.binary }}
+
   typecheck:
     needs: changes
     if: needs.changes.outputs.runtime == 'true'

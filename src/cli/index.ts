@@ -20,6 +20,7 @@
 import { defineCommand } from "citty";
 import { VERSION } from "../version.ts";
 import askCmd from "./ask.ts";
+import browserCmd from "./browser.ts";
 import acpCmd from "./acp.ts";
 import backfillIdentityCmd from "./backfill-identity.ts";
 import personaCmd from "./persona.ts";
@@ -82,6 +83,7 @@ export const mainCommand = defineCommand({
     restart: restartCmd,
     logs: logsCmd,
     ask: askCmd,
+    browser: browserCmd,
     acp: acpCmd,
     memory: memoryCmd,
     notify: notifyCmd,

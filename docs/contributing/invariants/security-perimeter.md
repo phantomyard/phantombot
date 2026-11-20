@@ -89,3 +89,17 @@ The capability rejects other personas/targets and expires on command completion
 or timeout. Closing the turn revokes its broker. No memory writes or wider host
 filesystem access are granted by this path. Tests: `security-task-cancellation`,
 `cli-tick` and `cli-ask` (#803).
+
+The session's bounded `browser` operation runs Chrome on the host, with a fresh
+private profile for THIS security session and only browser primitives. It never
+accepts a model-selected host path, profile, executable, flags, CDP method, or
+credential. This permits ordinary web browsing (network is already available)
+with page downloads denied before site navigation (no arbitrary host Downloads
+writes),
+without granting `setsid` or keeping children alive inside the OS sandbox.
+Profiles/endpoints live outside model-writable scratch and are destroyed with
+the session. Before a new profile, reap abandoned profiles older than one hour,
+preserving any live owner PID even for long-running turns. Only random, exclusively created PNGs enter the scratch root;
+broker screenshot replies carry model-visible images in native and MCP tools.
+See [invariant 89](architecture-and-orchestrator.md#inv-89) and the real compiled
+sandbox regression in `tests/browser-broker-live.test.ts`.

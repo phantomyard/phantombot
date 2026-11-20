@@ -19,6 +19,7 @@ import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 import { notifyLanded } from "../lib/notifySummary.ts";
 
 import type { TaskCancellation } from "./taskCancellation.ts";
+import { TurnBrowser } from "../browser/broker.ts";
 
 const MEMORY_TAGS = new Set(["decision", "lesson", "person", "commitment", "norm"]);
 /** Model text never starts an argv word with "-" (no flag injection). */
@@ -129,6 +130,7 @@ export async function createSecuritySession(options: {
     // memory and notify through this session.
     let sessionEnv: string | undefined;
     let closed = false;
+    const browser = new TurnBrowser(options.personaDir, workspace, signal, options.conversation);
     const requests = new Set<Promise<unknown>>();
     const server = Bun.serve({
       hostname: "127.0.0.1",
@@ -182,6 +184,19 @@ export async function createSecuritySession(options: {
                 "unknown session operation",
               );
             const op = v.operation as Record<string, unknown> | undefined;
+            if (op?.kind === "browser") {
+              const started = performance.now();
+              let outcome: SecurityAudit["outcome"] = "allowed";
+              try {
+                if (closed || signal.aborted) throw new PolicyError("policy_denied", "browser session is closed");
+                return Response.json(await browser.execute(op.request));
+              } catch (error) {
+                outcome = "unavailable";
+                throw new PolicyError("unavailable", `browser: ${(error as Error).message}`);
+              } finally {
+                try { options.audit?.({ operation: "browser", outcome, durationMs: Math.round(performance.now() - started) }); } catch {}
+              }
+            }
             if (op?.kind === "task-cancel") {
               const started = performance.now();
               let outcome: SecurityAudit["outcome"] = "allowed";
@@ -271,6 +286,7 @@ export async function createSecuritySession(options: {
       abort.abort();
       await server.stop(true);
       await Promise.allSettled([...requests]);
+      await browser.close();
       await hub?.close();
       vault?.close();
       deleteWindowsProfile(workspace);

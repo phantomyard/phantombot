@@ -176,8 +176,15 @@ not an execution-time phrase blacklist.
 - `notify`: `message` (to 4 KiB). Runs the persona's own `phantombot notify`.
 - `memory-capture`: `text` (to 8 KiB), optional `tags` (decision, lesson,
   person, commitment, norm). `memory-search`: `query`, optional `limit` (1-20).
+- `browser`: `request` with the bounded [browser actions](browser.md). The
+  runtime owns a fresh host-side profile for this turn, outside model-writable
+  scratch, and tears it down at turn end. `phantombot browser` inside the sandbox
+  forwards here automatically; `action:"screenshot"` through the broker returns
+  actual image content. No host paths, flags or raw CDP are accepted. Browser
+  cookies never come from the trusted persona or the owner's personal browser.
 
-These run on the host with fixed argv.
+Notify and memory run on the host with fixed argv; the browser uses its own
+isolated worker without changing the OS sandbox's permissions.
 With a grant:
 
 - `github-read`: `grant`, `resource` (`pull`, `files`, `comments`, `reviews`).

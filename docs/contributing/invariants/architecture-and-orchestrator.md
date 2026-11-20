@@ -53,6 +53,60 @@ Part of the phantombot contributor guide: the turn pipeline, prompt assembly and
 
 ## Invariants
 
+<a id="inv-89"></a>
+### 89. Browser profiles are process-isolated by persona and trust tier; shutdown flushes Chrome before force cleanup.
+
+`phantombot browser` is the default rendered-web tool advertised in the stable
+persona prompt. `src/browser/` uses experimental `Bun.WebView`, feature-detected
+so older runtimes fail only when browsing. It explicitly selects Chrome and
+`url:false`: never auto-attach to a person's running browser. Chrome is installed
+separately, discovered by Bun or `BUN_CHROME_PATH`; no automation dependency or
+browser download enters the binary. Preserve Chrome's sandbox flags.
+On macOS pass `--use-mock-keychain` for the dedicated automation profile: without
+it Chrome's native keychain dialog can stall navigation (zero HTTP requests in
+real macOS CI). Cookies then rely on the private profile directory's permissions,
+not the personal system keychain. Preserve this deliberate automation trade-off.
+
+Bun shares Chrome and `dataStore.directory` process-wide (first view wins).
+Therefore each persona owns a dedicated lazy process at `<persona-dir>/browser`,
+with its own persistent `profile`, kernel `worker.lock`, 0600 bearer endpoint,
+and bounded `screenshots`. Sandboxed CLI calls forward to their existing
+authenticated broker; Chrome cannot run inside that sandbox (`setsid` is
+denied and command process groups are reaped). The host broker owns a fresh,
+private `browser-turns/turn-*` profile for each security session, never the
+trusted persona worker. It stops and deletes it on session close. Before creating
+a profile, reap abandoned turn directories older than one hour, retaining any
+live owner PID (even long-running turns). Deny page downloads before navigation
+so pages cannot write arbitrary host Downloads files. Profile and
+endpoint directories must stay OUTSIDE model-writable scratch: putting them
+there lets a model replace directories with symlinks and redirect host writes.
+Only PNG artifacts enter scratch, with random names and exclusive creation at
+the workspace root. Broker screenshot replies become real image content blocks,
+not base64 text, in native and MCP tools. A missing broker refuses sandboxed
+browsing. Models never select executable flags, profiles, host paths or CDP.
+Never solve browser startup by widening the OS sandbox's host paths or syscalls.
+Worker startup bypasses config/vault bootstrap and receives OS environment only,
+not decrypted vault credentials. Loopback HTTP is token-authenticated, rejects
+Origin-bearing requests, bounds request bodies, and serializes operations by
+rejecting a busy request. Never retry mutations after a transport failure.
+
+Tabs follow conversation hashes by default (`--session` explicitly overrides),
+but cookies intentionally belong to the persona. Bound tabs (8), snapshots
+(24,000 text characters/100 elements), screenshot history (32), operations
+(30 seconds), and worker idle life (5 minutes). A timed-out session closes;
+shutdown uses `Browser.close` and a bounded two-second drain window before force cleanup:
+`Bun.WebView.closeAll()` alone SIGKILLs Chrome and loses cookies not yet flushed
+to disk (caught by the live persistence test). Keep UA override before the first
+site request and derive it from the installed browser's version, including its
+client-hint metadata by default. Capture that original identity once per tab;
+never derive a reset from an already overridden navigator. Optional `open.userAgent`
+sets a printable ASCII override (1–512 characters); omitted retains it, null resets.
+Custom strings suppress UA client hints (omit CDP metadata), reset restores the
+original hints. Overrides are tab-local and end on close/worker shutdown; CLI
+`--user-agent ""` maps to null. Page content remains untrusted data. Tests:
+`tests/browser.test.ts` and `tests/browser-live.test.ts`; the latter exercises
+actual Chrome and subprocess IPC and runs on all three desktop platforms.
+
 <a id="inv-29"></a>
 ### 29. The plan-then-confirm gate is CHANNEL-AGNOSTIC and lives in the orchestrator — one copy, overridable, and not in a channel suffix (issues #443, #447).
 
