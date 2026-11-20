@@ -16,8 +16,11 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("sandboxed compiled CLI
   const old = new Date(Date.now() - 2 * 60 * 60_000);
   await utimes(stale, old, old);
   const isolatedCookies: string[] = [];
+  const identityHeaders = new Map<string, string>();
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
-    if (new URL(req.url).pathname === "/isolation-check") isolatedCookies.push(req.headers.get("cookie") ?? "");
+    const path = new URL(req.url).pathname;
+    if (path.startsWith("/ua-")) identityHeaders.set(path, req.headers.get("user-agent") ?? "");
+    if (path === "/isolation-check") isolatedCookies.push(req.headers.get("cookie") ?? "");
     return new Response('<html><title>Broker fixture</title><body><h1>Sandbox browser</h1><input id="entry"><button id="apply" onclick="document.getElementById(\'result\').textContent=document.getElementById(\'entry\').value">Apply</button><p id="result">ready</p><script>document.cookie="turn=private; Max-Age=3600; Path=/"</script></body></html>', { headers: { "content-type": "text/html" } });
   } });
   const audits: string[] = [];
@@ -46,6 +49,13 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("sandboxed compiled CLI
     await command('click "#entry"');
     await command('type "typed-through-broker"');
     expect(await command('click "#apply"')).toContain("typed-through-broker");
+    await command(`open http://127.0.0.1:${server.port}/ua-custom --user-agent "BrokerCustom/1.0"`);
+    expect(identityHeaders.get("/ua-custom")).toBe("BrokerCustom/1.0");
+    await command(`open http://127.0.0.1:${server.port}/ua-retained`);
+    expect(identityHeaders.get("/ua-retained")).toBe("BrokerCustom/1.0");
+    await command(`open http://127.0.0.1:${server.port}/ua-reset --user-agent ""`);
+    expect(identityHeaders.get("/ua-reset")).toContain("Chrome/");
+    expect(identityHeaders.get("/ua-reset")).not.toContain("HeadlessChrome");
     const imageReply = await invokeSession(session.descriptor, { kind: "broker", operation: { kind: "browser", request: { action: "screenshot" } } });
     expect(imageReply.ok, imageReply.text.slice(0, 300)).toBe(true);
     const content = sessionToolResult(imageReply).content;

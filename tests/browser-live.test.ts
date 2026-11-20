@@ -9,8 +9,14 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("Chrome worker renders,
   const root = await mkdtemp(join(tmpdir(), "pb-browser-live-"));
   const other = await mkdtemp(join(tmpdir(), "pb-browser-other-"));
   const agents: string[] = [];
+  const identities = new Map<string, { ua: string; hints: string | null }>();
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
     agents.push(req.headers.get("user-agent") ?? "");
+    const path = new URL(req.url).pathname;
+    if (path.startsWith("/identity/")) {
+      identities.set(path, { ua: req.headers.get("user-agent") ?? "", hints: req.headers.get("sec-ch-ua") });
+      return new Response(`<body><script>document.body.innerText=JSON.stringify({ua:navigator.userAgent,brands:navigator.userAgentData?.brands ?? []})</script>`, { headers: { "Content-Type": "text/html" } });
+    }
     return new Response(`<html><head><title>Phantom fixture</title></head><body><h1>Rendered fixture</h1><p hidden>HIDDEN SECRET</p><input id="entry"><button id="button" onclick="document.querySelector('#result').textContent=document.querySelector('#entry').value">Apply</button><p id="result">waiting</p><a href="/next">Next page</a><script>document.body.dataset.ready='yes';document.cookie='phantom=present; Max-Age=3600; Path=/'</script></body></html>`, { headers: { "Content-Type": "text/html" } });
   } });
   try {
@@ -26,6 +32,26 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("Chrome worker renders,
     const bytes = await readFile(shot.path);
     expect(bytes.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
     expect(bytes.readUInt32BE(16)).toBe(900); expect(bytes.readUInt32BE(20)).toBe(600);
+    // Observe headers AND page JS; repeated opens must retain/reset identity,
+    // custom metadata must not leak actual Chrome hints, and tabs stay isolated.
+    const identity = async (path: string, extra = {}) => {
+      const result = await browserCall(root, { action: "open", url: `http://127.0.0.1:${server.port}/identity/${path}`, ...extra }) as { text: string };
+      const js = JSON.parse(result.text) as { ua: string; brands: unknown[] };
+      const headers = identities.get(`/identity/${path}`)!;
+      expect(js.ua).toBe(headers.ua);
+      return { js, headers };
+    };
+    const baseline = await identity("default");
+    expect(baseline.headers.ua).toContain("Chrome/");
+    const custom = await identity("custom", { userAgent: "PhantomCustom/1.0" });
+    expect(custom.headers).toEqual({ ua: "PhantomCustom/1.0", hints: null });
+    expect(custom.js.brands).toEqual([]);
+    expect((await identity("retained")).headers.ua).toBe("PhantomCustom/1.0");
+    expect((await identity("other", { session: "other" })).headers.ua).toBe(baseline.headers.ua);
+    expect((await identity("reset", { userAgent: null }))).toEqual(baseline);
+    await identity("before-close", { userAgent: "Temporary/1" });
+    await browserCall(root, { action: "close" });
+    expect((await identity("reopened")).headers.ua).toBe(baseline.headers.ua);
     // Server-side observation proves persistence and profile isolation without
     // exposing a general evaluate() or credential-reading tool to the model.
     await browserCall(root, { action: "stop" });

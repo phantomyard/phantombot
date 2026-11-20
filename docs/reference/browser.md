@@ -24,6 +24,16 @@ phantombot browser close                    # current tab
 phantombot browser stop                     # this persona's browser worker
 ```
 
+With `open --user-agent "custom UA"`, set a tab's user agent before navigation.
+Omitting the flag retains it on later opens and interactions. Use
+`open --user-agent ""` to restore the installed Chrome identity. Broker requests
+accept `userAgent: "custom UA"` or `userAgent: null` to reset. Overrides are
+per tab, last until close/worker shutdown, and never change other tabs or profiles.
+Values must be 1–512 printable ASCII characters with non-whitespace content.
+Custom strings suppress UA client hints rather than advertising conflicting Chrome
+metadata; reset restores Chrome's original UA and client hints. This does not
+emulate another browser's engine, OS, or full fingerprint.
+
 Use `--session NAME` for another tab, and `--persona NAME` for another persona.
 Tabs otherwise follow the current conversation (or `default` in a terminal).
 Cookies and logins live in `<persona-dir>/browser/profile`, shared by that

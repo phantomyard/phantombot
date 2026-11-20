@@ -40,6 +40,8 @@ export interface BrowserRequest {
   action: BrowserAction;
   session?: string;
   url?: string;
+  /** Omit to retain this tab's identity; null restores installed Chrome. */
+  userAgent?: string | null;
   selector?: string;
   text?: string;
   key?: string;
@@ -59,6 +61,10 @@ export function validateRequest(value: unknown): BrowserRequest {
   const r = value as BrowserRequest;
   if (!BROWSER_ACTIONS.includes(r.action)) throw new Error("Unknown browser action");
   if (r.session !== undefined && !/^[a-zA-Z0-9_-]{1,80}$/.test(requiredString(r.session, "session", 80))) throw new Error("Invalid browser session name");
+  if (r.userAgent !== undefined) {
+    if (r.action !== "open") throw new Error("userAgent is only supported with open");
+    if (r.userAgent !== null && (typeof r.userAgent !== "string" || !/^[\x20-\x7e]{1,512}$/.test(r.userAgent) || !r.userAgent.trim())) throw new Error("userAgent must be printable ASCII (1..512 characters), or null to reset");
+  }
   switch (r.action) {
     case "open": {
       const url = new URL(requiredString(r.url, "url"));
@@ -102,6 +108,7 @@ export const SNAPSHOT_SCRIPT = `(() => {
 /** One instance per dedicated process: Bun's Chrome profile is process-wide. */
 export class BrowserSessions {
   private views = new Map<string, BrowserView>();
+  private identities = new WeakMap<BrowserView, { userAgent: string; metadata: unknown; custom?: string }>();
   constructor(private root: string, private runtime: WebViewRuntime = webViewRuntime(), private timeoutMs = 30_000) {}
 
   async execute(raw: unknown): Promise<unknown> {
@@ -154,12 +161,20 @@ export class BrowserSessions {
         stage("download policy");
         await view.cdp("Page.setDownloadBehavior", { behavior: "deny" });
         stage("user-agent detection");
-        const ua = await view.evaluate("navigator.userAgent");
-        const metadata = await view.evaluate("navigator.userAgentData ? navigator.userAgentData.getHighEntropyValues(['architecture','bitness','model','platformVersion','fullVersionList','wow64']) : undefined");
+        let identity = this.identities.get(view);
+        if (!identity) {
+          const ua = await view.evaluate("navigator.userAgent");
+          const metadata = await view.evaluate("navigator.userAgentData ? navigator.userAgentData.getHighEntropyValues(['architecture','bitness','model','platformVersion','fullVersionList','wow64']) : undefined");
+          identity = { userAgent: String(ua).replace(/HeadlessChrome/g, "Chrome"), metadata };
+          this.identities.set(view, identity);
+        }
+        if (r.userAgent !== undefined) identity.custom = r.userAgent ?? undefined;
         stage("user-agent override");
         await view.cdp("Emulation.setUserAgentOverride", {
-          userAgent: String(ua).replace(/HeadlessChrome/g, "Chrome"),
-          ...(metadata ? { userAgentMetadata: metadata } : {}),
+          userAgent: identity.custom ?? identity.userAgent,
+          // Arbitrary UA strings cannot truthfully inherit Chrome's client hints.
+          // CDP suppresses UA hints when metadata is omitted; reset restores them.
+          ...(!identity.custom && identity.metadata ? { userAgentMetadata: identity.metadata } : {}),
         });
         stage("site navigation");
         await view.navigate(r.url!);

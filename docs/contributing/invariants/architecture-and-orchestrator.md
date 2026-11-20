@@ -98,7 +98,12 @@ shutdown uses `Browser.close` and a bounded two-second drain window before force
 `Bun.WebView.closeAll()` alone SIGKILLs Chrome and loses cookies not yet flushed
 to disk (caught by the live persistence test). Keep UA override before the first
 site request and derive it from the installed browser's version, including its
-client-hint metadata. Page content remains untrusted data. Tests:
+client-hint metadata by default. Capture that original identity once per tab;
+never derive a reset from an already overridden navigator. Optional `open.userAgent`
+sets a printable ASCII override (1–512 characters); omitted retains it, null resets.
+Custom strings suppress UA client hints (omit CDP metadata), reset restores the
+original hints. Overrides are tab-local and end on close/worker shutdown; CLI
+`--user-agent ""` maps to null. Page content remains untrusted data. Tests:
 `tests/browser.test.ts` and `tests/browser-live.test.ts`; the latter exercises
 actual Chrome and subprocess IPC and runs on all three desktop platforms.
 

@@ -56,6 +56,23 @@ describe("browser sessions", () => {
     sessions.closeAll();
   });
 
+  test("custom UA persists per tab, suppresses hints, resets from original identity and clears on close", async () => {
+    const fake = fakeRuntime(); const sessions = new BrowserSessions(await temp(), fake.runtime);
+    const open = (session: string, extra = {}) => sessions.execute({ action: "open", url: "https://example.com", session, ...extra });
+    const last = () => fake.calls.filter(c => c[0] === "Emulation.setUserAgentOverride").at(-1)![1];
+    await open("custom", { userAgent: "MyBrowser/1.0" });
+    expect(last()).toEqual({ userAgent: "MyBrowser/1.0" });
+    await open("custom"); expect(last()).toEqual({ userAgent: "MyBrowser/1.0" });
+    await open("other"); expect(last()).toMatchObject({ userAgent: "Chrome/156.0.0.0", userAgentMetadata: { text: "fixture" } });
+    await open("custom", { userAgent: null }); expect(last()).toMatchObject({ userAgent: "Chrome/156.0.0.0", userAgentMetadata: { text: "fixture" } });
+    // Baseline must be captured only once per view, before any custom override.
+    expect(fake.calls.filter(c => c[0] === "evaluate" && c[1] === "navigator.userAgent")).toHaveLength(2);
+    await open("custom", { userAgent: "Other/2.0" });
+    await sessions.execute({ action: "close", session: "custom" });
+    await open("custom"); expect(last()).toMatchObject({ userAgent: "Chrome/156.0.0.0" });
+    sessions.closeAll();
+  });
+
   test("tab close does not discard another tab, stop cleans the browser, and screenshot returns a file", async () => {
     const root = await temp(); const fake = fakeRuntime(); const sessions = new BrowserSessions(root, fake.runtime);
     for (const session of ["a", "b"]) await sessions.execute({ action: "open", url: "https://example.com", session });
@@ -84,11 +101,15 @@ describe("browser sessions", () => {
 
 test("rejects unsafe URLs, malformed input and unbounded dimensions", () => {
   for (const url of ["file:///etc/passwd", "javascript:alert(1)", "data:text/html,hi", "https://u:secret@example.com"]) expect(() => validateRequest({ action: "open", url })).toThrow();
+  for (const userAgent of ["", "   ", "a\nb", "a\rb", "a\tb", "é", "a".repeat(513), 42, {}, false]) expect(() => validateRequest({ action: "open", url: "https://example.com", userAgent })).toThrow();
+  expect(() => validateRequest({ action: "read", userAgent: "Custom/1" })).toThrow();
   for (const value of [null, [], { action: "nope" }, { action: "open" }, { action: "read", session: "../a" }, { action: "scroll", dy: NaN }, { action: "resize", width: 1e8, height: 800 }]) expect(() => validateRequest(value)).toThrow();
 });
 
 test("Citty accepts actions with no positional value", async () => {
   const args = typeof browserCommand.args === "function" ? await browserCommand.args() : browserCommand.args;
+  expect(parseArgs(["open", "https://example.com", "--user-agent", "Custom/1"], args as ArgsDef)["user-agent"]).toBe("Custom/1");
+  expect(parseArgs(["open", "https://example.com", "--user-agent", ""], args as ArgsDef)["user-agent"]).toBe("");
   for (const action of ["read", "screenshot", "close", "stop", "scroll"]) {
     expect(parseArgs([action], args as ArgsDef).action).toBe(action);
   }

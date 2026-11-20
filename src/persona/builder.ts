@@ -228,6 +228,9 @@ and screenshots for visual inspection. No browser or automation library is bundl
   phantombot browser close                      # close this tab
   phantombot browser stop                       # close all tabs and stop this persona's worker
 
+With open, --user-agent "custom UA" changes this tab's identity; omit to keep it,
+or --user-agent "" to restore installed Chrome. Custom UAs suppress Chrome client
+hints. Closing the tab or idle shutdown also resets the override.
 Tabs default to this conversation; --session NAME selects another tab. Cookies
 persist in a dedicated persona profile. Sandboxed CLI calls automatically use
 the runtime broker and a fresh host-owned profile for this turn, removed at turn

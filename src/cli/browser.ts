@@ -64,6 +64,7 @@ export default defineCommand({
     action: { type: "positional", required: true, description: BROWSER_ACTIONS.join(" | ") },
     value: { type: "positional", required: false, description: "URL for open, CSS selector for click, text for type, key for press." },
     session: { type: "string", description: "Tab name (default: current conversation, or default in a terminal)." },
+    "user-agent": { type: "string", description: "User agent for open; retained per tab. Empty string resets to installed Chrome." },
     persona: { type: "string", description: "Persona (default PHANTOMBOT_PERSONA, then configured default)." },
     dx: { type: "string", description: "Horizontal scroll in pixels (default 0)." },
     dy: { type: "string", description: "Vertical scroll in pixels." },
@@ -76,6 +77,7 @@ export default defineCommand({
       persona: args.persona,
       request: {
         action, session: args.session,
+        ...(args["user-agent"] !== undefined ? { userAgent: args["user-agent"] || null } : {}),
         ...(action === "open" ? { url: args.value } : {}),
         ...(action === "click" ? { selector: args.value } : {}),
         ...(action === "type" ? { text: args.value } : {}),

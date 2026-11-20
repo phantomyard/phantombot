@@ -44,7 +44,7 @@ export const SANDBOX_TOOL_DESCRIPTION =
   "Run shell commands in this turn's scratch workspace (cwd, $PHANTOMBOT_SCRATCH): the ONLY writable place, deleted at turn end. Read-only: ~/.local/bin (on PATH), ~/.ssh/*.pub, ~/.config (tool logins: gh, gog, gcloud, ...), ~/.gitconfig, ~/.git-credentials. Network, the persona's credentials (env) and the turn's PHANTOMBOT_* variables are available: git, gh, curl, APIs, and `phantombot memory search|capture` / `phantombot notify` work as usual. No other host files, persona files or SSH private keys.";
 export const BROKER_TOOL_DESCRIPTION =
   "Host actions the sandbox cannot do. operation:{kind:'notify',message} tells the owner; {kind:'memory-capture',text,tags?:[decision|lesson|person|commitment|norm]}; {kind:'memory-search',query,limit?}; {kind:'task-cancel',id} cancels only this turn's originating scheduled task. " +
-  "{kind:'browser',request:{action:'open',url}} browses in this turn's isolated Chrome profile; action:'screenshot' returns an image directly. Also read/click/type/press/scroll/resize/close/stop. " +
+  "{kind:'browser',request:{action:'open',url,userAgent?}} browses in this turn's isolated Chrome profile; action:'screenshot' returns an image directly. open.userAgent sets this tab's UA, omitted retains it, null restores Chrome; custom UAs suppress client hints. Also read/click/type/press/scroll/resize/close/stop. " +
   "{manifest:true} lists any owner grants; operation:{kind,grant,...} uses one: npm-package {name,version}, github-checkout/github-read/github-review, http (exact URL/method), mcp (exact arguments).";
 
 /** Preserve broker screenshots as model-visible images, never giant base64 text. */
