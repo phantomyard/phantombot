@@ -2523,6 +2523,10 @@ describe("spawnWakeChild — no-user-bus refusal and closed-store safety", () =>
 
 
 test("scheduled sandbox wake self-cancels and run bookkeeping keeps it inactive (#803)", async () => {
+  // This is a real sandbox session: cold Bun/Node staging can exceed the
+  // generic fixture's 5s wake budget before the harness is invoked. Keep a
+  // bounded startup allowance; the assertions still require broker cancellation.
+  const sandboxConfig: Config = { ...config, tick: { ...config.tick, wakeTimeoutMs: 15_000 } };
   await writeFile(join(workdir, "personas", "phantom", "security-policy.json"), JSON.stringify({ version: 1, enabled: true, grants: [] }));
   const now = new Date("2026-05-02T10:00:00Z");
   const added = store.add({ persona: "phantom", schedule: "*/5 * * * *", description: "spent", prompt: "retire", now: new Date(now.getTime() - 600_000) });
@@ -2539,7 +2543,7 @@ test("scheduled sandbox wake self-cancels and run bookkeeping keeps it inactive 
       yield { type: "done", finalText: "retired" };
     },
   };
-  expect(await tickInline({ config, taskStore: store, memory, harnesses: [harness], lockPath, now, out: { write() {} } })).toBe(0);
+  expect(await tickInline({ config: sandboxConfig, taskStore: store, memory, harnesses: [harness], lockPath, now, out: { write() {} } })).toBe(0);
   expect(invoked).toBe(true);
   expect(store.get(added.id)!.active).toBe(false);
   expect(store.get(added.id)!.runCount).toBe(1);
