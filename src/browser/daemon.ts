@@ -33,7 +33,8 @@ export function browserChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(names.filter(n => env[n] !== undefined).map(n => [n, env[n]]));
 }
 
-export async function browserCall(root: string, request: BrowserRequest): Promise<unknown> {
+export async function browserCall(root: string, request: BrowserRequest, signal?: AbortSignal): Promise<unknown> {
+  signal?.throwIfAborted();
   validateRequest(request);
   let e = await endpoint(root);
   if (!e || !await health(e)) {
@@ -53,6 +54,7 @@ export async function browserCall(root: string, request: BrowserRequest): Promis
     const deadline = Date.now() + 10_000;
     e = undefined;
     while (Date.now() < deadline) {
+      signal?.throwIfAborted();
       if (spawnError) throw spawnError;
       const candidate = await endpoint(root);
       if (candidate && await health(candidate)) { e = candidate; break; }
@@ -61,9 +63,9 @@ export async function browserCall(root: string, request: BrowserRequest): Promis
     if (!e) throw new Error(`Browser worker did not start; see ${join(root, "worker.log")} (requires Bun.WebView)`);
   }
   // Never retry an operation: a disconnected reply can follow a successful click.
-  const response = await fetch(`http://127.0.0.1:${e.port}/call`, {
+  const response = await fetch(`http://127.0.0.1:${e.port}/${request.action === "stop" ? "shutdown" : "call"}`, {
     method: "POST", headers: { Authorization: `Bearer ${e.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify(request), signal: AbortSignal.timeout(35_000), redirect: "error",
+    body: JSON.stringify(request), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(35_000)]) : AbortSignal.timeout(35_000), redirect: "error",
   });
   const body = await response.json() as { result?: unknown; error?: string };
   if (!response.ok) throw new Error(body.error ?? `Browser worker returned ${response.status}`);
@@ -90,6 +92,13 @@ export async function runBrowserDaemon(root: string, idleMs = BROWSER_IDLE_MS): 
       if (req.headers.has("origin") || req.headers.get("authorization") !== `Bearer ${token}`) return new Response("Forbidden", { status: 403 });
       const path = new URL(req.url).pathname;
       if (path === "/health" && req.method === "GET") return new Response("phantombot-browser");
+      if (path === "/shutdown" && req.method === "POST") {
+        closing = true;
+        if (pending) sessions.closeAll();
+        else await sessions.shutdown();
+        setTimeout(finish, 25);
+        return Response.json({ result: { stopped: true } });
+      }
       if (path !== "/call" || req.method !== "POST") return new Response("Not found", { status: 404 });
       // Do not queue browser mutations: callers retry after a clear busy result,
       // never after an ambiguous timeout waiting behind another operation.

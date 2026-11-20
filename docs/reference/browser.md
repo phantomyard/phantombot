@@ -27,7 +27,25 @@ phantombot browser stop                     # this persona's browser worker
 Use `--session NAME` for another tab, and `--persona NAME` for another persona.
 Tabs otherwise follow the current conversation (or `default` in a terminal).
 Cookies and logins live in `<persona-dir>/browser/profile`, shared by that
-persona's tabs. Untrusted turns use their own ephemeral scratch profile instead.
+persona's tabs. Sandboxed turns forward these commands through the existing
+authenticated runtime broker. Their Chrome process runs on the host with a
+fresh profile under `<persona-dir>/browser-turns/`, outside model-writable scratch,
+and is stopped and deleted when that turn ends. The sandbox's filesystem and
+process restrictions stay unchanged; no personal cookies are inherited.
+Without a live runtime broker, a sandboxed browser command refuses explicitly.
+
+For visual inspection inside a bounded turn, use the broker operation directly:
+
+```json
+{"operation":{"kind":"browser","request":{"action":"screenshot"}}}
+```
+
+It returns an actual image content block to native and MCP harnesses. The CLI
+also returns a PNG artifact path in that turn's scratch. Screenshot artifacts
+are created exclusively at the scratch root, never through a model-writable
+subdirectory or symlink. The broker exposes only the same bounded browser
+actions; models cannot choose host paths, executable flags, profiles, or CDP calls.
+
 Each profile has its own lazy worker process, authenticated loopback endpoint,
 eight-tab limit, 30-second operation deadline and five-minute idle shutdown.
 Snapshots cap rendered text at 24,000 characters and interactive elements at

@@ -4,14 +4,14 @@ import { join } from "node:path";
 import { loadConfig, personaDir, resolvePersona, type Config } from "../config.ts";
 import { browserCall } from "../browser/daemon.ts";
 import { BROWSER_ACTIONS, type BrowserRequest, validateRequest } from "../browser/session.ts";
+import { invokeSession, sessionFromEnv } from "../security/extension.ts";
+import { ENV_SECURITY_SESSION } from "../security/session.ts";
 
 export async function browserRoot(persona?: string, config?: Config, env = process.env): Promise<string> {
   // Untrusted turns never connect to persistent, authenticated host sessions.
   // The OS sandbox already limits them to this runtime-owned scratch directory.
   if ((env.PHANTOMBOT_TURN_ID || env.PHANTOMBOT_CONVERSATION) && env.PHANTOMBOT_TRUSTED !== "1") {
-    if (!env.PHANTOMBOT_SCRATCH) throw new Error("An untrusted browser requires turn scratch storage");
-    if (persona && persona !== env.PHANTOMBOT_PERSONA) throw new Error("Cannot select another persona from an untrusted turn");
-    return join(env.PHANTOMBOT_SCRATCH, "browser");
+    throw new Error("Sandboxed browsers require the runtime broker; Chrome cannot run inside the OS sandbox");
   }
   const c = config ?? await loadConfig();
   const name = persona || env.PHANTOMBOT_PERSONA || resolvePersona(undefined, c);
@@ -32,12 +32,24 @@ export interface BrowserInput {
 export async function runBrowser(input: BrowserInput): Promise<number> {
   try {
     validateRequest(input.request);
-    const root = await browserRoot(input.persona, input.config, input.env);
     const request = { ...input.request };
+    const env = input.env ?? process.env;
     // Tabs are conversation-scoped by default; cookies remain persona-scoped.
-    const conversation = (input.env ?? process.env).PHANTOMBOT_CONVERSATION;
+    const conversation = env.PHANTOMBOT_CONVERSATION;
     if (!request.session && conversation) request.session = new Bun.CryptoHasher("sha256").update(conversation).digest("hex");
-    const result = await (input.call ?? browserCall)(root, request);
+    let result: unknown;
+    if (env[ENV_SECURITY_SESSION] !== undefined || ((env.PHANTOMBOT_TURN_ID || env.PHANTOMBOT_CONVERSATION) && env.PHANTOMBOT_TRUSTED !== "1")) {
+      if (input.persona && input.persona !== env.PHANTOMBOT_PERSONA) throw new Error("Cannot select another persona from a sandboxed turn");
+      const session = sessionFromEnv(env);
+      if (!session) throw new Error("Sandboxed browsers require a live runtime broker session");
+      const response = await invokeSession(session, { kind: "broker", operation: { kind: "browser", request } }, AbortSignal.timeout(40_000));
+      const body = JSON.parse(response.text) as { result?: unknown; error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Browser broker refused the operation");
+      result = body.result;
+    } else {
+      const root = await browserRoot(input.persona, input.config, env);
+      result = await (input.call ?? browserCall)(root, request);
+    }
     (input.out ?? (s => process.stdout.write(s)))(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error) {

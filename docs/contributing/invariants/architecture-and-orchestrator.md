@@ -70,9 +70,18 @@ not the personal system keychain. Preserve this deliberate automation trade-off.
 Bun shares Chrome and `dataStore.directory` process-wide (first view wins).
 Therefore each persona owns a dedicated lazy process at `<persona-dir>/browser`,
 with its own persistent `profile`, kernel `worker.lock`, 0600 bearer endpoint,
-and bounded `screenshots`. Untrusted turns resolve only to their runtime-owned
-turn scratch, never connect to the persona worker, and cannot select another
-persona. Never solve browser startup by widening the OS sandbox's host paths.
+and bounded `screenshots`. Sandboxed CLI calls forward to their existing
+authenticated broker; Chrome cannot run inside that sandbox (`setsid` is
+denied and command process groups are reaped). The host broker owns a fresh,
+private `browser-turns/turn-*` profile for each security session, never the
+trusted persona worker. It stops and deletes it on session close. Profile and
+endpoint directories must stay OUTSIDE model-writable scratch: putting them
+there lets a model replace directories with symlinks and redirect host writes.
+Only PNG artifacts enter scratch, with random names and exclusive creation at
+the workspace root. Broker screenshot replies become real image content blocks,
+not base64 text, in native and MCP tools. A missing broker refuses sandboxed
+browsing. Models never select executable flags, profiles, host paths or CDP.
+Never solve browser startup by widening the OS sandbox's host paths or syscalls.
 Worker startup bypasses config/vault bootstrap and receives OS environment only,
 not decrypted vault credentials. Loopback HTTP is token-authenticated, rejects
 Origin-bearing requests, bounds request bodies, and serializes operations by

@@ -12,6 +12,7 @@ import {
   SANDBOX_TOOL_DESCRIPTION,
   sessionFromEnv,
   sessionToolBody,
+  sessionToolResult,
 } from "./extension.ts";
 import type { SessionDescriptor } from "./types.ts";
 
@@ -76,7 +77,7 @@ export async function handleSecurityMcp(
         });
       try {
         const r = await invoke(session, sessionToolBody(name, args));
-        return reply({ content: [{ type: "text", text: r.text }], ...(r.ok ? {} : { isError: true }) });
+        return reply(sessionToolResult(r));
       } catch {
         return reply({ content: [{ type: "text", text: "session unavailable" }], isError: true });
       }

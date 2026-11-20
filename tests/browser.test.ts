@@ -8,6 +8,8 @@ import { browserRoot, runBrowser } from "../src/cli/browser.ts";
 import type { Config } from "../src/config.ts";
 import browserCommand from "../src/cli/browser.ts";
 import { parseArgs, type ArgsDef } from "citty";
+import { sessionToolResult } from "../src/security/extension.ts";
+import { handleSecurityMcp } from "../src/security/mcpServer.ts";
 
 const roots: string[] = [];
 afterEach(async () => { for (const p of roots.splice(0)) await rm(p, { recursive: true, force: true }); });
@@ -88,6 +90,15 @@ test("Citty accepts actions with no positional value", async () => {
   }
 });
 
+test("native and MCP broker replies preserve images without duplicating base64 as text", async () => {
+  const data = Buffer.from("fixture-image").toString("base64");
+  const response = { ok: true, text: JSON.stringify({ result: { path: "/scratch/shot.png" }, image: { data, mimeType: "image/png" } }) };
+  const native = sessionToolResult(response);
+  expect(native.content).toEqual([{ type: "text", text: JSON.stringify({ result: { path: "/scratch/shot.png" } }) }, { type: "image", data, mimeType: "image/png" }]);
+  const mcp = await handleSecurityMcp({ id: 1, method: "tools/call", params: { name: "broker", arguments: { operation: { kind: "browser", request: { action: "screenshot" } } } } }, { url: "http://127.0.0.1:1/operation", token: "a".repeat(64), workspace: "/scratch" }, async () => response) as { result: { content: unknown } };
+  expect(mcp.result.content).toEqual(native.content);
+});
+
 test("worker inherits OS paths but never vault keys or personal remote-debugging configuration", () => {
   expect(browserChildEnv({ HOME: "/fixture", PATH: "/bin", BUN_CHROME_PATH: "/chrome", GITHUB_TOKEN: "never", PHANTOMBOT_PERSONA: "other", OPENAI_API_KEY: "never" })).toEqual({ HOME: "/fixture", PATH: "/bin", BUN_CHROME_PATH: "/chrome" });
 });
@@ -99,10 +110,30 @@ test("persona and trust scopes cannot share browser cookies", async () => {
   expect(await browserRoot(undefined, config, { PHANTOMBOT_PERSONA: "alice" })).toBe(join(root, "alice", "browser"));
   expect(await browserRoot("bob", config, { PHANTOMBOT_PERSONA: "alice" })).toBe(join(root, "bob", "browser"));
   const untrusted = { PHANTOMBOT_TURN_ID: "1", PHANTOMBOT_PERSONA: "alice", PHANTOMBOT_SCRATCH: join(root, "scratch") };
-  expect(await browserRoot(undefined, config, untrusted)).toBe(join(root, "scratch", "browser"));
-  await expect(browserRoot("bob", config, untrusted)).rejects.toThrow("another persona");
-  await expect(browserRoot(undefined, config, { PHANTOMBOT_TURN_ID: "1" })).rejects.toThrow("scratch");
+  await expect(browserRoot(undefined, config, untrusted)).rejects.toThrow("runtime broker");
+  await expect(browserRoot("bob", config, untrusted)).rejects.toThrow("runtime broker");
+  await expect(browserRoot(undefined, config, { PHANTOMBOT_TURN_ID: "1" })).rejects.toThrow("runtime broker");
   await expect(browserRoot("../escape", config, {})).rejects.toThrow("does not exist");
+});
+
+test("untrusted CLI uses only its authenticated broker, never launches a local worker", async () => {
+  const requests: unknown[] = [];
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) { requests.push(await req.json()); return Response.json({ result: { text: "broker page" } }); } });
+  let output = "";
+  const input = {
+    request: { action: "read" as const },
+    env: { PHANTOMBOT_TURN_ID: "turn", PHANTOMBOT_PERSONA: "alice", PHANTOMBOT_SECURITY_SESSION: JSON.stringify({ url: `http://127.0.0.1:${server.port}/operation`, token: "a".repeat(64), workspace: "/ignored" }) },
+    call: async () => { throw new Error("must not spawn locally"); },
+    out: (s: string) => { output += s; }, err: () => {},
+  };
+  try {
+    expect(await runBrowser(input)).toBe(0);
+    expect(requests).toEqual([{ kind: "broker", operation: { kind: "browser", request: { action: "read" } } }]);
+    expect(JSON.parse(output)).toEqual({ text: "broker page" });
+    expect(await runBrowser({ ...input, persona: "bob" })).toBe(1);
+    expect(await runBrowser({ ...input, env: { ...input.env, PHANTOMBOT_SECURITY_SESSION: "bad" } })).toBe(1);
+    expect(requests).toHaveLength(1);
+  } finally { await server.stop(true); }
 });
 
 test("CLI routes tabs by conversation and validates before invoking a worker", async () => {
