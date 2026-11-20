@@ -20,7 +20,7 @@ export interface BrowserView {
 
 export interface WebViewRuntime {
   new(options: {
-    backend: { type: "chrome"; url: false };
+    backend: { type: "chrome"; url: false; stderr: "inherit" };
     dataStore: { directory: string };
     width: number;
     height: number;
@@ -121,17 +121,18 @@ export class BrowserSessions {
       if (r.action !== "open") throw new Error(`Session '${name}' is not open; use browser open first`);
       if (this.views.size >= 8) throw new Error("Eight browser tabs are already open; close a session first");
       await mkdir(join(this.root, "profile"), { recursive: true, mode: 0o700 });
-      view = new this.runtime({ backend: { type: "chrome", url: false }, dataStore: { directory: join(this.root, "profile") }, width: 1280, height: 800 });
+      view = new this.runtime({ backend: { type: "chrome", url: false, stderr: "inherit" }, dataStore: { directory: join(this.root, "profile") }, width: 1280, height: 800 });
       this.views.set(name, view);
     }
     const current = view;
+    let stage: string = r.action;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        this.perform(current, r),
+        this.perform(current, r, value => { stage = value; }),
         new Promise<never>((_, reject) => { timer = setTimeout(() => {
           current.close(); this.views.delete(name);
-          reject(new Error("Browser operation timed out; the affected session was closed"));
+          reject(new Error(`Browser operation timed out during ${stage}; the affected session was closed`));
         }, this.timeoutMs); }),
       ]);
     } catch (e) {
@@ -141,17 +142,21 @@ export class BrowserSessions {
     } finally { clearTimeout(timer); }
   }
 
-  private async perform(view: BrowserView, r: BrowserRequest): Promise<unknown> {
+  private async perform(view: BrowserView, r: BrowserRequest, stage: (value: string) => void): Promise<unknown> {
     switch (r.action) {
       case "open": {
         // Establish the CDP session on a blank page BEFORE any site request.
+        stage("Chrome startup");
         await view.navigate("about:blank");
+        stage("user-agent detection");
         const ua = await view.evaluate("navigator.userAgent");
         const metadata = await view.evaluate("navigator.userAgentData ? navigator.userAgentData.getHighEntropyValues(['architecture','bitness','model','platformVersion','fullVersionList','wow64']) : undefined");
+        stage("user-agent override");
         await view.cdp("Emulation.setUserAgentOverride", {
           userAgent: String(ua).replace(/HeadlessChrome/g, "Chrome"),
           ...(metadata ? { userAgentMetadata: metadata } : {}),
         });
+        stage("site navigation");
         await view.navigate(r.url!);
         break;
       }
@@ -173,6 +178,7 @@ export class BrowserSessions {
         return { url: view.url, title: view.title, path, mimeType: "image/png" };
       }
     }
+    stage("rendered snapshot");
     return view.evaluate(SNAPSHOT_SCRIPT);
   }
 

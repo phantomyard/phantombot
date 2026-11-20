@@ -1,6 +1,7 @@
 /** Local, authenticated transport. Each persona (or untrusted scratch) owns a
  * separate process because Bun.WebView shares Chrome/profile process-wide. */
 import { spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { acquireRunLock } from "../lib/runLock.ts";
@@ -39,9 +40,13 @@ export async function browserCall(root: string, request: BrowserRequest): Promis
     if (request.action === "stop" || request.action === "close") return { closed: true, running: false };
     await mkdir(root, { recursive: true, mode: 0o700 });
     const args = isCompiledBinary() ? [] : [resolve(import.meta.dir, "..", "index.ts")];
-    const child = spawn(process.execPath, [...args, BROWSER_SUBCOMMAND, root], {
-      detached: true, stdio: "ignore", env: browserChildEnv(process.env), windowsHide: true,
-    });
+    const log = openSync(join(root, "worker.log"), "w", 0o600);
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(process.execPath, [...args, BROWSER_SUBCOMMAND, root], {
+        detached: true, stdio: ["ignore", "ignore", log], env: browserChildEnv(process.env), windowsHide: true,
+      });
+    } finally { closeSync(log); }
     let spawnError: Error | undefined;
     child.on("error", error => { spawnError = error; });
     child.unref();
@@ -53,7 +58,7 @@ export async function browserCall(root: string, request: BrowserRequest): Promis
       if (candidate && await health(candidate)) { e = candidate; break; }
       await Bun.sleep(100);
     }
-    if (!e) throw new Error("Browser worker did not start (requires a Bun runtime with Bun.WebView)");
+    if (!e) throw new Error(`Browser worker did not start; see ${join(root, "worker.log")} (requires Bun.WebView)`);
   }
   // Never retry an operation: a disconnected reply can follow a successful click.
   const response = await fetch(`http://127.0.0.1:${e.port}/call`, {

@@ -40,6 +40,11 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("Chrome worker renders,
       await browserCall(other, { action: "open", url: `http://127.0.0.1:${cookieServer.port}` });
       expect(cookies[0]).not.toContain("phantom=present");
     } finally { await cookieServer.stop(true); }
+  } catch (error) {
+    // The test owns both throwaway profiles; report Chrome launch failures
+    // before deleting them, so platform CI failures are actually diagnosable.
+    for (const path of [root, other]) console.error(await readFile(join(path, "worker.log"), "utf8").catch(() => "(no browser log)"));
+    throw error;
   } finally {
     await Promise.allSettled([browserCall(root, { action: "stop" }), browserCall(other, { action: "stop" })]);
     await Bun.sleep(200);
