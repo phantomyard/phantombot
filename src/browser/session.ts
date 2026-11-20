@@ -20,7 +20,7 @@ export interface BrowserView {
 
 export interface WebViewRuntime {
   new(options: {
-    backend: { type: "chrome"; url: false; stderr: "inherit" };
+    backend: { type: "chrome"; url: false; stderr: "inherit"; argv: string[] };
     dataStore: { directory: string };
     width: number;
     height: number;
@@ -121,7 +121,7 @@ export class BrowserSessions {
       if (r.action !== "open") throw new Error(`Session '${name}' is not open; use browser open first`);
       if (this.views.size >= 8) throw new Error("Eight browser tabs are already open; close a session first");
       await mkdir(join(this.root, "profile"), { recursive: true, mode: 0o700 });
-      view = new this.runtime({ backend: { type: "chrome", url: false, stderr: "inherit" }, dataStore: { directory: join(this.root, "profile") }, width: 1280, height: 800 });
+      view = new this.runtime({ backend: { type: "chrome", url: false, stderr: "inherit", argv: process.platform === "darwin" ? ["--use-mock-keychain"] : [] }, dataStore: { directory: join(this.root, "profile") }, width: 1280, height: 800 });
       this.views.set(name, view);
     }
     const current = view;

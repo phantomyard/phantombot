@@ -40,7 +40,7 @@ describe("browser sessions", () => {
     const root = await temp(); const fake = fakeRuntime(); const sessions = new BrowserSessions(root, fake.runtime);
     await sessions.execute({ action: "open", url: "https://example.com" });
     await sessions.execute({ action: "read" });
-    expect(fake.options).toEqual([{ backend: { type: "chrome", url: false, stderr: "inherit" }, dataStore: { directory: join(root, "profile") }, width: 1280, height: 800 }]);
+    expect(fake.options).toEqual([{ backend: { type: "chrome", url: false, stderr: "inherit", argv: process.platform === "darwin" ? ["--use-mock-keychain"] : [] }, dataStore: { directory: join(root, "profile") }, width: 1280, height: 800 }]);
     const override = fake.calls.findIndex(c => c[0] === "Emulation.setUserAgentOverride");
     expect(override).toBeGreaterThan(0);
     expect(fake.calls[override]?.[1]).toMatchObject({ userAgent: "Chrome/156.0.0.0" });
