@@ -30,6 +30,24 @@ async function health(e: Endpoint): Promise<boolean> {
   } catch { return false; }
 }
 
+/** /shutdown replies BEFORE the worker has stopped serving, removed its
+ * endpoint and released worker.lock; an immediate next call could hit the
+ * closing worker ("busy") or a fresh worker could lose the lock race.
+ * Return only once the old worker is fully gone (or after a bounded wait). */
+export const WORKER_EXIT_WAIT_MS = 10_000;
+async function workerGone(root: string, old: Endpoint): Promise<void> {
+  const deadline = Date.now() + WORKER_EXIT_WAIT_MS;
+  while (Date.now() < deadline) {
+    const current = await endpoint(root);
+    if (current?.token !== old.token && !await health(old)) {
+      const lock = acquireRunLock(join(root, "worker.lock"));
+      if ("release" in lock) { lock.release(); return; }
+    }
+    await Bun.sleep(25);
+  }
+  throw new Error(`Browser worker did not exit within ${WORKER_EXIT_WAIT_MS / 1000}s; see ${join(root, "worker.log")}`);
+}
+
 export interface BrowserCallOptions extends DiscoveryOptions {
   /** Where the persona's browser choice and detection cache live
    * (`<persona-dir>/browser`). Defaults to `root` (the persona worker). */
@@ -79,6 +97,7 @@ export async function browserCall(root: string, request: BrowserRequest, signal?
     body: JSON.stringify(request), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(35_000)]) : AbortSignal.timeout(35_000), redirect: "error",
   });
   const body = await response.json() as { result?: unknown; error?: string };
+  if (request.action === "stop" && response.ok) await workerGone(root, e);
   if (!response.ok) {
     // The cached pick stopped launching (uninstalled, broken update): detect
     // again on the next open. A persona's explicit choice is never dropped.

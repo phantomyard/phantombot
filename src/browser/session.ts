@@ -112,7 +112,7 @@ export const SNAPSHOT_SCRIPT = `(() => {
     while(n && n.nodeType===1) { let index=1; for(let p=n.previousElementSibling;p;p=p.previousElementSibling) if(p.tagName===n.tagName) index++;
       parts.unshift(n.tagName.toLowerCase()+':nth-of-type('+index+')'); n=n.parentElement; }
     const r=e.getBoundingClientRect();
-    elements.push({selector:parts.join(' > ').slice(0,2000),tag:e.tagName.toLowerCase(),label:(e.getAttribute('aria-label')||e.innerText||e.getAttribute('placeholder')||e.getAttribute('name')||'').slice(0,160),type:e.getAttribute('type'),href:e.href?e.href.slice(0,2000):undefined,inViewport:r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth});
+    elements.push({selector:parts.join(' > ').slice(0,2000),tag:e.tagName.toLowerCase(),label:(e.getAttribute('aria-label')||e.innerText||e.getAttribute('placeholder')||e.getAttribute('name')||'').slice(0,160),type:e.tagName==='INPUT'?e.type:e.getAttribute('type'),href:e.href?e.href.slice(0,2000):undefined,inViewport:r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth});
   }
   return {url:location.href,title:document.title,text:text.slice(0,24000),truncated:text.length>24000,elements};
 })()`;
@@ -135,6 +135,36 @@ export function hitPointScript(selector: string): string {
 }
 
 const PAGE_STATE_SCRIPT = "({ url: location.href, title: document.title })";
+
+/** Whether keystrokes from `type` have somewhere to go: the focused element
+ * (through shadow roots and same-origin frames) accepts text. A cross-origin
+ * frame cannot be inspected, so it is reported as unknown (`editable: null`)
+ * rather than refused. Issue #810: typing with nothing focused used to
+ * "succeed" while the text went nowhere. */
+export const FOCUS_SCRIPT = `(() => {
+  const TEXT = /^(text|search|email|url|tel|password|number|date|datetime-local|month|week|time|color)$/;
+  let e = document.activeElement;
+  for (;;) {
+    if (e && e.shadowRoot && e.shadowRoot.activeElement) { e = e.shadowRoot.activeElement; continue; }
+    if (e && (e.tagName === 'IFRAME' || e.tagName === 'FRAME')) {
+      let inner = null; try { inner = e.contentDocument; } catch {}
+      if (!inner) return { editable: null, tag: e.tagName.toLowerCase() };
+      e = inner.activeElement; continue;
+    }
+    break;
+  }
+  if (!e || e === document.body || e === document.documentElement) return { editable: false, tag: e ? e.tagName.toLowerCase() : null };
+  const tag = e.tagName.toLowerCase();
+  let editable = !!e.isContentEditable;
+  if (tag === 'textarea') editable = !e.disabled && !e.readOnly;
+  if (tag === 'input') editable = !e.disabled && !e.readOnly && TEXT.test(e.type);
+  return { editable, tag };
+})()`;
+
+/** Main document finished loading: used to settle `open` before snapshotting. */
+const READY_SCRIPT = "document.readyState";
+/** Poll interval while waiting for a document to finish loading. */
+const READY_POLL_MS = 50;
 
 /** One instance per dedicated process: Bun's Chrome profile is process-wide. */
 export class BrowserSessions {
@@ -223,13 +253,23 @@ export class BrowserSessions {
         });
         stage("site navigation");
         await view.navigate(r.url!);
-        break;
+        // navigate() can resolve before the document is ready, so the first
+        // snapshot came back empty while the next read was populated (#810).
+        stage("page load");
+        return this.readySnapshot(view);
       }
       case "click":
         await view.scrollTo(r.selector!, { timeout: Math.min(SELECTOR_WAIT_MS, this.timeoutMs) });
         stage("click");
         await this.settled(view, () => this.click(view, r.selector!), stage); break;
-      case "type": await view.type(r.text!); break;
+      case "type": {
+        const focus = await view.evaluate(FOCUS_SCRIPT) as { editable?: unknown; tag?: unknown } | undefined;
+        if (focus?.editable === false) {
+          const what = typeof focus.tag === "string" ? `<${focus.tag}>` : "nothing";
+          throw new Error(`Nothing editable is focused (focus is on ${what}); click an input first. No text was typed`);
+        }
+        await view.type(r.text!); break;
+      }
       case "press": await this.settled(view, () => view.press(r.key!), stage); break;
       case "scroll": await view.scroll(r.dx ?? 0, r.dy!); break;
       case "resize": await view.resize(r.width!, r.height!); break;
@@ -249,6 +289,24 @@ export class BrowserSessions {
     }
     stage("rendered snapshot");
     return view.evaluate(SNAPSHOT_SCRIPT);
+  }
+
+  /** Wait (bounded) for document.readyState 'complete', then snapshot; an
+   * empty snapshot of a ready page is retried until the same deadline, since
+   * a client-rendered page fills its body after the load event. */
+  private async readySnapshot(view: BrowserView): Promise<unknown> {
+    const deadline = Date.now() + Math.min(NAVIGATION_WAIT_MS, this.timeoutMs / 2);
+    while (Date.now() < deadline) {
+      const state = await view.evaluate(READY_SCRIPT).catch(() => undefined);
+      if (state !== "loading" && state !== "interactive") break;
+      await Bun.sleep(READY_POLL_MS);
+    }
+    for (;;) {
+      const snapshot = await view.evaluate(SNAPSHOT_SCRIPT) as { text?: unknown; elements?: unknown } | undefined;
+      const empty = snapshot?.text === "" && Array.isArray(snapshot.elements) && snapshot.elements.length === 0;
+      if (!empty || Date.now() >= deadline) return snapshot;
+      await Bun.sleep(READY_POLL_MS);
+    }
   }
 
   private async click(view: BrowserView, selector: string): Promise<void> {

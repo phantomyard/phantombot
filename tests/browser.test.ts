@@ -2,8 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BrowserSessions, CHROME_START_FAILED, type BrowserView, type WebViewRuntime, validateRequest } from "../src/browser/session.ts";
-import { browserChildEnv, runBrowserDaemon } from "../src/browser/daemon.ts";
+import { BrowserSessions, CHROME_START_FAILED, FOCUS_SCRIPT, SNAPSHOT_SCRIPT, type BrowserView, type WebViewRuntime, validateRequest } from "../src/browser/session.ts";
+import { browserCall, browserChildEnv, runBrowserDaemon } from "../src/browser/daemon.ts";
+import { acquireRunLock } from "../src/lib/runLock.ts";
 import { browserRoot, runBrowser } from "../src/cli/browser.ts";
 import type { Config } from "../src/config.ts";
 import browserCommand from "../src/cli/browser.ts";
@@ -312,5 +313,83 @@ describe("issue #810 session fixes", () => {
     const sessions = new BrowserSessions(await temp(), Broken as unknown as WebViewRuntime);
     await expect(sessions.execute({ action: "open", url: "https://example.com" })).rejects.toThrow(`${CHROME_START_FAILED}: Chrome process closed the pipe`);
     expect(sessions.chromeGone).toBe(true);
+  });
+});
+
+describe("issue #810 review follow-ups", () => {
+  function scripted(answers: { ready?: unknown[]; snapshots?: unknown[]; focus?: unknown }) {
+    const fake = fakeRuntime();
+    const ready = [...(answers.ready ?? [])], snapshots = [...(answers.snapshots ?? [])];
+    class View extends (fake.runtime as unknown as { new(v: unknown): BrowserView }) {
+      override async evaluate(script: string): Promise<unknown> {
+        fake.calls.push(["evaluate", script]);
+        if (script === "navigator.userAgent") return "HeadlessChrome/156.0.0.0";
+        if (script === "document.readyState") return ready.length ? ready.shift() : "complete";
+        if (script === FOCUS_SCRIPT) return answers.focus;
+        if (script === SNAPSHOT_SCRIPT) return snapshots.length > 1 ? snapshots.shift() : snapshots[0] ?? { text: "fixture", elements: [] };
+        return undefined;
+      }
+    }
+    return { ...fake, runtime: View as unknown as WebViewRuntime };
+  }
+
+  test("open waits for the document to finish loading before the snapshot", async () => {
+    const fake = scripted({ ready: ["loading", "interactive", "complete"], snapshots: [{ text: "Loaded", elements: [] }] });
+    const sessions = new BrowserSessions(await temp(), fake.runtime);
+    expect(await sessions.execute({ action: "open", url: "https://example.com" })).toEqual({ text: "Loaded", elements: [] });
+    const order = fake.calls.filter(c => c[0] === "evaluate" && (c[1] === "document.readyState" || c[1] === SNAPSHOT_SCRIPT)).map(c => c[1] === SNAPSHOT_SCRIPT ? "snapshot" : "ready");
+    expect(order).toEqual(["ready", "ready", "ready", "snapshot"]);
+    sessions.closeAll();
+  });
+
+  test("open retries an empty snapshot of a ready page instead of returning it", async () => {
+    const empty = { text: "", elements: [] };
+    const fake = scripted({ snapshots: [empty, empty, { text: "Hydrated", elements: [{ tag: "a" }] }] });
+    const sessions = new BrowserSessions(await temp(), fake.runtime);
+    expect(await sessions.execute({ action: "open", url: "https://example.com" })).toEqual({ text: "Hydrated", elements: [{ tag: "a" }] });
+    sessions.closeAll();
+  });
+
+  test("type with nothing editable focused errors and sends no keystrokes; a focused input types", async () => {
+    let fake = scripted({ focus: { editable: false, tag: "body" } });
+    let sessions = new BrowserSessions(await temp(), fake.runtime);
+    await sessions.execute({ action: "open", url: "https://example.com" });
+    await expect(sessions.execute({ action: "type", text: "lost" })).rejects.toThrow("Nothing editable is focused");
+    expect(fake.calls.some(c => c[0] === "type")).toBe(false);
+    sessions.closeAll();
+    for (const focus of [{ editable: true, tag: "input" }, { editable: null, tag: "iframe" }]) {
+      fake = scripted({ focus });
+      sessions = new BrowserSessions(await temp(), fake.runtime);
+      await sessions.execute({ action: "open", url: "https://example.com" });
+      await sessions.execute({ action: "type", text: "kept" });
+      expect(fake.calls).toContainEqual(["type", "kept"]);
+      sessions.closeAll();
+    }
+  });
+
+  test("stop returns only after the worker released its endpoint and lock, so the next start wins", async () => {
+    const root = await temp();
+    const first = runBrowserDaemon(root);
+    let endpoint: { port: number; token: string } | undefined;
+    for (let i = 0; i < 200 && !endpoint; i++) {
+      try { endpoint = JSON.parse(await readFile(join(root, "endpoint.json"), "utf8")); } catch { await Bun.sleep(5); }
+    }
+    expect(endpoint).toBeDefined();
+    expect(await browserCall(root, { action: "stop" })).toEqual({ stopped: true });
+    // No sleep: the old endpoint must already be gone and the lock free.
+    await expect(fetch(`http://127.0.0.1:${endpoint!.port}/health`, { headers: { Authorization: `Bearer ${endpoint!.token}` } })).rejects.toThrow();
+    await expect(readFile(join(root, "endpoint.json"))).rejects.toThrow();
+    const lock = acquireRunLock(join(root, "worker.lock"));
+    expect("release" in lock).toBe(true);
+    if ("release" in lock) lock.release();
+    await first;
+    // A replacement worker started immediately serves calls.
+    const second = runBrowserDaemon(root, 300);
+    let next: { port: number; token: string } | undefined;
+    for (let i = 0; i < 200 && !next; i++) {
+      try { next = JSON.parse(await readFile(join(root, "endpoint.json"), "utf8")); } catch { await Bun.sleep(5); }
+    }
+    expect(next?.token).not.toBe(endpoint!.token);
+    await second;
   });
 });
