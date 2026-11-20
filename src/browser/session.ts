@@ -130,9 +130,13 @@ export class BrowserSessions {
     try {
       return await Promise.race([
         this.perform(current, r, value => { stage = value; }),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => {
+        new Promise<never>((_, reject) => { timer = setTimeout(async () => {
+          const state = await Promise.race([
+            current.evaluate("document.readyState").catch(() => "unavailable"),
+            Bun.sleep(250).then(() => "unresponsive"),
+          ]);
           current.close(); this.views.delete(name);
-          reject(new Error(`Browser operation timed out during ${stage}; the affected session was closed`));
+          reject(new Error(`Browser operation timed out during ${stage} (document ${state}); the affected session was closed`));
         }, this.timeoutMs); }),
       ]);
     } catch (e) {

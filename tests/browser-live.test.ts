@@ -41,6 +41,7 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("Chrome worker renders,
       expect(cookies[0]).not.toContain("phantom=present");
     } finally { await cookieServer.stop(true); }
   } catch (error) {
+    console.error(`Fixture received ${agents.length} HTTP requests`);
     // The test owns both throwaway profiles; report Chrome launch failures
     // before deleting them, so platform CI failures are actually diagnosable.
     for (const path of [root, other]) console.error(await readFile(join(path, "worker.log"), "utf8").catch(() => "(no browser log)"));
