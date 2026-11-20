@@ -46,6 +46,12 @@ Phantombot is the agent runtime of [**Phantomyard**](https://phantomyard.ai):
 - **Local control** — persona state and AES-256-GCM encrypted secrets stay on
   your machine.
 
+## Built-in web browser
+
+Phantoms can read rendered pages, click, type, and inspect screenshots with
+`phantombot browser`. It uses Bun.WebView and an installed Chrome-family browser,
+with isolated persona profiles and lazy startup. See the [browser guide](docs/reference/browser.md).
+
 ## Install
 
 Linux and macOS:
@@ -94,6 +100,7 @@ phantombot acp install vscode    # also: zed, jetbrains, opencode
 |---|---|
 | `phantombot memory …` | Search, capture, inspect, and back up memory. |
 | `phantombot task …` | Schedule one-off and recurring work. |
+| `phantombot browser …` | Browse rendered pages and capture screenshots. |
 | `phantombot mcp …` | Discover and call external integrations. |
 | `phantombot vault …` | Store encrypted, persona-scoped secrets. |
 | `phantombot notify …` | Send a background update to the owner. |

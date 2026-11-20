@@ -122,6 +122,7 @@ One line per rule: its stable number, then its title. Click through for the full
 - [46](docs/contributing/invariants/architecture-and-orchestrator.md#inv-46) Fleet-wide behavioural rules ship as PROSE IN THE BINARY, not as a file on the host.
 - [64](docs/contributing/invariants/architecture-and-orchestrator.md#inv-64) The embeddable engine (`src/engine/`) is a FACADE over the daemon's own functions, scoped by AsyncLocalStorage — never by `process.env` (`phantombot/engine`, docs/reference/engine.md).
 - [69](docs/contributing/invariants/architecture-and-orchestrator.md#inv-69) A turn's scratch files live under the PERSONA dir, are named INJECTIVELY, and the env var is RUNTIME-owned (issue #661).
+- [89](docs/contributing/invariants/architecture-and-orchestrator.md#inv-89) Browser profiles are process-isolated by persona and trust tier; shutdown flushes Chrome before force cleanup.
 
 ### Channels — [channels.md](docs/contributing/invariants/channels.md)
 

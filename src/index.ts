@@ -57,8 +57,12 @@ import { BODY_GUARD_SUBCOMMAND, runBodyGuardHook } from "./lib/bodyPathGuard.ts"
 
 import { runSandbox, SANDBOX_SUBCOMMAND, sandboxExecChild } from "./security/sandbox.ts";
 import { runSecurityMcpServer, SECURITY_MCP_SUBCOMMAND } from "./security/mcpServer.ts";
+import { BROWSER_SUBCOMMAND, runBrowserDaemon } from "./browser/daemon.ts";
 
-if (process.argv[2] === "__sandbox_run") {
+if (process.argv[2] === BROWSER_SUBCOMMAND) {
+  try { await runBrowserDaemon(process.argv[3]!); }
+  catch (error) { console.error((error as Error).message); process.exitCode = 1; }
+} else if (process.argv[2] === "__sandbox_run") {
   try {
     const result = await runSandbox(process.argv[3]!, process.argv[4]!);
     await Bun.write(Bun.stdout, JSON.stringify(result));

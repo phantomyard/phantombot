@@ -57,6 +57,36 @@ jobs:
           echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
           echo "Runtime-affecting changes: $runtime"
 
+  browser-live:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            chrome: /usr/bin/google-chrome
+          - os: macos-latest
+            chrome: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+          - os: windows-latest
+            chrome: C:\Program Files\Google\Chrome\Application\chrome.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    concurrency:
+      group: ci-browser-${{ github.head_ref }}-${{ matrix.os }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.x
+      - run: bun install --frozen-lockfile
+      - name: Verify real Chrome rendering and profile isolation
+        run: bun test tests/browser-live.test.ts
+        env:
+          PHANTOMBOT_BROWSER_LIVE: "1"
+          BUN_CHROME_PATH: ${{ matrix.chrome }}
+
   typecheck:
     needs: changes
     if: needs.changes.outputs.runtime == 'true'

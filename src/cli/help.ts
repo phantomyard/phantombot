@@ -60,7 +60,7 @@ export const HELP_GROUPS: readonly HelpGroup[] = [
   },
   {
     title: "SECRETS & TOOLS",
-    commands: ["vault", "env", "mcp", "judge"],
+    commands: ["vault", "env", "mcp", "browser", "judge"],
   },
   {
     title: "MAINTAIN",
