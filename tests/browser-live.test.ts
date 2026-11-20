@@ -31,14 +31,20 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("Chrome worker renders,
     await browserCall(root, { action: "stop" });
     // Let the old process release its profile and lock before another start.
     await Bun.sleep(200);
-    const cookies: string[] = [];
-    const cookieServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) { cookies.push(req.headers.get("cookie") ?? ""); return new Response("cookies checked"); } });
+    const cookies = { persisted: [] as string[], isolated: [] as string[] };
+    const cookieServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+      const path = new URL(req.url).pathname;
+      // Chrome may request the first tab's favicon after the second profile
+      // starts. Attribute evidence by the requested route, never arrival order.
+      if (path === "/persisted") cookies.persisted.push(req.headers.get("cookie") ?? "");
+      if (path === "/isolated") cookies.isolated.push(req.headers.get("cookie") ?? "");
+      return new Response("cookies checked");
+    } });
     try {
-      await browserCall(root, { action: "open", url: `http://127.0.0.1:${cookieServer.port}` });
-      expect(cookies[0]).toContain("phantom=present");
-      cookies.length = 0;
-      await browserCall(other, { action: "open", url: `http://127.0.0.1:${cookieServer.port}` });
-      expect(cookies[0]).not.toContain("phantom=present");
+      await browserCall(root, { action: "open", url: `http://127.0.0.1:${cookieServer.port}/persisted` });
+      expect(cookies.persisted).toEqual(["phantom=present"]);
+      await browserCall(other, { action: "open", url: `http://127.0.0.1:${cookieServer.port}/isolated` });
+      expect(cookies.isolated).toEqual([""]);
     } finally { await cookieServer.stop(true); }
   } catch (error) {
     console.error(`Fixture received ${agents.length} HTTP requests`);
