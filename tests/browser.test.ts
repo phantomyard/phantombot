@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BrowserSessions, type BrowserView, type WebViewRuntime, validateRequest } from "../src/browser/session.ts";
+import { BrowserSessions, CHROME_START_FAILED, type BrowserView, type WebViewRuntime, validateRequest } from "../src/browser/session.ts";
 import { browserChildEnv, runBrowserDaemon } from "../src/browser/daemon.ts";
 import { browserRoot, runBrowser } from "../src/cli/browser.ts";
 import type { Config } from "../src/config.ts";
@@ -25,7 +25,7 @@ function fakeRuntime() {
     async evaluate(script: string): Promise<unknown> { calls.push(["evaluate", script]); return script === "navigator.userAgent" ? "HeadlessChrome/156.0.0.0" : { text: "fixture" }; }
     async cdp(method: string, params?: unknown) { calls.push([method, params]); if (method === "Browser.close") throw new Error("Chrome closed"); return {}; }
     async screenshot() { return Buffer.from("\x89PNG\r\n\x1a\n"); }
-    async click(selector: string) { calls.push(["click", selector]); }
+    async click(selector: string | number, y?: number | { timeout: number }) { calls.push(typeof selector === "number" ? ["clickAt", selector, y] : ["click", selector]); }
     async scrollTo(selector: string) { calls.push(["scrollTo", selector]); }
     async type(text: string) { calls.push(["type", text]); }
     async press(key: string) { calls.push(["press", key]); }
@@ -192,4 +192,125 @@ test("transport rejects unauthenticated, cross-origin and malformed requests; id
   expect((await fetch(url, { method: "POST", headers, body: JSON.stringify({ action: "open", url: "file:///x" }) })).status).toBe(400);
   await daemon;
   await expect(readFile(join(root, "endpoint.json"))).rejects.toThrow();
+});
+
+describe("issue #810 session fixes", () => {
+  /** A fake view that emits CDP page events like Chrome does after Enter. */
+  function eventRuntime(opts: { navigateOnPress?: boolean; frame?: string; stopAfterMs?: number; clickError?: string; hitPoint?: unknown; dead?: boolean } = {}) {
+    const fake = fakeRuntime();
+    const listeners = new Map<string, Set<(e: Event) => void>>();
+    const state = { title: "Home", stoppedAt: 0, snapshotAt: 0 };
+    const emit = (type: string, frameId: string) => { for (const l of listeners.get(type) ?? []) l(new MessageEvent(type, { data: { frameId } })); };
+    class View extends (fake.runtime as unknown as { new(v: unknown): BrowserView }) {
+      addEventListener(type: string, l: (e: Event) => void) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type)!.add(l); }
+      removeEventListener(type: string, l: (e: Event) => void) { listeners.get(type)?.delete(l); }
+      override async cdp(method: string, params?: unknown) {
+        fake.calls.push([method, params]);
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+        return {};
+      }
+      override async press(key: string) {
+        fake.calls.push(["press", key]);
+        if (!opts.navigateOnPress) return;
+        const frame = opts.frame ?? "main";
+        emit("Page.frameRequestedNavigation", frame);
+        setTimeout(() => { emit("Page.frameStartedLoading", frame); }, 20);
+        setTimeout(() => { if (frame === "main") state.title = "Results"; state.stoppedAt = Date.now(); emit("Page.frameStoppedLoading", frame); }, opts.stopAfterMs ?? 120);
+      }
+      override async click(selector: string | number, y?: number | { timeout: number }) {
+        if (typeof selector === "number") { fake.calls.push(["clickAt", selector, y]); return; }
+        fake.calls.push(["click", selector]);
+        if (opts.clickError) throw new Error(opts.clickError);
+      }
+      override async evaluate(script: string): Promise<unknown> {
+        fake.calls.push(["evaluate", script]);
+        if (opts.dead && script === "1") throw new Error("Target closed");
+        if (script === "navigator.userAgent") return "HeadlessChrome/156.0.0.0";
+        if (script.includes("elementFromPoint")) return opts.hitPoint ?? null;
+        if (script.includes("location.href, title: document.title")) return { url: "https://example.com/live", title: state.title };
+        state.snapshotAt = Date.now();
+        return { title: state.title };
+      }
+    }
+    return { ...fake, runtime: View as unknown as WebViewRuntime, state, listeners };
+  }
+
+  test("press Enter returns the page AFTER the main-frame navigation it started", async () => {
+    const fake = eventRuntime({ navigateOnPress: true });
+    const sessions = new BrowserSessions(await temp(), fake.runtime);
+    await sessions.execute({ action: "open", url: "https://example.com" });
+    expect(await sessions.execute({ action: "press", key: "Enter" })).toEqual({ title: "Results" });
+    expect(fake.state.snapshotAt).toBeGreaterThanOrEqual(fake.state.stoppedAt);
+    // Listeners are removed after every action.
+    for (const set of fake.listeners.values()) expect(set.size).toBe(0);
+    sessions.closeAll();
+  });
+
+  test("an iframe navigation is not waited for; a press with no navigation returns after the short grace", async () => {
+    const fake = eventRuntime({ navigateOnPress: true, frame: "ad-iframe", stopAfterMs: 2000 });
+    const sessions = new BrowserSessions(await temp(), fake.runtime);
+    await sessions.execute({ action: "open", url: "https://example.com" });
+    const started = Date.now();
+    expect(await sessions.execute({ action: "press", key: "Enter" })).toEqual({ title: "Home" });
+    // Grace only (300 ms), never the iframe's 2 s load.
+    expect(Date.now() - started).toBeLessThan(1000);
+    sessions.closeAll();
+  });
+
+  test("a failed selector keeps the tab, its page and its identity", async () => {
+    const fake = eventRuntime({ clickError: "timeout waiting for '#missing' to be actionable" });
+    const sessions = new BrowserSessions(await temp(), fake.runtime);
+    await sessions.execute({ action: "open", url: "https://example.com" });
+    await expect(sessions.execute({ action: "click", selector: "#missing" })).rejects.toThrow("(the tab is still open)");
+    expect(fake.calls.some(c => c[0] === "close" || c[0] === "closeAll")).toBe(false);
+    expect(await sessions.execute({ action: "read" })).toEqual({ title: "Home" });
+    expect(sessions.chromeGone).toBe(false);
+    sessions.closeAll();
+  });
+
+  test("a tab that no longer answers is closed and marks Chrome gone", async () => {
+    const fake = eventRuntime({ clickError: "Chrome process closed the pipe", dead: true });
+    const sessions = new BrowserSessions(await temp(), fake.runtime);
+    await sessions.execute({ action: "open", url: "https://example.com" });
+    await expect(sessions.execute({ action: "click", selector: "#x" })).rejects.toThrow("closed the pipe");
+    expect(fake.calls.some(c => c[0] === "closeAll")).toBe(true);
+    expect(sessions.chromeGone).toBe(true);
+    await expect(sessions.execute({ action: "read" })).rejects.toThrow("not open");
+  });
+
+  test("click falls back to the hit-tested center only when Bun's actionability wait gives up", async () => {
+    const actionable = "timeout waiting for 'input[name=\"q\"]' to be actionable";
+    let fake = eventRuntime({ clickError: actionable, hitPoint: { x: 640, y: 42 } });
+    let sessions = new BrowserSessions(await temp(), fake.runtime);
+    await sessions.execute({ action: "open", url: "https://example.com" });
+    await sessions.execute({ action: "click", selector: "input[name=\"q\"]" });
+    expect(fake.calls.find(c => c[0] === "clickAt")).toEqual(["clickAt", 640, 42]);
+    const script = fake.calls.find(c => c[0] === "evaluate" && String(c[1]).includes("elementFromPoint"))![1] as string;
+    expect(script).toContain(JSON.stringify("input[name=\"q\"]"));
+    sessions.closeAll();
+    // Obscured or missing (hit test returns null): the original error stands.
+    fake = eventRuntime({ clickError: actionable, hitPoint: null });
+    sessions = new BrowserSessions(await temp(), fake.runtime);
+    await sessions.execute({ action: "open", url: "https://example.com" });
+    await expect(sessions.execute({ action: "click", selector: "input[name=\"q\"]" })).rejects.toThrow("to be actionable");
+    expect(fake.calls.some(c => c[0] === "clickAt")).toBe(false);
+    sessions.closeAll();
+  });
+
+  test("screenshot metadata comes from the live document, not Bun's last-navigation cache", async () => {
+    const fake = eventRuntime();
+    const sessions = new BrowserSessions(await temp(), fake.runtime);
+    await sessions.execute({ action: "open", url: "https://example.com" });
+    fake.state.title = "Results";
+    expect(await sessions.execute({ action: "screenshot" })).toMatchObject({ url: "https://example.com/live", title: "Results" });
+    sessions.closeAll();
+  });
+
+  test("a browser that never launches reports CHROME_START_FAILED and marks Chrome gone", async () => {
+    const fake = fakeRuntime();
+    class Broken extends (fake.runtime as unknown as { new(v: unknown): BrowserView }) { override async navigate(): Promise<unknown> { throw new Error("Chrome process closed the pipe"); } }
+    const sessions = new BrowserSessions(await temp(), Broken as unknown as WebViewRuntime);
+    await expect(sessions.execute({ action: "open", url: "https://example.com" })).rejects.toThrow(`${CHROME_START_FAILED}: Chrome process closed the pipe`);
+    expect(sessions.chromeGone).toBe(true);
+  });
 });

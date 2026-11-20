@@ -6,7 +6,10 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { acquireRunLock } from "../lib/runLock.ts";
 import { isCompiledBinary } from "../lib/embeddedPi.ts";
-import { BrowserSessions, type BrowserRequest, validateRequest } from "./session.ts";
+import { BrowserSessions, CHROME_START_FAILED, type BrowserRequest, validateRequest } from "./session.ts";
+import { browserChildEnv, forgetDetected, resolveBrowserExecutable, type DiscoveryOptions } from "./discovery.ts";
+
+export { browserChildEnv };
 
 export const BROWSER_SUBCOMMAND = "__browser";
 export const BROWSER_IDLE_MS = 5 * 60_000;
@@ -27,25 +30,33 @@ async function health(e: Endpoint): Promise<boolean> {
   } catch { return false; }
 }
 
-/** Browser children need OS environment, not the persona's decrypted vault. */
-export function browserChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const names = ["PATH", "Path", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMFILES", "ProgramFiles", "ProgramFiles(x86)", "SYSTEMROOT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "BUN_CHROME_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"];
-  return Object.fromEntries(names.filter(n => env[n] !== undefined).map(n => [n, env[n]]));
+export interface BrowserCallOptions extends DiscoveryOptions {
+  /** Where the persona's browser choice and detection cache live
+   * (`<persona-dir>/browser`). Defaults to `root` (the persona worker). */
+  settings?: string;
 }
 
-export async function browserCall(root: string, request: BrowserRequest, signal?: AbortSignal): Promise<unknown> {
+export async function browserCall(root: string, request: BrowserRequest, signal?: AbortSignal, options: BrowserCallOptions = {}): Promise<unknown> {
   signal?.throwIfAborted();
   validateRequest(request);
+  const settings = options.settings ?? root;
   let e = await endpoint(root);
   if (!e || !await health(e)) {
     if (request.action === "stop" || request.action === "close") return { closed: true, running: false };
     await mkdir(root, { recursive: true, mode: 0o700 });
+    // Bun launches Chrome once per process and cannot fall back after a
+    // failed launch, so the executable is chosen (and launch-tested) here.
+    const executable = await resolveBrowserExecutable(settings, root, options);
+    signal?.throwIfAborted();
+    const env = browserChildEnv(process.env);
+    if (executable.path) env.BUN_CHROME_PATH = executable.path;
+    else delete env.BUN_CHROME_PATH;
     const args = isCompiledBinary() ? [] : [resolve(import.meta.dir, "..", "index.ts")];
     const log = openSync(join(root, "worker.log"), "w", 0o600);
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(process.execPath, [...args, BROWSER_SUBCOMMAND, root], {
-        detached: true, stdio: ["ignore", "ignore", log], env: browserChildEnv(process.env), windowsHide: true,
+        detached: true, stdio: ["ignore", "ignore", log], env, windowsHide: true,
       });
     } finally { closeSync(log); }
     let spawnError: Error | undefined;
@@ -68,7 +79,12 @@ export async function browserCall(root: string, request: BrowserRequest, signal?
     body: JSON.stringify(request), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(35_000)]) : AbortSignal.timeout(35_000), redirect: "error",
   });
   const body = await response.json() as { result?: unknown; error?: string };
-  if (!response.ok) throw new Error(body.error ?? `Browser worker returned ${response.status}`);
+  if (!response.ok) {
+    // The cached pick stopped launching (uninstalled, broken update): detect
+    // again on the next open. A persona's explicit choice is never dropped.
+    if (body.error?.startsWith(CHROME_START_FAILED)) await forgetDetected(settings).catch(() => {});
+    throw new Error(body.error ?? `Browser worker returned ${response.status}`);
+  }
   return body.result;
 }
 
@@ -112,6 +128,9 @@ export async function runBrowserDaemon(root: string, idleMs = BROWSER_IDLE_MS): 
         if (request.action === "stop") { closing = true; setTimeout(finish, 25); }
         return Response.json({ result });
       } catch (error) {
+        // Bun never relaunches Chrome inside a process whose Chrome died, so a
+        // worker without a browser exits and the next call starts a fresh one.
+        if (sessions.chromeGone) { closing = true; setTimeout(finish, 25); }
         return Response.json({ error: (error as Error).message }, { status: 400 });
       } finally { pending--; lastUse = Date.now(); }
     },

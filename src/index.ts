@@ -58,10 +58,15 @@ import { BODY_GUARD_SUBCOMMAND, runBodyGuardHook } from "./lib/bodyPathGuard.ts"
 import { runSandbox, SANDBOX_SUBCOMMAND, sandboxExecChild } from "./security/sandbox.ts";
 import { runSecurityMcpServer, SECURITY_MCP_SUBCOMMAND } from "./security/mcpServer.ts";
 import { BROWSER_SUBCOMMAND, runBrowserDaemon } from "./browser/daemon.ts";
+import { BROWSER_PROBE_SUBCOMMAND, runBrowserProbe } from "./browser/discovery.ts";
 
 if (process.argv[2] === BROWSER_SUBCOMMAND) {
   try { await runBrowserDaemon(process.argv[3]!); }
   catch (error) { console.error((error as Error).message); process.exitCode = 1; }
+} else if (process.argv[2] === BROWSER_PROBE_SUBCOMMAND) {
+  // Bun keeps Chrome's pipe alive; exit explicitly once the verdict is out.
+  try { await runBrowserProbe(process.argv[3]!, process.argv[4]!); process.exit(0); }
+  catch (error) { console.error((error as Error).message); process.exit(1); }
 } else if (process.argv[2] === "__sandbox_run") {
   try {
     const result = await runSandbox(process.argv[3]!, process.argv[4]!);

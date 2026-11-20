@@ -1,6 +1,7 @@
 /** Bun's experimental WebView is feature-detected: older runtimes can still run the CLI. */
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { chromeArgv } from "./discovery.ts";
 
 export interface BrowserView {
   url: string;
@@ -10,12 +11,15 @@ export interface BrowserView {
   cdp(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
   screenshot(options: { encoding: "buffer" }): Promise<Buffer>;
   click(selector: string, options: { timeout: number }): Promise<unknown>;
+  click(x: number, y: number): Promise<unknown>;
   type(text: string): Promise<unknown>;
   press(key: string): Promise<unknown>;
   scroll(dx: number, dy: number): Promise<unknown>;
   scrollTo(selector: string, options: { timeout: number }): Promise<unknown>;
   resize(width: number, height: number): Promise<unknown>;
   close(): void;
+  addEventListener?(type: string, listener: (event: Event) => void): void;
+  removeEventListener?(type: string, listener: (event: Event) => void): void;
 }
 
 export interface WebViewRuntime {
@@ -33,6 +37,14 @@ export function webViewRuntime(): WebViewRuntime {
   if (!runtime) throw new Error("This Bun runtime has no Bun.WebView. Update phantombot (or Bun when running from source).");
   return runtime;
 }
+
+/** Error prefix for a browser that never launched; daemon.ts drops the cached
+ * executable on it so the next open runs discovery again. */
+export const CHROME_START_FAILED = "Chrome failed to start";
+/** After a click/key press: how long a navigation has to begin, then finish. */
+export const NAVIGATION_GRACE_MS = 300;
+export const NAVIGATION_WAIT_MS = 8_000;
+const SELECTOR_WAIT_MS = 10_000;
 
 export const BROWSER_ACTIONS = ["open", "read", "screenshot", "click", "type", "press", "scroll", "resize", "close", "stop"] as const;
 export type BrowserAction = typeof BROWSER_ACTIONS[number];
@@ -105,10 +117,32 @@ export const SNAPSHOT_SCRIPT = `(() => {
   return {url:location.href,title:document.title,text:text.slice(0,24000),truncated:text.length>24000,elements};
 })()`;
 
+/** Center of `selector` when it is visible in the viewport and the topmost hit
+ * there is the element itself, a descendant, or its own <label>. Used only
+ * after Bun's stricter actionability wait gave up: that check needs a box
+ * stable across animation frames, which never happens when headless Chrome
+ * throttles rAF or a header animates (issue #810). Never clicks an overlay. */
+export function hitPointScript(selector: string): string {
+  return `((selector) => {
+  const e = document.querySelector(selector); if (!e) return null;
+  const r = e.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0) return null;
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
+  const hit = document.elementFromPoint(x, y); if (!hit) return null;
+  const label = hit.closest('label');
+  return e === hit || e.contains(hit) || (label && label.control === e) ? { x, y } : null;
+})(${JSON.stringify(selector)})`;
+}
+
+const PAGE_STATE_SCRIPT = "({ url: location.href, title: document.title })";
+
 /** One instance per dedicated process: Bun's Chrome profile is process-wide. */
 export class BrowserSessions {
   private views = new Map<string, BrowserView>();
   private identities = new WeakMap<BrowserView, { userAgent: string; metadata: unknown; custom?: string }>();
+  private pageEvents = new WeakSet<BrowserView>();
+  /** Chrome is gone for good: Bun will not relaunch it in this process. */
+  chromeGone = false;
   constructor(private root: string, private runtime: WebViewRuntime = webViewRuntime(), private timeoutMs = 30_000) {}
 
   async execute(raw: unknown): Promise<unknown> {
@@ -128,24 +162,34 @@ export class BrowserSessions {
       if (r.action !== "open") throw new Error(`Session '${name}' is not open; use browser open first`);
       if (this.views.size >= 8) throw new Error("Eight browser tabs are already open; close a session first");
       await mkdir(join(this.root, "profile"), { recursive: true, mode: 0o700 });
-      view = new this.runtime({ backend: { type: "chrome", url: false, stderr: "inherit", argv: process.platform === "darwin" ? ["--use-mock-keychain"] : [] }, dataStore: { directory: join(this.root, "profile") }, width: 1280, height: 800 });
+      view = new this.runtime({ backend: { type: "chrome", url: false, stderr: "inherit", argv: chromeArgv() }, dataStore: { directory: join(this.root, "profile") }, width: 1280, height: 800 });
       this.views.set(name, view);
     }
     const current = view;
     let stage: string = r.action;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     try {
       return await Promise.race([
         this.perform(current, r, value => { stage = value; }),
         new Promise<never>((_, reject) => { timer = setTimeout(() => {
+          timedOut = true;
           current.close(); this.views.delete(name);
           reject(new Error(`Browser operation timed out during ${stage}; the affected session was closed`));
         }, this.timeoutMs); }),
       ]);
     } catch (e) {
+      clearTimeout(timer);
+      // A missing selector or a failed site navigation leaves a working tab:
+      // keep its page, cookies and login (issue #810). Only a tab that no
+      // longer answers is closed.
+      const startFailed = (e as Error).message.startsWith(CHROME_START_FAILED);
+      if (!timedOut && !startFailed && this.views.get(name) === current && await this.responsive(current)) {
+        throw new Error(`${(e as Error).message} (the tab is still open)`);
+      }
       // A crashed Chrome leaves every tab unusable. Start fresh on the next open.
       current.close(); this.views.delete(name);
-      if (this.views.size === 0) this.runtime.closeAll();
+      if (this.views.size === 0) { this.runtime.closeAll(); this.chromeGone = true; }
       throw e;
     } finally { clearTimeout(timer); }
   }
@@ -155,7 +199,8 @@ export class BrowserSessions {
       case "open": {
         // Establish the CDP session on a blank page BEFORE any site request.
         stage("Chrome startup");
-        await view.navigate("about:blank");
+        try { await view.navigate("about:blank"); }
+        catch (error) { throw new Error(`${CHROME_START_FAILED}: ${(error as Error).message}. See 'phantombot browser list' and choose another with 'phantombot browser use <browser>'.`); }
         // A host-side browser must not let a page save arbitrary files into
         // the owner's Downloads directory. This tool exposes text/images only.
         stage("download policy");
@@ -181,10 +226,11 @@ export class BrowserSessions {
         break;
       }
       case "click":
-        await view.scrollTo(r.selector!, { timeout: Math.min(10_000, this.timeoutMs) });
-        await view.click(r.selector!, { timeout: Math.min(10_000, this.timeoutMs) }); break;
+        await view.scrollTo(r.selector!, { timeout: Math.min(SELECTOR_WAIT_MS, this.timeoutMs) });
+        stage("click");
+        await this.settled(view, () => this.click(view, r.selector!), stage); break;
       case "type": await view.type(r.text!); break;
-      case "press": await view.press(r.key!); break;
+      case "press": await this.settled(view, () => view.press(r.key!), stage); break;
       case "scroll": await view.scroll(r.dx ?? 0, r.dy!); break;
       case "resize": await view.resize(r.width!, r.height!); break;
       case "screenshot": {
@@ -195,11 +241,72 @@ export class BrowserSessions {
         for (const name of previous.slice(0, Math.max(0, previous.length - 31))) await rm(join(directory, name));
         const path = join(directory, `${Date.now()}-${crypto.randomUUID()}.png`);
         await Bun.write(path, await view.screenshot({ encoding: "buffer" }), { mode: 0o600 });
-        return { url: view.url, title: view.title, path, mimeType: "image/png" };
+        // view.url/title update only when Bun sees a navigation complete;
+        // read the live document so metadata matches the PNG (issue #810).
+        const page = await view.evaluate(PAGE_STATE_SCRIPT).catch(() => undefined) as { url?: unknown; title?: unknown } | undefined;
+        return { url: typeof page?.url === "string" ? page.url : view.url, title: typeof page?.title === "string" ? page.title : view.title, path, mimeType: "image/png" };
       }
     }
     stage("rendered snapshot");
     return view.evaluate(SNAPSHOT_SCRIPT);
+  }
+
+  private async click(view: BrowserView, selector: string): Promise<void> {
+    try { await view.click(selector, { timeout: Math.min(SELECTOR_WAIT_MS, this.timeoutMs) }); }
+    catch (error) {
+      if (!/actionable/i.test((error as Error).message)) throw error;
+      const point = await view.evaluate(hitPointScript(selector)).catch(() => null) as { x?: unknown; y?: unknown } | null;
+      if (typeof point?.x !== "number" || typeof point.y !== "number") throw error;
+      await view.click(point.x, point.y);
+    }
+  }
+
+  /** Run a click/key press, then wait for any main-frame navigation it started
+   * to finish, so the returned snapshot is the NEW page (issue #810). */
+  private async settled(view: BrowserView, action: () => Promise<unknown>, stage: (value: string) => void): Promise<void> {
+    const add = view.addEventListener?.bind(view), remove = view.removeEventListener?.bind(view);
+    let frame: string | undefined;
+    if (add && remove) {
+      if (!this.pageEvents.has(view)) { await view.cdp("Page.enable"); this.pageEvents.add(view); }
+      const tree = await view.cdp("Page.getFrameTree") as { frameTree?: { frame?: { id?: unknown } } };
+      if (typeof tree.frameTree?.frame?.id === "string") frame = tree.frameTree.frame.id;
+    }
+    if (!frame || !add || !remove) { await action(); return; }
+    let navigating = false;
+    let finished!: () => void;
+    const stopped = new Promise<void>(resolve => { finished = resolve; });
+    const main = (event: Event) => (event as MessageEvent<{ frameId?: string }>).data?.frameId === frame;
+    const start = (event: Event) => { if (main(event)) navigating = true; };
+    const stop = (event: Event) => { if (main(event) && navigating) finished(); };
+    add("Page.frameRequestedNavigation", start);
+    add("Page.frameStartedLoading", start);
+    add("Page.frameStoppedLoading", stop);
+    try {
+      await action();
+      stage("navigation");
+      const grace = Date.now() + NAVIGATION_GRACE_MS;
+      while (!navigating && Date.now() < grace) await Bun.sleep(25);
+      if (!navigating) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      // A navigation slower than this still returns a snapshot (of whatever
+      // has rendered); `read` refreshes it.
+      await Promise.race([stopped, new Promise<void>(resolve => { timer = setTimeout(resolve, NAVIGATION_WAIT_MS); })]);
+      clearTimeout(timer);
+    } finally {
+      remove("Page.frameRequestedNavigation", start);
+      remove("Page.frameStartedLoading", start);
+      remove("Page.frameStoppedLoading", stop);
+    }
+  }
+
+  private async responsive(view: BrowserView): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        view.evaluate("1").then(() => true, () => false),
+        new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 2000); }),
+      ]);
+    } finally { clearTimeout(timer); }
   }
 
   closeAll(): void {
