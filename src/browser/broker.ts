@@ -49,7 +49,8 @@ export class TurnBrowser {
       return root;
     })();
     const root = await this.root;
-    const result = await browserCall(root, request, this.signal);
+    // The persona's browser choice applies to its sandboxed turns too.
+    const result = await browserCall(root, request, this.signal, { settings: join(this.personaDir, "browser") });
     this.signal.throwIfAborted();
     if (request.action !== "screenshot") return { result };
     const shot = result as { path: string; url: string; title: string };

@@ -52,7 +52,10 @@ Phantoms can read rendered pages, click, type, and inspect screenshots with
 `phantombot browser`. It uses Bun.WebView and an installed Chrome-family browser,
 with isolated persona profiles and lazy startup. Sandboxed turns get temporary
 profiles with crash cleanup; page downloads are denied. Each tab supports an optional
-`open --user-agent "custom UA"` override (`--user-agent ""` resets to Chrome). See the [browser guide](docs/reference/browser.md).
+`open --user-agent "custom UA"` override (`--user-agent ""` resets to Chrome). The first open
+test-launches installed browsers and keeps the first that starts (Snap builds last);
+`phantombot browser list` / `browser use <chrome|chromium|brave|edge|path|auto>`
+switch it per persona. See the [browser guide](docs/reference/browser.md).
 
 ## Install
 

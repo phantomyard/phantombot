@@ -1,6 +1,6 @@
 /** Real rendering/IPC proof, opt-in locally; required on Linux/macOS/Windows CI. */
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { browserCall } from "../src/browser/daemon.ts";
@@ -86,3 +86,65 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("Chrome worker renders,
     await rm(other, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 }, 60_000);
+
+// Issue #810: launch-tested discovery and post-action page state, on real Chrome.
+test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("probe vouches only for a browser that starts; cascade picks one without BUN_CHROME_PATH", async () => {
+  const { browserCandidates, probeBrowser, resolveBrowserExecutable, systemHost } = await import("../src/browser/discovery.ts");
+  const root = await mkdtemp(join(tmpdir(), "pb-browser-probe-"));
+  try {
+    const env = { ...process.env }; delete env.BUN_CHROME_PATH;
+    const host = systemHost(env);
+    const known = process.env.BUN_CHROME_PATH ?? browserCandidates(host)[0]?.path;
+    if (known) expect(await probeBrowser(known, root)).toEqual({ ok: true });
+    expect((await probeBrowser(join(root, "no-such-chrome"), root)).ok).toBe(false);
+    const resolved = await resolveBrowserExecutable(root, root, { host });
+    if (browserCandidates(host).length) expect(resolved).toMatchObject({ source: "probed" });
+    else expect(resolved).toEqual({ source: "bun" });
+    // Probe profiles never outlive the probe.
+    expect((await readdir(root)).filter(n => n.startsWith("probe-"))).toEqual([]);
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+}, 90_000);
+
+test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1")("press/click return the navigated page; failed clicks keep the tab; unstable boxes still click", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pb-browser-nav-"));
+  let covered = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+    const url = new URL(req.url);
+    const html = (body: string) => new Response(`<html><head><title>${url.pathname}</title></head><body>${body}</body></html>`, { headers: { "Content-Type": "text/html" } });
+    if (url.pathname === "/results") { await Bun.sleep(700); return html(`<p>Results for ${url.searchParams.get("q")}</p><a id="next" href="/slow">Slow link</a>`); }
+    if (url.pathname === "/slow") { await Bun.sleep(700); return html("<p>Slow page arrived</p>"); }
+    if (url.pathname === "/covered") { covered++; return html("<p>covered</p>"); }
+    // The input's box changes every animation frame (never "stable"), like an
+    // animated header; the button sits under a full-page overlay.
+    return html(`<form action="/results"><input id="q" name="q"></form><p id="mirror"></p>
+      <div style="margin-top:400px"><button id="hidden" onclick="fetch('/covered')">Covered</button></div><div style="height:1200px"></div>
+      <div style="position:fixed;left:0;top:200px;right:0;bottom:0;background:#fff"></div>
+      <script>const q=document.querySelector('#q');let f=0;(function wiggle(){q.style.marginLeft=(f++%2)+'px';requestAnimationFrame(wiggle)})();
+      q.addEventListener('input',()=>{document.querySelector('#mirror').textContent='typed:'+q.value});</script>`);
+  } });
+  try {
+    await browserCall(root, { action: "open", url: `http://127.0.0.1:${server.port}/` });
+    await browserCall(root, { action: "click", selector: "#q" });
+    expect((await browserCall(root, { action: "type", text: "phantom" }) as { text: string }).text).toContain("typed:phantom");
+    const searched = await browserCall(root, { action: "press", key: "Enter" }) as { url: string; text: string };
+    expect(searched.url).toContain("/results?q=phantom");
+    expect(searched.text).toContain("Results for phantom");
+    const followed = await browserCall(root, { action: "click", selector: "#next" }) as { text: string };
+    expect(followed.text).toContain("Slow page arrived");
+    const shot = await browserCall(root, { action: "screenshot" }) as { title: string };
+    expect(shot.title).toBe("/slow");
+    await expect(browserCall(root, { action: "click", selector: "#does-not-exist" })).rejects.toThrow("(the tab is still open)");
+    expect((await browserCall(root, { action: "read" }) as { text: string }).text).toContain("Slow page arrived");
+    await browserCall(root, { action: "open", url: `http://127.0.0.1:${server.port}/` });
+    await expect(browserCall(root, { action: "click", selector: "#hidden" })).rejects.toThrow("still open");
+    expect(covered).toBe(0);
+  } catch (error) {
+    console.error(await readFile(join(root, "worker.log"), "utf8").catch(() => "(no browser log)"));
+    throw error;
+  } finally {
+    await browserCall(root, { action: "stop" }).catch(() => {});
+    await Bun.sleep(200);
+    await server.stop(true);
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+}, 120_000);

@@ -60,8 +60,29 @@ Part of the phantombot contributor guide: the turn pipeline, prompt assembly and
 persona prompt. `src/browser/` uses experimental `Bun.WebView`, feature-detected
 so older runtimes fail only when browsing. It explicitly selects Chrome and
 `url:false`: never auto-attach to a person's running browser. Chrome is installed
-separately, discovered by Bun or `BUN_CHROME_PATH`; no automation dependency or
-browser download enters the binary. Preserve Chrome's sandbox flags.
+separately; no automation dependency or browser download enters the binary.
+Preserve Chrome's sandbox flags.
+
+The executable is chosen BEFORE the worker starts (`src/browser/discovery.ts`,
+issue #810). Bun launches Chrome once per process, does not check that it starts,
+and refuses a second launch after a failed one, so a fallback inside the worker
+is impossible. Precedence: the persona's `browser use` choice, then host
+`BUN_CHROME_PATH` (used as-is), then the cached last good launch
+(`browser/detected.json`), then a cascade that test-launches each installed
+browser in a child process (`__browser_probe`) and keeps the first that starts.
+The order is Chrome, Chromium, Brave, Edge, with Snaps last. Bun's own discovery
+is used only when no known install exists. The probe must match the worker: same
+argv (`chromeArgv`), same OS-only environment (`browserChildEnv`), and a
+throwaway profile INSIDE the real browser root. Snap confinement fails on the
+profile's location (a hidden `$HOME` directory), not on the binary, so a probe
+from `/tmp` would wrongly approve it. Probes run in their own process group,
+close Chrome via `Browser.close`, and remove their profile until it stays gone,
+because wrapper-launched Chrome outlives a killed child. `browser use` probes the
+choice before saving it (`browser/preference.json`) and stops the persona worker.
+A moved choice is re-found by the same id and is never swapped for another
+browser. A `Chrome failed to start` error drops the cached pick, never the
+persona's choice. `list`/`use` refuse in sandboxed turns, because a choice names
+a host executable. The broker's turn browsers read the persona's settings.
 On macOS pass `--use-mock-keychain` for the dedicated automation profile: without
 it Chrome's native keychain dialog can stall navigation (zero HTTP requests in
 real macOS CI). Cookies then rely on the private profile directory's permissions,
@@ -83,7 +104,8 @@ there lets a model replace directories with symlinks and redirect host writes.
 Only PNG artifacts enter scratch, with random names and exclusive creation at
 the workspace root. Broker screenshot replies become real image content blocks,
 not base64 text, in native and MCP tools. A missing broker refuses sandboxed
-browsing. Models never select executable flags, profiles, host paths or CDP.
+browsing. Sandboxed models never select executables, flags, profiles, host paths
+or CDP. Only a trusted turn picks the executable, via `browser use`.
 Never solve browser startup by widening the OS sandbox's host paths or syscalls.
 Worker startup bypasses config/vault bootstrap and receives OS environment only,
 not decrypted vault credentials. Loopback HTTP is token-authenticated, rejects
@@ -93,7 +115,16 @@ rejecting a busy request. Never retry mutations after a transport failure.
 Tabs follow conversation hashes by default (`--session` explicitly overrides),
 but cookies intentionally belong to the persona. Bound tabs (8), snapshots
 (24,000 text characters/100 elements), screenshot history (32), operations
-(30 seconds), and worker idle life (5 minutes). A timed-out session closes;
+(30 seconds), and worker idle life (5 minutes). A timed-out session closes. Any
+other failed action keeps its tab (and login) when the tab still answers a
+2-second liveness check; an unresponsive tab closes, and when none remain the
+worker exits (`chromeGone`) so the next call gets a fresh Chrome. `click`/`press`
+wait for a main-frame navigation they start (`Page.frameRequestedNavigation` /
+`frameStartedLoading` within 300 ms, then `frameStoppedLoading`, at most 8 s) so
+the snapshot is the new page. When Bun's click actionability wait times out, fall back
+to one coordinate click only if a hit test shows the element (or its label) on
+top at its center: never click through an overlay. Screenshot metadata is read
+from the live document. Finally,
 shutdown uses `Browser.close` and a bounded two-second drain window before force cleanup:
 `Bun.WebView.closeAll()` alone SIGKILLs Chrome and loses cookies not yet flushed
 to disk (caught by the live persistence test). Keep UA override before the first
