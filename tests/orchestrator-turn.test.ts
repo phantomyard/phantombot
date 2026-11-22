@@ -2395,6 +2395,32 @@ describe("runTurn — soft deadline + wrap-up nudge (#639)", () => {
     expect(harness.requests[0]!.softTimeoutMs).toBeUndefined();
   });
 
+  test.each<[string, HarnessChunk[], boolean]>([
+    ["an undelivered partial answer", [{ type: "text", text: "Found a real bug. " }, SOFT_ERROR], false],
+    ["only narration before a tool", [
+      { type: "text", text: "Checking. " },
+      { type: "progress", note: "read", tool: { title: "read", kind: "read", locations: [] } },
+      SOFT_ERROR,
+    ], true],
+  ])("explicit silence after a wrap-up nudge: %s", async (_name, first, silent) => {
+    const harness = new MultiScriptHarness("fake", [
+      first,
+      [{ type: "text", text: "SILENT" }, { type: "done", finalText: "SILENT" }],
+    ]);
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        explicitSilence: true,
+        userMessage: "please check",
+        harnesses: [harness],
+        hardTimeoutMs: 3_600_000,
+        softTimeoutMs: 3_000_000,
+      }),
+    );
+    expect(harness.invocations).toBe(2);
+    expect((chunks.at(-1) as { finalText: string }).finalText === "").toBe(silent);
+  });
+
   test("#668 wake: a soft kill gets its wrap-up nudge, which reports real elapsed time", async () => {
     const harness = new MultiScriptHarness("fake", [
       [{ type: "text", text: "half way..." }, SOFT_ERROR],
@@ -2436,7 +2462,12 @@ describe("explicit phantom silence", () => {
     [true, " \nSILENT\n ", true],
     [false, "SILENT", false],
     [true, "The word SILENT occurs here.", false],
-    [true, "silent", false],
+    [true, "silent", true],
+    [true, "SILENT.", true],
+    [true, "**SILENT**", true],
+    [false, "SILENT.", false],
+    [true, "Silent alarm.", false],
+    [true, "SILENT SILENT", false],
   ] as const)("wake=%s, reply=%s, silence=%s", async (explicitSilence, text, silent) => {
     const chunks = await collect(runTurn({ ...baseInput(), explicitSilence,
       userMessage: "Please check the record.",
@@ -2447,6 +2478,40 @@ describe("explicit phantom silence", () => {
       : { type: "done", finalText: text });
     const turns = await memory.recentTurns("phantom", "cli:default", 10);
     expect(turns.at(-1)!.text).toBe(silent ? "[Completed without a reply.]" : text);
+  });
+
+  const read: HarnessChunk = { type: "progress", note: "read", tool: { title: "read", kind: "read", locations: [] } };
+  const failed: HarnessChunk[] = [
+    { type: "text", text: "Checking.\n" }, read,
+    { type: "error", error: "upstream died", recoverable: true },
+  ];
+
+  test.each<[string, HarnessChunk[], boolean]>([
+    ["streams and restates", [{ type: "text", text: "Again.\n" }, read, { type: "text", text: "SILENT" }, { type: "done", finalText: "Again.\nSILENT" }], true],
+    ["reports only its last message", [{ type: "text", text: "Again.\n" }, read, { type: "text", text: "SILENT" }, { type: "done", finalText: "SILENT" }], true],
+    ["trims its reply", [{ type: "text", text: "\nAgain.\n" }, read, { type: "text", text: "SILENT\n" }, { type: "done", finalText: "Again.\nSILENT" }], true],
+    ["runs no tool", [{ type: "text", text: "SILENT" }, { type: "done", finalText: "SILENT" }], true],
+    ["really answers", [{ type: "text", text: "Again.\n" }, read, { type: "text", text: "The word is SILENT" }, { type: "done", finalText: "Again.\nThe word is SILENT" }], false],
+  ])("silence is judged on the serving harness alone: fallback %s", async (_name, script, silent) => {
+    const chunks = await collect(runTurn({ ...baseInput(), explicitSilence: true,
+      userMessage: "Please check the record.",
+      harnesses: [new ScriptedHarness("primary", [...failed]), new ScriptedHarness("cover", [...script])],
+    }));
+    const done = chunks.at(-1)!;
+    expect(done.type).toBe("done");
+    expect(done).not.toHaveProperty("finalSegment");
+    expect((done as { finalText: string }).finalText === "").toBe(silent);
+  });
+
+  test("a token streamed by a failed harness never silences the one that answers", async () => {
+    const chunks = await collect(runTurn({ ...baseInput(), explicitSilence: true,
+      userMessage: "Please check the record.",
+      harnesses: [
+        new ScriptedHarness("primary", [read, { type: "text", text: "SILENT" }, { type: "error", error: "died", recoverable: true }]),
+        new ScriptedHarness("cover", [{ type: "done", finalText: "The record is SILENT" }]),
+      ],
+    }));
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "The record is SILENT" });
   });
 
   test("only the final segment after a real tool decides silence", async () => {

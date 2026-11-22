@@ -73,6 +73,7 @@ import { isNightlyConversation } from "../lib/nightly.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { PromptEpochTurn } from "../harnesses/payload.ts";
 import { INTERRUPTED_MARKER } from "../channels/core/interrupted.ts";
+import { isSilenceToken } from "../lib/silence.ts";
 import { gateNarrationStream } from "../lib/narrationStreamGate.ts";
 import type { ToolCallDetail } from "../harnesses/toolNote.ts";
 import type { MemoryStore, TurnOrigin } from "../memory/store.ts";
@@ -403,7 +404,7 @@ export interface TurnInput {
    * actually show them.
    */
   replyAudience?: "private" | "shared" | "silent";
-  /** Only phantom handoffs interpret an exact SILENT final segment as silence. */
+  /** Only phantom handoffs interpret a bare SILENT final segment as silence. */
   explicitSilence?: boolean;
   /**
    * Optional threat screen for UNTRUSTED turns (built by
@@ -993,7 +994,8 @@ async function* runTurnBody(
   }
 
   let finalText = "";
-  let lastToolPrefix = "";
+  // finalText.length at the last tool call, across passes.
+  let lastToolAt = 0;
   let succeeded = false;
   let terminalError: Extract<HarnessChunk, { type: "error" }> | undefined;
 
@@ -1125,6 +1127,9 @@ async function* runTurnBody(
       // describes only its own stream (the fallback resume path makes the
       // same stitch), so the turn's authoritative reply is prefix + tail.
       const passPrefix = finalText;
+      // What earlier passes said after their last tool call. It is still
+      // undelivered, so this pass's token must not silence it.
+      const passRemainder = finalText.slice(lastToolAt);
       terminalError = undefined;
       const upstream = runWithFallback(
         chainHarnesses,
@@ -1194,7 +1199,7 @@ async function* runTurnBody(
           continue;
         }
         if (chunk.type === "text") finalText += chunk.text;
-        if (chunk.type === "progress" && chunk.tool) lastToolPrefix = finalText;
+        if (chunk.type === "progress" && chunk.tool) lastToolAt = finalText.length;
         if (chunk.type === "done") {
           // The done chunk carries the authoritative finalText — prefer it
           // over our running accumulation in case the harness reformatted.
@@ -1204,15 +1209,15 @@ async function* runTurnBody(
           // against what was streamed, so an unstitched done would truncate
           // pass 1's already-delivered text out of history and voice.
           const stitched = passPrefix + chunk.finalText;
-          const tail = stitched.startsWith(lastToolPrefix)
-            ? stitched.slice(lastToolPrefix.length) : stitched;
-          const silent = input.explicitSilence && tail.trim() === "SILENT";
+          const { finalSegment, ...doneChunk } = chunk;
+          const tail = finalSegment ?? passRemainder + chunk.finalText;
+          const silent = input.explicitSilence && isSilenceToken(tail);
           // Persist a descriptive marker, never a replayable control token.
           finalText = silent ? "[Completed without a reply.]" : stitched;
           succeeded = true;
           yield silent
-            ? { ...chunk, finalText: "", meta: { ...chunk.meta, silentReply: true } }
-            : passPrefix.length > 0 ? { ...chunk, finalText: stitched } : chunk;
+            ? { ...doneChunk, finalText: "", meta: { ...chunk.meta, silentReply: true } }
+            : passPrefix.length > 0 ? { ...doneChunk, finalText: stitched } : doneChunk;
           continue;
         }
         if (chunk.type === "error") terminalError = chunk;

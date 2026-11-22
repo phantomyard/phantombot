@@ -571,7 +571,7 @@ describe("runWithFallback onToolCall audit hook (#282)", () => {
         },
       }),
     );
-    expect(chunks.at(-1)).toEqual({ type: "done", finalText: "done" });
+    expect(chunks.at(-1)).toEqual({ type: "done", finalText: "done", finalSegment: "done" });
   });
 });
 

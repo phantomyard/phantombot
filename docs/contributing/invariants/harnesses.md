@@ -19,7 +19,7 @@ Phantom handoffs use an explicit nonempty `SILENT` token (invariant 90), not an
 empty-result exception. The Pi ladder and outer fallback recover empty or
 whitespace replies normally for every caller. `SILENT` is usable assistant text
 at those layers, so it completes once without retries. Only a wake-enabled
-`runTurn` interprets an exact token in the final post-tool segment and replaces
+`runTurn` interprets the bare token in the final post-tool segment and replaces
 it with a descriptive history marker; the PhantomChat adapter suppresses its
 bubble/voice output. Exhausted empty chains retain failure logs and records.
 

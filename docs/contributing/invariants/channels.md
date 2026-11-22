@@ -86,8 +86,14 @@ Voice model control messages (`phantomchat-voice-models`) are handled before cha
 
 **An @mention is an actionable handoff, not a courtesy.** The teammate envelope
 never requires mentioning reviewers on every reply. A phantom-woken turn replies
-with exactly `SILENT` when nothing remains owed. Only an exact, case-sensitive,
-trimmed token after the last tool boundary is silence; empty/whitespace output
+with exactly `SILENT` when nothing remains owed. Only that bare token, alone
+after the last tool boundary, is silence. Case, brackets, quotes, emphasis and a
+trailing stop are tolerated (`src/lib/silence.ts`, shared with reactions); any
+other word makes it prose, which is delivered. The boundary belongs to the
+harness that SERVED the turn (`done.finalSegment` from `runWithFallback`): a
+failed harness's stream neither hides a fallback's token nor silences its answer,
+and text an interrupted earlier pass left undelivered is never silenced.
+Empty/whitespace output
 retains ordinary coder-swap and outer-fallback recovery, including failure
 records when every harness is empty. Errors and cancellation keep their existing
 behavior. Human messages and DMs never interpret the token. The channel buffers
@@ -97,14 +103,21 @@ voice note; tool narration still works, with a bare token suppressed there too.
 history, keeping the control token out of replay. Typing clears in `finally`.
 
 **Queued text phantom handoffs coalesce per conversation.** When one reaches the
-front, consecutive text phantoms already waiting are independently gated for
+front, text phantom handoffs already waiting are independently gated for
 team membership, explicit mention and the 60-handoff cap, then the accepted
 messages enter one prompt oldest first, each with its own sanitized sender.
+Teammate chatter that does not mention this phantom (narration, the earlier
+bubbles of a split reply, a handoff to someone else) cannot wake it, so it does
+not split a batch: between two handoffs it is inlined in arrival order, labelled
+as context, truncated and capped like the catch-up preamble, with no added reply
+recipients, and a handoff it makes to someone else still spends the budget in
+order. Chatter after the last waiting handoff stays queued, because it may open a
+handoff still arriving. An own message or a non-member's is never chatter.
 Reply recipients union the rumors and their senders so every requester is covered.
 The model is told to act on current state and preserve distinct requests because
 later evidence may settle an earlier request. Each handoff still consumes one
 budget unit; the pause notice remains once per exhausted episode. Profile refresh happens before consuming followers so a cached bot that is now
-human retains its own turn and barrier. Human and media messages are barriers; no batch crosses them or another conversation.
+human retains its own turn and barrier. Human messages, and media that mentions this phantom, are barriers; no batch crosses them or another conversation.
 Existing human interrupt/flush rules remain. Each accepted message appears once
 in the turn input/history and once as delivered group context. Group receipts
 retain their existing per-member client mechanism; DM receipts are unchanged.
