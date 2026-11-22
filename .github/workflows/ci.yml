@@ -89,10 +89,15 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Compile the browser CLI for the real sandbox regression
         run: bun build --compile ${{ matrix.target }} src/index.ts --outfile "${{ matrix.binary }}"
+      - name: Install test-only cached Chromium
+        run: bunx playwright@1.58.2 install --no-shell chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pb-playwright-cache
       - name: Verify real Chrome rendering and profile isolation
-        run: bun test tests/browser-live.test.ts tests/browser-broker-live.test.ts
+        run: bun test tests/browser-discovery.test.ts tests/browser-cache-live.test.ts tests/browser-live.test.ts tests/browser-broker-live.test.ts
         env:
           PHANTOMBOT_BROWSER_LIVE: "1"
+          PHANTOMBOT_BROWSER_CACHE_LIVE: ${{ runner.temp }}/pb-playwright-cache
           BUN_CHROME_PATH: ${{ matrix.chrome }}
           PHANTOMBOT_BROWSER_TEST_BINARY: ${{ matrix.binary }}
 

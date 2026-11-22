@@ -21,14 +21,24 @@ launches, in this order:
    `<persona-dir>/browser/detected.json`).
 4. Otherwise it test-launches each installed browser in turn and keeps the
    first one that actually starts: Chrome, Chromium, Brave, then Edge, with
-   every Snap build (including Ubuntu's `chromium-browser` wrapper) last.
+   existing full Chromium builds in the user's Playwright cache next (newest
+   revision first), and every Snap build (including Ubuntu's `chromium-browser`
+   wrapper) last.
    Each test is a short headless launch (about a second) with the same flags
    and environment as the real worker, using a throwaway profile next to the
    real one. Snap confinement cannot open a profile under a hidden `$HOME`
    directory such as `~/.local/share`, so a Snap Chromium that runs fine from a
    terminal can still fail here; the test catches that.
-5. If none of the standard install locations exist (Flatpak, NixOS, custom
+5. If none of the known install or cache locations exist (Flatpak, NixOS, custom
    prefixes), Bun's own discovery is used.
+
+The Playwright cache is `~/.cache/ms-playwright` on Linux (or
+`$XDG_CACHE_HOME/ms-playwright` when the XDG root is absolute),
+`~/Library/Caches/ms-playwright` on macOS, and `%LOCALAPPDATA%\ms-playwright`
+on Windows. An absolute host `PLAYWRIGHT_BROWSERS_PATH` selects a custom cache
+instead; relative values and `0` skip cache discovery. Both older Chromium and
+newer Chrome for Testing layouts are recognized. Project-local installs and
+headless-shell builds are excluded. Nothing is downloaded or installed.
 
 If no installed browser starts, `open` fails with the list of what was tried. If
 the cached browser later fails to start, the cache is dropped and the next open

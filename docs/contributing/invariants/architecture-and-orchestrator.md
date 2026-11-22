@@ -70,7 +70,16 @@ is impossible. Precedence: the persona's `browser use` choice, then host
 `BUN_CHROME_PATH` (used as-is), then the cached last good launch
 (`browser/detected.json`), then a cascade that test-launches each installed
 browser in a child process (`__browser_probe`) and keeps the first that starts.
-The order is Chrome, Chromium, Brave, Edge, with Snaps last. Bun's own discovery
+The order is native Chrome, Chromium, Brave, Edge, then full Chromium builds
+from the user's Playwright cache (newest revision first), with Snaps last. Only
+known executable layouts under numeric `chromium-*` directories are considered;
+never recurse, search cwd/project installs, or select headless-shell. Cache roots
+are `~/.cache/ms-playwright` (Linux, respecting absolute `XDG_CACHE_HOME`),
+`~/Library/Caches/ms-playwright` (macOS), and `%LOCALAPPDATA%\ms-playwright`
+(Windows). An absolute host `PLAYWRIGHT_BROWSERS_PATH` replaces that cache root;
+relative values and `0` disable cache discovery. Cached builds use the SAME
+host-side probes, path deduplication and credential-free child environment; no
+downloads or Playwright dependency enter the runtime. Bun's own discovery
 is used only when no known install exists. The probe must match the worker: same
 argv (`chromeArgv`), same OS-only environment (`browserChildEnv`), and a
 throwaway profile INSIDE the real browser root. Snap confinement fails on the
