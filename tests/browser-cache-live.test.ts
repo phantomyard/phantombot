@@ -1,7 +1,7 @@
 /** A real cached Chromium must pass the existing host probe and serve WebView.
  * CI installs the browser into a throwaway cache, never a runtime dependency. */
 import { expect, test } from "bun:test";
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { browserCandidates, resolveBrowserExecutable, systemHost } from "../src/browser/discovery.ts";
@@ -31,26 +31,39 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1" || !process.env.PHANTOMB
     const shot = await browserCall(root, { action: "screenshot" }) as { path: string };
     expect((await readFile(shot.path)).subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
     if (process.platform === "linux") {
-      // Reproduce an invalid installed helper without touching the CI/host
-      // build. Unlike an absent helper (userns can suffice), a user-owned
-      // 0755 chrome-sandbox must fail with the real sandbox on.
+      // Stock archives use chrome_sandbox; CI may also install chrome-sandbox.
+      // A non-SUID helper is rejected only where user namespaces are restricted.
       const freshCache = join(root, "fresh-cache");
       const broken = join(freshCache, "chromium-999999", "chrome-linux64");
       await cp(dirname(selected.path!), broken, { recursive: true });
+      const helper = await readFile(join(broken, "chrome_sandbox"))
+        .catch(() => readFile(join(broken, "chrome-sandbox")));
+      await writeFile(join(broken, "chrome-sandbox"), helper);
       await chmod(join(broken, "chrome-sandbox"), 0o755);
       const freshHost = systemHost({ ...process.env, PLAYWRIGHT_BROWSERS_PATH: freshCache });
       freshHost.isFile = path => path.startsWith(freshCache + sep) && isFile(path);
       freshHost.which = () => null;
       const settings = join(root, "fresh-settings");
-      await expect(resolveBrowserExecutable(settings, settings, { host: freshHost })).rejects.toThrow("chrome-sandbox");
-      await expect(readFile(join(settings, "detected.json"))).rejects.toThrow();
-      // A usable older revision must still win after the real failed probe.
+      const unconfigured = await resolveBrowserExecutable(settings, settings, { host: freshHost })
+        .then(result => ({ result, error: null }), error => ({ result: null, error }));
+      if (unconfigured.error) {
+        expect(String(unconfigured.error)).toContain("chrome-sandbox");
+        await expect(readFile(join(settings, "detected.json"))).rejects.toThrow();
+      } else {
+        // Namespace sandboxing can make this build usable without SUID setup.
+        expect(unconfigured.result!.path).toBe(join(broken, "chrome"));
+      }
+      // Force a real failed probe on either kind of host, independently of
+      // sandbox policy, then prove fall-through to the usable older revision.
+      await writeFile(join(broken, "chrome"), "#!/bin/sh\nexit 1\n");
+      await chmod(join(broken, "chrome"), 0o755);
+      const fallbackSettings = join(root, "fallback-settings");
       const working = join(freshCache, "chromium-1", "chrome-linux64");
       await mkdir(working, { recursive: true });
       await symlink(selected.path!, join(working, "chrome"));
-      const fallback = await resolveBrowserExecutable(settings, settings, { host: freshHost });
+      const fallback = await resolveBrowserExecutable(fallbackSettings, fallbackSettings, { host: freshHost });
       expect(fallback.path).toBe(join(working, "chrome"));
-      expect(JSON.parse(await readFile(join(settings, "detected.json"), "utf8")).path).toBe(fallback.path);
+      expect(JSON.parse(await readFile(join(fallbackSettings, "detected.json"), "utf8")).path).toBe(fallback.path);
     }
   } catch (error) {
     console.error(await readFile(join(root, "worker.log"), "utf8").catch(() => "(no browser log)"));
