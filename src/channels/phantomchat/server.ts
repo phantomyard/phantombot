@@ -98,7 +98,7 @@ import {
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
 import { warmSymmetricKeyCache } from "../../lib/nostrCrypto.ts";
 import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
-import { inboxDir } from "../telegram/parse.ts";
+import { inboxDir, sanitizeEnvelopeField } from "../telegram/parse.ts";
 import { renderRelayMessage } from "./relayEnvelope.ts";
 import {
   MediaCaptionCoalescer,
@@ -644,21 +644,24 @@ export async function runPhantomchatServer(
   };
 
   /** Is this sender's kind-0 name safe to show? Only for keys our config
-   *  vouches for (allow-listed or configured sibling). Nostr names are
-   *  self-asserted, so anyone else is labelled by short hex: a stranger named
-   *  "andrew" must not read as the principal. */
-  const nameVouched = (hex: string): boolean => {
+   *  vouches for (allow-listed or configured sibling), or for a member of
+   *  THIS conversation's team roster. Team vouching is scoped to the group the
+   *  message is in: membership of one team must not vouch a self-asserted name
+   *  in any other group. Nostr names are self-asserted, so anyone else is
+   *  labelled by short hex: a stranger named "andrew" must not read as the
+   *  principal. */
+  const nameVouched = (hex: string, conversationId: string | undefined): boolean => {
     const h = hex.toLowerCase();
     if (allowedSet.has(h) || configSiblingHex.has(h)) return true;
-    for (const members of teamRosters.values()) if (members.has(h)) return true;
+    if (conversationId !== undefined && teamRosters.get(conversationId)?.has(h) === true) return true;
     return false;
   };
 
   /** Buffer label for a sender: its kind-0 name when vouched and resolved,
    *  else the short hex. formatGroupContext sanitises it. */
-  const senderLabel = (hex: string): string => {
+  const senderLabel = (hex: string, conversationId: string | undefined): string => {
     const short = hex.slice(0, 8) + "…";
-    if (!nameVouched(hex)) return short;
+    if (!nameVouched(hex, conversationId)) return short;
     const meta = profileCache.get(hex.toLowerCase());
     const name = (meta?.name || meta?.display_name || "").trim();
     return name.length > 0 ? name : short;
@@ -679,10 +682,10 @@ export async function runPhantomchatServer(
     if (text.length === 0) return;
     // Only fetch kind-0 for keys whose name we would show; a stranger must not
     // make us fetch profiles of its choosing.
-    if (nameVouched(hex)) await ensureProfiles([hex]);
+    if (nameVouched(hex, msg.conversationId)) await ensureProfiles([hex]);
     const state = groupChats.get(msg.conversationId);
     if (!state) return;
-    state.buffer.push({ from: senderLabel(hex), text, delivered: false });
+    state.buffer.push({ from: senderLabel(hex, msg.conversationId), text, delivered: false });
     while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
   };
 
@@ -788,8 +791,10 @@ export async function runPhantomchatServer(
     if (!wokenByPhantom && isTeamMember(msg)) handoffs.delete(msg.conversationId);
 
     // A group the owner is active in is an open thread for hold notices
-    // (#768). DMs are not: notify already reached the owner's DM.
-    if (msg.groupId && tier === "trusted") {
+    // (#768). DMs are not: notify already reached the owner's DM. Only the
+    // OWNER's own activity opens one (invariant 87): a team member is trusted
+    // tier too, but a teammate speaking must not open a hold thread.
+    if (msg.groupId && tier === "trusted" && allowedSet.has(senderHex.toLowerCase())) {
       // Same member set the reply path builds: the group's members as the
       // rumor lists them, plus the sender (never in that list).
       const members = new Set<string>(memberHexes);
@@ -839,7 +844,7 @@ export async function runPhantomchatServer(
         // What to keep in the rolling buffer for context catch-up. Text keeps its
         // words; a media message keeps a short label so the thread stays coherent.
         const bufText = groupBufferText(msg);
-        const fromLabel = senderLabel(senderHex);
+        const fromLabel = senderLabel(senderHex, msg.conversationId);
 
         if (!decision.reply) {
           if (bufText.length > 0) {
@@ -1020,7 +1025,7 @@ export async function runPhantomchatServer(
     if (msg.groupId && tier === "trusted" && !allowedSet.has(senderHex.toLowerCase())) {
       const who = isBot(senderHex) ? "phantom" : "human";
       userMessage =
-        `[From ${senderLabel(senderHex)}, a ${who} member of this team group (not your principal). ` +
+        `[From ${sanitizeEnvelopeField(senderLabel(senderHex, msg.conversationId))}, a ${who} member of this team group (not your principal). ` +
         `An @mention of a phantom in your reply wakes it; mention each one once, in your final answer.]\n\n` +
         userMessage;
     }
