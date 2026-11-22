@@ -136,6 +136,7 @@ One line per rule: its stable number, then its title. Click through for the full
 - [82](docs/contributing/invariants/channels.md#inv-82) OpenCode consumes Phantombot as a MODEL via an `aisdk:` provider module, never as an ACP agent (issue #699).
 - [83](docs/contributing/invariants/channels.md#inv-83) The OpenCode provider persists its thread TOKEN — never the transcript — and a cold registry RELOADS it instead of minting a new thread (issue #710).
 - [87](docs/contributing/invariants/channels.md#inv-87) A hold notice reaches the owner's other open threads OUT OF BAND — a count in groups, never a turn, never a DM (issue #768).
+- [90](docs/contributing/invariants/channels.md#inv-90) A PhantomChat group the human principal is in is a TEAM: its members are trusted there, and a phantom wakes another phantom only by @mention, within a fixed handoff budget a human refills.
 
 ### Security perimeter — [security-perimeter.md](docs/contributing/invariants/security-perimeter.md)
 

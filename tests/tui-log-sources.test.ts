@@ -191,11 +191,24 @@ describe("logSources", () => {
 
   test("the session source is honest that it is this process only", async () => {
     const { host } = await hostWithPersona();
-    const session = logSources({ host }).find((s) => s.id === "session")!;
+    // Its own empty ring: the process-wide one is shared by every test file,
+    // so asserting it is empty depended on what other files left logging.
+    const session = logSources({ host, sessionBuffer: new LogBuffer() })
+      .find((s) => s.id === "session")!;
     expect(session.location).toContain("in-memory");
     const lines = await session.read(10);
     // The old pane's silent `0/0`, now a row that points at `service`.
     expect(lines[0]!.msg).toContain("service");
+  });
+
+  test("the session source reads the ring it is given, not a hint row", async () => {
+    const { host } = await hostWithPersona();
+    const ring = new LogBuffer();
+    ring.push(JSON.stringify({ level: "info", msg: "hello from this process" }));
+    const session = logSources({ host, sessionBuffer: ring }).find((s) => s.id === "session")!;
+    const lines = await session.read(10);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.msg).toBe("hello from this process");
   });
 
   test("EMPTY_SOURCE reads clean so an empty source list cannot crash the pane", async () => {

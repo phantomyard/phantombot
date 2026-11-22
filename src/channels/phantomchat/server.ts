@@ -67,7 +67,9 @@ import {
   GROUP_BUFFER_MAX,
   GROUP_BUFFER_TEXT_MAX,
   type GroupChatState,
+  matchAtMentions,
   matchPersonaNames,
+  PHANTOM_HANDOFF_BUDGET,
 } from "../core/routing.ts";
 import {
   hasTextSubstance,
@@ -96,7 +98,7 @@ import {
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
 import { warmSymmetricKeyCache } from "../../lib/nostrCrypto.ts";
 import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
-import { inboxDir } from "../telegram/parse.ts";
+import { inboxDir, sanitizeEnvelopeField } from "../telegram/parse.ts";
 import { renderRelayMessage } from "./relayEnvelope.ts";
 import {
   MediaCaptionCoalescer,
@@ -341,6 +343,60 @@ export async function runPhantomchatServer(
   // per-group, in-memory.
   const groupChats = new Map<string, GroupChatState>();
   const selfName = input.persona;
+
+  // ===================== TEAM GROUPS =====================
+  // A group the principal is in is a TEAM: every member the principal's own
+  // latest message lists (humans and phantoms alike) is trusted there, and a
+  // phantom may wake another phantom by @mentioning it. Membership is read only
+  // from messages the principal signed, so a stranger cannot join by naming
+  // the principal in a group of their own, and removing someone in the app
+  // takes effect at the principal's next message. Keyed by conversationId.
+  const teamRosters = new Map<string, Set<string>>();
+  // Phantom handoffs since a human last spoke, per team group, plus whether the
+  // pause notice for the current run already went out. Every phantom counts the
+  // same stream (its own handoffs at send time, the others' on arrival), so the
+  // count converges without coordination. In memory: a restart refills it.
+  const handoffs = new Map<string, { count: number; pausedNotified: boolean }>();
+
+  /** Record the member list of a group message a HUMAN principal sent. An
+   *  allow-listed phantom does not define the team: only a person adds people. */
+  const noteTeamRoster = async (msg: ChannelMessage): Promise<void> => {
+    if (!msg.groupId || msg.reaction) return;
+    const sender = msg.senderId.toLowerCase();
+    if (!allowedSet.has(sender)) return;
+    await ensureProfiles([sender]);
+    if (isBot(sender)) return;
+    const members = new Set((msg.groupMemberHexes ?? []).map((h) => h.toLowerCase()));
+    members.add(sender);
+    teamRosters.set(msg.conversationId, members);
+  };
+
+  /** Is the sender a member of a team group (not a principal DM, not a
+   *  reaction)? */
+  const isTeamMember = (msg: ChannelMessage): boolean =>
+    !!msg.groupId &&
+    !msg.reaction &&
+    teamRosters.get(msg.conversationId)?.has(msg.senderId.toLowerCase()) === true;
+
+  /** Does `text`, sent by `fromHex` into a team group, hand off to another
+   *  phantom (an @mention of a phantom other than the sender)? */
+  const isHandoff = (text: string, fromHex: string, memberHexes: string[]): boolean => {
+    const from = fromHex.toLowerCase();
+    const fromName = from === ourHex
+      ? selfName
+      : (profileCache.get(from)?.name || profileCache.get(from)?.display_name || "");
+    const others = buildRoster(memberHexes).filter(
+      (n) => n.toLowerCase() !== fromName.toLowerCase(),
+    );
+    return matchAtMentions(text, others).length > 0;
+  };
+
+  const countHandoff = (conversationId: string): number => {
+    const h = handoffs.get(conversationId) ?? { count: 0, pausedNotified: false };
+    h.count++;
+    handoffs.set(conversationId, h);
+    return h.count;
+  };
   // Our own hex pubkey — excluded from the roster and always treated as a bot
   // (so the bot never replies to its own self-wrapped group echo).
   const ourHex = getPublicKey(input.secretKey).toLowerCase();
@@ -532,6 +588,9 @@ export async function runPhantomchatServer(
       return "relay";
     }
     if (allowedSet.size > 0) {
+      // A member of a team group the principal is in is trusted THERE (and only
+      // there): the principal vouched for them by putting them in the group.
+      if (!allowedSet.has(lowerHex) && isTeamMember(msg)) return "trusted";
       // Locked allowlist (configured, or already claimed by TOFU).
       if (!allowedSet.has(lowerHex)) {
         log.info("phantomchat: dropping message from non-allowed sender", {
@@ -585,19 +644,24 @@ export async function runPhantomchatServer(
   };
 
   /** Is this sender's kind-0 name safe to show? Only for keys our config
-   *  vouches for (allow-listed or configured sibling). Nostr names are
-   *  self-asserted, so anyone else is labelled by short hex: a stranger named
-   *  "andrew" must not read as the principal. */
-  const nameVouched = (hex: string): boolean => {
+   *  vouches for (allow-listed or configured sibling), or for a member of
+   *  THIS conversation's team roster. Team vouching is scoped to the group the
+   *  message is in: membership of one team must not vouch a self-asserted name
+   *  in any other group. Nostr names are self-asserted, so anyone else is
+   *  labelled by short hex: a stranger named "andrew" must not read as the
+   *  principal. */
+  const nameVouched = (hex: string, conversationId: string | undefined): boolean => {
     const h = hex.toLowerCase();
-    return allowedSet.has(h) || configSiblingHex.has(h);
+    if (allowedSet.has(h) || configSiblingHex.has(h)) return true;
+    if (conversationId !== undefined && teamRosters.get(conversationId)?.has(h) === true) return true;
+    return false;
   };
 
   /** Buffer label for a sender: its kind-0 name when vouched and resolved,
    *  else the short hex. formatGroupContext sanitises it. */
-  const senderLabel = (hex: string): string => {
+  const senderLabel = (hex: string, conversationId: string | undefined): string => {
     const short = hex.slice(0, 8) + "…";
-    if (!nameVouched(hex)) return short;
+    if (!nameVouched(hex, conversationId)) return short;
     const meta = profileCache.get(hex.toLowerCase());
     const name = (meta?.name || meta?.display_name || "").trim();
     return name.length > 0 ? name : short;
@@ -618,10 +682,10 @@ export async function runPhantomchatServer(
     if (text.length === 0) return;
     // Only fetch kind-0 for keys whose name we would show; a stranger must not
     // make us fetch profiles of its choosing.
-    if (nameVouched(hex)) await ensureProfiles([hex]);
+    if (nameVouched(hex, msg.conversationId)) await ensureProfiles([hex]);
     const state = groupChats.get(msg.conversationId);
     if (!state) return;
-    state.buffer.push({ from: senderLabel(hex), text, delivered: false });
+    state.buffer.push({ from: senderLabel(hex, msg.conversationId), text, delivered: false });
     while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
   };
 
@@ -674,7 +738,43 @@ export async function runPhantomchatServer(
     // flag (or it's a configured sibling / ourselves). Only humans drive
     // conversation, so a bot's own reply can't trigger another. Drop silently —
     // no receipt, no state change — exactly like a non-allowed sender.
-    if (isBot(senderHex)) {
+    // TEAM GROUPS are the exception: there a phantom may wake another phantom
+    // by @mentioning it, within PHANTOM_HANDOFF_BUDGET handoffs since a human
+    // last spoke. Every handoff is counted, whoever it is for.
+    let wokenByPhantom = false;
+    if (isBot(senderHex) && isTeamMember(msg) && senderHex.toLowerCase() !== ourHex) {
+      if (isHandoff(msg.text ?? "", senderHex, memberHexes)) {
+        const count = countHandoff(msg.conversationId);
+        const forUs = matchAtMentions(msg.text ?? "", [selfName]).length > 0;
+        if (forUs && count <= PHANTOM_HANDOFF_BUDGET) {
+          wokenByPhantom = true;
+        } else if (forUs) {
+          const h = handoffs.get(msg.conversationId)!;
+          if (!h.pausedNotified) {
+            h.pausedNotified = true;
+            const others = new Set<string>(memberHexes);
+            others.add(senderHex.toLowerCase());
+            await transport
+              .sendGroupMessage(
+                msg.groupId!,
+                [...others],
+                `⏸ Paused: ${PHANTOM_HANDOFF_BUDGET} phantom handoffs since a human spoke. Say "continue" to carry on.`,
+              )
+              .catch((e: unknown) =>
+                log.warn("phantomchat: pause notice failed", {
+                  error: (e as Error).message,
+                }),
+              );
+          }
+          log.info("phantomchat: phantom handoff budget spent — pausing", {
+            persona: input.persona,
+            group: msg.groupId,
+            count,
+          });
+        }
+      }
+    }
+    if (isBot(senderHex) && !wokenByPhantom) {
       // Never REPLY to a bot, but keep what it said as group context so a
       // later "Robbie, what do you think?" sees Kai's answer, not just the
       // question. Our own echo is skipped (it is already in our history).
@@ -687,9 +787,14 @@ export async function runPhantomchatServer(
       return;
     }
 
+    // A human spoke in a team group: the phantoms get a fresh handoff budget.
+    if (!wokenByPhantom && isTeamMember(msg)) handoffs.delete(msg.conversationId);
+
     // A group the owner is active in is an open thread for hold notices
-    // (#768). DMs are not: notify already reached the owner's DM.
-    if (msg.groupId && tier === "trusted") {
+    // (#768). DMs are not: notify already reached the owner's DM. Only the
+    // OWNER's own activity opens one (invariant 87): a team member is trusted
+    // tier too, but a teammate speaking must not open a hold thread.
+    if (msg.groupId && tier === "trusted" && allowedSet.has(senderHex.toLowerCase())) {
       // Same member set the reply path builds: the group's members as the
       // rumor lists them, plus the sender (never in that list).
       const members = new Set<string>(memberHexes);
@@ -724,17 +829,22 @@ export async function runPhantomchatServer(
         // re-addressing — same as Telegram routing on text/caption only.
         const matchText = msg.text ?? "";
         const matched = matchPersonaNames(matchText, roster);
-        const decision = decideGroupReply({
-          self: selfName,
-          matched,
-          lastAddressed: state.lastAddressed,
-        });
+        // A phantom's @mention already decided (above) that this bot answers,
+        // and it must not move the thread away from whoever the humans
+        // addressed last.
+        const decision = wokenByPhantom
+          ? { reply: true, nextLastAddressed: state.lastAddressed }
+          : decideGroupReply({
+              self: selfName,
+              matched,
+              lastAddressed: state.lastAddressed,
+            });
         state.lastAddressed = decision.nextLastAddressed;
 
         // What to keep in the rolling buffer for context catch-up. Text keeps its
         // words; a media message keeps a short label so the thread stays coherent.
         const bufText = groupBufferText(msg);
-        const fromLabel = senderLabel(senderHex);
+        const fromLabel = senderLabel(senderHex, msg.conversationId);
 
         if (!decision.reply) {
           if (bufText.length > 0) {
@@ -910,6 +1020,16 @@ export async function runPhantomchatServer(
     // Group catch-up context goes at the very TOP of the turn input so the
     // harness reads the room (messages this bot saw but stayed quiet through)
     // before the specific message it's answering. Mirrors core/engine.ts.
+    // TEAM GROUP: say who is speaking when it is not the principal, so the
+    // turn knows a teammate (human or phantom) asked, and how a handoff works.
+    if (msg.groupId && tier === "trusted" && !allowedSet.has(senderHex.toLowerCase())) {
+      const who = isBot(senderHex) ? "phantom" : "human";
+      userMessage =
+        `[From ${sanitizeEnvelopeField(senderLabel(senderHex, msg.conversationId))}, a ${who} member of this team group (not your principal). ` +
+        `An @mention of a phantom in your reply wakes it; mention each one once, in your final answer.]\n\n` +
+        userMessage;
+    }
+
     if (groupContext) {
       userMessage =
         userMessage.length > 0
@@ -1066,6 +1186,14 @@ export async function runPhantomchatServer(
             groupTypingMembers!,
             text,
           );
+          // Our own handoff: the channel skips our live self-copy, so count it
+          // here, the same way every other phantom counts it on arrival.
+          if (
+            teamRosters.has(msg.conversationId) &&
+            isHandoff(text, ourHex, groupTypingMembers!)
+          ) {
+            countHandoff(msg.conversationId);
+          }
         } else {
           // transport.sendMessage NIP-17-wraps the plaintext to `senderHex`
           // and publishes both wraps. conversationId === recipient hex pubkey.
@@ -1847,6 +1975,10 @@ export async function runPhantomchatServer(
   }, input.holdRelayPollMs);
   try {
     for await (const msg of channel.listen(input.signal)) {
+      // Before anything else, so the auth gate sees the principal's latest
+      // member list for this group (history included: it rebuilds the team
+      // after a restart).
+      await noteTeamRoster(msg).catch(() => {});
       // History is context only: filed in arrival order, before any live
       // message behind it, and kept away from the coalescer, media download
       // and the turn path entirely.
@@ -1861,7 +1993,9 @@ export async function runPhantomchatServer(
       coalescer.accept(msg);
     }
   } finally {
-    stopHoldRelay();
+    // Awaited: a hold notice already being sent finishes before we drain and
+    // hand the transport back, instead of publishing into a torn-down pool.
+    await stopHoldRelay();
   }
 
   // Whatever is still waiting for a caption goes out as-is: a hold must never
