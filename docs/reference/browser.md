@@ -40,6 +40,27 @@ instead; relative values and `0` skip cache discovery. Both older Chromium and
 newer Chrome for Testing layouts are recognized. Project-local installs and
 headless-shell builds are excluded. Nothing is downloaded or installed.
 
+On Linux, a downloaded Chromium also needs a working Chrome sandbox. Playwright
+ships `chrome_sandbox` as a user-owned file, so a fresh cache can fail the launch
+probe with `Chrome process closed the pipe` (Chrome reports a SUID sandbox FATAL).
+For a trusted cached build, an operator can configure the helper next to `chrome`
+once per downloaded revision, substituting its actual absolute directory:
+
+```bash
+# Current archives use an underscore; install the helper under Chrome's name.
+sudo install -o root -g root -m 4755 /absolute/path/to/chrome-linux64/chrome_sandbox /absolute/path/to/chrome-linux64/chrome-sandbox
+# If chrome-sandbox already exists, configure that file instead:
+sudo chown root:root /absolute/path/to/chrome-linux64/chrome-sandbox
+sudo chmod 4755 /absolute/path/to/chrome-linux64/chrome-sandbox
+```
+
+Chrome's required filename is `chrome-sandbox` (hyphen). Phantombot never
+performs this privileged setup or adds `--no-sandbox`. Hosts whose policy still
+prevents launch need an installed browser that works under that policy. Failed
+cached candidates are skipped; if every candidate is a Linux cached build and
+none starts, the error points to this prerequisite. Discovery alone does not
+make an unconfigured downloaded browser usable.
+
 If no installed browser starts, `open` fails with the list of what was tried. If
 the cached browser later fails to start, the cache is dropped and the next open
 detects again.

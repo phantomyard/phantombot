@@ -79,7 +79,18 @@ are `~/.cache/ms-playwright` (Linux, respecting absolute `XDG_CACHE_HOME`),
 (Windows). An absolute host `PLAYWRIGHT_BROWSERS_PATH` replaces that cache root;
 relative values and `0` disable cache discovery. Cached builds use the SAME
 host-side probes, path deduplication and credential-free child environment; no
-downloads or Playwright dependency enter the runtime. Bun's own discovery
+downloads or Playwright dependency enter the runtime. On Linux, fresh Playwright
+builds ship a user-owned `chrome_sandbox`; Chrome needs `chrome-sandbox`. For a
+trusted build an operator can run
+`sudo install -o root -g root -m 4755 /absolute/path/to/chrome-linux64/chrome_sandbox /absolute/path/to/chrome-linux64/chrome-sandbox`.
+If the hyphen-named helper exists already, run
+`sudo chown root:root /absolute/path/to/chrome-linux64/chrome-sandbox` then
+`sudo chmod 4755 /absolute/path/to/chrome-linux64/chrome-sandbox` (hyphen, not
+underscore), once per downloaded revision. The runtime never performs privileged
+setup or disables Chrome's sandbox. CI configures only its disposable cache;
+the live regression also rejects an unconfigured copy before falling through
+to a working browser. Cache-only Linux launch failures point at this prerequisite
+and the browser guide. Bun's own discovery
 is used only when no known install exists. The probe must match the worker: same
 argv (`chromeArgv`), same OS-only environment (`browserChildEnv`), and a
 throwaway profile INSIDE the real browser root. Snap confinement fails on the

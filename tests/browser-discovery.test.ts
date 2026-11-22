@@ -239,3 +239,21 @@ test("a broken newest cache falls through, only the proven winner is cached; ove
   await chooseBrowser(root, "chromium", { host, probe });
   expect(await resolveBrowserExecutable(root, root, { host, probe })).toEqual({ path: older, source: "preference", choice: "chromium" });
 });
+
+test("cache-only Linux failures explain sandbox setup without claiming other failures need it", async () => {
+  const root = await temp();
+  const cached = "/cache/chromium-100/chrome-linux64/chrome";
+  const host = cacheHost("linux", { PLAYWRIGHT_BROWSERS_PATH: "/cache" }, "/cache", [cached]);
+  const probe: ProbeFn = async () => ({ ok: false, error: "Chrome process closed the pipe" });
+  await expect(resolveBrowserExecutable(root, root, { host, probe })).rejects.toThrow("root:root and mode to 4755 (see docs/reference/browser.md)");
+  await expect(readFile(join(root, "detected.json"))).rejects.toThrow();
+  for (const other of [linuxHost(), cacheHost("darwin", { PLAYWRIGHT_BROWSERS_PATH: "/cache" }, "/cache", ["/cache/chromium-100/chrome-mac/Chromium.app/Contents/MacOS/Chromium"])]) {
+    try {
+      await resolveBrowserExecutable(root, root, { host: other, probe });
+      throw new Error("expected a failed probe");
+    } catch (error) {
+      expect(String(error)).toContain("No installed browser could start");
+      expect(String(error)).not.toContain("4755");
+    }
+  }
+});

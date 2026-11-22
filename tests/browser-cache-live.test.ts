@@ -1,9 +1,9 @@
 /** A real cached Chromium must pass the existing host probe and serve WebView.
  * CI installs the browser into a throwaway cache, never a runtime dependency. */
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { browserCandidates, resolveBrowserExecutable, systemHost } from "../src/browser/discovery.ts";
 import { browserCall } from "../src/browser/daemon.ts";
 
@@ -30,6 +30,27 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1" || !process.env.PHANTOMB
     expect(page.text).toContain("Cache discovery works");
     const shot = await browserCall(root, { action: "screenshot" }) as { path: string };
     expect((await readFile(shot.path)).subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+    if (process.platform === "linux") {
+      // Reproduce a fresh download without touching the configured CI/host
+      // build. A user-owned 0755 helper must fail with the real sandbox on.
+      const freshCache = join(root, "fresh-cache");
+      const broken = join(freshCache, "chromium-999999", "chrome-linux64");
+      await cp(dirname(selected.path!), broken, { recursive: true });
+      await chmod(join(broken, "chrome-sandbox"), 0o755);
+      const freshHost = systemHost({ ...process.env, PLAYWRIGHT_BROWSERS_PATH: freshCache });
+      freshHost.isFile = path => path.startsWith(freshCache + sep) && isFile(path);
+      freshHost.which = () => null;
+      const settings = join(root, "fresh-settings");
+      await expect(resolveBrowserExecutable(settings, settings, { host: freshHost })).rejects.toThrow("chrome-sandbox");
+      await expect(readFile(join(settings, "detected.json"))).rejects.toThrow();
+      // A usable older revision must still win after the real failed probe.
+      const working = join(freshCache, "chromium-1", "chrome-linux64");
+      await mkdir(working, { recursive: true });
+      await symlink(selected.path!, join(working, "chrome"));
+      const fallback = await resolveBrowserExecutable(settings, settings, { host: freshHost });
+      expect(fallback.path).toBe(join(working, "chrome"));
+      expect(JSON.parse(await readFile(join(settings, "detected.json"), "utf8")).path).toBe(fallback.path);
+    }
   } catch (error) {
     console.error(await readFile(join(root, "worker.log"), "utf8").catch(() => "(no browser log)"));
     throw error;

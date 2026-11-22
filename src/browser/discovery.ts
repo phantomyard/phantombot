@@ -299,7 +299,13 @@ export async function resolveBrowserExecutable(settings: string, root: string, o
   // Unknown layout (Flatpak, NixOS, a custom prefix): keep Bun's own search.
   if (!candidates.length) return { source: "bun" };
   const { found, tried } = await firstThatStarts(candidates, root, probe);
-  if (!found) throw new Error(`No installed browser could start: ${tried.join("; ")}. Install Chrome, Chromium, Brave or Edge, or choose an executable with 'phantombot browser use <path>'.`);
+  if (!found) {
+    const cachePaths = new Set(cachedCandidates(host).map(c => c.path));
+    const hint = host.platform === "linux" && candidates.every(c => cachePaths.has(c.path))
+      ? " Cached Chromium on Linux needs a working sandbox; if the adjacent chrome-sandbox helper is not configured, an operator must set its owner to root:root and mode to 4755 (see docs/reference/browser.md)."
+      : "";
+    throw new Error(`No installed browser could start: ${tried.join("; ")}.${hint} Install Chrome, Chromium, Brave or Edge, or choose an executable with 'phantombot browser use <path>'.`);
+  }
   await writeJson(settings, DETECTED_FILE, { path: found.path, checkedAt: new Date().toISOString() } satisfies Detected);
   return { path: found.path, source: "probed" };
 }
