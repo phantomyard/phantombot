@@ -1131,10 +1131,13 @@ describe("runWithFallback — chain-wide wake budget (#631)", () => {
     // The fallback's cap is what was LEFT after the primary burned most of
     // the budget — strictly less than the configured 30-min-style full cap,
     // and close to (deadline - now) rather than a fresh window.
-    expect(first.capsSeen[0]).toBe(200);
+    // Availability/setup can consume time before the first invocation.
+    expect(first.capsSeen[0]).toBeGreaterThan(0);
+    expect(first.capsSeen[0]).toBeLessThanOrEqual(200);
     const remaining = second.capsSeen[0]!;
     expect(remaining).toBeGreaterThan(0);
     expect(remaining).toBeLessThanOrEqual(200);
+    expect(remaining).toBeLessThan(first.capsSeen[0]!);
     expect(remaining).toBeLessThan(160); // first attempt consumed ~150ms
     // And the whole chain never exceeds the deadline by much: the fallback
     // was clamped to the remainder, not restarted the clock.

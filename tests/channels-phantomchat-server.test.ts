@@ -7,7 +7,7 @@
  * (rumor.pubkey), proving the allowlist works end-to-end through unwrap.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1833,7 +1833,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
             const out = new Map<string, { name?: string; bot?: boolean }>();
             for (const a of authors) {
               const meta = opts.profiles![a.toLowerCase()];
-              if (meta) out.set(a.toLowerCase(), meta);
+              if (meta) out.set(a.toLowerCase(), { ...meta });
             }
             return out;
           }
@@ -2486,6 +2486,33 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
         expect(replyWraps(srv.pool).filter(w => w.tags.some(tg => tg[0] === "p" && tg[1] === key))).toHaveLength(2);
       }
     } finally { harness.release(); await srv.stop(); }
+  });
+
+  test("team group: a refreshed human profile becomes a queue barrier, never a dropped wake", async () => {
+    const t = team();
+    const harness = new BlockedHandoffHarness();
+    const srv = makeGroupServer({ botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness });
+    let clock: { mockRestore(): void } | undefined;
+    try {
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+      await groupSleep(80);
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena m1 running", "PR");
+      await groupSleep(80);
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena m2 request", "PR");
+      srv.feedGroup(t.omarSk, t.others(t.omarSk), "@lena m3 now a human request", "PR");
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena m4 request", "PR");
+      await groupSleep(100);
+      t.profiles[t.omarHex]!.bot = false;
+      // Expire the kind-0 cache only after every input has entered the queue.
+      clock = spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60_000);
+      harness.release();
+      await groupSleep(250);
+      expect(harness.requests).toHaveLength(4);
+      expect(harness.requests[1]!.userMessage).toContain("m2 request");
+      expect(harness.requests[2]!.userMessage).toContain("m3 now a human request");
+      expect(harness.requests[2]!.systemPrompt).not.toContain("# Phantom team handoff");
+      expect(harness.requests[3]!.userMessage).toContain("m4 request");
+    } finally { clock?.mockRestore(); harness.release(); await srv.stop(); }
   });
 
   test("team group: queued human is a barrier and never inherits silence", async () => {

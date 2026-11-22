@@ -1900,6 +1900,17 @@ export async function runPhantomchatServer(
         if (entry.consumed) return;
         queued.splice(queued.indexOf(entry), 1);
         if (!backlog.claim(key, epoch)) return;
+        const waitingAtFront = new Set(queued);
+        if (batchable(msg)) {
+          // Refresh before consuming followers: a stale bot flag can resolve
+          // to a human, who must keep their own turn and remain a barrier.
+          const refresh = [msg];
+          for (const extra of queued) {
+            if (!batchable(extra.msg)) break;
+            refresh.push(extra.msg);
+          }
+          await ensureProfiles(refresh.flatMap(m => [m.senderId, ...(m.groupMemberHexes ?? [])]));
+        }
         if (!batchable(msg)) {
           await handle(msg, alsoReceipt);
           return;
@@ -1907,7 +1918,7 @@ export async function runPhantomchatServer(
         const candidates = [entry];
         // Snapshot only the consecutive text phantoms already waiting. A human
         // or media message is a barrier; later arrivals belong to a later turn.
-        while (queued.length && batchable(queued[0]!.msg)) {
+        while (queued.length && waitingAtFront.has(queued[0]!) && batchable(queued[0]!.msg)) {
           const extra = queued.shift()!;
           extra.consumed = true;
           if (backlog.claim(key, extra.epoch)) candidates.push(extra);

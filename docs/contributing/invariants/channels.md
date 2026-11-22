@@ -103,8 +103,8 @@ messages enter one prompt oldest first, each with its own sanitized sender.
 Reply recipients union the rumors and their senders so every requester is covered.
 The model is told to act on current state and preserve distinct requests because
 later evidence may settle an earlier request. Each handoff still consumes one
-budget unit; the pause notice remains once per exhausted episode. Human and
-media messages are barriers; no batch crosses them or another conversation.
+budget unit; the pause notice remains once per exhausted episode. Profile refresh happens before consuming followers so a cached bot that is now
+human retains its own turn and barrier. Human and media messages are barriers; no batch crosses them or another conversation.
 Existing human interrupt/flush rules remain. Each accepted message appears once
 in the turn input/history and once as delivered group context. Group receipts
 retain their existing per-member client mechanism; DM receipts are unchanged.
