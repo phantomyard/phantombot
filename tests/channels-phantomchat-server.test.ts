@@ -37,7 +37,7 @@ import {
   type NTNostrEvent,
 } from "../src/lib/nostrCrypto.ts";
 import { npubEncode } from "../src/lib/nostrIdentity.ts";
-import { matchAtMentions, PHANTOM_HANDOFF_BUDGET } from "../src/channels/core/routing.ts";
+import { GROUP_BUFFER_MAX, matchAtMentions, PHANTOM_HANDOFF_BUDGET } from "../src/channels/core/routing.ts";
 import { clearReplyModeOverride, setReplyModeOverride } from "../src/lib/replyMode.ts";
 
 /** A tool-backed progress chunk payload (#688: only these are tool calls). */
@@ -2540,6 +2540,164 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       expect(harness.requests.filter(r => r.userMessage.includes("m2 request") && r.userMessage.includes("m4 request"))).toHaveLength(0);
       expect(harness.requests.at(-1)!.userMessage).toContain("m4 request");
     } finally { harness.release(); await srv.stop(); }
+  });
+
+  test("team group: teammate chatter between queued handoffs does not split the batch", async () => {
+    const t = team();
+    const harness = new BlockedHandoffHarness();
+    const srv = makeGroupServer({ botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness });
+    try {
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+      await groupSleep(80);
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena m1 running", "PR");
+      await groupSleep(80);
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena m2 review 900", "PR");
+      srv.feedGroup(t.omarSk, t.others(t.omarSk), "c1 checking the clock now", "PR");
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "c2 correction: 900 is withdrawn", "PR");
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@omar c3 yours is 902", "PR");
+      srv.feedGroup(t.omarSk, t.others(t.omarSk), "@lena m3 review 901", "PR");
+      srv.feedGroup(t.omarSk, t.others(t.omarSk), "c4 trailing first half", "PR");
+      await groupSleep(150);
+      harness.release();
+      await groupSleep(250);
+      expect(harness.requests).toHaveLength(2);
+      const prompt = harness.requests[1]!.userMessage;
+      const order = ["m2 review", "c1 checking", "c2 correction", "c3 yours", "m3 review"].map(x => prompt.indexOf(x));
+      expect(order.every(i => i >= 0)).toBe(true);
+      expect([...order].sort((a, b) => a - b)).toEqual(order);
+      expect(prompt).toContain("[omar, a phantom member of this team group, also said without mentioning you.");
+      expect(prompt).toContain("[From omar, a phantom member");
+      // Chatter after the last handoff waits for the turn it may introduce.
+      expect(prompt).not.toContain("c4 trailing");
+      srv.feedGroup(t.omarSk, t.others(t.omarSk), "@lena m4 second half", "PR");
+      await groupSleep(150);
+      expect(harness.requests).toHaveLength(3);
+      const next = harness.requests[2]!.userMessage;
+      expect(next).toContain("c4 trailing first half");
+      expect(next).not.toContain("c1 checking");
+      expect(next).not.toContain("m3 review");
+    } finally { harness.release(); await srv.stop(); }
+  });
+
+  test("team group: chatter never carries a handoff past a human", async () => {
+    const t = team();
+    const harness = new BlockedHandoffHarness();
+    const srv = makeGroupServer({ botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness });
+    try {
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, m1 begin", "PR");
+      await groupSleep(80);
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena m2 request", "PR");
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "c1 narration", "PR");
+      srv.feedGroup(t.eveSk, t.others(t.eveSk), "m3 human barrier", "PR");
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "c2 narration", "PR");
+      srv.feedGroup(t.omarSk, t.others(t.omarSk), "@lena m4 request", "PR");
+      await groupSleep(100);
+      harness.release();
+      await groupSleep(250);
+      expect(harness.requests).toHaveLength(4);
+      expect(harness.requests[1]!.userMessage).toContain("m2 request");
+      expect(harness.requests[2]!.userMessage).toContain("m3 human barrier");
+      expect(harness.requests[2]!.systemPrompt).not.toContain("# Phantom team handoff");
+      expect(harness.requests[3]!.userMessage).toContain("m4 request");
+    } finally { harness.release(); await srv.stop(); }
+  });
+
+  test("team group: chatter in a batch adds no reply recipients and is bounded, handoffs are not", async () => {
+    const t = team();
+    const harness = new BlockedHandoffHarness("Reviewed both.");
+    const srv = makeGroupServer({ botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness });
+    try {
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+      await groupSleep(80);
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena m1 running", "PR");
+      await groupSleep(80);
+      const before = replyWraps(srv.pool).length;
+      srv.feedGroup(t.kaiSk, [t.lenaHex], "@lena m2 review 900", "PR");
+      for (let i = 0; i < GROUP_BUFFER_MAX + 2; i++) {
+        srv.feedGroup(t.omarSk, [t.lenaHex], `chatter-${i}-`, "PR");
+      }
+      srv.feedGroup(t.kaiSk, [t.lenaHex], "@lena m3 review 901", "PR");
+      await groupSleep(250);
+      harness.release();
+      await groupSleep(300);
+      expect(harness.requests).toHaveLength(2);
+      const prompt = harness.requests[1]!.userMessage;
+      expect(prompt).toContain("m2 review 900");
+      expect(prompt).toContain("m3 review 901");
+      expect(prompt).not.toContain("chatter-0-");
+      expect(prompt).not.toContain("chatter-1-");
+      expect(prompt).toContain("chatter-2-");
+      expect(prompt).toContain(`chatter-${GROUP_BUFFER_MAX + 1}-`);
+      expect(before).toBe(0);
+      // First reply: whole roster + self. Batched: Kai + self, Omar not added.
+      expect(replyWraps(srv.pool)).toHaveLength(t.others(t.lenaSk).length + 1 + 2);
+    } finally { harness.release(); await srv.stop(); }
+  });
+
+  test("team group: chatter that hands off to another phantom still spends the budget in order", async () => {
+    const t = team();
+    const harness = new BlockedHandoffHarness();
+    const srv = makeGroupServer({ botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness });
+    try {
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+      await groupSleep(80);
+      for (let i = 0; i < PHANTOM_HANDOFF_BUDGET - 3; i++) {
+        srv.feedGroup(t.kaiSk, t.others(t.kaiSk), `@omar prime ${i}`, "PR");
+      }
+      await groupSleep(200);
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena m1 running", "PR"); // 58
+      await groupSleep(100);
+      for (const text of ["@lena m2 review", "@omar c1 spends 60", "@lena m3 over cap"]) {
+        srv.feedGroup(t.kaiSk, t.others(t.kaiSk), text, "PR");
+      }
+      await groupSleep(150);
+      harness.release();
+      await groupSleep(250);
+      expect(harness.requests).toHaveLength(2);
+      expect(harness.requests[1]!.userMessage).toContain("m2 review");
+      expect(harness.requests[1]!.userMessage).not.toContain("m3 over cap");
+    } finally { harness.release(); await srv.stop(); }
+  });
+
+  test.each(["SILENT.", "silent", "**SILENT**", "`SILENT`", "[SILENT]"])("team group: decorated token %s is silence", async text => {
+    const t = team();
+    const harness = new ScriptedHarness("silent", [{ type: "text", text }, { type: "done", finalText: text }]);
+    const srv = makeGroupServer({ botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness });
+    try {
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+      await groupSleep(80);
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena status noted", "PR");
+      await groupSleep(150);
+      expect(harness.invocations).toBe(1);
+      expect(replyWraps(srv.pool)).toEqual([]);
+    } finally { await srv.stop(); }
+  });
+
+  test("team group: a fallback's own tool then SILENT posts no token after the primary died mid-turn", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("primary", [
+      { type: "text", text: "Checking the record.\n" },
+      { type: "progress", note: "read", tool: toolCall("read") },
+      { type: "error", error: "upstream died", recoverable: true },
+    ]);
+    const fallback = new ScriptedHarness("cover", [
+      { type: "text", text: "Reading it again.\n" },
+      { type: "progress", note: "read", tool: toolCall("read") },
+      { type: "text", text: "SILENT" },
+      { type: "done", finalText: "Reading it again.\nSILENT" },
+    ]);
+    const srv = makeGroupServer({ botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness, fallbackHarness: fallback });
+    try {
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+      await groupSleep(80);
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena please check the record", "PR");
+      await groupSleep(200);
+      expect(fallback.invocations).toBe(1);
+      for (const wrap of replyWraps(srv.pool).filter(w => w.tags.some(tg => tg[0] === "p" && tg[1] === t.kaiHex))) {
+        const rumor = unwrapNip17Message(wrap as NTNostrEvent, t.kaiSk);
+        expect(rumor.content).not.toContain("SILENT");
+      }
+    } finally { await srv.stop(); }
   });
 
   test("team group: queued handoffs in different conversations never merge", async () => {

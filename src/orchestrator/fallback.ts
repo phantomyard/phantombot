@@ -99,6 +99,24 @@ export interface RunWithFallbackOptions {
   chainDeadlineMs?: number;
 }
 
+/**
+ * The part of `finalText` after the last tool call. Harnesses differ in what
+ * `done.finalText` holds (the whole stream, a trimmed copy, or only the last
+ * message), so match the streamed prefix first, then the streamed tail, and
+ * otherwise treat the whole reply as the final segment.
+ */
+function segmentAfterLastTool(
+  finalText: string,
+  streamed: string,
+  toolAt: number,
+): string {
+  const before = streamed.slice(0, toolAt);
+  if (finalText.startsWith(before)) return finalText.slice(before.length);
+  const after = streamed.slice(toolAt).trim();
+  if (after.length > 0 && finalText.trimEnd().endsWith(after)) return after;
+  return finalText;
+}
+
 export async function* runWithFallback(
   chain: Harness[],
   req: HarnessRequest,
@@ -323,6 +341,11 @@ export async function* runWithFallback(
     // slot emits its reply across two processes, and the terminal `done` has
     // to account for both — see the stitch below.
     let carriedText = "";
+    // This slot's own stream, across resumes, and where its last tool call
+    // landed in it. Slot-local on purpose: text a FAILED harness streamed is
+    // not part of this one's `finalText`, so it must not move the boundary.
+    let slotText = "";
+    let slotToolAt: number | undefined;
     while (resumeRequested) {
       resumeRequested = false;
       // #631: recompute the clamp per attempt so a resumed slot (and the
@@ -569,10 +592,18 @@ export async function* runWithFallback(
         // history and from voice, and — because the stream no longer matches
         // its own prefix — make the transports resend the recovery text. So the
         // terminal chunk describes the whole stream, not just its tail.
-        const emitted: HarnessChunk =
+        if (chunk.type === "text") slotText += chunk.text;
+        if (chunk.type === "progress" && chunk.tool) slotToolAt = slotText.length;
+        let emitted: HarnessChunk =
           chunk.type === "done" && carriedText.length > 0
             ? { ...chunk, finalText: carriedText + chunk.finalText }
             : chunk;
+        if (emitted.type === "done" && slotToolAt !== undefined) {
+          emitted = {
+            ...emitted,
+            finalSegment: segmentAfterLastTool(emitted.finalText, slotText, slotToolAt),
+          };
+        }
         if (
           emitted.type === "done" &&
           emitted.finalText.trim().length === 0 &&

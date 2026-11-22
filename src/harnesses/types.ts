@@ -231,8 +231,8 @@ export type HarnessChunk =
    *     evidence, never an audit tool call.
    */
   | { type: "replay"; note: string }
-  /** Final marker. `finalText` is the full assistant reply (sum of all `text` chunks). `runTurn` may replace an explicit silence token with empty `finalText` and `meta.silentReply: true` for a wake-enabled channel. `meta.replyMode` may be "text", "voice", or "default"/"disable" for channel adapters that support model-selected reply modality. */
-  | { type: "done"; finalText: string; meta?: Record<string, unknown> }
+  /** Final marker. `finalText` is the full assistant reply (sum of all `text` chunks). `runTurn` may replace an explicit silence token with empty `finalText` and `meta.silentReply: true` for a wake-enabled channel. `meta.replyMode` may be "text", "voice", or "default"/"disable" for channel adapters that support model-selected reply modality. `finalSegment` is orchestrator-internal: `runWithFallback` sets it to the serving harness's own text after its last tool call (only when it ran one) and `runTurn` consumes it, so silence is never judged against a failed harness's stream. */
+  | { type: "done"; finalText: string; finalSegment?: string; meta?: Record<string, unknown> }
   /**
    * Error. `recoverable: true` means the orchestrator should try the next harness.
    * `false` means abort the turn.

@@ -34,6 +34,7 @@ import { DEFAULT_CHATTINESS, DEFAULT_TELEGRAM_STREAMING } from "../../config.ts"
 import type { Harness } from "../../harnesses/types.ts";
 import type { WriteSink } from "../../lib/io.ts";
 import { log } from "../../lib/logger.ts";
+import { isSilenceToken } from "../../lib/silence.ts";
 import { resolveNarrationEnabled } from "../../lib/chattiness.ts";
 import type { MemoryStore } from "../../memory/store.ts";
 import { runTurn } from "../../orchestrator/turn.ts";
@@ -751,16 +752,19 @@ export async function runPhantomchatServer(
     return wokenByPhantom;
   };
 
+  /** One extra message in a coalesced phantom turn. `chatter` did not mention us. */
+  type BatchItem = { msg: ChannelMessage; chatter: boolean };
   const handle = async (
     msg: ChannelMessage,
     alsoReceipt?: string[],
-    phantomBatch?: ChannelMessage[],
+    phantomBatch?: BatchItem[],
   ): Promise<void> => {
     // A batch can contain messages sent to different subsets of this group.
     // The reply must reach every requester, not just the first rumor's peers.
     if (phantomBatch?.length) {
       const members = new Set(msg.groupMemberHexes ?? []);
-      for (const extra of phantomBatch) {
+      for (const { msg: extra, chatter } of phantomBatch) {
+        if (chatter) continue; // overheard, not a requester
         members.add(extra.senderId.toLowerCase());
         for (const member of extra.groupMemberHexes ?? []) members.add(member);
       }
@@ -1052,10 +1056,13 @@ export async function runPhantomchatServer(
 
     if (phantomBatch?.length) {
       const state = groupChats.get(msg.conversationId);
-      for (const extra of phantomBatch) {
+      for (const { msg: extra, chatter } of phantomBatch) {
         const label = sanitizeEnvelopeField(senderLabel(extra.senderId, extra.conversationId));
-        userMessage += `\n\n[From ${label}, a phantom member of this team group (not your principal).]\n\n${extra.text}`;
-        state?.buffer.push({ from: senderLabel(extra.senderId, extra.conversationId), text: extra.text, delivered: true });
+        const text = chatter ? groupBufferText(extra) : extra.text;
+        userMessage += chatter
+          ? `\n\n[${label}, a phantom member of this team group, also said without mentioning you. Context: it may be part of a handoff around it.]\n\n${text}`
+          : `\n\n[From ${label}, a phantom member of this team group (not your principal).]\n\n${text}`;
+        state?.buffer.push({ from: senderLabel(extra.senderId, extra.conversationId), text, delivered: true });
       }
       if (state) while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
       userMessage = "[Queued phantom handoffs, oldest first. Act on the current state: a later message may settle an earlier one. Preserve every distinct request.]\n\n" + userMessage;
@@ -1196,7 +1203,7 @@ export async function runPhantomchatServer(
       text: string,
       kind: "narration" | "final" = "final",
     ): Promise<void> => {
-      if (text.trim().length === 0 || (kind === "narration" && wokenByPhantom && text.trim() === "SILENT")) return;
+      if (text.trim().length === 0 || (kind === "narration" && wokenByPhantom && isSilenceToken(text))) return;
       // A bubble with no letters or digits ("⚡", "👍") is a sign-off, not an
       // answer. It reaches here as the streamed leftover: the splitter cut the
       // real bubble at a sentence boundary and PUBLISHED it, so there is
@@ -1427,7 +1434,7 @@ export async function runPhantomchatServer(
             const unsent = wokenByPhantom
               ? streamedReply.slice(toolBoundaries.at(-1) ?? 0)
               : finalCandidateText.slice(finalCandidateSentChars);
-            if (unsent.trim().length > 0 && !(wokenByPhantom && unsent.trim() === "SILENT")) narration.append(unsent);
+            if (unsent.trim().length > 0 && !(wokenByPhantom && isSilenceToken(unsent))) narration.append(unsent);
             consumedReplyChars = streamedReply.length;
             if (toolBoundaries.at(-1) !== streamedReply.length) {
               toolBoundaries.push(streamedReply.length);
@@ -1551,7 +1558,7 @@ export async function runPhantomchatServer(
           void transport.sendTyping(senderHex, true);
         }
       }
-      if (!recoveryText?.trim() || (wokenByPhantom && recoveryText.trim() === "SILENT")) {
+      if (!recoveryText?.trim() || (wokenByPhantom && isSilenceToken(recoveryText))) {
         recoveryText = "⚠️ That turn failed before I could finish — please ask me again.";
       }
     }
@@ -1809,11 +1816,19 @@ export async function runPhantomchatServer(
   // chains); senderId would serialize them behind each other.
   type QueuedMessage = { msg: ChannelMessage; alsoReceipt?: string[]; epoch: number; consumed: boolean };
   const pendingMessages = new Map<string, QueuedMessage[]>();
+  const fromTeamPhantom = (msg: ChannelMessage): boolean =>
+    !!msg.groupId && isTeamMember(msg) && authorize(msg) === "trusted" &&
+    isBot(msg.senderId) && msg.senderId.toLowerCase() !== ourHex;
+  const mentionsUs = (msg: ChannelMessage): boolean =>
+    matchAtMentions(msg.text ?? "", [selfName]).length > 0;
   const batchable = (msg: ChannelMessage): boolean =>
-    !!msg.groupId && !msg.media && isTeamMember(msg) && authorize(msg) === "trusted" &&
-    isBot(msg.senderId) && msg.senderId.toLowerCase() !== ourHex &&
-    matchAtMentions(msg.text ?? "", [selfName]).length > 0 &&
+    fromTeamPhantom(msg) && !msg.media && mentionsUs(msg) &&
     isHandoff(msg.text ?? "", msg.senderId, msg.groupMemberHexes ?? []);
+  // A teammate phantom talking past us (narration, a split reply's earlier
+  // bubbles, a handoff to someone else). It can never wake us, so it must not
+  // split a batch: it rides along in order instead.
+  const isChatter = (msg: ChannelMessage): boolean =>
+    fromTeamPhantom(msg) && !mentionsUs(msg);
   const enqueue = (
     msg: ChannelMessage,
     alsoReceipt?: string[],
@@ -1906,7 +1921,7 @@ export async function runPhantomchatServer(
           // to a human, who must keep their own turn and remain a barrier.
           const refresh = [msg];
           for (const extra of queued) {
-            if (!batchable(extra.msg)) break;
+            if (!batchable(extra.msg) && !isChatter(extra.msg)) break;
             refresh.push(extra.msg);
           }
           await ensureProfiles(refresh.flatMap(m => [m.senderId, ...(m.groupMemberHexes ?? [])]));
@@ -1916,20 +1931,38 @@ export async function runPhantomchatServer(
           return;
         }
         const candidates = [entry];
-        // Snapshot only the consecutive text phantoms already waiting. A human
-        // or media message is a barrier; later arrivals belong to a later turn.
-        while (queued.length && waitingAtFront.has(queued[0]!) && batchable(queued[0]!.msg)) {
+        // Snapshot only the phantom messages already waiting, up to the last
+        // handoff among them: teammate chatter BETWEEN handoffs comes along in
+        // order, chatter after the last one stays queued for the next turn's
+        // context (it may be the first half of a handoff still arriving). A
+        // human message, or media that mentions us, is a barrier; later
+        // arrivals belong to a later turn.
+        let take = 0;
+        for (let i = 0; i < queued.length; i++) {
+          const next = queued[i]!;
+          if (!waitingAtFront.has(next)) break;
+          if (batchable(next.msg)) take = i + 1;
+          else if (!isChatter(next.msg)) break;
+        }
+        while (take-- > 0) {
           const extra = queued.shift()!;
           extra.consumed = true;
           if (backlog.claim(key, extra.epoch)) candidates.push(extra);
         }
-        const admitted: ChannelMessage[] = [];
+        const admitted: BatchItem[] = [];
         const paused: ChannelMessage[] = [];
         for (const candidate of candidates) {
-          if (await admitPhantomWake(candidate.msg)) admitted.push(candidate.msg);
-          else paused.push(candidate.msg);
+          const chatter = !mentionsUs(candidate.msg);
+          // Also counts a handoff between two OTHER phantoms, in queue order.
+          const wakes = await admitPhantomWake(candidate.msg);
+          if (wakes || (chatter && admitted.length && !paused.length)) {
+            admitted.push({ msg: candidate.msg, chatter: !wakes });
+          } else paused.push(candidate.msg);
         }
-        if (admitted.length) await handle(admitted[0]!, undefined, admitted.slice(1));
+        // Same bound the catch-up preamble has; handoffs are never dropped.
+        let excess = admitted.filter((i) => i.chatter).length - GROUP_BUFFER_MAX;
+        const batch = admitted.filter((i) => !i.chatter || excess-- <= 0);
+        if (batch.length) await handle(batch[0]!.msg, undefined, batch.slice(1));
         // Over-budget messages remain later context, never instructions folded
         // into the last permitted turn just because they shared its batch.
         for (const message of paused) await observeGroupMessage(message);

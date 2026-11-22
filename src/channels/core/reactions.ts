@@ -40,6 +40,7 @@
 import { homedir } from "node:os";
 import type { Harness } from "../../harnesses/types.ts";
 import { log } from "../../lib/logger.ts";
+import { isSilenceToken } from "../../lib/silence.ts";
 import type { MemoryStore } from "../../memory/store.ts";
 import { runTurn } from "../../orchestrator/turn.ts";
 
@@ -217,15 +218,13 @@ matters.`;
 /**
  * Sentinel a well-behaved model emits when it has nothing material to say.
  * Case-insensitive; also treated as silence: an empty/whitespace reply, or a
- * bare "[silent]". Matched in {@link isSilentReply}.
+ * bare "[silent]". Matched in {@link isSilentReply} via lib/silence.ts.
  */
 export const REACTION_SILENCE_SENTINEL = "SILENT";
 
 /** True when the model's reaction reply should be suppressed (no message sent). */
 export function isSilentReply(finalText: string): boolean {
-  const t = finalText.trim();
-  if (t.length === 0) return true;
-  return /^\[?silent\]?[.!]?$/i.test(t);
+  return finalText.trim().length === 0 || isSilenceToken(finalText);
 }
 
 /** Everything {@link runReactionTurn} needs to run one wake-but-silent turn. */
