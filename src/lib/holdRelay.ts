@@ -205,10 +205,12 @@ export function startHoldRelay(
   relay: HoldThreadRelay,
   deliver: (thread: string, notices: HoldNotice[]) => Promise<unknown> | unknown,
   intervalMs = HOLD_RELAY_POLL_MS,
-): () => void {
+): () => Promise<void> {
   let busy = false;
+  let current: Promise<void> = Promise.resolve();
+  let stopped = false;
   const tick = async () => {
-    if (busy) return;
+    if (busy || stopped) return;
     busy = true;
     try {
       for (const { thread, notices } of relay.due()) {
@@ -224,7 +226,17 @@ export function startHoldRelay(
       busy = false;
     }
   };
-  const timer = setInterval(() => void tick(), intervalMs);
+  const timer = setInterval(() => {
+    if (busy || stopped) return;
+    current = tick();
+  }, intervalMs);
   (timer as { unref?: () => void }).unref?.();
-  return () => clearInterval(timer);
+  // Stop polling, then resolve once a delivery already under way has settled,
+  // so a caller that awaits it never tears its transport down mid-send (the
+  // send would otherwise finish, and log, after the owner is gone).
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+    return current;
+  };
 }

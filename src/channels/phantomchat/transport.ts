@@ -1028,6 +1028,10 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
         this.relayHealth.record(relay, found);
       }),
     );
+    // Torn down while the read-back was querying: the verdict is moot (the
+    // pool is gone, nobody acts on it) and logging it would outlive the
+    // owner — in tests, into whatever log sink a later file installs.
+    if (this.closed) return missing;
     const confirmed = targets.length - missing.length;
     if (confirmed >= PUBLISH_CONFIRM_QUORUM) {
       log.info(`phantomchat: publish confirmed delivered via ${confirmed} relays`, {

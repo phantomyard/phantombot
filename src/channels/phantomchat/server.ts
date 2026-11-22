@@ -1993,7 +1993,9 @@ export async function runPhantomchatServer(
       coalescer.accept(msg);
     }
   } finally {
-    stopHoldRelay();
+    // Awaited: a hold notice already being sent finishes before we drain and
+    // hand the transport back, instead of publishing into a torn-down pool.
+    await stopHoldRelay();
   }
 
   // Whatever is still waiting for a caption goes out as-is: a hold must never

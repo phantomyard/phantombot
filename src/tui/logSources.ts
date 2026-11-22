@@ -39,7 +39,7 @@ import { join } from "node:path";
 
 import { auditPath } from "../state.ts";
 import { logsLocation, logsSpec } from "../lib/platform.ts";
-import { logBuffer, parseLogLine, type LogLine } from "./logBuffer.ts";
+import { logBuffer, parseLogLine, type LogBuffer, type LogLine } from "./logBuffer.ts";
 import type { HostSnapshot, PersonaSnapshot } from "./snapshot.ts";
 
 export type LogSourceId = "session" | "service" | "audit" | "state" | "tasks";
@@ -375,7 +375,7 @@ function taskSource(personas: PersonaSnapshot[]): LogSource {
 }
 
 /** The live in-process ring: the TUI's own logger plus harness stderr. */
-function sessionSource(): LogSource {
+function sessionSource(buffer: LogBuffer = logBuffer): LogSource {
   return {
     id: "session",
     label: "session (this TUI)",
@@ -383,7 +383,7 @@ function sessionSource(): LogSource {
     command: "",
     available: true,
     async read(limit) {
-      const lines = logBuffer.tail(limit);
+      const lines = buffer.tail(limit);
       return lines.length
         ? lines
         : unavailable(
@@ -412,6 +412,8 @@ export const EMPTY_SOURCE: LogSource = {
 export interface LogSourcesInput {
   host: HostSnapshot;
   now?: Date;
+  /** The ring behind the `session` source; defaults to the process-wide one. */
+  sessionBuffer?: LogBuffer;
 }
 
 /** Every source on this host, in cycle order. Pure: no I/O until `read`. */
@@ -419,7 +421,7 @@ export function logSources(input: LogSourcesInput): LogSource[] {
   const now = input.now ?? new Date();
   const personas = input.host.personas;
   const byId: Record<LogSourceId, LogSource> = {
-    session: sessionSource(),
+    session: sessionSource(input.sessionBuffer),
     service: serviceSource(),
     audit: auditSource(personas, now),
     state: stateSource(),

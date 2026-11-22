@@ -141,6 +141,36 @@ describe("HoldThreadRelay", () => {
       stop();
     }
   });
+
+  test("stop() resolves only after a delivery already under way has settled", async () => {
+    const relay = new HoldThreadRelay(dir);
+    relay.touch("slow");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let started = false;
+    let finished = false;
+    const stop = startHoldRelay(
+      relay,
+      async () => {
+        started = true;
+        await gate;
+        finished = true;
+      },
+      10,
+    );
+    await sleep(5);
+    publishHoldNotice(dir, { source: "judge", count: 1, text: "held" });
+    for (let i = 0; i < 50 && !started; i++) await sleep(5);
+    expect(started).toBe(true);
+    let stopped = false;
+    const done = stop().then(() => (stopped = true));
+    await sleep(20);
+    // Still sending: stop() must not report quiescence yet.
+    expect(stopped).toBe(false);
+    release();
+    await done;
+    expect(finished).toBe(true);
+  });
 });
 
 describe("TUI: a hold shows as a system line straight away", () => {

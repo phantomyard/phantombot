@@ -1875,6 +1875,11 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     const stop = async () => {
       ac.abort();
       await done;
+      // Quiesce the transport too: drain background relay publishes, then
+      // close so a detached read-back cannot log after this test ends (the
+      // log ring is process-wide and would leak into a later test file).
+      await transport.flush();
+      transport.close();
     };
     return { pool, feedGroup, stop };
   }
