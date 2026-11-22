@@ -21,14 +21,65 @@ launches, in this order:
    `<persona-dir>/browser/detected.json`).
 4. Otherwise it test-launches each installed browser in turn and keeps the
    first one that actually starts: Chrome, Chromium, Brave, then Edge, with
-   every Snap build (including Ubuntu's `chromium-browser` wrapper) last.
+   existing full Chromium builds in the user's Playwright cache next (newest
+   revision first), and every Snap build (including Ubuntu's `chromium-browser`
+   wrapper) last.
    Each test is a short headless launch (about a second) with the same flags
    and environment as the real worker, using a throwaway profile next to the
    real one. Snap confinement cannot open a profile under a hidden `$HOME`
    directory such as `~/.local/share`, so a Snap Chromium that runs fine from a
    terminal can still fail here; the test catches that.
-5. If none of the standard install locations exist (Flatpak, NixOS, custom
+5. If none of the known install or cache locations exist (Flatpak, NixOS, custom
    prefixes), Bun's own discovery is used.
+
+The Playwright cache is `~/.cache/ms-playwright` on Linux (or
+`$XDG_CACHE_HOME/ms-playwright` when the XDG root is absolute),
+`~/Library/Caches/ms-playwright` on macOS, and `%LOCALAPPDATA%\ms-playwright`
+on Windows. An absolute host `PLAYWRIGHT_BROWSERS_PATH` selects a custom cache
+instead; relative values and `0` skip cache discovery. Both older Chromium and
+newer Chrome for Testing layouts are recognized. Project-local installs and
+headless-shell builds are excluded. Nothing is downloaded or installed.
+
+On Linux, a downloaded Chromium also needs a working Chrome sandbox. Unprivileged
+user namespaces can provide it without SUID setup. Where those namespaces are
+restricted (for example Ubuntu's default AppArmor policy since 23.10, some
+containers or hardened kernels), a fresh cache can fail the launch probe with
+`Chrome process closed the pipe`. Playwright ships a user-owned `chrome_sandbox`,
+but Chrome looks for `chrome-sandbox`. For a trusted cached build on such a host,
+an operator can configure the helper next to `chrome` once per downloaded
+revision, substituting its actual absolute directory:
+
+```bash
+# Current archives use an underscore; install the helper under Chrome's name.
+sudo install -o root -g root -m 4755 /absolute/path/to/chrome-linux64/chrome_sandbox /absolute/path/to/chrome-linux64/chrome-sandbox
+# If chrome-sandbox already exists, configure that file instead:
+sudo chown root:root /absolute/path/to/chrome-linux64/chrome-sandbox
+sudo chmod 4755 /absolute/path/to/chrome-linux64/chrome-sandbox
+```
+
+Chrome's required filename is `chrome-sandbox` (hyphen). Phantombot never
+performs this privileged setup or adds `--no-sandbox`. Hosts whose policy still
+prevents launch need an installed browser that works under that policy. Failed
+cached candidates are skipped; if every candidate is a Linux cached build and
+none starts, the error points to this prerequisite. Discovery alone does not
+make an unconfigured downloaded browser usable.
+
+On Windows, downloaded builds need read/execute access for Chrome's sandboxed
+AppContainer processes. A cache under a restricted directory can pass the
+`about:blank` startup probe but then fail navigation with `net::ERR_ABORTED` and
+`Sandbox cannot access executable` in the worker log. An operator can grant
+read/execute access to a trusted browser cache (substitute its absolute path):
+
+```powershell
+icacls 'C:\absolute\path\to\ms-playwright' /grant '*S-1-15-2-1:(OI)(CI)(RX)' '*S-1-15-2-2:(OI)(CI)(RX)' /T
+```
+
+These are the application-package and restricted-application-package SIDs;
+the grant covers only the browser cache, without write access. Phantombot does
+not change these permissions or disable Chrome's sandbox. CI configures only
+its disposable downloaded cache before verifying real navigation and screenshots.
+See [Chromium's sandbox ACL setup](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/testing/scripts/common.py)
+and [Puppeteer's Windows sandbox guidance](https://pptr.dev/troubleshooting#chrome-reports-sandbox-errors-on-windows).
 
 If no installed browser starts, `open` fails with the list of what was tried. If
 the cached browser later fails to start, the cache is dropped and the next open

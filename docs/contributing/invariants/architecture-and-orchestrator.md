@@ -70,7 +70,34 @@ is impossible. Precedence: the persona's `browser use` choice, then host
 `BUN_CHROME_PATH` (used as-is), then the cached last good launch
 (`browser/detected.json`), then a cascade that test-launches each installed
 browser in a child process (`__browser_probe`) and keeps the first that starts.
-The order is Chrome, Chromium, Brave, Edge, with Snaps last. Bun's own discovery
+The order is native Chrome, Chromium, Brave, Edge, then full Chromium builds
+from the user's Playwright cache (newest revision first), with Snaps last. Only
+known executable layouts under numeric `chromium-*` directories are considered;
+never recurse, search cwd/project installs, or select headless-shell. Cache roots
+are `~/.cache/ms-playwright` (Linux, respecting absolute `XDG_CACHE_HOME`),
+`~/Library/Caches/ms-playwright` (macOS), and `%LOCALAPPDATA%\ms-playwright`
+(Windows). An absolute host `PLAYWRIGHT_BROWSERS_PATH` replaces that cache root;
+relative values and `0` disable cache discovery. Cached builds use the SAME
+host-side probes, path deduplication and credential-free child environment; no
+downloads or Playwright dependency enter the runtime. On Linux, unprivileged user
+namespaces can provide Chrome's sandbox without SUID setup. Where namespaces are
+restricted (Ubuntu's default AppArmor policy since 23.10, some containers or
+hardened kernels), cached builds need a configured SUID helper. Playwright ships
+a user-owned `chrome_sandbox`; Chrome needs `chrome-sandbox`. For a trusted build
+on such a host an operator can run
+`sudo install -o root -g root -m 4755 /absolute/path/to/chrome-linux64/chrome_sandbox /absolute/path/to/chrome-linux64/chrome-sandbox`.
+If the hyphen-named helper exists already, run
+`sudo chown root:root /absolute/path/to/chrome-linux64/chrome-sandbox` then
+`sudo chmod 4755 /absolute/path/to/chrome-linux64/chrome-sandbox` (hyphen, not
+underscore), once per downloaded revision. The runtime never performs privileged
+setup or disables Chrome's sandbox. On Windows, a downloaded cache may need
+AppContainer read/execute ACLs (application-package SIDs `S-1-15-2-1` and
+`S-1-15-2-2`); the runtime never grants them. A restricted cache can pass the
+`about:blank` probe yet fail real navigation. CI configures only its disposable
+cache on both platforms and verifies real navigation and screenshots. The Linux
+live regression checks rejection where user namespaces are restricted and
+forces a failed candidate to prove fallback on either kind of host. Cache-only
+Linux launch failures point at this prerequisite and the browser guide. Bun's own discovery
 is used only when no known install exists. The probe must match the worker: same
 argv (`chromeArgv`), same OS-only environment (`browserChildEnv`), and a
 throwaway profile INSIDE the real browser root. Snap confinement fails on the

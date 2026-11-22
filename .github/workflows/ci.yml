@@ -89,10 +89,39 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Compile the browser CLI for the real sandbox regression
         run: bun build --compile ${{ matrix.target }} src/index.ts --outfile "${{ matrix.binary }}"
+      - name: Install test-only cached Chromium
+        run: bunx playwright@1.65.1 install --no-shell chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pb-playwright-cache
+      - name: Configure the cached Chromium Linux sandbox
+        if: runner.os == 'Linux'
+        env:
+          CACHE_ROOT: ${{ runner.temp }}/pb-playwright-cache
+        run: |
+          set -euo pipefail
+          # Operator setup for this disposable CI browser only. The runtime
+          # never elevates permissions or disables Chrome's sandbox.
+          # The archive spells it chrome_sandbox; Chrome looks for the hyphen.
+          mapfile -d '' helpers < <(find "$CACHE_ROOT" -type f -name chrome_sandbox -print0)
+          test "${#helpers[@]}" -gt 0
+          for helper in "${helpers[@]}"; do
+            sudo install -o root -g root -m 4755 "$helper" "${helper%/*}/chrome-sandbox"
+          done
+      - name: Configure the cached Chromium Windows sandbox
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CACHE_ROOT: ${{ runner.temp }}/pb-playwright-cache
+        run: |
+          # Downloaded binaries need AppContainer read/execute access. Apply
+          # only to this disposable cache, never the runner's other files.
+          icacls $env:CACHE_ROOT /grant '*S-1-15-2-1:(OI)(CI)(RX)' '*S-1-15-2-2:(OI)(CI)(RX)' /T /Q
+          if ($LASTEXITCODE -ne 0) { throw "Cached Chromium sandbox ACL setup failed" }
       - name: Verify real Chrome rendering and profile isolation
-        run: bun test tests/browser-live.test.ts tests/browser-broker-live.test.ts
+        run: bun test tests/browser-discovery.test.ts tests/browser-cache-live.test.ts tests/browser-live.test.ts tests/browser-broker-live.test.ts
         env:
           PHANTOMBOT_BROWSER_LIVE: "1"
+          PHANTOMBOT_BROWSER_CACHE_LIVE: ${{ runner.temp }}/pb-playwright-cache
           BUN_CHROME_PATH: ${{ matrix.chrome }}
           PHANTOMBOT_BROWSER_TEST_BINARY: ${{ matrix.binary }}
 

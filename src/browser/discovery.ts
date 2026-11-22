@@ -15,9 +15,9 @@
  *   5. Bun's own discovery, only when no known install exists at all
  */
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { isCompiledBinary } from "../lib/embeddedPi.ts";
 
 export const BROWSER_PROBE_SUBCOMMAND = "__browser_probe";
@@ -34,6 +34,7 @@ export interface DiscoveryHost {
   env: NodeJS.ProcessEnv;
   isFile(path: string): boolean;
   which(name: string): string | null;
+  directories(path: string): string[];
   realpath(path: string): string;
   /** First bytes of a file (Snap wrapper detection); "" when unreadable. */
   head(path: string): string;
@@ -50,6 +51,9 @@ export function systemHost(env: NodeJS.ProcessEnv = process.env): DiscoveryHost 
     env,
     isFile: path => { try { return statSync(path).isFile(); } catch { return false; } },
     which: name => Bun.which(name, { PATH: env.PATH ?? env.Path ?? "" }),
+    directories: path => {
+      try { return readdirSync(path, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name); } catch { return []; }
+    },
     realpath: path => { try { return realpathSync(path); } catch { return path; } },
     head: path => {
       let fd: number | undefined;
@@ -71,8 +75,8 @@ function platformCandidates(host: DiscoveryHost): { id: BrowserId; path: string 
       ["brave", "Brave Browser.app/Contents/MacOS/Brave Browser"],
       ["edge", "Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
     ];
-    const roots = ["/Applications", ...(env.HOME ? [join(env.HOME, "Applications")] : [])];
-    return apps.flatMap(([id, app]) => roots.map(root => ({ id, path: join(root, app) })));
+    const roots = ["/Applications", ...(env.HOME ? [posix.join(env.HOME, "Applications")] : [])];
+    return apps.flatMap(([id, app]) => roots.map(root => ({ id, path: posix.join(root, app) })));
   }
   if (host.platform === "win32") {
     const roots = [env.PROGRAMFILES ?? env.ProgramFiles, env["ProgramFiles(x86)"], env.LOCALAPPDATA].filter((r): r is string => !!r);
@@ -102,6 +106,40 @@ function platformCandidates(host: DiscoveryHost): { id: BrowserId; path: string 
   ];
 }
 
+/** Only the user's known Playwright cache, never a recursive/cwd search.
+ * Full Chromium builds only: headless-shell is not a WebView browser. Layouts
+ * cover both the older Chromium archives and newer Chrome for Testing archives. */
+function cachedCandidates(host: DiscoveryHost): { id: BrowserId; path: string }[] {
+  const { env, platform } = host;
+  const paths = platform === "win32" ? win32 : posix;
+  let root: string | undefined;
+  if (env.PLAYWRIGHT_BROWSERS_PATH) {
+    // Playwright's "0" means project-local storage; relative paths likewise
+    // depend on cwd and must never become implicit host executable choices.
+    if (!paths.isAbsolute(env.PLAYWRIGHT_BROWSERS_PATH)) return [];
+    root = env.PLAYWRIGHT_BROWSERS_PATH;
+  } else if (platform === "win32") {
+    if (env.LOCALAPPDATA && paths.isAbsolute(env.LOCALAPPDATA)) root = paths.join(env.LOCALAPPDATA, "ms-playwright");
+  } else if (platform === "darwin") {
+    if (env.HOME && paths.isAbsolute(env.HOME)) root = paths.join(env.HOME, "Library", "Caches", "ms-playwright");
+  } else if (platform === "linux") {
+    const cache = env.XDG_CACHE_HOME && paths.isAbsolute(env.XDG_CACHE_HOME) ? env.XDG_CACHE_HOME
+      : env.HOME && paths.isAbsolute(env.HOME) ? paths.join(env.HOME, ".cache") : undefined;
+    if (cache) root = paths.join(cache, "ms-playwright");
+  }
+  if (!root) return [];
+  const layouts = platform === "win32" ? [["chrome-win64", "chrome.exe"], ["chrome-win", "chrome.exe"]]
+    : platform === "darwin" ? [
+      ["chrome-mac-arm64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"],
+      ["chrome-mac-x64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"],
+      ["chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"],
+    ] : [["chrome-linux64", "chrome"], ["chrome-linux-arm64", "chrome"], ["chrome-linux", "chrome"]];
+  return host.directories(root)
+    .filter(name => /^chromium-\d+$/.test(name))
+    .sort((a, b) => Number(b.slice(9)) - Number(a.slice(9)))
+    .flatMap(name => layouts.map(parts => ({ id: "chromium" as const, path: paths.join(root, name, ...parts) })));
+}
+
 function isSnapLauncher(real: string): boolean { return /\/s?bin\/snap$/.test(real); }
 
 /** A Snap, or Ubuntu's `chromium-browser` shell wrapper that execs one. */
@@ -115,12 +153,12 @@ export function isSnap(host: DiscoveryHost, path: string): boolean {
 }
 
 /** Installed Chrome-family executables in launch-preference order: Chrome,
- * Chromium, Brave, Edge; every Snap after every non-Snap. Deduplicated by
+ * Chromium, Brave, Edge, then cached Chromium; every Snap last. Deduplicated by
  * real path so a symlink and its target are probed once. */
 export function browserCandidates(host: DiscoveryHost = systemHost()): Candidate[] {
   const seen = new Set<string>();
   const found: Candidate[] = [];
-  for (const c of platformCandidates(host)) {
+  for (const c of [...platformCandidates(host), ...cachedCandidates(host)]) {
     if (!host.isFile(c.path)) continue;
     const real = host.realpath(c.path);
     // Every Snap app resolves to the one launcher; keep those apart by name.
@@ -261,7 +299,13 @@ export async function resolveBrowserExecutable(settings: string, root: string, o
   // Unknown layout (Flatpak, NixOS, a custom prefix): keep Bun's own search.
   if (!candidates.length) return { source: "bun" };
   const { found, tried } = await firstThatStarts(candidates, root, probe);
-  if (!found) throw new Error(`No installed browser could start: ${tried.join("; ")}. Install Chrome, Chromium, Brave or Edge, or choose an executable with 'phantombot browser use <path>'.`);
+  if (!found) {
+    const cachePaths = new Set(cachedCandidates(host).map(c => c.path));
+    const hint = host.platform === "linux" && candidates.every(c => cachePaths.has(c.path))
+      ? " Cached Chromium on Linux needs a working sandbox; if the adjacent chrome-sandbox helper is not configured, an operator must set its owner to root:root and mode to 4755 (see docs/reference/browser.md)."
+      : "";
+    throw new Error(`No installed browser could start: ${tried.join("; ")}.${hint} Install Chrome, Chromium, Brave or Edge, or choose an executable with 'phantombot browser use <path>'.`);
+  }
   await writeJson(settings, DETECTED_FILE, { path: found.path, checkedAt: new Date().toISOString() } satisfies Detected);
   return { path: found.path, source: "probed" };
 }
