@@ -2428,17 +2428,18 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     (text.match(/[\s\S]{1,9}/g) ?? []).map((t) => ({ type: "text" as const, text: t }));
 
   test.each([
-    ["human", "streamed", "lena, get the PR reviewed", [...inPieces(HANDOFF), { type: "done", finalText: HANDOFF }], [HANDOFF]],
-    ["human", "done only", "lena, get the PR reviewed", [{ type: "done", finalText: HANDOFF }], [HANDOFF]],
-    ["human", "narration stays its own message", "lena, get the PR reviewed", [{ type: "text", text: "Checking the PR" }, { type: "progress", note: "read", tool: toolCall("read") }, ...inPieces(HANDOFF), { type: "done", finalText: "Checking the PR" + HANDOFF }], ["Checking the PR", HANDOFF]],
-    ["human", "before a last tool", "lena, get the PR reviewed", [...inPieces(HANDOFF), { type: "progress", note: "capture", tool: toolCall("capture") }, { type: "done", finalText: HANDOFF }], [HANDOFF]],
-    ["phantom", "streamed", "@lena get the PR reviewed", [...inPieces(HANDOFF), { type: "done", finalText: HANDOFF }], [HANDOFF]],
-  ] as const)("team group: a %s-woken multi-bubble handoff (%s) is one message", async (who, _name, ask, script, expected) => {
+    ["human", "streamed", "lena, get the PR reviewed", [...inPieces(HANDOFF), { type: "done", finalText: HANDOFF }], [HANDOFF], true],
+    ["human", "done only", "lena, get the PR reviewed", [{ type: "done", finalText: HANDOFF }], [HANDOFF], true],
+    ["human", "narration stays its own message", "lena, get the PR reviewed", [{ type: "text", text: "Checking the PR" }, { type: "progress", note: "read", tool: toolCall("read") }, ...inPieces(HANDOFF), { type: "done", finalText: "Checking the PR" + HANDOFF }], ["Checking the PR", HANDOFF], true],
+    ["human", "before a last tool", "lena, get the PR reviewed", [...inPieces(HANDOFF), { type: "progress", note: "capture", tool: toolCall("capture") }, { type: "done", finalText: HANDOFF }], [HANDOFF], true],
+    ["human", "before a last tool, narration off", "lena, get the PR reviewed", [...inPieces(HANDOFF), { type: "progress", note: "capture", tool: toolCall("capture") }, { type: "done", finalText: HANDOFF }], [HANDOFF], false],
+    ["phantom", "streamed", "@lena get the PR reviewed", [...inPieces(HANDOFF), { type: "done", finalText: HANDOFF }], [HANDOFF], true],
+  ] as const)("team group: a %s-woken multi-bubble handoff (%s) is one message", async (who, _name, ask, script, expected, chattiness) => {
     const t = team();
     const srv = makeGroupServer({
       botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles,
       harness: new ScriptedHarness("fake", [...script] as HarnessChunk[]),
-      config: { ...baseConfig(), telegramStreaming: smallBubbles },
+      config: { ...baseConfig(), telegramStreaming: smallBubbles, chattiness },
     });
     let sent: string[];
     try {
