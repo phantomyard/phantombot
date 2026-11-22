@@ -71,6 +71,9 @@ case "$mode" in
     action=$(printf '%s' "$FAKE_PI_SEQUENCE" | cut -d, -f"$attempt")
     case "$action" in
       answer) emit_normal ;;
+      silent)
+        printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"SILENT"}}'
+        ;;
       error) echo "simulated provider failure" >&2; exit 1 ;;
       terminal) exit 127 ;;
       rate) echo "429 Too Many Requests" >&2; exit 1 ;;

@@ -229,32 +229,46 @@ describe("runWithFallback — silent rate-limit failover", () => {
 });
 
 describe("runWithFallback — empty done falls through", () => {
-  test("permitted silence completes once without fallback or failure records", async () => {
-    const empty = new FakeHarness("silent", [{ type: "done", finalText: "" }]);
+  test("explicit silence completes once without fallback or failure records", async () => {
+    const empty = new FakeHarness("silent", [{ type: "done", finalText: "SILENT" }]);
     const filler = new FakeHarness("filler", [{ type: "done", finalText: "unwanted acknowledgment" }]);
     const failures: unknown[] = [];
     const alerts: string[] = [];
     const alerter = new HarnessAlerter({ send: async message => { alerts.push(message); } });
     for (let i = 0; i < DEGRADE_AFTER_FAILURES + 1; i++) {
-      const chunks = await collect(runWithFallback([empty, filler], newRequest({ allowEmptyReply: true }), {
+      const chunks = await collect(runWithFallback([empty, filler], newRequest(), {
         cooldown: new CooldownStore(), alerter,
         onHarnessFailure: record => { failures.push(record); },
       }));
-      expect(chunks).toEqual([{ type: "done", finalText: "" }]);
+      expect(chunks).toEqual([{ type: "done", finalText: "SILENT" }]);
     }
     expect(filler.invocations).toBe(0);
     expect(failures).toEqual([]);
     expect(alerts).toEqual([]);
   });
 
-  test("permitted silence does not swallow actual harness errors", async () => {
+  test("explicit silence protocol does not swallow actual harness errors", async () => {
     const broken = new FakeHarness("broken", [{ type: "error", error: "offline", recoverable: true }]);
     const cover = new FakeHarness("cover", [{ type: "done", finalText: "covered" }]);
-    const chunks = await collect(runWithFallback([broken, cover], newRequest({ allowEmptyReply: true }), {
+    const chunks = await collect(runWithFallback([broken, cover], newRequest(), {
       cooldown: new CooldownStore(),
     }));
     expect(cover.invocations).toBe(1);
     expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "covered" });
+  });
+
+  test.each(["", " \n\t"])("an exhausted empty chain records failure for %j", async text => {
+    const failures: Array<{ error: string }> = [];
+    const chunks = await collect(runWithFallback([
+      new FakeHarness("empty-head", [{ type: "done", finalText: text }]),
+      new FakeHarness("empty-tail", [{ type: "done", finalText: text }]),
+    ], newRequest(), {
+      cooldown: new CooldownStore(),
+      onHarnessFailure: record => { failures.push(record); },
+    }));
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: text });
+    expect(failures).toHaveLength(2);
+    expect(failures.every(f => f.error === "empty reply")).toBe(true);
   });
 
   test("non-last harness emitting done with empty finalText falls through", async () => {
@@ -1117,10 +1131,13 @@ describe("runWithFallback — chain-wide wake budget (#631)", () => {
     // The fallback's cap is what was LEFT after the primary burned most of
     // the budget — strictly less than the configured 30-min-style full cap,
     // and close to (deadline - now) rather than a fresh window.
-    expect(first.capsSeen[0]).toBe(200);
+    // Availability/setup can consume time before the first invocation.
+    expect(first.capsSeen[0]).toBeGreaterThan(0);
+    expect(first.capsSeen[0]).toBeLessThanOrEqual(200);
     const remaining = second.capsSeen[0]!;
     expect(remaining).toBeGreaterThan(0);
     expect(remaining).toBeLessThanOrEqual(200);
+    expect(remaining).toBeLessThan(first.capsSeen[0]!);
     expect(remaining).toBeLessThan(160); // first attempt consumed ~150ms
     // And the whole chain never exceeds the deadline by much: the fallback
     // was clamped to the remainder, not restarted the clock.

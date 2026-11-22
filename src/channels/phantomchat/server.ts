@@ -710,37 +710,11 @@ export async function runPhantomchatServer(
     await observeGroupMessage(msg);
   };
 
-  const handle = async (
-    msg: ChannelMessage,
-    alsoReceipt?: string[],
-  ): Promise<void> => {
+  const admitPhantomWake = async (msg: ChannelMessage): Promise<boolean> => {
+    if (authorize(msg) === "drop") return false;
     const senderHex = msg.senderId;
-
-    const tier = authorize(msg);
-    if (tier === "drop") {
-      // Not allowed to command us, but may still be someone we can LISTEN to:
-      // another member of a group our principal already talks to us in.
-      await observeGroupMessage(msg);
-      return;
-    }
-
-    // ===================== PROFILE RESOLUTION + BOT GATE =====================
-    // Resolve the kind-0 profiles this decision needs: always the sender (for the
-    // global bot-gate just below) and, for a group, every member (to auto-derive
-    // the name roster). Lazy + cached, so a warm cache makes this a no-op. The
-    // await only populates the cache — the per-group state mutation further down
-    // stays a single synchronous (atomic) read-modify-write.
-    const memberHexes = msg.groupId ? msg.groupMemberHexes ?? [] : [];
+    const memberHexes = msg.groupMemberHexes ?? [];
     await ensureProfiles([senderHex, ...memberHexes]);
-
-    // GLOBAL cascade kill (option (a)): a bot NEVER replies to another bot — in a
-    // group OR a 1:1 DM. A sender is a bot if its kind-0 carries the NIP-24 `bot`
-    // flag (or it's a configured sibling / ourselves). Only humans drive
-    // conversation, so a bot's own reply can't trigger another. Drop silently —
-    // no receipt, no state change — exactly like a non-allowed sender.
-    // TEAM GROUPS are the exception: there a phantom may wake another phantom
-    // by @mentioning it, within PHANTOM_HANDOFF_BUDGET handoffs since a human
-    // last spoke. Every handoff is counted, whoever it is for.
     let wokenByPhantom = false;
     if (isBot(senderHex) && isTeamMember(msg) && senderHex.toLowerCase() !== ourHex) {
       if (isHandoff(msg.text ?? "", senderHex, memberHexes)) {
@@ -774,6 +748,52 @@ export async function runPhantomchatServer(
         }
       }
     }
+    return wokenByPhantom;
+  };
+
+  const handle = async (
+    msg: ChannelMessage,
+    alsoReceipt?: string[],
+    phantomBatch?: ChannelMessage[],
+  ): Promise<void> => {
+    // A batch can contain messages sent to different subsets of this group.
+    // The reply must reach every requester, not just the first rumor's peers.
+    if (phantomBatch?.length) {
+      const members = new Set(msg.groupMemberHexes ?? []);
+      for (const extra of phantomBatch) {
+        members.add(extra.senderId.toLowerCase());
+        for (const member of extra.groupMemberHexes ?? []) members.add(member);
+      }
+      msg = { ...msg, groupMemberHexes: [...members] };
+    }
+    const senderHex = msg.senderId;
+
+    const tier = authorize(msg);
+    if (tier === "drop") {
+      // Not allowed to command us, but may still be someone we can LISTEN to:
+      // another member of a group our principal already talks to us in.
+      await observeGroupMessage(msg);
+      return;
+    }
+
+    // ===================== PROFILE RESOLUTION + BOT GATE =====================
+    // Resolve the kind-0 profiles this decision needs: always the sender (for the
+    // global bot-gate just below) and, for a group, every member (to auto-derive
+    // the name roster). Lazy + cached, so a warm cache makes this a no-op. The
+    // await only populates the cache — the per-group state mutation further down
+    // stays a single synchronous (atomic) read-modify-write.
+    const memberHexes = msg.groupId ? msg.groupMemberHexes ?? [] : [];
+    await ensureProfiles([senderHex, ...memberHexes]);
+
+    // GLOBAL cascade kill (option (a)): a bot NEVER replies to another bot — in a
+    // group OR a 1:1 DM. A sender is a bot if its kind-0 carries the NIP-24 `bot`
+    // flag (or it's a configured sibling / ourselves). Only humans drive
+    // conversation, so a bot's own reply can't trigger another. Drop silently —
+    // no receipt, no state change — exactly like a non-allowed sender.
+    // TEAM GROUPS are the exception: there a phantom may wake another phantom
+    // by @mentioning it, within PHANTOM_HANDOFF_BUDGET handoffs since a human
+    // last spoke. Every handoff is counted, whoever it is for.
+    const wokenByPhantom = phantomBatch !== undefined || await admitPhantomWake(msg);
     if (isBot(senderHex) && !wokenByPhantom) {
       // Never REPLY to a bot, but keep what it said as group context so a
       // later "Robbie, what do you think?" sees Kai's answer, not just the
@@ -1030,6 +1050,17 @@ export async function runPhantomchatServer(
         userMessage;
     }
 
+    if (phantomBatch?.length) {
+      const state = groupChats.get(msg.conversationId);
+      for (const extra of phantomBatch) {
+        const label = sanitizeEnvelopeField(senderLabel(extra.senderId, extra.conversationId));
+        userMessage += `\n\n[From ${label}, a phantom member of this team group (not your principal).]\n\n${extra.text}`;
+        state?.buffer.push({ from: senderLabel(extra.senderId, extra.conversationId), text: extra.text, delivered: true });
+      }
+      if (state) while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
+      userMessage = "[Queued phantom handoffs, oldest first. Act on the current state: a later message may settle an earlier one. Preserve every distinct request.]\n\n" + userMessage;
+    }
+
     if (groupContext) {
       userMessage =
         userMessage.length > 0
@@ -1077,6 +1108,7 @@ export async function runPhantomchatServer(
     let finalCandidateText = "";
     let finalCandidateSentChars = 0;
     let finalReply: string | undefined;
+    let silentReply = false;
     let requestedReplyMode: ReplyModeRequest | undefined;
     // Set when the turn fails — either an `error` chunk from the harness chain
     // or a throw out of the stream. NEVER shown raw; it drives the recovery
@@ -1164,7 +1196,7 @@ export async function runPhantomchatServer(
       text: string,
       kind: "narration" | "final" = "final",
     ): Promise<void> => {
-      if (text.trim().length === 0) return;
+      if (text.trim().length === 0 || (kind === "narration" && wokenByPhantom && text.trim() === "SILENT")) return;
       // A bubble with no letters or digits ("⚡", "👍") is a sign-off, not an
       // answer. It reaches here as the streamed leftover: the splitter cut the
       // real bubble at a sentence boundary and PUBLISHED it, so there is
@@ -1269,7 +1301,7 @@ export async function runPhantomchatServer(
         persona: input.persona,
         conversation: conversationKey,
         userMessage,
-        allowEmptyReply: wokenByPhantom,
+        explicitSilence: wokenByPhantom,
         agentDir: input.agentDir,
         // Interactive surface: the owner asks for work on repos all over their
         // home dir, so home stays the cwd. Explicit since #387 removed the
@@ -1341,7 +1373,7 @@ export async function runPhantomchatServer(
         // (short, no-markdown, TTS-friendly) when this reply will be spoken.
         systemPromptSuffix: [
           wokenByPhantom
-            ? "# Phantom team handoff\n\nIf this message contains no new request, evidence requiring action, or unresolved decision, complete this turn with no text. Do not acknowledge acknowledgments, announce standing down, or narrate a decision to stay silent. An empty reply is successful completion here. Reply only when you have substantive work or information to contribute; use @mentions only for actionable handoffs."
+            ? "# Phantom team handoff\n\nIf this message contains no new request, evidence requiring action, or unresolved decision, reply with exactly SILENT as your final text, including after tool calls. Do not acknowledge acknowledgments, announce standing down, or narrate a decision to stay silent. Empty or whitespace replies are failures and will be retried. Never narrate the SILENT token. Reply only when you have substantive work or information to contribute; use @mentions only for actionable handoffs."
             : undefined,
           willReplyWithVoice
             ? `${CHAT_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
@@ -1359,7 +1391,7 @@ export async function runPhantomchatServer(
           streamedReply += chunk.text;
           // Voice-out: don't stream text bubbles — the whole reply is
           // synthesized once at the end. Just keep accumulating streamedReply.
-          if (!willReplyWithVoice) {
+          if (!willReplyWithVoice && !wokenByPhantom) {
             finalCandidateText += chunk.text;
             // Markdown-aware splitter: emit only completed sentence/block
             // boundaries as bubbles; partial text stays buffered until it is.
@@ -1392,8 +1424,10 @@ export async function runPhantomchatServer(
             // progress narration ("checking your calendar…"): buffer it for
             // the timed flush, then consume it so it is not duplicated in
             // the final answer.
-            const unsent = finalCandidateText.slice(finalCandidateSentChars);
-            if (unsent.trim().length > 0) narration.append(unsent);
+            const unsent = wokenByPhantom
+              ? streamedReply.slice(toolBoundaries.at(-1) ?? 0)
+              : finalCandidateText.slice(finalCandidateSentChars);
+            if (unsent.trim().length > 0 && !(wokenByPhantom && unsent.trim() === "SILENT")) narration.append(unsent);
             consumedReplyChars = streamedReply.length;
             if (toolBoundaries.at(-1) !== streamedReply.length) {
               toolBoundaries.push(streamedReply.length);
@@ -1413,6 +1447,7 @@ export async function runPhantomchatServer(
         }
         if (chunk.type === "done") {
           finalReply = chunk.finalText;
+          silentReply = wokenByPhantom && chunk.meta?.silentReply === true;
           requestedReplyMode = normalizeReplyModeRequest(chunk.meta?.replyMode);
         }
         // The harness chain gave up. Telegram sets the same flag here; without
@@ -1477,6 +1512,11 @@ export async function runPhantomchatServer(
       return;
     }
 
+    if (silentReply && !errored) return;
+    if (wokenByPhantom && !(finalReply ?? streamedReply).trim() && !errored) {
+      errored = "phantom handoff completed without an explicit reply or SILENT";
+    }
+
     // The turn failed. We never show the raw diagnostic — it is English-only
     // and reads like a crash — so re-prompt the chain ONCE for a short,
     // language-matched "hit a snag, mind trying again?" and deliver that as an
@@ -1511,7 +1551,7 @@ export async function runPhantomchatServer(
           void transport.sendTyping(senderHex, true);
         }
       }
-      if (!recoveryText?.trim()) {
+      if (!recoveryText?.trim() || (wokenByPhantom && recoveryText.trim() === "SILENT")) {
         recoveryText = "⚠️ That turn failed before I could finish — please ask me again.";
       }
     }
@@ -1767,6 +1807,13 @@ export async function runPhantomchatServer(
   // last promise. Keyed on conversationId so a group turn and a DM turn from
   // the same person run in parallel (which is the point of per-conversation
   // chains); senderId would serialize them behind each other.
+  type QueuedMessage = { msg: ChannelMessage; alsoReceipt?: string[]; epoch: number; consumed: boolean };
+  const pendingMessages = new Map<string, QueuedMessage[]>();
+  const batchable = (msg: ChannelMessage): boolean =>
+    !!msg.groupId && !msg.media && isTeamMember(msg) && authorize(msg) === "trusted" &&
+    isBot(msg.senderId) && msg.senderId.toLowerCase() !== ourHex &&
+    matchAtMentions(msg.text ?? "", [selfName]).length > 0 &&
+    isHandoff(msg.text ?? "", msg.senderId, msg.groupMemberHexes ?? []);
   const enqueue = (
     msg: ChannelMessage,
     alsoReceipt?: string[],
@@ -1837,6 +1884,10 @@ export async function runPhantomchatServer(
     // Captured synchronously, before the callback is attached — see the
     // Telegram engine for the full rationale.
     const epoch = backlog.enqueue(msg.conversationId);
+    const entry: QueuedMessage = { msg, alsoReceipt, epoch, consumed: false };
+    const pending = pendingMessages.get(key) ?? [];
+    pending.push(entry);
+    pendingMessages.set(key, pending);
     const prev = chains.get(key) ?? Promise.resolve();
     const next = prev
       .catch(() => {
@@ -1845,8 +1896,43 @@ export async function runPhantomchatServer(
       })
       .then(async () => {
         // Superseded while queued — evaporate without running.
-        if (!backlog.claim(msg.conversationId, epoch)) return;
-        await handle(msg, alsoReceipt);
+        const queued = pendingMessages.get(key)!;
+        if (entry.consumed) return;
+        queued.splice(queued.indexOf(entry), 1);
+        if (!backlog.claim(key, epoch)) return;
+        const waitingAtFront = new Set(queued);
+        if (batchable(msg)) {
+          // Refresh before consuming followers: a stale bot flag can resolve
+          // to a human, who must keep their own turn and remain a barrier.
+          const refresh = [msg];
+          for (const extra of queued) {
+            if (!batchable(extra.msg)) break;
+            refresh.push(extra.msg);
+          }
+          await ensureProfiles(refresh.flatMap(m => [m.senderId, ...(m.groupMemberHexes ?? [])]));
+        }
+        if (!batchable(msg)) {
+          await handle(msg, alsoReceipt);
+          return;
+        }
+        const candidates = [entry];
+        // Snapshot only the consecutive text phantoms already waiting. A human
+        // or media message is a barrier; later arrivals belong to a later turn.
+        while (queued.length && waitingAtFront.has(queued[0]!) && batchable(queued[0]!.msg)) {
+          const extra = queued.shift()!;
+          extra.consumed = true;
+          if (backlog.claim(key, extra.epoch)) candidates.push(extra);
+        }
+        const admitted: ChannelMessage[] = [];
+        const paused: ChannelMessage[] = [];
+        for (const candidate of candidates) {
+          if (await admitPhantomWake(candidate.msg)) admitted.push(candidate.msg);
+          else paused.push(candidate.msg);
+        }
+        if (admitted.length) await handle(admitted[0]!, undefined, admitted.slice(1));
+        // Over-budget messages remain later context, never instructions folded
+        // into the last permitted turn just because they shared its batch.
+        for (const message of paused) await observeGroupMessage(message);
       });
     chains.set(key, next);
     inFlight.add(next);
@@ -1856,6 +1942,7 @@ export async function runPhantomchatServer(
       // grow without bound across many conversations.
       if (chains.get(key) === next) {
         chains.delete(key);
+        pendingMessages.delete(key);
         // Settled tail for this peer: release its backlog slot as well so
         // `slots` doesn't accumulate one entry per conversation forever. `release`
         // no-ops while anything is still pending, so a live epoch is safe.

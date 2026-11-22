@@ -36,9 +36,6 @@ export interface HarnessRequest {
   epochTurns?: readonly import("./payload.ts").PromptEpochTurn[];
   /** The new user message to respond to. */
   userMessage: string;
-  /** A clean empty completion is intentional silence, not an empty-result failure.
-   * Set only for phantom-to-phantom team handoffs; errors still recover normally. */
-  allowEmptyReply?: boolean;
   /** Prior turns of this conversation, oldest first. May be empty. */
   history: HistoryTurn[];
   /**
@@ -234,7 +231,7 @@ export type HarnessChunk =
    *     evidence, never an audit tool call.
    */
   | { type: "replay"; note: string }
-  /** Final marker. `finalText` is the full assistant reply (sum of all `text` chunks). `meta.replyMode` may be "text", "voice", or "default"/"disable" for channel adapters that support model-selected reply modality. */
+  /** Final marker. `finalText` is the full assistant reply (sum of all `text` chunks). `runTurn` may replace an explicit silence token with empty `finalText` and `meta.silentReply: true` for a wake-enabled channel. `meta.replyMode` may be "text", "voice", or "default"/"disable" for channel adapters that support model-selected reply modality. */
   | { type: "done"; finalText: string; meta?: Record<string, unknown> }
   /**
    * Error. `recoverable: true` means the orchestrator should try the next harness.

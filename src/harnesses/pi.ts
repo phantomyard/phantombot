@@ -938,7 +938,7 @@ export class PiHarness implements Harness {
         }
         if (!failure) {
           if (!completion) return; // cancelled or stopped without completion
-          if (producedOutput || completion.finalText.trim() || req.allowEmptyReply) {
+          if (producedOutput || completion.finalText.trim()) {
             yield completion;
             return;
           }

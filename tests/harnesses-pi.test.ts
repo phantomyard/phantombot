@@ -1705,11 +1705,11 @@ describe("PiHarness coder-swap retry ladder", () => {
     routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
   });
 
-  test("permitted silence does not retry an empty coder completion", async () => {
+  test("explicit SILENT completes the real coder subprocess once", async () => {
     process.env.FAKE_PI_MODE = "sequence";
-    process.env.FAKE_PI_SEQUENCE = "empty,answer";
-    const chunks = await collect(sequenceHarness().invoke(newRequest({ userMessage: PR_MSG, allowEmptyReply: true })));
-    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "" });
+    process.env.FAKE_PI_SEQUENCE = "silent,answer";
+    const chunks = await collect(sequenceHarness().invoke(newRequest({ userMessage: PR_MSG })));
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "SILENT" });
     expect(await loggedArgv()).toHaveLength(1);
   });
 

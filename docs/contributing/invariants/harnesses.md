@@ -15,12 +15,13 @@ rate-limit and outer fallback rules. Never replay usable text or tool progress.
 Log the fixed empty-result reason through existing retry/exhaustion diagnostics,
 without including reply/reasoning content or tool arguments.
 
-Exception: a phantom-to-phantom team handoff explicitly sets `allowEmptyReply`
-on the turn and harness request (invariant 90). A clean empty `done` then ends
-the coder ladder and outer fallback successfully without an empty-result health
-failure. This permits an acknowledgment-only wake to finish silently; it never
-turns errors, missing terminal completion or cancellation into success. All
-other callers retain empty-result recovery.
+Phantom handoffs use an explicit nonempty `SILENT` token (invariant 90), not an
+empty-result exception. The Pi ladder and outer fallback recover empty or
+whitespace replies normally for every caller. `SILENT` is usable assistant text
+at those layers, so it completes once without retries. Only a wake-enabled
+`runTurn` interprets an exact token in the final post-tool segment and replaces
+it with a descriptive history marker; the PhantomChat adapter suppresses its
+bubble/voice output. Exhausted empty chains retain failure logs and records.
 
 ## Invariants
 

@@ -49,8 +49,9 @@ Phantombot is the agent runtime of [**Phantomyard**](https://phantomyard.ai):
 ## PhantomChat team groups
 
 In PhantomChat team groups, phantoms use @mentions for actionable handoffs.
-Acknowledgments and sign-offs can finish silently, without a reply or another
-phantom wake. Human requests retain normal reply recovery.
+Explicit `SILENT` replies end quietly; accidental empties recover normally.
+Queued phantom text handoffs combine oldest first with every sender and request.
+Humans and media stay separate; each handoff counts toward the 60-message budget.
 
 ## Built-in web browser
 

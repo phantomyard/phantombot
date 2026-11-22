@@ -403,8 +403,8 @@ export interface TurnInput {
    * actually show them.
    */
   replyAudience?: "private" | "shared" | "silent";
-  /** Permit a phantom handoff to finish without a reply. Does not suppress errors. */
-  allowEmptyReply?: boolean;
+  /** Only phantom handoffs interpret an exact SILENT final segment as silence. */
+  explicitSilence?: boolean;
   /**
    * Optional threat screen for UNTRUSTED turns (built by
    * orchestrator/screen.ts#makeScreener). Called with the incoming user
@@ -993,6 +993,7 @@ async function* runTurnBody(
   }
 
   let finalText = "";
+  let lastToolPrefix = "";
   let succeeded = false;
   let terminalError: Extract<HarnessChunk, { type: "error" }> | undefined;
 
@@ -1131,7 +1132,6 @@ async function* runTurnBody(
           systemPrompt,
           ...(turnContext ? { turnContext } : {}),
           userMessage: passUserMessage,
-          allowEmptyReply: input.allowEmptyReply,
           history: [...(epochPlan?.baseHistory ?? history)],
           ...((epochPlan?.epochTurns.length ?? 0) > 0 || nudgePairs.length > 0
             ? { epochTurns: [...(epochPlan?.epochTurns ?? []), ...nudgePairs] }
@@ -1194,6 +1194,7 @@ async function* runTurnBody(
           continue;
         }
         if (chunk.type === "text") finalText += chunk.text;
+        if (chunk.type === "progress" && chunk.tool) lastToolPrefix = finalText;
         if (chunk.type === "done") {
           // The done chunk carries the authoritative finalText — prefer it
           // over our running accumulation in case the harness reformatted.
@@ -1203,9 +1204,15 @@ async function* runTurnBody(
           // against what was streamed, so an unstitched done would truncate
           // pass 1's already-delivered text out of history and voice.
           const stitched = passPrefix + chunk.finalText;
-          finalText = stitched;
+          const tail = stitched.startsWith(lastToolPrefix)
+            ? stitched.slice(lastToolPrefix.length) : stitched;
+          const silent = input.explicitSilence && tail.trim() === "SILENT";
+          // Persist a descriptive marker, never a replayable control token.
+          finalText = silent ? "[Completed without a reply.]" : stitched;
           succeeded = true;
-          yield passPrefix.length > 0 ? { ...chunk, finalText: stitched } : chunk;
+          yield silent
+            ? { ...chunk, finalText: "", meta: { ...chunk.meta, silentReply: true } }
+            : passPrefix.length > 0 ? { ...chunk, finalText: stitched } : chunk;
           continue;
         }
         if (chunk.type === "error") terminalError = chunk;
