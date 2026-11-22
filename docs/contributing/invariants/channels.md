@@ -91,8 +91,10 @@ after the last tool boundary, is silence. Case, brackets, quotes, emphasis and a
 trailing stop are tolerated (`src/lib/silence.ts`, shared with reactions); any
 other word makes it prose, which is delivered. The boundary belongs to the
 harness that SERVED the turn (`done.finalSegment` from `runWithFallback`): a
-failed harness's stream neither hides a fallback's token nor silences its answer,
-and text an interrupted earlier pass left undelivered is never silenced.
+failed harness's stream neither hides a fallback's token nor silences its answer.
+An interrupted earlier pass's trailing text blocks silence only when the final
+pass ran no tool; once it runs one, that text is pre-tool narration like any
+other, and a bare token after it is silence.
 Empty/whitespace output
 retains ordinary coder-swap and outer-fallback recovery, including failure
 records when every harness is empty. Errors and cancellation keep their existing

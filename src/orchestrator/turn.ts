@@ -1128,7 +1128,8 @@ async function* runTurnBody(
       // same stitch), so the turn's authoritative reply is prefix + tail.
       const passPrefix = finalText;
       // What earlier passes said after their last tool call. It is still
-      // undelivered, so this pass's token must not silence it.
+      // undelivered, so this pass's token must not silence it, unless this
+      // pass runs a tool itself: then it is pre-tool narration (invariant 90).
       const passRemainder = finalText.slice(lastToolAt);
       terminalError = undefined;
       const upstream = runWithFallback(

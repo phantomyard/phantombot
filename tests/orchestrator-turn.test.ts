@@ -2395,17 +2395,21 @@ describe("runTurn — soft deadline + wrap-up nudge (#639)", () => {
     expect(harness.requests[0]!.softTimeoutMs).toBeUndefined();
   });
 
-  test.each<[string, HarnessChunk[], boolean]>([
+  test.each<[string, HarnessChunk[], boolean, HarnessChunk[]?]>([
     ["an undelivered partial answer", [{ type: "text", text: "Found a real bug. " }, SOFT_ERROR], false],
+    // The wrap-up pass ran its own tool, so the earlier text is pre-tool narration.
+    ["a partial answer, then the wrap-up pass runs a tool", [{ type: "text", text: "Found a real bug. " }, SOFT_ERROR], true, [
+      { type: "progress", note: "read", tool: { title: "read", kind: "read", locations: [] } },
+    ]],
     ["only narration before a tool", [
       { type: "text", text: "Checking. " },
       { type: "progress", note: "read", tool: { title: "read", kind: "read", locations: [] } },
       SOFT_ERROR,
     ], true],
-  ])("explicit silence after a wrap-up nudge: %s", async (_name, first, silent) => {
+  ])("explicit silence after a wrap-up nudge: %s", async (_name, first, silent, wrapUp = []) => {
     const harness = new MultiScriptHarness("fake", [
       first,
-      [{ type: "text", text: "SILENT" }, { type: "done", finalText: "SILENT" }],
+      [...wrapUp, { type: "text", text: "SILENT" }, { type: "done", finalText: "SILENT" }],
     ]);
     const chunks = await collect(
       runTurn({
