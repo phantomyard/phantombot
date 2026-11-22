@@ -575,8 +575,7 @@ export async function* runWithFallback(
             : chunk;
         if (
           emitted.type === "done" &&
-          emitted.finalText.length === 0 &&
-          !req.allowEmptyReply &&
+          emitted.finalText.trim().length === 0 &&
           !isLast
         ) {
           log.warn(
@@ -622,7 +621,7 @@ export async function* runWithFallback(
         yield emitted;
         if (emitted.type === "done") {
           succeeded = true;
-          if (emitted.finalText.length === 0 && !req.allowEmptyReply) servedEmpty = true;
+          if (emitted.finalText.trim().length === 0) servedEmpty = true;
         }
       }
       } catch (e) {

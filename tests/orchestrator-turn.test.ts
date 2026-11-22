@@ -2428,3 +2428,38 @@ describe("runTurn — soft deadline + wrap-up nudge (#639)", () => {
     expect(nudge.softTimeoutMs).toBe(Math.floor(nudge.hardTimeoutMs! * 0.8));
   });
 });
+
+
+describe("explicit phantom silence", () => {
+  test.each([
+    [true, "SILENT", true],
+    [true, " \nSILENT\n ", true],
+    [false, "SILENT", false],
+    [true, "The word SILENT occurs here.", false],
+    [true, "silent", false],
+  ] as const)("wake=%s, reply=%s, silence=%s", async (explicitSilence, text, silent) => {
+    const chunks = await collect(runTurn({ ...baseInput(), explicitSilence,
+      userMessage: "Please check the record.",
+      harnesses: [new ScriptedHarness("token", [{ type: "text", text }, { type: "done", finalText: text }])],
+    }));
+    expect(chunks.at(-1)).toMatchObject(silent
+      ? { type: "done", finalText: "", meta: { silentReply: true } }
+      : { type: "done", finalText: text });
+    const turns = await memory.recentTurns("phantom", "cli:default", 10);
+    expect(turns.at(-1)!.text).toBe(silent ? "[Completed without a reply.]" : text);
+  });
+
+  test("only the final segment after a real tool decides silence", async () => {
+    const chunks = await collect(runTurn({ ...baseInput(), explicitSilence: true,
+      userMessage: "Please check the record.",
+      harnesses: [new ScriptedHarness("token", [
+        { type: "text", text: "Checking the record.\n" },
+        { type: "progress", note: "read", tool: { title: "read", kind: "read", locations: [] } },
+        { type: "text", text: "SILENT" },
+        { type: "done", finalText: "Checking the record.\nSILENT" },
+      ])],
+    }));
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "", meta: { silentReply: true } });
+    expect((await memory.recentTurns("phantom", "cli:default", 10)).at(-1)!.text).toBe("[Completed without a reply.]");
+  });
+});

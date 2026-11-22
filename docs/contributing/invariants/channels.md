@@ -85,15 +85,30 @@ Voice model control messages (`phantomchat-voice-models`) are handled before cha
 ### 90. A PhantomChat group the human principal is in is a TEAM: its members are trusted there, and a phantom wakes another phantom only by @mention, within a fixed handoff budget a human refills.
 
 **An @mention is an actionable handoff, not a courtesy.** The teammate envelope
-must never require mentioning reviewers on every reply. A phantom-woken turn is
-instructed to complete with no text when there is no new request, evidence
-requiring action, or unresolved decision; announcing silence is itself a reply
-and restarts the acknowledgment loop. Only those turns set `allowEmptyReply`:
-clean empty completions succeed without outer fallback, coder-swap retries or
-empty-result health failures. Errors, aborts and missing completion markers keep
-their existing behavior. Human requests and DMs keep ordinary empty recovery.
-The channel emits no bubble for silence and still clears typing in `finally`.
-The closing-message replay in `tests/channels-phantomchat-server.test.ts` covers
-no output/no further wake, followed by a human request that still falls back.
+never requires mentioning reviewers on every reply. A phantom-woken turn replies
+with exactly `SILENT` when nothing remains owed. Only an exact, case-sensitive,
+trimmed token after the last tool boundary is silence; empty/whitespace output
+retains ordinary coder-swap and outer-fallback recovery, including failure
+records when every harness is empty. Errors and cancellation keep their existing
+behavior. Human messages and DMs never interpret the token. The channel buffers
+phantom final text until completion so no partial token becomes a bubble or
+voice note; tool narration still works, with a bare token suppressed there too.
+`runTurn` replaces intentional silence with `[Completed without a reply.]` in
+history, keeping the control token out of replay. Typing clears in `finally`.
+
+**Queued text phantom handoffs coalesce per conversation.** When one reaches the
+front, consecutive text phantoms already waiting are independently gated for
+team membership, explicit mention and the 60-handoff cap, then the accepted
+messages enter one prompt oldest first, each with its own sanitized sender.
+Reply recipients union the rumors and their senders so every requester is covered.
+The model is told to act on current state and preserve distinct requests because
+later evidence may settle an earlier request. Each handoff still consumes one
+budget unit; the pause notice remains once per exhausted episode. Human and
+media messages are barriers; no batch crosses them or another conversation.
+Existing human interrupt/flush rules remain. Each accepted message appears once
+in the turn input/history and once as delivered group context. Group receipts
+retain their existing per-member client mechanism; DM receipts are unchanged.
+Tests: the `team group` cases in `tests/channels-phantomchat-server.test.ts` and
+explicit-silence, empty-failure, and real Pi subprocess regressions.
 
 `src/channels/phantomchat/server.ts` (`noteTeamRoster`, `isTeamMember`, the bot gate in `handle`) + `matchAtMentions` / `PHANTOM_HANDOFF_BUDGET` in `src/channels/core/routing.ts`. PhantomChat only; Telegram keeps "a bot never answers a bot". Load-bearing rules: **membership is read ONLY from group messages an allow-listed HUMAN signed** (the rumor's p-tags plus the sender) — never from a phantom's message, never from the group id, so a stranger cannot join by building a group that names the principal, and removing someone in the app takes effect at the principal's next message. **Team trust is scoped to that conversation**: the member's DMs, reactions and other groups stay dropped. **A phantom wakes only on an explicit `@name`** — naming in passing ("Kai and Omar approved") is not a handoff — and a phantom's wake never moves `lastAddressed`. **The budget is a constant (60), not a setting**: every phantom counts every handoff it sees (its own at send time, because the channel skips the live self-copy), any human message resets it, and over budget the woken phantom posts one pause notice and runs no turn. A non-principal speaker is named in the turn input so the model never mistakes a teammate for its principal; that name is self-asserted, so it goes through `sanitizeEnvelopeField` and cannot close the bracket to forge a principal envelope. **Name vouching follows the same scope**: a team member's kind-0 name is shown only in THAT team's group, never in another group it shares. **Team trust never opens a hold-notice thread** (invariant 87): only an allow-listed sender's own message does. Tests: the `team group` cases in `tests/channels-phantomchat-server.test.ts`.
