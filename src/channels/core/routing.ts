@@ -38,6 +38,39 @@ export function matchPersonaNames(text: string, names: string[]): string[] {
 }
 
 /**
+ * Find which of `names` are explicitly @-mentioned in `text` ("@kai", "@Kai,").
+ * Stricter than matchPersonaNames: a phantom's message often names its
+ * siblings in passing ("Kai and Omar approved"), and on PhantomChat a phantom's
+ * message wakes another phantom only through a deliberate @mention. Same letter
+ * boundary on the right; the "@" must not be glued to a preceding word char, so
+ * an email-like "x@kai" is not a mention. Exported for testing.
+ */
+export function matchAtMentions(text: string, names: string[]): string[] {
+  if (text.length === 0 || names.length === 0) return [];
+  const out: string[] = [];
+  for (const name of names) {
+    if (name.length === 0 || out.some((n) => n.toLowerCase() === name.toLowerCase())) {
+      continue;
+    }
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?<![\\w@])@${escaped}(?![a-z0-9_])`, "i");
+    if (re.test(text)) out.push(name);
+  }
+  return out;
+}
+
+/**
+ * Phantom handoff budget for a PhantomChat team group: how many phantom
+ * handoffs (a phantom's group message that @mentions another phantom) may run
+ * back to back before the phantoms pause and wait for a human. Any human
+ * message in the group refills it. Sized from real review loops: the heaviest
+ * recent one (6 pushes, 3 reviewers) was ~35 handoffs, so 60 leaves headroom
+ * for a hard job overnight while still capping a runaway loop. Deliberately a
+ * constant, not a setting.
+ */
+export const PHANTOM_HANDOFF_BUDGET = 60;
+
+/**
  * Decide whether THIS bot (persona `self`) should reply to a group message,
  * and what the chat's "last addressed" set becomes afterwards.
  *

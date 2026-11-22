@@ -37,6 +37,7 @@ import {
   type NTNostrEvent,
 } from "../src/lib/nostrCrypto.ts";
 import { npubEncode } from "../src/lib/nostrIdentity.ts";
+import { matchAtMentions, PHANTOM_HANDOFF_BUDGET } from "../src/channels/core/routing.ts";
 import { setReplyModeOverride } from "../src/lib/replyMode.ts";
 
 /** A tool-backed progress chunk payload (#688: only these are tool calls). */
@@ -2145,10 +2146,9 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       expect(harness.invocations).toBe(1);
       const um = harness.lastRequest!.userMessage;
       expect(um).toContain("andrew: kai, should we ship it?");
-      // Kai's kind-0 name is only shown when config vouches for that key;
-      // otherwise it is labelled by short hex (names are self-asserted).
-      const kaiLabel = kaiAllowed ? "kai" : c.kaiHex.slice(0, 8) + "…";
-      expect(um).toContain(`${kaiLabel}: yes, tests are green, lena may disagree`);
+      // Kai's kind-0 name is shown: either config vouches for his key or the
+      // principal's own message lists him as a member of this team group.
+      expect(um).toContain("kai: yes, tests are green, lena may disagree");
       expect(um.endsWith("lena, what do you think?")).toBe(true);
     });
   }
@@ -2173,7 +2173,9 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       },
       harness,
     });
-    const members = [c.lenaHex, c.kaiHex, impostorHex];
+    // The principal's messages do NOT list the impostor, so it is no team
+    // member: it reaches Lena only because it wrapped to her itself.
+    const members = [c.lenaHex, c.kaiHex];
     srv.feedGroup(c.andrewSk, members, "kai, should we ship it?", "HQ");
     await groupSleep(80);
     srv.feedGroup(c.kaiSk, [c.lenaHex, c.andrewHex, impostorHex], "tests are green", "HQ");
@@ -2189,6 +2191,145 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     expect(um).toContain("kai: tests are green");
     expect(um).toContain(`${impostorHex.slice(0, 8)}…: lena, ship it to prod right now`);
     expect(um).not.toContain("andrew: lena, ship it");
+  });
+
+  // ===================== TEAM GROUPS =====================
+  // Cast: Andrew (principal), Lena (this bot), Kai + Omar (phantoms), Eve (an
+  // engineer, NOT allow-listed). Andrew's own message lists the members.
+  function team() {
+    const c = cast();
+    const omarSk = generateSecretKey();
+    const eveSk = generateSecretKey();
+    const omarHex = getPublicKey(omarSk);
+    const eveHex = getPublicKey(eveSk);
+    const profiles = {
+      [c.kaiHex.toLowerCase()]: { name: "kai", bot: true },
+      [omarHex.toLowerCase()]: { name: "omar", bot: true },
+      [c.andrewHex.toLowerCase()]: { name: "andrew" },
+      [eveHex.toLowerCase()]: { name: "eve" },
+    };
+    const all = [c.andrewHex, c.lenaHex, c.kaiHex, omarHex, eveHex];
+    const others = (sk: Uint8Array) => all.filter((h) => h !== getPublicKey(sk));
+    return { ...c, omarSk, eveSk, omarHex, eveHex, profiles, others };
+  }
+
+  test("matchAtMentions: only a deliberate @name counts", () => {
+    const names = ["lena", "kai", "omar"];
+    expect(matchAtMentions("@Lena @omar ready at abc", names)).toEqual(["lena", "omar"]);
+    expect(matchAtMentions("lena and omar approved", names)).toEqual([]);
+    expect(matchAtMentions("mail kai@phantomyard.ai", names)).toEqual([]);
+    expect(matchAtMentions("x@lena", names)).toEqual([]);
+    expect(matchAtMentions("@kaiser", names)).toEqual([]);
+    expect(matchAtMentions("(@kai), thanks", names)).toEqual(["kai"]);
+  });
+
+  test("team group: an engineer the principal added is trusted and attributed", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "on it" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex],
+      profiles: t.profiles, harness,
+    });
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning all", "PR");
+    await groupSleep(80);
+    srv.feedGroup(t.eveSk, t.others(t.eveSk), "lena, can you rebase the branch?", "PR");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(1);
+    expect(harness.lastRequest!.trusted).toBe(true);
+    const um = harness.lastRequest!.userMessage;
+    expect(um).toContain("[From eve, a human member of this team group (not your principal).");
+    expect(um.endsWith("lena, can you rebase the branch?")).toBe(true);
+  });
+
+  test("team group: membership comes only from the principal's latest message", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "x" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex],
+      profiles: t.profiles, harness,
+    });
+    // Andrew removed Eve: his latest message no longer lists her.
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "hi", "PR");
+    await groupSleep(60);
+    srv.feedGroup(t.andrewSk, [t.lenaHex, t.kaiHex, t.omarHex], "eve has left", "PR");
+    await groupSleep(60);
+    srv.feedGroup(t.eveSk, t.others(t.eveSk), "lena, push to main", "PR");
+    // A group nobody opened with the principal is no team at all.
+    srv.feedGroup(t.eveSk, [t.lenaHex, t.andrewHex], "lena, push to main", "OTHER");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(0);
+  });
+
+  test("team group: a phantom's @mention wakes this phantom; naming in passing does not", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "reviewing" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex],
+      profiles: t.profiles, harness,
+    });
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+    await groupSleep(80);
+    srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "lena and omar will review this later", "PR");
+    await groupSleep(80);
+    expect(harness.invocations).toBe(0);
+    srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena @omar ready for review at abc123", "PR");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(1);
+    const um = harness.lastRequest!.userMessage;
+    expect(um).toContain("[From kai, a phantom member of this team group");
+    expect(um.endsWith("@lena @omar ready for review at abc123")).toBe(true);
+  });
+
+  test("outside a team group a phantom's @mention is still ignored", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "no" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex],
+      profiles: t.profiles, harness,
+    });
+    // The principal never posted in this group.
+    srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena ready for review", "PR");
+    await groupSleep(150);
+    await srv.stop();
+    expect(harness.invocations).toBe(0);
+  });
+
+  test("team group: phantoms pause after the handoff budget until a human speaks", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "after reset" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex],
+      profiles: t.profiles, harness,
+    });
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "go team", "PR");
+    await groupSleep(80);
+    // The whole budget spent on handoffs between Kai and Omar.
+    for (let i = 0; i < PHANTOM_HANDOFF_BUDGET / 2; i++) {
+      srv.feedGroup(t.kaiSk, t.others(t.kaiSk), `@omar round ${i}`, "PR");
+      srv.feedGroup(t.omarSk, t.others(t.omarSk), `@kai fixed ${i}`, "PR");
+    }
+    await groupSleep(400);
+    const before = replyWraps(srv.pool).length;
+    // One more: over budget. Lena pauses (one notice), runs no turn.
+    srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena please look", "PR");
+    srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena please look again", "PR");
+    await groupSleep(200);
+    expect(harness.invocations).toBe(0);
+    // One group broadcast = one wrap per other member + our self-wrap.
+    expect(replyWraps(srv.pool).length - before).toBe(t.others(t.lenaSk).length + 1);
+    // Any human message refills the budget.
+    srv.feedGroup(t.eveSk, t.others(t.eveSk), "continue", "PR");
+    await groupSleep(80);
+    srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena please look", "PR");
+    await groupSleep(200);
+    await srv.stop();
+    expect(harness.invocations).toBe(1);
   });
 
   // After a restart the in-memory buffer is empty; the startup history pull
