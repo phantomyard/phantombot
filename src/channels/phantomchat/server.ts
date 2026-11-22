@@ -141,6 +141,11 @@ export type SenderTier = "trusted" | "relay" | "open" | "drop";
 // a multi-hundred-MB blob would blow memory + disk for little benefit.
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
+/** Largest handoff sent as one message. The text is JSON-escaped twice and
+ *  encrypted twice on its way out, and NIP-44 pads and caps at 64 KB, so stay far
+ *  below that. A longer reply is split into bubbles like any other. */
+const MAX_WHOLE_HANDOFF_BYTES = 8_000;
+
 // Local sleep — spaces out consecutive bubbles so the PWA renders them as a
 // readable sequence rather than a single burst (mirrors core/engine.ts).
 function sleep(ms: number): Promise<void> {
@@ -1248,6 +1253,20 @@ export async function runPhantomchatServer(
       }
     };
 
+    // A handoff must arrive WHOLE: mentions are read per message, so a reply
+    // split into bubbles wakes the teammate with only the bubble that holds the
+    // @name, and the request itself lands as background (#817).
+    const isWholeHandoff = (text: string): boolean =>
+      teamRosters.has(msg.conversationId) &&
+      isHandoff(text, ourHex, groupTypingMembers!) &&
+      Buffer.byteLength(text) <= MAX_WHOLE_HANDOFF_BYTES;
+    // Mentions usually come last, so a reply that could be a handoff is held
+    // until its text is complete instead of streaming. (A phantom-woken turn
+    // never streams its final text, see below.)
+    const holdFinal =
+      teamRosters.has(msg.conversationId) &&
+      groupTypingMembers!.some((h) => h.toLowerCase() !== ourHex && isBot(h));
+
     // /chattiness gate: does this conversation want interim progress bubbles?
     // Per-conversation override wins; absent, the config default decides.
     // Suppresses ONLY narration — the final reply is untouched.
@@ -1274,6 +1293,20 @@ export async function runPhantomchatServer(
       enabled: narrationEnabled,
       send: (text) => sendBubble(text, "narration"),
     });
+
+    // Markdown-aware splitter: emit only completed sentence/block boundaries as
+    // bubbles; partial text stays buffered until it is.
+    const streamSegments = async (text: string): Promise<void> => {
+      const { segments } = finalSegmenter.push(text);
+      for (const segment of segments) {
+        await sendBubble(segment);
+        consumedReplyChars += segment.length;
+        finalCandidateSentChars += segment.length;
+        if (streaming.bubbleDelayMs > 0) {
+          await sleep(streaming.bubbleDelayMs);
+        }
+      }
+    };
 
     const resetFinalCandidate = (): void => {
       finalSegmenter = new StreamSegmenter(segmenterOptions);
@@ -1400,17 +1433,7 @@ export async function runPhantomchatServer(
           // synthesized once at the end. Just keep accumulating streamedReply.
           if (!willReplyWithVoice && !wokenByPhantom) {
             finalCandidateText += chunk.text;
-            // Markdown-aware splitter: emit only completed sentence/block
-            // boundaries as bubbles; partial text stays buffered until it is.
-            const { segments } = finalSegmenter.push(chunk.text);
-            for (const segment of segments) {
-              await sendBubble(segment);
-              consumedReplyChars += segment.length;
-              finalCandidateSentChars += segment.length;
-              if (streaming.bubbleDelayMs > 0) {
-                await sleep(streaming.bubbleDelayMs);
-              }
-            }
+            if (!holdFinal) await streamSegments(chunk.text);
           }
         }
         if (chunk.type === "heartbeat") {
@@ -1426,6 +1449,16 @@ export async function runPhantomchatServer(
           // is liveness: as a boundary it would split the answer and drop
           // the text before it from the spoken reply. Twin of core/engine.ts.
           if (chunk.tool) {
+            // Text held for a possible handoff is complete here: a handoff
+            // goes out whole, anything else exactly as it would have streamed.
+            if (holdFinal && finalCandidateText.trim().length > 0) {
+              if (isWholeHandoff(finalCandidateText)) {
+                await sendBubble(finalCandidateText.trim());
+                finalCandidateSentChars = finalCandidateText.length;
+              } else {
+                await streamSegments(finalCandidateText);
+              }
+            }
             // A tool is about to run. Text emitted since the last boundary
             // that the splitter hasn't already sent as a final bubble is
             // progress narration ("checking your calendar…"): buffer it for
@@ -1663,6 +1696,10 @@ export async function runPhantomchatServer(
 
     if (outText.trim().length === 0) return;
 
+    if (isWholeHandoff(outText)) {
+      await sendBubble(outText.trim());
+      return;
+    }
     const finalSegments = splitIntoSegments(outText, segmenterOptions);
     for (let i = 0; i < finalSegments.length; i++) {
       await sendBubble(finalSegments[i]!);

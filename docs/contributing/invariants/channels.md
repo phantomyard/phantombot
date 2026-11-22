@@ -104,6 +104,15 @@ voice note; tool narration still works, with a bare token suppressed there too.
 `runTurn` replaces intentional silence with `[Completed without a reply.]` in
 history, keeping the control token out of replay. Typing clears in `finally`.
 
+**A handoff is one message.** Mentions are read per message, so a reply split into
+bubbles would wake the teammate with only the bubble holding the `@name`. In a
+team group with another phantom the final text does not stream: it is held until
+the answer ends or a tool starts, then sent whole if it mentions a phantom
+(`isWholeHandoff`) and in ordinary bubbles if not. Narration stays its own
+message. Above `MAX_WHOLE_HANDOFF_BYTES` (8,000 UTF-8 bytes, kept well under the
+NIP-44 cap) a handoff is split like any reply. Not covered: a phantom-woken
+turn's pre-tool text is narration, whatever it mentions.
+
 **Queued text phantom handoffs coalesce per conversation.** When one reaches the
 front, text phantom handoffs already waiting are independently gated for
 team membership, explicit mention and the 60-handoff cap, then the accepted

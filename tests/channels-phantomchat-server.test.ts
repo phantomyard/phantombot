@@ -2409,6 +2409,101 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     }
   });
 
+  /** What `sk` reads in the group from one server's pool, in publish order. */
+  function readsFrom(pool: { published: unknown[] }, sk: Uint8Array): string[] {
+    const hex = getPublicKey(sk);
+    const out: string[] = [];
+    for (const wrap of pool.published as NTNostrEvent[]) {
+      if (wrap.kind !== 1059 || !wrap.tags.some((tg) => tg[0] === "p" && tg[1] === hex)) continue;
+      try {
+        const { content, type } = JSON.parse(unwrapNip17Message(wrap, sk).content);
+        if (type === "text") out.push(content);
+      } catch { /* a receipt, not a message */ }
+    }
+    return out;
+  }
+  const smallBubbles = { ...DEFAULT_TELEGRAM_STREAMING, bubbleMaxSentences: 1, bubbleDelayMs: 0, narrationFlushMs: 0 };
+  const HANDOFF = "Please review PR 900. Check the trust gate.\n\nPost findings on the PR.\n\n@kai @omar";
+  const inPieces = (text: string): HarnessChunk[] =>
+    (text.match(/[\s\S]{1,9}/g) ?? []).map((t) => ({ type: "text" as const, text: t }));
+
+  test.each([
+    ["human", "streamed", "lena, get the PR reviewed", [...inPieces(HANDOFF), { type: "done", finalText: HANDOFF }], [HANDOFF]],
+    ["human", "done only", "lena, get the PR reviewed", [{ type: "done", finalText: HANDOFF }], [HANDOFF]],
+    ["human", "narration stays its own message", "lena, get the PR reviewed", [{ type: "text", text: "Checking the PR" }, { type: "progress", note: "read", tool: toolCall("read") }, ...inPieces(HANDOFF), { type: "done", finalText: "Checking the PR" + HANDOFF }], ["Checking the PR", HANDOFF]],
+    ["human", "before a last tool", "lena, get the PR reviewed", [...inPieces(HANDOFF), { type: "progress", note: "capture", tool: toolCall("capture") }, { type: "done", finalText: HANDOFF }], [HANDOFF]],
+    ["phantom", "streamed", "@lena get the PR reviewed", [...inPieces(HANDOFF), { type: "done", finalText: HANDOFF }], [HANDOFF]],
+  ] as const)("team group: a %s-woken multi-bubble handoff (%s) is one message", async (who, _name, ask, script, expected) => {
+    const t = team();
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles,
+      harness: new ScriptedHarness("fake", [...script] as HarnessChunk[]),
+      config: { ...baseConfig(), telegramStreaming: smallBubbles },
+    });
+    let sent: string[];
+    try {
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+      await groupSleep(80);
+      const sk = who === "human" ? t.andrewSk : t.kaiSk;
+      srv.feedGroup(sk, t.others(sk), ask, "PR");
+      await groupSleep(200);
+      sent = readsFrom(srv.pool, t.kaiSk);
+    } finally { await srv.stop(); }
+    expect(sent).toEqual([...expected]);
+
+    // The woken teammate gets the whole request as the request, once.
+    const kai = new ScriptedHarness("kai", [{ type: "done", finalText: "SILENT" }]);
+    const peer = makeGroupServer({ botSk: t.kaiSk, persona: "kai", allowedHex: [t.andrewHex], profiles: t.profiles, harness: kai });
+    try {
+      peer.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+      await groupSleep(80);
+      for (const text of sent) { peer.feedGroup(t.lenaSk, t.others(t.lenaSk), text, "PR"); await groupSleep(60); }
+      await groupSleep(120);
+      expect(kai.invocations).toBe(1);
+      expect(kai.lastRequest!.userMessage.endsWith(HANDOFF)).toBe(true);
+    } finally { await peer.stop(); }
+  });
+
+  test.each([
+    ["no mention", "First point. Second point. Third point.", ["First point.", "Second point.", "Third point."]],
+    ["naming in passing", "Kai approved. Omar is next.", ["Kai approved.", "Omar is next."]],
+    ["mentioning a human", "All done. Over to you @andrew now.", ["All done.", "Over to you @andrew now."]],
+  ])("team group: a reply that is no handoff (%s) keeps its bubbles", async (_name, reply, expected) => {
+    for (const tail of [[], [{ type: "progress", note: "capture", tool: toolCall("capture") }]]) {
+      const t = team();
+      const srv = makeGroupServer({
+        botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles,
+        harness: new ScriptedHarness("fake", [...inPieces(reply), ...tail, { type: "done", finalText: reply }] as HarnessChunk[]),
+        config: { ...baseConfig(), telegramStreaming: smallBubbles },
+      });
+      try {
+        srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+        await groupSleep(80);
+        srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, status?", "PR");
+        await groupSleep(200);
+        expect(readsFrom(srv.pool, t.andrewSk).map((s) => s.trim())).toEqual(expected);
+      } finally { await srv.stop(); }
+    }
+  });
+
+  test("team group: a handoff over the size cap is split, and the cap is in bytes", async () => {
+    for (const [body, whole] of [["a".repeat(7_000), true], ["é".repeat(4_500), false]] as const) {
+      const t = team();
+      const srv = makeGroupServer({
+        botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles,
+        harness: new ScriptedHarness("fake", [{ type: "done", finalText: `${body}\n\n@kai` }]),
+        config: { ...baseConfig(), telegramStreaming: smallBubbles },
+      });
+      try {
+        srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, hand this over", "PR");
+        await groupSleep(250);
+        const sent = readsFrom(srv.pool, t.kaiSk);
+        expect(sent.length === 1).toBe(whole);
+        expect(sent.join("").replace(/\s/g, "")).toBe(`${body}@kai`);
+      } finally { await srv.stop(); }
+    }
+  });
+
   class BlockedHandoffHarness implements Harness {
     readonly id = "blocked-handoff";
     constructor(private readonly answer = "SILENT") {}
