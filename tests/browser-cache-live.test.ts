@@ -31,8 +31,9 @@ test.skipIf(process.env.PHANTOMBOT_BROWSER_LIVE !== "1" || !process.env.PHANTOMB
     const shot = await browserCall(root, { action: "screenshot" }) as { path: string };
     expect((await readFile(shot.path)).subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
     if (process.platform === "linux") {
-      // Reproduce a fresh download without touching the configured CI/host
-      // build. A user-owned 0755 helper must fail with the real sandbox on.
+      // Reproduce an invalid installed helper without touching the CI/host
+      // build. Unlike an absent helper (userns can suffice), a user-owned
+      // 0755 chrome-sandbox must fail with the real sandbox on.
       const freshCache = join(root, "fresh-cache");
       const broken = join(freshCache, "chromium-999999", "chrome-linux64");
       await cp(dirname(selected.path!), broken, { recursive: true });

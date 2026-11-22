@@ -79,9 +79,12 @@ are `~/.cache/ms-playwright` (Linux, respecting absolute `XDG_CACHE_HOME`),
 (Windows). An absolute host `PLAYWRIGHT_BROWSERS_PATH` replaces that cache root;
 relative values and `0` disable cache discovery. Cached builds use the SAME
 host-side probes, path deduplication and credential-free child environment; no
-downloads or Playwright dependency enter the runtime. On Linux, fresh Playwright
-builds ship a user-owned `chrome_sandbox`; Chrome needs `chrome-sandbox`. For a
-trusted build an operator can run
+downloads or Playwright dependency enter the runtime. On Linux, unprivileged user
+namespaces can provide Chrome's sandbox without SUID setup. Where namespaces are
+restricted (Ubuntu's default AppArmor policy since 23.10, some containers or
+hardened kernels), cached builds need a configured SUID helper. Playwright ships
+a user-owned `chrome_sandbox`; Chrome needs `chrome-sandbox`. For a trusted build
+on such a host an operator can run
 `sudo install -o root -g root -m 4755 /absolute/path/to/chrome-linux64/chrome_sandbox /absolute/path/to/chrome-linux64/chrome-sandbox`.
 If the hyphen-named helper exists already, run
 `sudo chown root:root /absolute/path/to/chrome-linux64/chrome-sandbox` then

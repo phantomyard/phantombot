@@ -40,11 +40,14 @@ instead; relative values and `0` skip cache discovery. Both older Chromium and
 newer Chrome for Testing layouts are recognized. Project-local installs and
 headless-shell builds are excluded. Nothing is downloaded or installed.
 
-On Linux, a downloaded Chromium also needs a working Chrome sandbox. Playwright
-ships `chrome_sandbox` as a user-owned file, so a fresh cache can fail the launch
-probe with `Chrome process closed the pipe` (Chrome reports a SUID sandbox FATAL).
-For a trusted cached build, an operator can configure the helper next to `chrome`
-once per downloaded revision, substituting its actual absolute directory:
+On Linux, a downloaded Chromium also needs a working Chrome sandbox. Unprivileged
+user namespaces can provide it without SUID setup. Where those namespaces are
+restricted (for example Ubuntu's default AppArmor policy since 23.10, some
+containers or hardened kernels), a fresh cache can fail the launch probe with
+`Chrome process closed the pipe`. Playwright ships a user-owned `chrome_sandbox`,
+but Chrome looks for `chrome-sandbox`. For a trusted cached build on such a host,
+an operator can configure the helper next to `chrome` once per downloaded
+revision, substituting its actual absolute directory:
 
 ```bash
 # Current archives use an underscore; install the helper under Chrome's name.
