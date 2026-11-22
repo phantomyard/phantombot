@@ -64,6 +64,23 @@ cached candidates are skipped; if every candidate is a Linux cached build and
 none starts, the error points to this prerequisite. Discovery alone does not
 make an unconfigured downloaded browser usable.
 
+On Windows, downloaded builds need read/execute access for Chrome's sandboxed
+AppContainer processes. A cache under a restricted directory can pass the
+`about:blank` startup probe but then fail navigation with `net::ERR_ABORTED` and
+`Sandbox cannot access executable` in the worker log. An operator can grant
+read/execute access to a trusted browser cache (substitute its absolute path):
+
+```powershell
+icacls 'C:\absolute\path\to\ms-playwright' /grant '*S-1-15-2-1:(OI)(CI)(RX)' '*S-1-15-2-2:(OI)(CI)(RX)' /T
+```
+
+These are the application-package and restricted-application-package SIDs;
+the grant covers only the browser cache, without write access. Phantombot does
+not change these permissions or disable Chrome's sandbox. CI configures only
+its disposable downloaded cache before verifying real navigation and screenshots.
+See [Chromium's sandbox ACL setup](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/testing/scripts/common.py)
+and [Puppeteer's Windows sandbox guidance](https://pptr.dev/troubleshooting#chrome-reports-sandbox-errors-on-windows).
+
 If no installed browser starts, `open` fails with the list of what was tried. If
 the cached browser later fails to start, the cache is dropped and the next open
 detects again.

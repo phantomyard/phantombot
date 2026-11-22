@@ -107,6 +107,16 @@ jobs:
           for helper in "${helpers[@]}"; do
             sudo install -o root -g root -m 4755 "$helper" "${helper%/*}/chrome-sandbox"
           done
+      - name: Configure the cached Chromium Windows sandbox
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CACHE_ROOT: ${{ runner.temp }}/pb-playwright-cache
+        run: |
+          # Downloaded binaries need AppContainer read/execute access. Apply
+          # only to this disposable cache, never the runner's other files.
+          icacls $env:CACHE_ROOT /grant '*S-1-15-2-1:(OI)(CI)(RX)' '*S-1-15-2-2:(OI)(CI)(RX)' /T /Q
+          if ($LASTEXITCODE -ne 0) { throw "Cached Chromium sandbox ACL setup failed" }
       - name: Verify real Chrome rendering and profile isolation
         run: bun test tests/browser-discovery.test.ts tests/browser-cache-live.test.ts tests/browser-live.test.ts tests/browser-broker-live.test.ts
         env:

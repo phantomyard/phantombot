@@ -90,10 +90,14 @@ If the hyphen-named helper exists already, run
 `sudo chown root:root /absolute/path/to/chrome-linux64/chrome-sandbox` then
 `sudo chmod 4755 /absolute/path/to/chrome-linux64/chrome-sandbox` (hyphen, not
 underscore), once per downloaded revision. The runtime never performs privileged
-setup or disables Chrome's sandbox. CI configures only its disposable cache;
-the live regression also rejects an unconfigured copy before falling through
-to a working browser. Cache-only Linux launch failures point at this prerequisite
-and the browser guide. Bun's own discovery
+setup or disables Chrome's sandbox. On Windows, a downloaded cache may need
+AppContainer read/execute ACLs (application-package SIDs `S-1-15-2-1` and
+`S-1-15-2-2`); the runtime never grants them. A restricted cache can pass the
+`about:blank` probe yet fail real navigation. CI configures only its disposable
+cache on both platforms and verifies real navigation and screenshots. The Linux
+live regression checks rejection where user namespaces are restricted and
+forces a failed candidate to prove fallback on either kind of host. Cache-only
+Linux launch failures point at this prerequisite and the browser guide. Bun's own discovery
 is used only when no known install exists. The probe must match the worker: same
 argv (`chromeArgv`), same OS-only environment (`browserChildEnv`), and a
 throwaway profile INSIDE the real browser root. Snap confinement fails on the
