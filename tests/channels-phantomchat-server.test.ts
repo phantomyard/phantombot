@@ -1783,6 +1783,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     /** Wraps the relays still hold from before this (re)start: served to the
      *  startup group-history pull (enabled only when given). */
     history?: NTNostrEvent[];
+    fallbackHarness?: Harness;
     /** Replaces the default pool (history then comes from it). */
     pool?: FakePool;
     backfillPollMs?: number;
@@ -1817,7 +1818,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     const done = runPhantomchatServer({
       config: baseConfig(),
       memory,
-      harnesses: [opts.harness],
+      harnesses: [opts.harness, ...(opts.fallbackHarness ? [opts.fallbackHarness] : [])],
       agentDir,
       persona: opts.persona,
       channel,
@@ -2291,6 +2292,46 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     const um = harness.lastRequest!.userMessage;
     expect(um).toContain("[From kai, a phantom member of this team group");
     expect(um.endsWith("@lena @omar ready for review at abc123")).toBe(true);
+    expect(um).not.toContain("mention each one once");
+    expect(um).toContain("only to hand off actionable work");
+  });
+
+  test("team group: closing-message replay ends silently without fallback or further wakes", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("silent", [{ type: "done", finalText: "" }]);
+    const fallback = new ScriptedHarness("unwanted", [{ type: "done", finalText: "Acknowledged @kai @omar" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex],
+      profiles: t.profiles, harness, fallbackHarness: fallback,
+    });
+    try {
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning team", "PR");
+      await groupSleep(80);
+      for (const text of [
+        "@lena confirmed — merged, verified, nothing outstanding. Signing off here.",
+        "@lena nothing further — no reply needed.",
+        "@lena no verification owed. Going quiet.",
+      ]) {
+        srv.feedGroup(t.kaiSk, t.others(t.kaiSk), text, "PR");
+        await groupSleep(150);
+      }
+      expect(harness.invocations).toBe(3);
+      expect(harness.completed).toBe(3);
+      expect(harness.requests.every(r => r.allowEmptyReply === true)).toBe(true);
+      expect(harness.lastRequest!.systemPrompt).toContain("complete this turn with no text");
+      expect(fallback.invocations).toBe(0);
+      // Typing events are ephemeral, not chat bubbles capable of waking peers.
+      expect(srv.pool.published.filter(e => e.kind === 1059)).toEqual([]);
+
+      // The human's next real request retains ordinary empty-result recovery.
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, please review the new fix", "PR");
+      await groupSleep(150);
+      expect(harness.lastRequest!.allowEmptyReply).toBe(false);
+      expect(fallback.invocations).toBe(1);
+      expect(srv.pool.published.some(e => e.kind === 1059)).toBe(true);
+    } finally {
+      await srv.stop();
+    }
   });
 
   test("outside a team group a phantom's @mention is still ignored", async () => {

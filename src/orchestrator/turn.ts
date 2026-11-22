@@ -403,6 +403,8 @@ export interface TurnInput {
    * actually show them.
    */
   replyAudience?: "private" | "shared" | "silent";
+  /** Permit a phantom handoff to finish without a reply. Does not suppress errors. */
+  allowEmptyReply?: boolean;
   /**
    * Optional threat screen for UNTRUSTED turns (built by
    * orchestrator/screen.ts#makeScreener). Called with the incoming user
@@ -1129,6 +1131,7 @@ async function* runTurnBody(
           systemPrompt,
           ...(turnContext ? { turnContext } : {}),
           userMessage: passUserMessage,
+          allowEmptyReply: input.allowEmptyReply,
           history: [...(epochPlan?.baseHistory ?? history)],
           ...((epochPlan?.epochTurns.length ?? 0) > 0 || nudgePairs.length > 0
             ? { epochTurns: [...(epochPlan?.epochTurns ?? []), ...nudgePairs] }
