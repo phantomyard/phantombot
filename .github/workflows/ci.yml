@@ -90,7 +90,7 @@ jobs:
       - name: Compile the browser CLI for the real sandbox regression
         run: bun build --compile ${{ matrix.target }} src/index.ts --outfile "${{ matrix.binary }}"
       - name: Install test-only cached Chromium
-        run: bunx playwright@1.58.2 install --no-shell chromium
+        run: bunx playwright@1.65.1 install --no-shell chromium
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pb-playwright-cache
       - name: Verify real Chrome rendering and profile isolation
