@@ -1026,7 +1026,7 @@ export async function runPhantomchatServer(
       const who = isBot(senderHex) ? "phantom" : "human";
       userMessage =
         `[From ${sanitizeEnvelopeField(senderLabel(senderHex, msg.conversationId))}, a ${who} member of this team group (not your principal). ` +
-        `An @mention of a phantom in your reply wakes it; mention each one once, in your final answer.]\n\n` +
+        `An @mention of a phantom in your reply wakes it; use one only to hand off actionable work, once in your final answer. Acknowledgments and sign-offs need no reply.]\n\n` +
         userMessage;
     }
 
@@ -1269,6 +1269,7 @@ export async function runPhantomchatServer(
         persona: input.persona,
         conversation: conversationKey,
         userMessage,
+        allowEmptyReply: wokenByPhantom,
         agentDir: input.agentDir,
         // Interactive surface: the owner asks for work on repos all over their
         // home dir, so home stays the cwd. Explicit since #387 removed the
@@ -1339,6 +1340,9 @@ export async function runPhantomchatServer(
         // is on a phone-style chat client here too. Stack the voice overlay
         // (short, no-markdown, TTS-friendly) when this reply will be spoken.
         systemPromptSuffix: [
+          wokenByPhantom
+            ? "# Phantom team handoff\n\nIf this message contains no new request, evidence requiring action, or unresolved decision, complete this turn with no text. Do not acknowledge acknowledgments, announce standing down, or narrate a decision to stay silent. An empty reply is successful completion here. Reply only when you have substantive work or information to contribute; use @mentions only for actionable handoffs."
+            : undefined,
           willReplyWithVoice
             ? `${CHAT_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
             : CHAT_REPLY_INSTRUCTION,

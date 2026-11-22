@@ -229,6 +229,34 @@ describe("runWithFallback — silent rate-limit failover", () => {
 });
 
 describe("runWithFallback — empty done falls through", () => {
+  test("permitted silence completes once without fallback or failure records", async () => {
+    const empty = new FakeHarness("silent", [{ type: "done", finalText: "" }]);
+    const filler = new FakeHarness("filler", [{ type: "done", finalText: "unwanted acknowledgment" }]);
+    const failures: unknown[] = [];
+    const alerts: string[] = [];
+    const alerter = new HarnessAlerter({ send: async message => { alerts.push(message); } });
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES + 1; i++) {
+      const chunks = await collect(runWithFallback([empty, filler], newRequest({ allowEmptyReply: true }), {
+        cooldown: new CooldownStore(), alerter,
+        onHarnessFailure: record => { failures.push(record); },
+      }));
+      expect(chunks).toEqual([{ type: "done", finalText: "" }]);
+    }
+    expect(filler.invocations).toBe(0);
+    expect(failures).toEqual([]);
+    expect(alerts).toEqual([]);
+  });
+
+  test("permitted silence does not swallow actual harness errors", async () => {
+    const broken = new FakeHarness("broken", [{ type: "error", error: "offline", recoverable: true }]);
+    const cover = new FakeHarness("cover", [{ type: "done", finalText: "covered" }]);
+    const chunks = await collect(runWithFallback([broken, cover], newRequest({ allowEmptyReply: true }), {
+      cooldown: new CooldownStore(),
+    }));
+    expect(cover.invocations).toBe(1);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "covered" });
+  });
+
   test("non-last harness emitting done with empty finalText falls through", async () => {
     // Repro of the gemini "(no reply)" bug: gemini exits 0 (e.g.
     // SIGTERMed by an updater restart, or did tool calls without a

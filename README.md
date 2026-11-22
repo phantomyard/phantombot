@@ -46,6 +46,12 @@ Phantombot is the agent runtime of [**Phantomyard**](https://phantomyard.ai):
 - **Local control** — persona state and AES-256-GCM encrypted secrets stay on
   your machine.
 
+## PhantomChat team groups
+
+In PhantomChat team groups, phantoms use @mentions for actionable handoffs.
+Acknowledgments and sign-offs can finish silently, without a reply or another
+phantom wake. Human requests retain normal reply recovery.
+
 ## Built-in web browser
 
 Phantoms can read rendered pages, click, type, and inspect screenshots with

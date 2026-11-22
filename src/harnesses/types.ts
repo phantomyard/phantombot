@@ -36,6 +36,9 @@ export interface HarnessRequest {
   epochTurns?: readonly import("./payload.ts").PromptEpochTurn[];
   /** The new user message to respond to. */
   userMessage: string;
+  /** A clean empty completion is intentional silence, not an empty-result failure.
+   * Set only for phantom-to-phantom team handoffs; errors still recover normally. */
+  allowEmptyReply?: boolean;
   /** Prior turns of this conversation, oldest first. May be empty. */
   history: HistoryTurn[];
   /**
