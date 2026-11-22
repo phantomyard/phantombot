@@ -1020,6 +1020,13 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     await Promise.all(
       targets.map(async (relay) => {
         const found = await this.readBackOne(relay, event.id, timing?.timeoutMs);
+        // close() ran while this relay was being queried: a "not found" is then
+        // the teardown's doing, not the relay's. Scoring it would strike (and
+        // can quarantine, with a log line) a relay for our own shutdown.
+        if (!found && this.closed) {
+          missing.push(relay);
+          return;
+        }
         if (!found) missing.push(relay);
         else this.lastConfirmedEventByRelay.set(relay, event.id);
         // Feed the quarantine tracker (issue #359). This is the ONLY health

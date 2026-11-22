@@ -606,6 +606,51 @@ describe("publish confirmation quorum", () => {
       restore();
     }
   });
+
+  // A detached read-back outlives its send. close() while it is still querying
+  // must silence it: the log ring is process-wide, so a late line lands in
+  // whatever sink a later owner (or test file) installed.
+  test("close() during the read-back logs no verdict and strikes no relay", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      let queried = 0;
+      const answers: Array<() => void> = [];
+      const heldPool: RelayPool = {
+        subscribeMany(_urls, _filter: NostrFilter, params) {
+          queried++;
+          answers.push(() => params.oneose?.());
+          return { close() {} };
+        },
+        publish() {
+          return [];
+        },
+        close() {},
+      };
+      const transport = new SimplePoolPhantomchatTransport(sk, relays, heldPool);
+      // One strike short of quarantine: a strike scored after close() would
+      // quarantine the relay and log that too.
+      for (let i = 1; i < READBACK_STRIKE_THRESHOLD; i++) {
+        transport.relayHealth.record(relays[0]!, false);
+      }
+      const verdict = transport.verifyStored(event, { settleMs: 0, timeoutMs: 5_000 });
+      for (let i = 0; i < 100 && queried < relays.length; i++) {
+        await new Promise((r) => setTimeout(r, 1));
+      }
+      expect(queried).toBe(relays.length); // really mid read-back
+
+      transport.close();
+      for (const answer of answers) answer(); // every relay: "not stored"
+
+      expect([...(await verdict)].sort()).toEqual([...relays].sort());
+      expect(lines).toEqual([]);
+      expect(transport.relayHealth.isQuarantined(relays[0]!)).toBe(false);
+      expect(transport.relayHealth.report().find((r) => r.relay === relays[1])?.dropped ?? 0)
+        .toBe(0);
+    } finally {
+      restore();
+    }
+  });
 });
 
 describe("setRelays — surviving a relay-config change", () => {
