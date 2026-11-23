@@ -102,6 +102,13 @@ export interface ChannelMessage {
    */
   groupMemberHexes?: string[];
   /**
+   * GROUP NAME (optional; phantomchat only). Set on a group CONTROL message (a
+   * create, add or rename in the app), which carries a name and nothing to
+   * answer: no text, no member list, and the server runs no turn for it.
+   * `at` is the event's own time (unix seconds).
+   */
+  groupName?: { name: string; at: number };
+  /**
    * HISTORY (phantomchat groups only). True for a group message read back from
    * the relays' backlog (startup pull / pre-EOSE replay) rather than delivered
    * live. Context only: the server adds it to the group catch-up buffer and

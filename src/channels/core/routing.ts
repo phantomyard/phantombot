@@ -37,6 +37,13 @@ export function matchPersonaNames(text: string, names: string[]): string[] {
   return out;
 }
 
+/** The one rule for what "@name" wakes. Shared with the unmatched-mention notice
+ *  (groupContext.ts), which must never call a mention that wakes someone unmatched. */
+export function atMentionPattern(name: string, flags: "i" | "iy"): RegExp {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![\\w@])@${escaped}(?![a-z0-9_])`, flags);
+}
+
 /**
  * Find which of `names` are explicitly @-mentioned in `text` ("@kai", "@Kai,").
  * Stricter than matchPersonaNames: a phantom's message often names its
@@ -52,9 +59,7 @@ export function matchAtMentions(text: string, names: string[]): string[] {
     if (name.length === 0 || out.some((n) => n.toLowerCase() === name.toLowerCase())) {
       continue;
     }
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`(?<![\\w@])@${escaped}(?![a-z0-9_])`, "i");
-    if (re.test(text)) out.push(name);
+    if (atMentionPattern(name, "i").test(text)) out.push(name);
   }
   return out;
 }

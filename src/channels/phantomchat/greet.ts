@@ -67,7 +67,7 @@ export async function resolvePersonaGreeting(input: {
   try {
     const persona = await loadPersona(input.agentDir);
     const systemPrompt = buildSystemPrompt(persona, {
-      channel: "cli",
+      channel: "phantomchat",
       conversationId: `phantomchat-greet:${input.persona}`,
       timestamp: new Date(),
       trusted: true,

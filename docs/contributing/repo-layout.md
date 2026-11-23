@@ -55,13 +55,14 @@ phantombot/
 │   │   │   ├── types.ts      # Channel / ChannelTransport / ChannelMessage + capabilities + encrypt/decrypt seam
 │   │   │   ├── engine.ts     # the streaming turn engine + server loop (channel-blind)
 │   │   │   ├── routing.ts    # group-reply decision logic (pure)
+│   │   │   ├── groupContext.ts # the group block a turn reads (name, members, changes) + the unmatched-@name check (pure)
 │   │   │   ├── prompts.ts    # channel-layer prompt suffixes (VOICE_REPLY_INSTRUCTION, capture nudge, …)
 │   │   │   └── streaming.ts  # shared by both chat channels: the narration controller, segmenter options, final-reply reconciliation
 │   │   ├── telegram/
 │   │   │   ├── transport.ts  # HttpTelegramTransport (HTTP client; Number(conversationId) at the API boundary)
 │   │   │   ├── parse.ts      # update parsing → ChannelMessage (String(chat.id) on ingest)
 │   │   │   └── channel.ts    # Telegram adapter: capabilities + identity encrypt/decrypt (no crypto)
-│   │   ├── phantomchat/      # PhantomChat adapter: Nostr relay pool + NIP-17 gift-wraps, end-to-end encrypted in the adapter (channel.ts unwraps and verifies inbound, transport.ts wraps outbound), relay health quarantine (relayHealth.ts); server.ts mirrors the core engine's streaming loop
+│   │   ├── phantomchat/      # PhantomChat adapter: Nostr relay pool + NIP-17 gift-wraps, end-to-end encrypted in the adapter (channel.ts unwraps and verifies inbound, transport.ts wraps outbound), relay health quarantine (relayHealth.ts), group names and last-shown members (groupState.ts); server.ts mirrors the core engine's streaming loop
 │   │   ├── statusProbes.ts   # fresh-on-every-call /status subsystem probes (Telegram getMe, editor connectors, memory, voice)
 │   │   ├── telegram.ts       # backward-compat barrel re-export (preserves the old public surface)
 │   │   ├── telegramFormat.ts # markdown → Telegram HTML

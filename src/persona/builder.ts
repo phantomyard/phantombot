@@ -16,6 +16,8 @@ export interface ChannelContext {
   channel: string; // 'telegram' | 'signal' | 'googlechat'
   conversationId: string;
   senderName?: string;
+  /** Extra lines the channel adds about the conversation (group context). */
+  detail?: string;
   timestamp: Date;
   /**
    * Security-perimeter provenance bit. True ONLY when an authenticated
@@ -82,6 +84,7 @@ export function buildSystemPrompt(
       `- Channel: ${channelCtx.channel}\n` +
       `- Conversation: ${channelCtx.conversationId}\n` +
       (channelCtx.senderName ? `- Sender: ${channelCtx.senderName}\n` : "") +
+      (channelCtx.detail ? `${channelCtx.detail}\n` : "") +
       `- Time (UTC): ${channelCtx.timestamp.toISOString()}\n`,
   );
 

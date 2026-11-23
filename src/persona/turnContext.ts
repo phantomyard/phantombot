@@ -2,6 +2,8 @@ export interface TurnContextChannel {
   channel: string;
   conversationId: string;
   senderName?: string;
+  /** Extra lines the channel adds about the conversation (group context). */
+  detail?: string;
   timestamp: Date;
 }
 
@@ -52,6 +54,7 @@ export function buildTurnContext(input: TurnContextInput): string {
     `- Channel: ${input.channel.channel}`,
     `- Conversation: ${input.channel.conversationId}`,
     input.channel.senderName ? `- Sender: ${input.channel.senderName}` : undefined,
+    input.channel.detail,
     `- Time (UTC): ${input.channel.timestamp.toISOString()}`,
   ].filter((line): line is string => line !== undefined);
 
