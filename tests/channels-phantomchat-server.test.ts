@@ -72,6 +72,26 @@ class ScriptedHarness implements Harness {
   }
 }
 
+/** Yields a different script on each invocation. */
+class SequencedHarness implements Harness {
+  invocations = 0;
+  lastRequest?: HarnessRequest;
+  constructor(
+    public readonly id: string,
+    private readonly scripts: HarnessChunk[][],
+  ) {}
+  async available(): Promise<boolean> {
+    return true;
+  }
+  async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+    this.lastRequest = req;
+    const script =
+      this.scripts[Math.min(this.invocations, this.scripts.length - 1)]!;
+    this.invocations++;
+    for (const c of script) yield c;
+  }
+}
+
 /**
  * In-memory relay pool. `feed(event)` delivers a gift-wrap to the live
  * subscription; `published` records everything publish() saw. After the seeded
@@ -1778,6 +1798,8 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     allowedHex: string[];
     groupPersonaNames?: string[];
     siblingBotHex?: string[];
+    relayHex?: string[];
+    screen?: ReturnType<typeof passingScreen>["fn"];
     /** Stub kind-0 resolver: lowercased hex → {name, bot}. Models what the bot
      *  would fetch from relays, so auto bot-detection / name resolution can be
      *  tested with no config seeds. */
@@ -1830,6 +1852,8 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       allowedHex: opts.allowedHex,
       groupPersonaNames: opts.groupPersonaNames,
       siblingBotHex: opts.siblingBotHex,
+      relayHex: opts.relayHex,
+      screen: opts.screen,
       ...(opts.holdRelayPollMs ? { holdRelayPollMs: opts.holdRelayPollMs } : {}),
       fetchProfiles: opts.profiles
         ? async (authors: string[]) => {
@@ -3134,6 +3158,60 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     expect(groupBlock(harness.lastRequest!)).toContain('"Newer"');
   });
 
+  // Only a trusted turn may carry the block. A bridge the principal listed as a
+  // member speaks in a group that HAS a roster, and must still not be told it.
+  test.each(["a member", "an allow-listed member"])("group context: a relay turn never carries it (%s)", async (who) => {
+    const t = team();
+    const relaySk = generateSecretKey();
+    const relayHex = getPublicKey(relaySk);
+    const screen = passingScreen();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", profiles: t.profiles, harness,
+      allowedHex: who === "a member" ? [t.andrewHex] : [t.andrewHex, relayHex],
+      relayHex: [relayHex], screen: screen.fn,
+    });
+    const listed = [...t.others(t.andrewSk), relayHex];
+    srv.feedGroup(t.andrewSk, listed, "lena, hello", "PR");
+    await groupSleep(150);
+    srv.feedGroup(relaySk, [t.andrewHex, ...t.others(t.andrewSk)], "lena, who is here?", "PR");
+    await groupSleep(150);
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, and now?", "PR");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.requests.length).toBe(3);
+    expect(screen.calls.length).toBe(1);
+    const [before, relayed, after] = harness.requests;
+    expect(groupBlock(before!)).not.toBe("");
+    expect(relayed!.systemPrompt).toContain("Security perimeter — UNTRUSTED turn");
+    expect(groupBlock(relayed!)).toBe("");
+    expect(relayed!.systemPrompt).not.toContain("Members, as of");
+    // Nor does it use up what our next trusted turn is owed.
+    expect(groupBlock(after!)).toContain("Changed since your last turn here:");
+  });
+
+  // Recovery text stands in for a turn that failed: the model never sent that
+  // answer, so it is not scanned for mentions.
+  test("team group: recovery text that @names nobody posts no notice", async () => {
+    const t = team();
+    const harness = new SequencedHarness("fake", [
+      [{ type: "error", error: "harness gone", recoverable: false }],
+      [{ type: "done", finalText: "I hit a snag, please ask again. @kaiwork" }],
+      [{ type: "done", finalText: "Fine." }],
+    ]);
+    const srv = makeGroupServer({ botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness });
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, go", "PR");
+    await groupSleep(250);
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, again", "PR");
+    await groupSleep(200);
+    await srv.stop();
+    expect(harness.invocations).toBe(3);
+    expect(readsFrom(srv.pool, t.kaiSk)).toEqual(["I hit a snag, please ask again. @kaiwork", "Fine."]);
+    expect(groupBlock(harness.lastRequest!)).not.toBe("");
+    expect(groupBlock(harness.lastRequest!)).not.toContain("woke no one");
+  });
+
   test("group context: a DM carries no group block", async () => {
     const t = team();
     const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
@@ -4108,24 +4186,6 @@ describe("phantomchat relay tier — reactions", () => {
  * reply) and ACP (on-screen [error]) both surface it.
  */
 describe("phantomchat turn failure is surfaced, never silent", () => {
-  /** Yields a different script on each invocation. */
-  class SequencedHarness implements Harness {
-    invocations = 0;
-    constructor(
-      public readonly id: string,
-      private readonly scripts: HarnessChunk[][],
-    ) {}
-    async available(): Promise<boolean> {
-      return true;
-    }
-    async *invoke(): AsyncGenerator<HarnessChunk> {
-      const script =
-        this.scripts[Math.min(this.invocations, this.scripts.length - 1)]!;
-      this.invocations++;
-      for (const c of script) yield c;
-    }
-  }
-
   /** Every v2 reply bubble the sender can read, in order. */
   async function replyTexts(
     pool: FakePool,
