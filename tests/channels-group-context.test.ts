@@ -89,6 +89,8 @@ describe("unmatchedMentions", () => {
     ["Ready for review, **@Lena**", ["Lena"]],
     ["Ready: @Kai, @Lena and @Omar.", ["Lena"]],
     ["@lena @LENA", ["lena"]],
+    ["Ready. @Kai_work", ["Kai_work"]],
+    ["Ready. @Lena-work @Kai-work", ["Lena-work"]],
     ["Ready @everyone!", ["everyone"]],
   ])("a call to nobody is found: %s", (text, want) => {
     expect(unmatchedMentions(text, TEAM)).toEqual(want);
@@ -117,6 +119,22 @@ describe("unmatchedMentions", () => {
 
   test("silent while any member has no known name: it could be the one called", () => {
     expect(unmatchedMentions("@Lena please", [...TEAM, m(undefined, "unknown")])).toEqual([]);
+  });
+
+  test("never reports a mention that the wake rule matches", () => {
+    const names = ["Kai", "Zoé", "R2.5", "Anne-Marie", "C++"];
+    const team = names.map((n) => m(n, "phantom"));
+    let woke = 0;
+    for (const name of names) {
+      for (const tail of ["", "-work", "-", "_work", "work", "9", "é", "ß", ".x", ".5", "'s", "/x", "(", ":", "!", " Clay", "-é_x"]) {
+        for (const text of [`Ready. @${name}${tail}`, `@${name}${tail} please`]) {
+          if (matchAtMentions(text, names).length === 0) continue;
+          woke++;
+          expect([text, unmatchedMentions(text, team)]).toEqual([text, []]);
+        }
+      }
+    }
+    expect(woke).toBeGreaterThan(100);
   });
 
   test("a full profile name answers to its first word", () => {

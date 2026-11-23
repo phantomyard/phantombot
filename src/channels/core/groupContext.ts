@@ -10,6 +10,7 @@
  */
 
 import { sanitizeEnvelopeField } from "../telegram/parse.ts";
+import { atMentionPattern } from "./routing.ts";
 
 /** Cap on a group name as stored and as shown. */
 export const GROUP_NAME_MAX = 80;
@@ -126,11 +127,14 @@ export function unmatchedMentions(text: string, members: GroupMember[]): string[
     known.add(name).add(first);
     if (m.kind === "phantom" && first.length >= 3) phantoms.push(first);
   }
+  // The wake rule itself, tried at each call: "@Kai-work" wakes Kai.
+  const wakes = [...known].map((name) => atMentionPattern(name, "iy"));
   const prose = stripNonProse(text).trimEnd();
   const out: string[] = [];
   for (const m of prose.matchAll(CALL)) {
     const key = m[1]!.toLowerCase();
-    if (known.has(key) || GENERIC.has(key)) continue;
+    if (GENERIC.has(key)) continue;
+    if (wakes.some((re) => ((re.lastIndex = m.index), re.test(prose)))) continue;
     if (out.some((n) => n.toLowerCase() === key)) continue;
     const before = prose.slice(prose.lastIndexOf("\n", m.index - 1) + 1, m.index);
     const after = prose.slice(m.index + m[0].length);
