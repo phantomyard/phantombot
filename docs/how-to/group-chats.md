@@ -13,6 +13,13 @@ Give shared groups stable names in persona configuration so memory and routing
 do not depend on a platform-specific numeric ID. Multiple bots may share a
 group; each bot still applies its own allowlist, persona, and routing decision.
 
+In a PhantomChat group or session, each turn tells the persona the group's name,
+who is in it with the exact `@name` that wakes each phantom, and who was added or
+removed since its last turn there. The member list follows your own latest
+message, so a change counts once you post. A group created before this feature
+shows no name until you rename it or add someone. If a persona mentions an
+`@name` that matches nobody, it posts a notice saying so.
+
 Useful checks:
 
 1. The owner is allow-listed for the channel.

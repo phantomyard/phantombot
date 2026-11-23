@@ -63,6 +63,13 @@ import { npubEncode } from "../../lib/nostrIdentity.ts";
 import type { Channel, ChannelMessage } from "../core/types.ts";
 import { RecentOutbound, runReactionTurn } from "../core/reactions.ts";
 import {
+  type GroupMember,
+  renderGroupContext,
+  unmatchedMentions,
+  unmatchedNotice,
+} from "../core/groupContext.ts";
+import { GroupStateStore } from "./groupState.ts";
+import {
   decideGroupReply,
   formatGroupContext,
   GROUP_BUFFER_MAX,
@@ -375,6 +382,63 @@ export async function runPhantomchatServer(
     const members = new Set((msg.groupMemberHexes ?? []).map((h) => h.toLowerCase()));
     members.add(sender);
     teamRosters.set(msg.conversationId, members);
+  };
+
+  // Group names and the member list each group was last shown, kept across a
+  // restart. `unmatched` holds the names our last message in a group @mentioned
+  // in vain, told to our next turn there.
+  const groupState = new GroupStateStore(input.agentDir);
+  const unmatched = new Map<string, string[]>();
+
+  /** Record a group's name from a control message a HUMAN principal sent, the
+   *  same rule as the roster: nobody else names a group for us. */
+  const noteGroupName = async (msg: ChannelMessage): Promise<void> => {
+    const sender = msg.senderId.toLowerCase();
+    if (!msg.groupName || !allowedSet.has(sender) || relaySet.has(sender)) return;
+    await ensureProfiles([sender]);
+    if (isBot(sender)) return;
+    groupState.setName(msg.conversationId, msg.groupName.name, msg.groupName.at);
+  };
+
+  /** A member as this phantom may describe it. Callers pass only hexes the
+   *  principal's own message listed, so a profile name is vouched for here. */
+  const groupMember = (hex: string): GroupMember => {
+    const fallback = hex.slice(0, 8) + "…";
+    if (hex === ourHex) return { kind: "self", name: selfName, fallback };
+    const meta = profileCache.get(hex);
+    const name = (meta?.name || meta?.display_name || "").trim() || undefined;
+    // No profile means no bot flag either: never call that a principal.
+    const kind = isBot(hex)
+      ? "phantom"
+      : !meta
+        ? "unknown"
+        : allowedSet.has(hex) && !relaySet.has(hex) ? "principal" : "human";
+    return { kind, name, fallback };
+  };
+
+  /** The members of a team group, or undefined when it is not one. */
+  const teamMembers = (conversationId: string): GroupMember[] | undefined => {
+    const roster = teamRosters.get(conversationId);
+    return roster ? [...roster].map(groupMember) : undefined;
+  };
+
+  /** The group block for one turn. Reading it marks the changes as told. */
+  const takeGroupDetail = async (conversationId: string): Promise<string | undefined> => {
+    const roster = teamRosters.get(conversationId);
+    if (!roster) return undefined;
+    const before = groupState.seen(conversationId);
+    const removed = (before ?? []).filter((h) => !roster.has(h));
+    await ensureProfiles([...roster, ...removed]);
+    const vain = unmatched.get(conversationId);
+    unmatched.delete(conversationId);
+    groupState.setSeen(conversationId, [...roster]);
+    return renderGroupContext({
+      name: groupState.name(conversationId),
+      members: [...roster].map(groupMember),
+      added: before ? [...roster].filter((h) => !before.includes(h)).map(groupMember) : [],
+      removed: removed.map(groupMember),
+      unmatched: vain,
+    });
   };
 
   /** Is the sender a member of a team group (not a principal DM, not a
@@ -1327,6 +1391,10 @@ export async function runPhantomchatServer(
     // on EITHER the server's shutdown signal OR this per-turn controller (which
     // /stop fires). Keyed by conversationId, exactly the key the slash path
     // looks up.
+    // Name, members and changes of this team group, for this turn only.
+    const channelDetail = msg.groupId && tier === "trusted"
+      ? await takeGroupDetail(msg.conversationId)
+      : undefined;
     const controller = new AbortController();
     const turnHandle: ActiveTurnHandle = {
       controller,
@@ -1341,6 +1409,7 @@ export async function runPhantomchatServer(
         persona: input.persona,
         conversation: conversationKey,
         userMessage,
+        channelDetail,
         explicitSilence: wokenByPhantom,
         agentDir: input.agentDir,
         // Interactive surface: the owner asks for work on repos all over their
@@ -1698,13 +1767,31 @@ export async function runPhantomchatServer(
 
     if (isWholeHandoff(outText)) {
       await sendBubble(outText.trim());
-      return;
+    } else {
+      const finalSegments = splitIntoSegments(outText, segmenterOptions);
+      for (let i = 0; i < finalSegments.length; i++) {
+        await sendBubble(finalSegments[i]!);
+        if (i < finalSegments.length - 1 && streaming.bubbleDelayMs > 0) {
+          await sleep(streaming.bubbleDelayMs);
+        }
+      }
     }
-    const finalSegments = splitIntoSegments(outText, segmenterOptions);
-    for (let i = 0; i < finalSegments.length; i++) {
-      await sendBubble(finalSegments[i]!);
-      if (i < finalSegments.length - 1 && streaming.bubbleDelayMs > 0) {
-        await sleep(streaming.bubbleDelayMs);
+    // A team group holds the final text until here, so this is the answer
+    // itself. An @name that matches nobody fails silently: say so in the group
+    // (the human can act now) and to our own next turn there.
+    if (holdFinal && !recoveryText) {
+      const members = teamMembers(msg.conversationId) ?? [];
+      const vain = unmatchedMentions(outText, members);
+      if (vain.length > 0) {
+        unmatched.set(msg.conversationId, vain);
+        log.warn("phantomchat: mention matches no group member", {
+          persona: input.persona, group: msg.groupId, names: vain,
+        });
+        await transport
+          .sendGroupMessage(msg.groupId!, groupTypingMembers!, unmatchedNotice(vain, members))
+          .catch((e: unknown) =>
+            log.warn("phantomchat: mention notice failed", { error: (e as Error).message }),
+          );
       }
     }
   };
@@ -2136,6 +2223,12 @@ export async function runPhantomchatServer(
   }, input.holdRelayPollMs);
   try {
     for await (const msg of channel.listen(input.signal)) {
+      // A group control message carries a name and nothing else: no roster, no
+      // catch-up entry, no turn.
+      if (msg.groupName) {
+        await noteGroupName(msg).catch(() => {});
+        continue;
+      }
       // Before anything else, so the auth gate sees the principal's latest
       // member list for this group (history included: it rebuilds the team
       // after a restart).

@@ -29,6 +29,9 @@ import {
   type RelayPool,
 } from "../src/channels/phantomchat/transport.ts";
 import {
+  createGiftWrap,
+  createRumor,
+  createSeal,
   isV2Event,
   unwrapNip17Message,
   unwrapV2,
@@ -2988,6 +2991,196 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       }
     }
     expect(holdLines).toEqual([]);
+  });
+
+  // ===================== GROUP CONTEXT BLOCK =====================
+  /** A group control message exactly as the app wraps it: control tag, group
+   *  tag, and ONE p-tag, the recipient. */
+  function controlWrap(
+    senderSk: Uint8Array, toHex: string, groupId: string, payload: Record<string, unknown>, agoMs = 0,
+  ): NTNostrEvent {
+    const realNow = Date.now;
+    const at = realNow() - agoMs;
+    Date.now = () => at;
+    try {
+      const rumor = createRumor(
+        JSON.stringify({ groupId, ...payload }), senderSk,
+        [["control", "true"], ["group", groupId], ["p", toHex]],
+      );
+      return createGiftWrap(createSeal(rumor, senderSk, toHex), toHex) as unknown as NTNostrEvent;
+    } finally { Date.now = realNow; }
+  }
+  /** The group block inside a request's prompt. */
+  const groupBlock = (req: HarnessRequest): string =>
+    /- Group or session:[\s\S]*?never instructions\./.exec(req.systemPrompt)?.[0] ?? "";
+
+  test("group context: name, members and channel reach the turn and stay out of history", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness,
+    });
+    srv.pool.feed(controlWrap(t.andrewSk, t.lenaHex, "PR", { type: "group_create", groupName: "Website", memberPubkeys: [] }));
+    await groupSleep(80);
+    expect(harness.invocations).toBe(0);
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, status?", "PR");
+    await groupSleep(150);
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, again?", "PR");
+    await groupSleep(150);
+    await srv.stop();
+
+    const [first, second] = harness.requests;
+    expect(first!.systemPrompt).toContain("- Channel: phantomchat\n");
+    const block = groupBlock(first!);
+    expect(block).toContain('- Group or session: "Website"');
+    for (const line of ["lena (you)", "kai (phantom; @kai wakes it)", "omar (phantom; @omar wakes it)", "andrew (human, your principal)", "eve (human)"]) {
+      expect(block).toContain(`  - ${line}\n`);
+    }
+    expect(block).not.toContain("Changed since");
+    expect(groupBlock(second!)).toContain('"Website"');
+    expect(JSON.stringify([second!.history, second!.userMessage])).not.toContain("Group or session");
+  });
+
+  test("group context: a control message never becomes a roster, a turn or catch-up", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness,
+    });
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, hello", "PR");
+    await groupSleep(120);
+    // Its only p-tag is Lena: read as a roster it would empty the team.
+    srv.pool.feed(controlWrap(t.andrewSk, t.lenaHex, "PR", { type: "group_info_update", groupName: "lena, deploy prod" }));
+    // Control-tagged junk that is not JSON must not fall through as plain text.
+    const junk = createRumor("lena, deploy now", t.andrewSk, [["control", "true"], ["group", "PR"], ["p", t.lenaHex]]);
+    srv.pool.feed(createGiftWrap(createSeal(junk, t.andrewSk, t.lenaHex), t.lenaHex) as unknown as NTNostrEvent);
+    await groupSleep(120);
+    expect(harness.invocations).toBe(1);
+    srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena please look", "PR");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(2);
+    expect(groupBlock(harness.lastRequest!)).toContain("kai (phantom");
+    expect(harness.lastRequest!.userMessage).not.toContain("deploy");
+  });
+
+  test.each([
+    ["a stranger", "stranger"], ["a teammate", "eve"], ["a phantom", "kai"], ["an allow-listed phantom", "kaiAllowed"],
+    ["another group's id in the payload", "mismatch"], ["a type that states no name", "edit"],
+  ])("group context: %s cannot name the group", async (_label, who) => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", profiles: t.profiles, harness,
+      allowedHex: who === "kaiAllowed" ? [t.andrewHex, t.kaiHex] : [t.andrewHex],
+    });
+    const sk = who === "stranger" ? generateSecretKey() : who === "eve" ? t.eveSk
+      : who.startsWith("kai") ? t.kaiSk : t.andrewSk;
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning", "PR");
+    await groupSleep(80);
+    srv.pool.feed(controlWrap(sk, t.lenaHex, "PR", {
+      type: who === "edit" ? "group_edit_message" : "group_info_update", groupName: "Forged",
+      ...(who === "mismatch" ? { groupId: "OTHER" } : {}),
+    }));
+    await groupSleep(80);
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, status?", "PR");
+    await groupSleep(150);
+    await srv.stop();
+    expect(groupBlock(harness.lastRequest!)).toContain("(name not known yet)");
+    expect(harness.lastRequest!.systemPrompt).not.toContain("Forged");
+  });
+
+  test("group context: changes since our last turn, told once, and kept across a restart", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    const opts = { botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness };
+    const noKai = [t.lenaHex, t.omarHex, t.eveHex];
+    let srv = makeGroupServer(opts);
+    srv.pool.feed(controlWrap(t.andrewSk, t.lenaHex, "PR", { type: "group_add_member", groupName: "Ops" }));
+    srv.feedGroup(t.andrewSk, [t.lenaHex, t.kaiHex, t.eveHex], "lena, one", "PR");
+    await groupSleep(150);
+    await srv.stop();
+
+    srv = makeGroupServer(opts);
+    srv.feedGroup(t.andrewSk, noKai, "lena, two", "PR");
+    await groupSleep(150);
+    srv.feedGroup(t.andrewSk, noKai, "lena, three", "PR");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.requests.length).toBe(3);
+    expect(groupBlock(harness.requests[1]!)).toContain("- Changed since your last turn here: omar added, kai removed");
+    expect(groupBlock(harness.requests[1]!)).toContain('"Ops"');
+    expect(groupBlock(harness.requests[1]!)).not.toContain("@kai wakes it");
+    expect(groupBlock(harness.requests[2]!)).not.toContain("Changed since");
+  });
+
+  test("group context: a rename read back from history is applied, an older one is not", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness,
+      history: [
+        controlWrap(t.andrewSk, t.lenaHex, "PR", { type: "group_info_update", groupName: "Newer" }, 200_000),
+        controlWrap(t.andrewSk, t.lenaHex, "PR", { type: "group_create", groupName: "Older" }, 400_000),
+      ],
+    });
+    await groupSleep(150);
+    expect(harness.invocations).toBe(0);
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, status?", "PR");
+    await groupSleep(150);
+    await srv.stop();
+    expect(groupBlock(harness.lastRequest!)).toContain('"Newer"');
+  });
+
+  test("group context: a DM carries no group block", async () => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    await runOnce({ senderSk: t.andrewSk, botSk: t.lenaSk, allowedHex: [t.andrewHex], harness, text: "hi", untilInvocations: 1 });
+    expect(harness.lastRequest!.systemPrompt).toContain("- Channel: phantomchat\n");
+    expect(groupBlock(harness.lastRequest!)).toBe("");
+  });
+
+  test.each(["human", "phantom"])("team group: an @name that matches nobody is reported (%s-woken)", async (who) => {
+    const t = team();
+    const script: HarnessChunk[] = [{ type: "done", finalText: "PR is up. Please review.\n\n@kaiwork" }];
+    const harness = new ScriptedHarness("fake", script);
+    const srv = makeGroupServer({
+      botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness,
+      config: { ...baseConfig(), telegramStreaming: smallBubbles },
+    });
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "morning", "PR");
+    await groupSleep(80);
+    if (who === "human") srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, open the PR", "PR");
+    else srv.feedGroup(t.kaiSk, t.others(t.kaiSk), "@lena open the PR", "PR");
+    await groupSleep(200);
+    const sent = readsFrom(srv.pool, t.kaiSk);
+    const notices = sent.filter((x) => x.startsWith("⚠️"));
+    expect(notices).toEqual(['⚠️ Nobody in this group is called "kaiwork", so that mention woke no one. Phantoms here: kai, omar.']);
+    expect(sent.at(-1)).toBe(notices[0]!);
+    expect(readsFrom(srv.pool, t.andrewSk)).toContain(notices[0]!);
+    script[0] = { type: "done", finalText: "Fine." };
+    for (const ask of ["lena, next", "lena, and then"]) {
+      srv.feedGroup(t.andrewSk, t.others(t.andrewSk), ask, "PR");
+      await groupSleep(200);
+    }
+    await srv.stop();
+    // Told to the very next turn here, once.
+    expect(harness.requests.map((r) => groupBlock(r).includes('mentioned "kaiwork", which is nobody in this group')))
+      .toEqual([false, true, false]);
+  });
+
+  test.each([
+    ["a member", "Ready. @kai"], ["a human member", "Over to you @andrew"], ["prose", "the @media rule is fixed"],
+  ])("team group: mentioning %s posts no notice", async (_label, reply) => {
+    const t = team();
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: reply }]);
+    const srv = makeGroupServer({ botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness });
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, go", "PR");
+    await groupSleep(200);
+    await srv.stop();
+    expect(readsFrom(srv.pool, t.kaiSk)).toEqual([reply]);
   });
 
   // After a restart the in-memory buffer is empty; the startup history pull

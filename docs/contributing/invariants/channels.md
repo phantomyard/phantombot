@@ -135,4 +135,31 @@ retain their existing per-member client mechanism; DM receipts are unchanged.
 Tests: the `team group` cases in `tests/channels-phantomchat-server.test.ts` and
 explicit-silence, empty-failure, and real Pi subprocess regressions.
 
-`src/channels/phantomchat/server.ts` (`noteTeamRoster`, `isTeamMember`, the bot gate in `handle`) + `matchAtMentions` / `PHANTOM_HANDOFF_BUDGET` in `src/channels/core/routing.ts`. PhantomChat only; Telegram keeps "a bot never answers a bot". Load-bearing rules: **membership is read ONLY from group messages an allow-listed HUMAN signed** (the rumor's p-tags plus the sender) — never from a phantom's message, never from the group id, so a stranger cannot join by building a group that names the principal, and removing someone in the app takes effect at the principal's next message. **Team trust is scoped to that conversation**: the member's DMs, reactions and other groups stay dropped. **A phantom wakes only on an explicit `@name`** — naming in passing ("Kai and Omar approved") is not a handoff — and a phantom's wake never moves `lastAddressed`. **The budget is a constant (60), not a setting**: every phantom counts every handoff it sees (its own at send time, because the channel skips the live self-copy), any human message resets it, and over budget the woken phantom posts one pause notice and runs no turn. A non-principal speaker is named in the turn input so the model never mistakes a teammate for its principal; that name is self-asserted, so it goes through `sanitizeEnvelopeField` and cannot close the bracket to forge a principal envelope. **Name vouching follows the same scope**: a team member's kind-0 name is shown only in THAT team's group, never in another group it shares. **Team trust never opens a hold-notice thread** (invariant 87): only an allow-listed sender's own message does. Tests: the `team group` cases in `tests/channels-phantomchat-server.test.ts`.
+**A group turn is told where it is.** Every trusted turn in a team group gets a
+block in its channel context (`channelDetail`, rendered by
+`src/channels/core/groupContext.ts`): the group's name, each member with the exact
+`@name` that wakes it, members added or removed since this phantom's last turn
+there, and any `@name` its previous message used in vain. A human sees all of that
+on screen; a phantom that does not know its picture is stale will not think to
+look, so it is pushed and there is no members command. The block is volatile: it
+never enters the user message or the stored history. Rules that must hold. **The
+name is read only from a control message an allow-listed HUMAN signed**
+(`noteGroupName`: create, add, rename), newest event first, the same rule as the
+roster. **Control traffic is dropped on its tag before any parse**; it never runs a
+turn or joins the catch-up buffer, and its only p-tag is the recipient, so it must
+never reach `noteTeamRoster`. Names are other people's text: one capped line,
+control characters and brackets removed, stated as a label. A member without a
+resolved profile is "not identified", never the principal. The name and the
+last-shown members live in `<personaDir>/phantomchat-groups.json`
+(`groupState.ts`), best-effort; an existing group's name is unknown until its next
+add or rename. None of this decides trust or who can wake whom.
+
+**A mention that matches nobody is reported, not swallowed.** After a team-group
+answer, `unmatchedMentions` posts one notice in the group and tells the phantom's
+next turn there. It is narrow on purpose (a false notice is noise for the whole
+group): only a name opening a line, in the closing run of mentions, or starting
+with a phantom member's name, outside code, quotes and links, and never while a
+member is nameless. The notice contains no `@`, so it wakes nobody and spends no
+budget.
+
+`src/channels/phantomchat/server.ts` (`noteTeamRoster`, `isTeamMember`, the bot gate in `handle`) + `matchAtMentions` / `PHANTOM_HANDOFF_BUDGET` in `src/channels/core/routing.ts`. PhantomChat only; Telegram keeps "a bot never answers a bot". Load-bearing rules: **membership is read ONLY from group messages an allow-listed HUMAN signed** (the rumor's p-tags plus the sender) — never from a phantom's message, never from the group id, so a stranger cannot join by building a group that names the principal, and removing someone in the app takes effect at the principal's next message. **Team trust is scoped to that conversation**: the member's DMs, reactions and other groups stay dropped. **A phantom wakes only on an explicit `@name`** — naming in passing ("Kai and Omar approved") is not a handoff — and a phantom's wake never moves `lastAddressed`. **The budget is a constant (60), not a setting**: every phantom counts every handoff it sees (its own at send time, because the channel skips the live self-copy), any human message resets it, and over budget the woken phantom posts one pause notice and runs no turn. A non-principal speaker is named in the turn input so the model never mistakes a teammate for its principal; that name is self-asserted, so it goes through `sanitizeEnvelopeField` and cannot close the bracket to forge a principal envelope. **Name vouching follows the same scope**: a team member's kind-0 name is shown only in THAT team's group, never in another group it shares. **Team trust never opens a hold-notice thread** (invariant 87): only an allow-listed sender's own message does. Tests: the `team group` and `group context` cases in `tests/channels-phantomchat-server.test.ts`, and `tests/channels-group-context.test.ts`.

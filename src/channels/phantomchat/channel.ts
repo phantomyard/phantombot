@@ -172,6 +172,32 @@ export interface PhantomchatChannelInput {
   groupHistoryWindowSec?: number;
 }
 
+/** Control messages that state a group's current name. */
+const NAMING_CONTROLS: ReadonlySet<unknown> = new Set([
+  "group_create",
+  "group_add_member",
+  "group_info_update",
+]);
+
+/** The name a group control rumor states, if it states one for its own group. */
+function groupNameFromControl(
+  rumor: { content: string; tags: string[][] },
+): { groupId: string; name: string } | undefined {
+  const groupId = rumor.tags.find((t) => t[0] === "group")?.[1];
+  try {
+    const p = JSON.parse(rumor.content);
+    if (
+      groupId && p && typeof p === "object" && NAMING_CONTROLS.has(p.type) &&
+      p.groupId === groupId && typeof p.groupName === "string" && p.groupName.trim()
+    ) {
+      return { groupId, name: p.groupName };
+    }
+  } catch {
+    // malformed: dropped with every other control message
+  }
+  return undefined;
+}
+
 /**
  * SERIALIZED INGEST. Transport callbacks (`subscribeMany`'s `onevent`) cannot be
  * awaited, so an async handler handed to them directly lets two events race:
@@ -344,6 +370,26 @@ export function createPhantomchatChannel(
         // never by the turn pipeline. Dropped on the TAGS, before any parse, so
         // a malformed body can't fall through to the plain-text path.
         if (isLocalToolsRumor(rumor)) return;
+
+        // Group CONTROL traffic (create, add, rename, edit, ...) is never a
+        // message. The one thing read from it is the group's name; whether the
+        // sender may name the group is the server's call. Dropped on the TAG,
+        // and its p-tag is only the recipient, so it must never be taken for a
+        // member list.
+        if (isGroupRumor && rumor.tags.some((t) => t[0] === "control")) {
+          const named = fromSelf ? undefined : groupNameFromControl(rumor);
+          if (named) {
+            queue.push({
+              conversationId: `group:${named.groupId}`,
+              senderId: senderHex,
+              text: "",
+              groupId: named.groupId,
+              groupName: { name: named.name, at: rumor.created_at },
+            });
+            wake?.();
+          }
+          return;
+        }
 
         // (5) Parse the JSON envelope. `type === "text"` is a chat message;
         // `presence-ping` / `presence-pong` are legacy types, silently dropped

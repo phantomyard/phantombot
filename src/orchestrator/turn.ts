@@ -134,6 +134,14 @@ export function boundHistoryByBytes(
   return { history: history.slice(first), loadedBytes, includedBytes };
 }
 
+/** Conversation-key prefixes that name a channel; anything else is local. */
+const CHANNELS: ReadonlySet<string> = new Set(["phantomchat", "telegram", "acp", "tick", "system"]);
+
+function channelOf(conversation: string): string {
+  const head = conversation.split(":", 1)[0]!;
+  return CHANNELS.has(head) ? head : "cli";
+}
+
 export interface TurnInput {
   /** Runtime-only originating task capability; never derived from prompt text. */
   taskCancellation?: TaskCancellation;
@@ -143,6 +151,12 @@ export interface TurnInput {
   conversation: string;
   /** The new user message. */
   userMessage: string;
+  /**
+   * Lines the channel adds to the turn's channel context (a PhantomChat group's
+   * name and members). Volatile like the rest of that block and never stored.
+   * The channel renders it; only a TRUSTED turn may carry one.
+   */
+  channelDetail?: string;
   /** Path to the persona directory (BOOT.md / SOUL.md / IDENTITY.md etc. live here). */
   agentDir: string;
   /**
@@ -780,8 +794,9 @@ async function* runTurnBody(
   }
 
   const channelCtx = {
-    channel: "cli",
+    channel: channelOf(input.conversation),
     conversationId: input.conversation,
+    ...(input.channelDetail ? { detail: input.channelDetail } : {}),
     timestamp: new Date(),
     trusted: input.trusted === true,
   };
