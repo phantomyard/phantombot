@@ -152,3 +152,48 @@ entry unioned and never shrunk, no credential on disk). A future provider that
 wants the same treatment opts in there explicitly; `openai-compatible` never
 does, because there a model choice is a real decision. Tests:
 `tests/tui-brain-flow.test.ts`, `tests/cli-harness.test.ts`.
+
+<a id="inv-91"></a>
+### 91. Phantombot's capabilities are ONE tool catalog every harness drives — never a per-harness tool, never a shell-out (issue #820).
+
+The typed `pbot_*` tools (`src/pbot/tools.ts`) and the persona's registered MCP
+servers form one `ToolCatalog` (`src/pbot/catalog.ts`). claude and codex reach
+it through `phantombot mcp proxy` (projected on EVERY foreground turn, registry
+or not); the native harness reaches it through an inline extension of the
+embedded pi (`src/pbot/piExtension.ts`), in the `__pi` process, with no server
+hop. Four rules hold it together:
+
+- **One action, two faces.** Each tool calls the same exported `run*` function
+  its CLI command calls (`runMemoryCapture`, `runVaultSet`, `runTaskAdd`, …),
+  which own every side effect of a write: the capture log the nudge and
+  `doctor` count, index-on-write, the sandbox forward and its markdown
+  fallback, the conversation key. A tool never spawns `phantombot` and never
+  touches a store directly. Context (persona, conversation, tier) is passed in
+  from the turn — the proxy child gets it as explicit `env` in the projected
+  config, because an MCP client is not required to hand a stdio server its own
+  environment (codex does not). Parity tests: `tests/pbot-tools.test.ts`.
+- **One loading rule.** `EAGER_PBOT_TOOLS` (memory, vault) plus `pbot_tools`
+  are in the first tool list on every harness; everything else loads via
+  `pbot_tools describe` (proxy: `tools/list_changed`; pi: a late
+  `registerTool`, which pi activates for the next model call). `pbot_memory`
+  must stay eager: the memory reflex names it.
+- **The prompt follows the spawn, not the turn.** The persona prompt is built
+  once and shared by the fallback chain, so each harness runs
+  `adaptRequestForPbotTools` on the spawn it makes: CLI sections become tool
+  sections only when THAT spawn carries the tools; otherwise the prompt is
+  byte-identical. No harness is told to use a route its prompt does not
+  document.
+- **Untrusted turns are unchanged.** Judge (`toolsMode "none"`), background
+  (`mcpMode "none"`) and sandboxed (security session) spawns never get the
+  catalog — the pi extension checks both its runtime-owned
+  `PHANTOMBOT_PBOT_TOOLS` flag and the absence of a security session.
+  Widening that is a separate, deliberate change.
+
+`[vault] agent_env` (`agentSpawnEnv` in `lib/vault.ts`) is the companion
+credential rule: when set, a harness hands its agent child only those vault
+names; the rest reach commands through `pbot_vault exec` / `phantombot vault
+exec`, which strips every vault name from the command's env, adds back only
+the requested ones and redacts their values from the output. A harness that
+needs a secret for the spawn itself (pi's provider key) sets it AFTER the
+filter. Tests: `tests/pbot-harness.test.ts`, `tests/mcp-proxy.test.ts`,
+`tests/vault-agent-env.test.ts`, `tests/mcp-harnessConfig.test.ts`.

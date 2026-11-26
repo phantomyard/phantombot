@@ -24,7 +24,8 @@ phantombot/
 │   ├── state.ts              # phantombot-managed state (default persona)
 │   ├── persona/
 │   │   ├── loader.ts         # accepts BOOT.md / SOUL.md / IDENTITY.md, MEMORY.md, tools.md / AGENTS.md
-│   │   └── builder.ts        # buildSystemPrompt + MEMORY_TOOLS_SECTION + CREDENTIALS_SECTION
+│   │   ├── builder.ts        # buildSystemPrompt + MEMORY_TOOLS_SECTION + CREDENTIALS_SECTION
+│   │   └── pbotPrompt.ts     # per-spawn rewrite: CLI sections -> pbot_* tool sections (memory reflex included) when the spawn has the tools
 │   ├── memory/
 │   │   ├── store.ts          # bun:sqlite store: turns table + capture_log table
 │   │   │                     #   (capture_log backs the 30-turn nudge + doctor)
@@ -79,8 +80,13 @@ phantombot/
 │   │   ├── registry.ts       # per-persona mcp.json, written by the agent via `phantombot mcp add`
 │   │   ├── client.ts         # the one place that talks to servers: official SDK transports + the three auth methods from the vault
 │   │   ├── hub.ts            # shared upstream connections + token store, opened lazily
-│   │   ├── proxy.ts          # loopback aggregated MCP server for MCP-native harnesses — lazy discovery meta-tools, never a flat dump
-│   │   └── harnessConfig.ts  # the --mcp-config payload: phantombot's own registered servers and ONLY those
+│   │   ├── proxy.ts          # loopback MCP server for claude/codex: serves the pbot ToolCatalog (eager core + lazy rest), never a flat dump
+│   │   └── harnessConfig.ts  # the --mcp-config payload: phantombot's own proxy and ONLY that, on every foreground turn
+│   ├── pbot/                 # the typed pbot_* tools (#820): ONE catalog for every harness
+│   │   ├── tools.ts          # the 7 capability tools; each calls the SAME run* action its CLI command calls
+│   │   ├── catalog.ts        # eager core (EAGER_PBOT_TOOLS) + pbot_tools search/describe/call + upstream <server>__<tool>
+│   │   ├── host.ts           # builds the catalog in the hosting child (mcp proxy / __pi) from the turn's env
+│   │   └── piExtension.ts    # inline embedded-pi extension: catalog tools as native pi tools, in-process
 │   ├── p2p/                  # WebRTC transport node (#258, #61): node.ts routes gift-wrap frames, signaling.ts carries the handshake over Nostr, channelBridge.ts feeds frames into the phantomchat channel
 │   ├── cli/                  # one file per Citty subcommand
 │   │   ├── index.ts          # dispatcher; subcommand registration list lives here

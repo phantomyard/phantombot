@@ -924,6 +924,14 @@ export interface Config {
    * always populates it, and read sites default to DEFAULT_UPDATE_CHANNEL.
    */
   updateChannel?: UpdateChannel;
+  /**
+   * `[vault] agent_env` (#820): the vault secret NAMES a harness may hand its
+   * agent child in the environment. Undefined (no key) = every vault secret,
+   * the long-standing behaviour. A list = only those; `[]` = none (commands
+   * then get secrets through `pbot_vault exec`). See lib/vault.ts
+   * agentSpawnEnv.
+   */
+  vaultAgentEnv?: string[];
 
   embeddings: {
     /** "gemini" | "openai-compatible" | "none". */
@@ -1797,6 +1805,8 @@ export async function loadConfig(persona?: string): Promise<Config> {
     // is the fail-closed direction.
     updateChannel: resolveUpdateChannel(globalToml.update_channel),
 
+    ...vaultAgentEnvFromToml(toml.vault),
+
     embeddings: buildEmbeddingsConfig(
       tomlEmbeddings,
       tomlGemini,
@@ -1819,6 +1829,22 @@ export async function loadConfig(persona?: string): Promise<Config> {
 
     p2p: buildP2PConfig(tomlP2p),
   }, piRouting, platformKey);
+}
+
+/**
+ * `[vault] agent_env` → `vaultAgentEnv`. Absent or malformed = unset (every
+ * secret, the old behaviour) with a warning for malformed, so a typo can
+ * never silently strip a running fleet's credentials.
+ */
+export function vaultAgentEnvFromToml(vault: unknown): { vaultAgentEnv?: string[] } {
+  if (!vault || typeof vault !== "object" || Array.isArray(vault)) return {};
+  const raw = (vault as Record<string, unknown>).agent_env;
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw) || !raw.every((x) => typeof x === "string")) {
+    log.warn("config: ignoring [vault] agent_env — expected an array of secret names");
+    return {};
+  }
+  return { vaultAgentEnv: (raw as string[]).map((x) => x.trim()).filter(Boolean) };
 }
 
 /**

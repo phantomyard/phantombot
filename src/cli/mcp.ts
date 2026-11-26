@@ -523,17 +523,13 @@ export async function runMcpLogin(input: {
 // ─── proxy ────────────────────────────────────────────────────────────────────
 
 async function runMcpProxy(persona?: string): Promise<number> {
-  const dir = await resolvePersonaDir(persona);
-  const registry = await loadRegistry(dir);
-  const vault = await openPersonaVault(dir);
-  const hub = new McpHub(registry, vault);
+  // #820: the proxy serves the shared ToolCatalog — the pbot_* tools plus the
+  // persona's registered servers (opened lazily). Persona and conversation
+  // come from the env the harness spawned us with; --persona wins.
+  const { buildHostCatalog } = await import("../pbot/host.ts");
   const { runProxyStdio } = await import("../mcp/proxy.ts");
-  try {
-    await runProxyStdio(hub);
-    return 0;
-  } finally {
-    vault.close();
-  }
+  await runProxyStdio(buildHostCatalog(process.env, persona));
+  return 0;
 }
 
 // ─── citty surface ────────────────────────────────────────────────────────────

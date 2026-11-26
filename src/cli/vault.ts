@@ -24,7 +24,7 @@ import {
   resolvePersona,
   type Config,
 } from "../config.ts";
-import { openPersonaVault, type Vault } from "../lib/vault.ts";
+import { openPersonaVault, type Vault, vaultTrackedKeys } from "../lib/vault.ts";
 import type { WriteSink } from "../lib/io.ts";
 
 const ENV_VAR_NAME = /^[A-Z_][A-Z0-9_]*$/i;
@@ -243,6 +243,117 @@ export async function runVaultUnset(input: VaultUnsetInput): Promise<number> {
   return 0;
 }
 
+export interface VaultExecInput {
+  /** Secret names to expose to the command — and nothing else from the vault. */
+  secrets: string[];
+  /** Shell command, run with `bash -c`. */
+  command: string;
+  /** Seconds before the command is killed. Default 120, max 600. */
+  timeoutS?: number;
+  persona?: string;
+  personaDir?: string;
+  vault?: Vault;
+  /** The env the command starts from (default process.env). */
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+  out?: WriteSink;
+  err?: WriteSink;
+}
+
+export const VAULT_EXEC_DEFAULT_TIMEOUT_S = 120;
+export const VAULT_EXEC_MAX_TIMEOUT_S = 600;
+
+/** Replace every occurrence of each value with «NAME». Longest first. */
+export function redactSecretValues(text: string, secrets: ReadonlyMap<string, string>): string {
+  const pairs = [...secrets.entries()].filter(([, v]) => v.length >= 4).sort((a, b) => b[1].length - a[1].length);
+  let outText = text;
+  for (const [name, value] of pairs) outText = outText.split(value).join(`«${name}»`);
+  return outText;
+}
+
+/**
+ * `phantombot vault exec` / `pbot_vault exec` (#820): run ONE command with
+ * only the named secrets added to its environment, and return its output —
+ * never the values.
+ *
+ * The command's env is the caller's env with EVERY name this persona's vault
+ * holds removed first (in a daemon-spawned turn they were injected
+ * wholesale), then only the requested ones put back. So a stray `env` inside
+ * the command shows the secrets it asked for, not the whole vault. Any
+ * requested value that still turns up in the output (an echo, a verbose
+ * client) is redacted to «NAME» before it reaches the caller — the
+ * transcript-hygiene half of the contract. Same model as command tasks'
+ * `--secret NAME`. Exit code = the command's.
+ */
+export async function runVaultExec(input: VaultExecInput): Promise<number> {
+  const out = input.out ?? process.stdout;
+  const err = input.err ?? process.stderr;
+  const names = [...new Set(input.secrets.map((s) => s.trim()).filter(Boolean))];
+  for (const n of names) {
+    if (!ENV_VAR_NAME.test(n)) {
+      err.write(`'${n}' is not a valid env var name.\n`);
+      return 2;
+    }
+  }
+  if (!input.command.trim()) {
+    err.write("vault exec: empty command\n");
+    return 2;
+  }
+  const timeoutS = Math.min(
+    VAULT_EXEC_MAX_TIMEOUT_S,
+    Math.max(1, Math.trunc(input.timeoutS ?? VAULT_EXEC_DEFAULT_TIMEOUT_S)),
+  );
+  const { vault, owned } = await resolveVault(input);
+  const values = new Map<string, string>();
+  let allNames: string[];
+  try {
+    allNames = vault.list();
+    for (const n of names) {
+      const v = vault.get(n);
+      if (v === undefined) {
+        err.write(`${n} not set\n`);
+        return 1;
+      }
+      values.set(n, v);
+    }
+  } finally {
+    if (owned) vault.close();
+  }
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(input.env ?? process.env)) {
+    if (v !== undefined) env[k] = v;
+  }
+  for (const k of allNames) delete env[k];
+  for (const k of vaultTrackedKeys()) delete env[k];
+  for (const [k, v] of values) env[k] = v;
+
+  const proc = Bun.spawn(["bash", "-c", input.command], {
+    cwd: input.cwd ?? process.cwd(),
+    env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    proc.kill("SIGKILL");
+  }, timeoutS * 1000);
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  clearTimeout(timer);
+  if (stdout) out.write(redactSecretValues(stdout, values));
+  if (stderr) err.write(redactSecretValues(stderr, values));
+  if (timedOut) {
+    err.write(`vault exec: killed after ${timeoutS}s\n`);
+    return 124;
+  }
+  return code;
+}
+
 export default defineCommand({
   meta: {
     name: "vault",
@@ -294,6 +405,27 @@ export default defineCommand({
       },
       async run({ args }) {
         process.exitCode = await runVaultList({
+          persona: args.persona ? String(args.persona) : undefined,
+        });
+      },
+    }),
+    exec: defineCommand({
+      meta: {
+        name: "exec",
+        description:
+          "Run COMMAND with only the named secrets in its env; prints its output, never the values.",
+      },
+      args: {
+        command: { type: "positional", required: true, description: "Shell command (quoted), run with bash -c" },
+        secrets: { type: "string", description: "Comma-separated secret names to expose, e.g. GITHUB_CLASSIC_TOKEN" },
+        timeout: { type: "string", description: `Seconds before the command is killed (default ${VAULT_EXEC_DEFAULT_TIMEOUT_S}, max ${VAULT_EXEC_MAX_TIMEOUT_S})` },
+        persona: { type: "string", description: "Persona whose vault to use." },
+      },
+      async run({ args }) {
+        process.exitCode = await runVaultExec({
+          command: String(args.command),
+          secrets: args.secrets ? String(args.secrets).split(",") : [],
+          timeoutS: args.timeout !== undefined ? Number(args.timeout) : undefined,
           persona: args.persona ? String(args.persona) : undefined,
         });
       },

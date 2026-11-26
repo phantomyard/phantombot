@@ -741,3 +741,42 @@ export async function harnessSpawnEnv(
   }
   return env;
 }
+
+/**
+ * The env a harness hands its AGENT child (#820, "scoped secrets"): `env`
+ * with every vault-injected secret removed except the names in the
+ * `[vault] agent_env` allow-list.
+ *
+ * Absent allow-list (the default) = unchanged: every vault secret still
+ * reaches the agent, exactly as before. An allow-list — e.g.
+ * `agent_env = ["GITHUB_CLASSIC_TOKEN"]` — shrinks what a bare `env` in a turn
+ * can print to those names; everything else reaches commands only through
+ * `pbot_vault exec` / `phantombot vault exec`. An empty list removes them
+ * all (rollout step 3). Phantombot's own reads are unaffected: the daemon's
+ * process.env keeps the vault, and a harness that needs a secret for the
+ * spawn itself (pi's provider key) sets it on the child explicitly AFTER this
+ * filter.
+ *
+ * Which names count as vault secrets: every name in the persona's vault plus
+ * every key the daemon injected from any vault (`vaultTrackedKeys`). Sticky
+ * boot env (systemd / shell) is never touched.
+ */
+export async function agentSpawnEnv<T extends NodeJS.ProcessEnv>(
+  env: T,
+  persona: string | undefined,
+): Promise<T> {
+  const config = await cachedConfig();
+  const allow = config.vaultAgentEnv;
+  if (allow === undefined) return env;
+  const name = persona || scopedPersona() || config.defaultPersona;
+  const names = new Set<string>(vaultTrackedKeys());
+  const result = await readAllVaultValues(resolvePersonaDir(config, name));
+  if (result) {
+    for (const k of result.values.keys()) names.add(k);
+    for (const k of result.badKeys) names.add(k);
+  }
+  const keep = new Set(allow);
+  const out = { ...env };
+  for (const k of names) if (!keep.has(k)) delete out[k];
+  return out;
+}

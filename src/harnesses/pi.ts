@@ -67,7 +67,7 @@ import { recordDecisionModelOutcome } from "../lib/decisionModelHealth.ts";
 import { classifyFailure } from "../lib/harnessAlert.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
-import { harnessSpawnEnv } from "../lib/vault.ts";
+import { agentSpawnEnv, harnessSpawnEnv } from "../lib/vault.ts";
 import { ENV_SECURITY_SESSION } from "../security/session.ts";
 import {
   type HarnessActivity,
@@ -78,6 +78,8 @@ import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
 import { createHarnessTempDir } from "../lib/harnessArgvFiles.ts";
 import { renderConversationPayload } from "./payload.ts";
+import { adaptRequestForPbotTools } from "../persona/pbotPrompt.ts";
+import { ENV_PBOT_TOOLS } from "../pbot/env.ts";
 import {
   DEFAULT_REASONING_REPLAY,
   type ReasoningReplayConfig,
@@ -180,6 +182,16 @@ export class PiHarness implements Harness {
     this.id = config.id ?? (config.mode === "native" ? "native" : "pi-host");
   }
 
+  /** Whether this spawn hosts the pbot_* tools (see invoke). */
+  pbotToolsFor(req: HarnessRequest): boolean {
+    return (
+      this.config.mode === "native" &&
+      req.securitySession === undefined &&
+      req.toolsMode !== "none" &&
+      req.mcpMode !== "none"
+    );
+  }
+
   /** Routing applies to native mode only; a host pi decides for itself. */
   private routing(): PiRoutingConfig | undefined {
     return this.config.mode === "native" ? this.config.routing : undefined;
@@ -239,7 +251,13 @@ export class PiHarness implements Harness {
     );
   }
 
-  async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+  async *invoke(rawReq: HarnessRequest): AsyncGenerator<HarnessChunk> {
+    // #820: the EMBEDDED engine hosts the typed pbot_* tools in-process (an
+    // inline extension in `phantombot __pi`, src/pbot/piExtension.ts). A host
+    // pi cannot load phantombot code, and judge / background / sandboxed
+    // turns keep today's surface, so only those spawns lose the CLI docs.
+    const pbotTools = this.pbotToolsFor(rawReq);
+    const req: HarnessRequest = adaptRequestForPbotTools(rawReq, pbotTools);
     const payload = renderPayload(req);
     const totalBytes =
       Buffer.byteLength(req.systemPrompt, "utf8") +
@@ -565,7 +583,14 @@ export class PiHarness implements Harness {
     // unsets any stale ambient value rather than leaking it into the subtree.
     // withPersonaEnv returns a fresh copy with turn context and non-interactive defaults;
     // the spread guarantees we can freely assign child-specific vars without mutating parent state.
-    const childEnv = { ...withPersonaEnv(spawnEnv, req.persona, req.conversation, req.turnId, req.scratchDir, req.trusted) };
+    // #820: only the `[vault] agent_env` allow-list of vault secrets (all of
+    // them when unset) reaches the agent. The provider key is set explicitly
+    // below, after this filter.
+    const childEnv = { ...withPersonaEnv(await agentSpawnEnv(spawnEnv, req.persona), req.persona, req.conversation, req.turnId, req.scratchDir, req.trusted) };
+    // Runtime-owned like PHANTOMBOT_SCRATCH: set only when this spawn carries
+    // the pbot_* tools, and an inherited value is always cleared.
+    if (pbotTools) childEnv[ENV_PBOT_TOOLS] = "1";
+    else delete childEnv[ENV_PBOT_TOOLS];
     if (
       this.config.mode === "host" &&
       this.config.maxOldSpaceMb !== undefined

@@ -57,7 +57,7 @@ import type {
 import { buildToolCall } from "./toolNote.ts";
 import { DEFAULT_REASONING_REPLAY, type ParseEventResult, type ReasoningReplayConfig } from "./reasoningReplay.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
-import { harnessSpawnEnv } from "../lib/vault.ts";
+import { agentSpawnEnv, harnessSpawnEnv } from "../lib/vault.ts";
 import { claudeBodyGuardHookEntry } from "../lib/bodyPathGuard.ts";
 import { phantombotSelfCommand } from "../lib/embeddedPi.ts";
 import { ENV_SECURITY_SESSION } from "../security/session.ts";
@@ -78,6 +78,7 @@ import {
   EMPTY_MCP_CONFIG,
 } from "../mcp/harnessConfig.ts";
 import { renderConversationPayload } from "./payload.ts";
+import { adaptRequestForPbotTools } from "../persona/pbotPrompt.ts";
 
 export interface ClaudeHarnessConfig {
   /** Path to the `claude` CLI binary. Default: "claude" (looked up in PATH). */
@@ -131,7 +132,26 @@ export class ClaudeHarness implements Harness {
     }
   }
 
-  async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+  async *invoke(rawReq: HarnessRequest): AsyncGenerator<HarnessChunk> {
+    // Foreground turns run --strict-mcp-config pointed at phantombot's OWN
+    // proxy — the typed pbot_* tools plus the persona's registered servers
+    // (#820) — so account-level claude.ai connectors never inject into a
+    // phantombot prompt. Background/nightly (mcpMode "none") keep the
+    // zero-server config. Best-effort: any failure resolves to the empty
+    // config, so the isolation holds regardless.
+    const bounded = rawReq.securitySession !== undefined;
+    const foregroundMcpConfig = bounded
+      ? securityMcpConfig(phantombotSelfCommand())
+      : rawReq.mcpMode === "none"
+        ? undefined
+        : await buildForegroundMcpConfig(rawReq.persona, {
+            conversation: rawReq.conversation,
+            turnId: rawReq.turnId,
+            trusted: rawReq.trusted,
+          });
+    // The prompt documents the CLI only for what this spawn has no tool for.
+    const pbotTools = !bounded && foregroundMcpConfig !== undefined && foregroundMcpConfig !== EMPTY_MCP_CONFIG;
+    const req: HarnessRequest = adaptRequestForPbotTools(rawReq, pbotTools);
     // Argv-length workaround. Claude's conversation payload already travels on
     // stdin, but the persona/memory system prompt still rides on argv via
     // `--system-prompt <text>`, and that one string can outgrow what execve
@@ -185,15 +205,6 @@ export class ClaudeHarness implements Harness {
     }
     try {
 
-    // Foreground turns run --strict-mcp-config pointed at phantombot's OWN
-    // registry (empty until servers are registered), so account-level claude.ai
-    // connectors never inject into a phantombot prompt. Background/nightly
-    // (mcpMode "none") keep the zero-server config. Best-effort: any failure
-    // resolves to the empty config, so the isolation holds regardless.
-    const bounded = req.securitySession !== undefined;
-    const foregroundMcpConfig = bounded
-      ? securityMcpConfig(phantombotSelfCommand())
-      : req.mcpMode === "none" ? undefined : await buildForegroundMcpConfig(req.persona);
 
     const args = this.buildArgs(
       req.systemPrompt,
@@ -220,7 +231,11 @@ export class ClaudeHarness implements Harness {
     // A sandboxed turn's claude process never loads the vault: it starts from
     // a fixed allowlist of the daemon's own non-secret env (GHSA-w7w8). The
     // session hands the vault to sandboxed commands only.
-    const spawnEnv = bounded ? boundedClaudeEnv(process.env) : await harnessSpawnEnv(req.persona);
+    // #820: on a normal turn, only the `[vault] agent_env` allow-list of vault
+    // secrets (all of them when unset) reaches the agent.
+    const spawnEnv = bounded
+      ? boundedClaudeEnv(process.env)
+      : await agentSpawnEnv(await harnessSpawnEnv(req.persona), req.persona);
 
     // OAuth-on-host: don't leak any ANTHROPIC_* / CLAUDE_CODE_* auth or
     // routing var into the subprocess env (the vault may have supplied one),
