@@ -116,7 +116,7 @@ phantombot acp install vscode    # also: zed, jetbrains, opencode
 | `phantombot task …` | Schedule one-off and recurring work. |
 | `phantombot browser …` | Browse rendered pages and capture screenshots. |
 | `phantombot mcp …` | Discover and call external integrations. |
-| `phantombot vault …` | Store encrypted, persona-scoped secrets; `vault exec` hands one command only the secrets it names. |
+| `phantombot vault …` | Store encrypted, persona-scoped secrets. |
 | `phantombot notify …` | Send a background update to the owner. |
 | `phantombot start\|stop\|restart\|logs` | Manage the service. |
 | `phantombot update` | Install a verified release. |
@@ -124,10 +124,8 @@ phantombot acp install vscode    # also: zed, jetbrains, opencode
 Run `phantombot --help` or `phantombot <command> --help` for the current
 flags — it is always fresher than copied docs.
 
-Inside a turn, the agent reaches these capabilities as typed `pbot_*` tools
-(`pbot_memory`, `pbot_vault`, plus `pbot_tools` to discover the rest and every
-registered MCP server's tools) on claude, codex and the native harness alike —
-see [Connect MCP integrations](docs/how-to/mcp.md).
+Inside a turn, every harness reaches these as typed `pbot_*` tools — see
+[Connect MCP integrations](docs/how-to/mcp.md).
 
 ## Learn more
 
