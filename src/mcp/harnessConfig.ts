@@ -21,7 +21,11 @@
 
 import { loadConfig } from "../config.ts";
 import { TRUSTED_ENV_VAR } from "../lib/envBootstrap.ts";
-import { scopedChildEnv } from "../lib/engineScope.ts";
+import {
+  currentEngineScope,
+  HOST_LOCATION_ENV,
+  scopedChildEnv,
+} from "../lib/engineScope.ts";
 
 /** Empty (zero-server) strict config — the safe default and the nightly/background payload. */
 export const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
@@ -51,17 +55,45 @@ export interface ProxyTurnContext {
 /**
  * The env a proxy child needs to act for this turn: which conversation a
  * capture belongs to, the trust tier (`pbot_device` refuses untrusted turns),
- * and inside an engine scope the XDG roots that locate personas and the vault.
+ * and the location env that finds personas and the vault (proxyLocationEnv).
  * Never a secret: the proxy opens the vault itself.
  */
 export function proxyEnv(persona: string, ctx: ProxyTurnContext = {}): Record<string, string> {
   return {
-    ...scopedChildEnv(),
+    ...proxyLocationEnv(),
     PHANTOMBOT_PERSONA: persona,
     ...(ctx.conversation ? { PHANTOMBOT_CONVERSATION: ctx.conversation } : {}),
     ...(ctx.turnId ? { PHANTOMBOT_TURN_ID: ctx.turnId } : {}),
     ...(ctx.trusted === true ? { [TRUSTED_ENV_VAR]: "1" } : {}),
   };
+}
+
+/** The XDG base directories phantombot derives its stores from (config.ts). */
+const XDG_LOCATION_ENV = ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"] as const;
+
+/**
+ * Where the proxy child must look for personas, vault, registry and memory.
+ *
+ * Inside an engine scope: exactly the scoped roots + marker (scopedChildEnv);
+ * host location overrides are deliberately NOT forwarded there, so an
+ * embedding application is never aimed at the host's stores.
+ *
+ * Outside a scope (the CLI/daemon): the parent's own XDG roots and host
+ * location overrides, explicitly. An MCP client need not pass its environment
+ * to a stdio child — codex does not — so without this a daemon running on
+ * custom roots would start a proxy against the DEFAULT stores. Locations only;
+ * never a secret.
+ */
+export function proxyLocationEnv(
+  env: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  if (currentEngineScope()) return scopedChildEnv();
+  const out: Record<string, string> = {};
+  for (const k of [...XDG_LOCATION_ENV, ...HOST_LOCATION_ENV]) {
+    const v = env[k];
+    if (v) out[k] = v;
+  }
+  return out;
 }
 
 /**

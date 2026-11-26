@@ -12,6 +12,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { runInEngineScope } from "../src/lib/engineScope.ts";
 import {
   buildForegroundMcpConfig,
   proxyInvocation,
@@ -77,6 +78,44 @@ describe("buildForegroundMcpConfig", () => {
     process.env.SOME_SECRET_TOKEN = "s3cret-value";
     const cfg = await buildForegroundMcpConfig("tester", { conversation: "c" });
     expect(cfg).not.toContain("s3cret-value");
+  });
+});
+
+describe("proxy child location env (codex does not inherit the parent env)", () => {
+  test("outside an engine scope the parent's XDG roots and location overrides ride explicitly", async () => {
+    process.env.XDG_CONFIG_HOME = "/custom/cfg";
+    process.env.XDG_DATA_HOME = "/custom/data";
+    process.env.XDG_STATE_HOME = "/custom/state";
+    process.env.PHANTOMBOT_CONFIG = "/custom/cfg/phantombot/config.toml";
+    const cfg = JSON.parse(await buildForegroundMcpConfig("tester", { conversation: "c" }));
+    expect(cfg.mcpServers.phantombot.env).toMatchObject({
+      XDG_CONFIG_HOME: "/custom/cfg",
+      XDG_DATA_HOME: "/custom/data",
+      XDG_STATE_HOME: "/custom/state",
+      PHANTOMBOT_CONFIG: "/custom/cfg/phantombot/config.toml",
+      PHANTOMBOT_PERSONAS_DIR: workdir,
+      PHANTOMBOT_PERSONA: "tester",
+    });
+    expect(cfg.mcpServers.phantombot.env.PHANTOMBOT_ENGINE_SCOPE).toBeUndefined();
+  });
+
+  test("inside an engine scope only the scoped roots ride — never a host location override", async () => {
+    process.env.XDG_CONFIG_HOME = "/host/cfg";
+    process.env.PHANTOMBOT_CONFIG = "/host/cfg/phantombot/config.toml";
+    const raw = await runInEngineScope(
+      { configHome: "/app/cfg", dataHome: "/app/data", stateHome: "/app/state" },
+      () => buildForegroundMcpConfig("tester", { conversation: "c" }),
+    );
+    const env = JSON.parse(raw).mcpServers.phantombot.env;
+    expect(env).toMatchObject({
+      XDG_CONFIG_HOME: "/app/cfg",
+      XDG_DATA_HOME: "/app/data",
+      XDG_STATE_HOME: "/app/state",
+      PHANTOMBOT_ENGINE_SCOPE: "1",
+    });
+    expect(env.PHANTOMBOT_CONFIG).toBeUndefined();
+    expect(env.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
+    expect(raw).not.toContain("/host/");
   });
 });
 

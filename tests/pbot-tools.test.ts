@@ -235,6 +235,34 @@ describe("pbot_vault exec — scoped secrets", () => {
   });
 });
 
+describe("vault exec timeout kills the whole command tree", () => {
+  test.skipIf(process.platform === "win32")(
+    "a backgrounded descendant dies with the cap: prompt return, no late side effect",
+    async () => {
+      const marker = join(root, "vault-exec-late-marker");
+      const started = Date.now();
+      const err = new Sink();
+      const code = await runVaultExec({
+        secrets: [],
+        command: `bash -c 'sleep 3; printf survived > "${marker}"' & wait`,
+        persona: "viatool",
+        timeoutS: 1,
+        out: new Sink(),
+        err,
+      });
+      const elapsed = Date.now() - started;
+      expect(code).toBe(124);
+      expect(err.text).toContain("killed after 1s");
+      // Before the fix the outer bash died but the descendant held the pipes
+      // open, so this returned only after ~3s and then wrote the marker.
+      expect(elapsed).toBeLessThan(2500);
+      await new Promise((r) => setTimeout(r, 3000));
+      expect(await Bun.file(marker).exists()).toBe(false);
+    },
+    15_000,
+  );
+});
+
 describe("pbot_task add — parity with `phantombot task add`", () => {
   test("same schedule row through both routes", async () => {
     const viaTool = await pbotTask.run(

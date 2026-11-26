@@ -26,6 +26,7 @@ import {
 } from "../config.ts";
 import { openPersonaVault, type Vault, vaultTrackedKeys } from "../lib/vault.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { signalProcessGroup, spawnInNewSession } from "../lib/processGroup.ts";
 
 const ENV_VAR_NAME = /^[A-Z_][A-Z0-9_]*$/i;
 
@@ -331,7 +332,11 @@ export async function runVaultExec(input: VaultExecInput): Promise<number> {
   for (const k of vaultTrackedKeys()) delete env[k];
   for (const [k, v] of values) env[k] = v;
 
-  const proc = Bun.spawn(["bash", "-c", input.command], {
+  // Own session/process group (Job Object on Windows), so the timeout kills
+  // the WHOLE tree: proc.kill would signal only the outer bash, and a
+  // descendant would outlive the cap, holding the output pipes open and
+  // still performing side effects.
+  const proc = spawnInNewSession(["bash", "-c", input.command], {
     cwd: input.cwd ?? process.cwd(),
     env,
     stdin: "ignore",
@@ -341,7 +346,12 @@ export async function runVaultExec(input: VaultExecInput): Promise<number> {
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill("SIGKILL");
+    if (typeof proc.pid === "number") signalProcessGroup(proc.pid, "SIGKILL");
+    try {
+      proc.kill("SIGKILL"); // the leader, should the group signal have failed
+    } catch {
+      /* already gone */
+    }
   }, timeoutS * 1000);
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
