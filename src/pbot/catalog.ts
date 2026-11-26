@@ -43,6 +43,11 @@ export type CatalogContent =
 export interface CatalogResult {
   content: CatalogContent[];
   isError?: boolean;
+  /**
+   * An upstream MCP tool's `structuredContent`, carried through untouched so
+   * the proxy hands MCP clients the complete result (PR #821 review).
+   */
+  structuredContent?: Record<string, unknown>;
 }
 
 export const PBOT_TOOLS_SCHEMA: CatalogToolSchema = {
@@ -85,10 +90,23 @@ export function fromMcpResult(raw: unknown): CatalogResult {
       } else content.push({ type: "text", text: JSON.stringify(c) });
     }
   }
-  if (content.length === 0) {
+  const structured =
+    r.structuredContent !== null && typeof r.structuredContent === "object" && !Array.isArray(r.structuredContent)
+      ? (r.structuredContent as Record<string, unknown>)
+      : undefined;
+  if (structured !== undefined) {
+    // A harness that reads only `content` (pi, and MCP clients that ignore
+    // structuredContent) must still see the data: append its JSON unless a
+    // text block already carries exactly that serialisation.
+    const json = JSON.stringify(structured);
+    if (!content.some((c) => c.type === "text" && c.text === json)) content.push({ type: "text", text: json });
+  } else if (content.length === 0) {
     content.push({ type: "text", text: JSON.stringify(r.structuredContent ?? raw ?? null) });
   }
-  return r.isError === true ? { content, isError: true } : { content };
+  const out: CatalogResult = { content };
+  if (r.isError === true) out.isError = true;
+  if (structured !== undefined) out.structuredContent = structured;
+  return out;
 }
 
 export interface ToolCatalogOptions {

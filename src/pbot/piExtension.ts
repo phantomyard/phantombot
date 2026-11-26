@@ -47,9 +47,10 @@ export function pbotToolsEnabled(env: NodeJS.ProcessEnv = process.env): boolean 
 }
 
 function toPiResult(r: CatalogResult) {
+  const details = r.structuredContent !== undefined ? { structuredContent: r.structuredContent } : {};
   return r.isError
-    ? { content: r.content, details: {}, isError: true }
-    : { content: r.content, details: {} };
+    ? { content: r.content, details, isError: true }
+    : { content: r.content, details };
 }
 
 /**

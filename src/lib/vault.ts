@@ -37,6 +37,7 @@ import {
   isConfigOwnedEnvMirror,
   isRoutingEnvName,
   loadConfig,
+  loadConfigForPersona,
   personaDir as resolvePersonaDir,
   type Config,
   xdgConfigHome,
@@ -607,9 +608,27 @@ async function cachedConfig(): Promise<Config> {
   return config;
 }
 
+/**
+ * The config LAYERED for one persona, cached like `cachedConfig`. Per-persona
+ * settings (`[vault] agent_env`) must come from the persona being spawned, not
+ * the host default — a non-default persona's own config.toml decides what its
+ * agent sees.
+ */
+const _cachedPersonaConfigs = new Map<string, Config>();
+async function cachedPersonaConfig(host: Config, persona: string): Promise<Config> {
+  const key = `${xdgConfigHome()}\0${hostLocationEnv("PHANTOMBOT_CONFIG") ?? ""}\0${persona}`;
+  let config = _cachedPersonaConfigs.get(key);
+  if (!config) {
+    config = (await loadConfigForPersona(persona, host)).config;
+    _cachedPersonaConfigs.set(key, config);
+  }
+  return config;
+}
+
 /** For tests: drop the cached config so a fresh one is loaded next call. */
 export function _resetConfigCacheForTesting(): void {
   _cachedConfigs.clear();
+  _cachedPersonaConfigs.clear();
 }
 
 /**
@@ -765,10 +784,11 @@ export async function agentSpawnEnv<T extends NodeJS.ProcessEnv>(
   env: T,
   persona: string | undefined,
 ): Promise<T> {
-  const config = await cachedConfig();
+  const host = await cachedConfig();
+  const name = persona || scopedPersona() || host.defaultPersona;
+  const config = await cachedPersonaConfig(host, name);
   const allow = config.vaultAgentEnv;
   if (allow === undefined) return env;
-  const name = persona || scopedPersona() || config.defaultPersona;
   const names = new Set<string>(vaultTrackedKeys());
   const result = await readAllVaultValues(resolvePersonaDir(config, name));
   if (result) {

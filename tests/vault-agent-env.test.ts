@@ -62,6 +62,21 @@ describe("agentSpawnEnv", () => {
     expect(out).toEqual({ PATH: "/usr/bin", STICKY: "boot" });
   });
 
+  test("the SPAWNED persona's own agent_env decides, not the default persona's (PR #821 review)", async () => {
+    await setup('[vault]\nagent_env = ["P1_ONLY"]\n');
+    await mkdir(join(root, "personas", "p2"), { recursive: true });
+    await writeFile(join(root, "personas", "p2", "config.toml"), '[vault]\nagent_env = ["P2_ONLY"]\n');
+    for (const persona of ["p", "p2"]) {
+      for (const n of ["P1_ONLY", "P2_ONLY"]) {
+        await runVaultSet({ name: n, value: `${n}-value`, persona, out: sink, err: sink });
+      }
+    }
+    const e: NodeJS.ProcessEnv = { PATH: "/usr/bin", P1_ONLY: "one", P2_ONLY: "two" };
+    expect(await agentSpawnEnv(e, "p2")).toEqual({ PATH: "/usr/bin", P2_ONLY: "two" });
+    // and the default persona still gets its own list
+    expect(await agentSpawnEnv(e, "p")).toEqual({ PATH: "/usr/bin", P1_ONLY: "one" });
+  });
+
   test("the input env is never mutated", async () => {
     await setup("[vault]\nagent_env = []\n");
     const e = env();

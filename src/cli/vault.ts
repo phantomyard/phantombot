@@ -263,9 +263,13 @@ export interface VaultExecInput {
 export const VAULT_EXEC_DEFAULT_TIMEOUT_S = 120;
 export const VAULT_EXEC_MAX_TIMEOUT_S = 600;
 
-/** Replace every occurrence of each value with «NAME». Longest first. */
+/**
+ * Replace every occurrence of each value with «NAME». Longest first. EVERY
+ * non-empty value is redacted, however short: a 1-3 character secret is still
+ * a secret, and the contract is output without values (PR #821 review).
+ */
 export function redactSecretValues(text: string, secrets: ReadonlyMap<string, string>): string {
-  const pairs = [...secrets.entries()].filter(([, v]) => v.length >= 4).sort((a, b) => b[1].length - a[1].length);
+  const pairs = [...secrets.entries()].filter(([, v]) => v.length > 0).sort((a, b) => b[1].length - a[1].length);
   let outText = text;
   for (const [name, value] of pairs) outText = outText.split(value).join(`«${name}»`);
   return outText;

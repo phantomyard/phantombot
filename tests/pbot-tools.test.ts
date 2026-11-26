@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 import { runMemoryCapture, runMemorySearch } from "../src/cli/memory.ts";
 import { runTaskAdd } from "../src/cli/task.ts";
-import { runVaultExec, runVaultGet, runVaultSet } from "../src/cli/vault.ts";
+import { redactSecretValues, runVaultExec, runVaultGet, runVaultSet } from "../src/cli/vault.ts";
 import { pbotMemory, pbotTask, pbotVault, PBOT_TOOLS, type PbotContext } from "../src/pbot/tools.ts";
 import { rmrf } from "./fixtures/rmrf.ts";
 
@@ -164,6 +164,13 @@ describe("pbot_vault — parity with `phantombot vault`", () => {
 });
 
 describe("pbot_vault exec — scoped secrets", () => {
+  test("short secrets (1-3 chars) are redacted too (PR #821 review)", () => {
+    expect(redactSecretValues("token=abc", new Map([["SHORT_TOKEN", "abc"]]))).toBe("token=«SHORT_TOKEN»");
+    expect(redactSecretValues("pin=42;", new Map([["PIN", "42"]]))).toBe("pin=«PIN»;");
+    expect(redactSecretValues("k=Z", new Map([["ONE", "Z"]]))).toBe("k=«ONE»");
+    expect(redactSecretValues("unchanged", new Map([["EMPTY", ""]]))).toBe("unchanged");
+  });
+
   beforeAll(async () => {
     for (const [n, v] of [
       ["EXEC_WANTED", "wanted-secret-value"],
