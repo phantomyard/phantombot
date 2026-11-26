@@ -1283,10 +1283,6 @@ export async function loadConfig(persona?: string): Promise<Config> {
     "phantom";
 
   const personaDirPath = join(personasDir, personaLayer);
-  // Embedding API keys are resolved VAULT-FIRST (#514). See
-  // `readEmbeddingSecretsFromVault` for why this can't just read process.env.
-  const vaultEmbeddingSecrets =
-    await readEmbeddingSecretsFromVault(personaDirPath);
 
   const rawPersonaToml = await readPersonaToml(personasDir, personaLayer);
   warnDeprecatedConfigKeys(
@@ -1427,20 +1423,41 @@ export async function loadConfig(persona?: string): Promise<Config> {
   const tomlTick = (toml.tick ?? {}) as Record<string, unknown>;
   const tomlDecisionModel = (toml.jev ?? {}) as Record<string, unknown>;
 
-  // Jev API keys resolve VAULT-FIRST under the configured key_env name (and
-  // the default name), exactly like the embedding keys above — a secondary
-  // persona on a multi-persona daemon must read its OWN vault, not the one
-  // injected at startup. Only read the vault at all when Jev is configured.
-  const decisionModelKeyEnv =
-    asString(process.env.PHANTOMBOT_JEV_KEY_ENV) ??
-    asString(tomlDecisionModel.key_env) ??
-    DECISION_MODEL_DEFAULT_KEY_ENV;
-  const vaultDecisionModelSecrets =
-    Object.keys(tomlDecisionModel).length > 0 || hasDecisionModelEnv()
-      ? await readDecisionModelSecretsFromVault(personaDirPath, [
-          ...new Set([decisionModelKeyEnv, DECISION_MODEL_DEFAULT_KEY_ENV]),
-        ])
-      : {};
+  // Read every config-resolved secret from THIS persona's vault in one open.
+  // This deliberately does not skip the startup persona: its vault having been
+  // mirrored into process.env is an agent-delivery detail, not a runtime read
+  // path. With no environment copy these values still resolve (#820).
+  const configSecretNames = new Set<string>([
+    ...Object.values(EMBEDDING_KEY_ENV),
+    ENV_PI_API_KEY,
+  ]);
+  if (Object.keys(tomlDecisionModel).length > 0 || hasDecisionModelEnv()) {
+    configSecretNames.add(
+      asString(process.env.PHANTOMBOT_JEV_KEY_ENV) ??
+        asString(tomlDecisionModel.key_env) ??
+        DECISION_MODEL_DEFAULT_KEY_ENV,
+    );
+    configSecretNames.add(DECISION_MODEL_DEFAULT_KEY_ENV);
+  }
+  const ownTelegramTokenEnv =
+    `TELEGRAM_BOT_TOKEN${isDefaultPersona ? "" : `_${personaEnvSuffix(personaLayer)}`}`;
+  configSecretNames.add(ownTelegramTokenEnv);
+  const telegramTomlPersonas = isTomlTable(tomlTelegram.personas)
+    ? tomlTelegram.personas
+    : {};
+  for (const name of Object.keys(telegramTomlPersonas)) {
+    configSecretNames.add(`TELEGRAM_BOT_TOKEN_${personaEnvSuffix(name)}`);
+  }
+  const vaultConfigSecrets = await readConfigSecretsFromVault(
+    personaDirPath,
+    [...configSecretNames],
+  );
+  const telegramSecret = (name: string): string | undefined =>
+    vaultConfigSecrets[name] ?? ambientConfigSecret(name, personaDirPath);
+  const vaultEmbeddingSecrets: EmbeddingVaultSecrets = {
+    gemini: vaultConfigSecrets[EMBEDDING_KEY_ENV.gemini],
+    openaiCompatible: vaultConfigSecrets[EMBEDDING_KEY_ENV.openaiCompatible],
+  };
 
   const configuredChain =
     harnessEnv("PHANTOMBOT_HARNESS_CHAIN", ["chain"])
@@ -1507,6 +1524,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
     // Default persona keeps the unsuffixed env vars; every other persona
     // reads only its own suffixed ones. See buildTelegramConfig.
     isDefaultPersona ? undefined : personaEnvSuffix(personaLayer),
+    telegramSecret,
   );
   const tomlHarnessInstances = isTomlTable(tomlHarnesses.instances)
     ? tomlHarnesses.instances
@@ -1526,7 +1544,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
       maxOldSpaceMb: positiveInt(raw.max_old_space_mb),
     };
   }
-  let telegramPersonas = buildTelegramPersonasConfig(tomlTelegram);
+  let telegramPersonas = buildTelegramPersonasConfig(tomlTelegram, telegramSecret);
   const globalChannels = isTomlTable(globalToml.channels)
     ? globalToml.channels
     : undefined;
@@ -1614,14 +1632,9 @@ export async function loadConfig(persona?: string): Promise<Config> {
   // nothing to re-copy. Vault first, then env with the injection guard.
   let platformKey: string | undefined;
   if (piRouting?.provider?.trim().toLowerCase() === PHANTOOPS_PROVIDER) {
-    const fromVault = (await readDecisionModelSecretsFromVault(personaDirPath, [ENV_PI_API_KEY]))[ENV_PI_API_KEY];
-    const fromEnv = process.env[ENV_PI_API_KEY];
     platformKey =
-      fromVault ??
-      (fromEnv !== undefined && fromEnv !== "" &&
-      (!isVaultInjectedEnvKey(ENV_PI_API_KEY) || isVaultLoadedPersonaDir(personaDirPath))
-        ? fromEnv
-        : undefined);
+      vaultConfigSecrets[ENV_PI_API_KEY] ??
+      ambientConfigSecret(ENV_PI_API_KEY, personaDirPath);
   }
 
   return containPlatformSlots({
@@ -1824,7 +1837,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
 
     jev: buildDecisionModelConfig(tomlDecisionModel, {
       personaDirPath,
-      vaultSecrets: vaultDecisionModelSecrets,
+      vaultSecrets: vaultConfigSecrets,
     }),
 
     p2p: buildP2PConfig(tomlP2p),
@@ -2573,49 +2586,34 @@ const EMBEDDING_KEY_ENV = {
 } as const;
 
 /**
- * Read this persona's embedding API keys straight out of ITS OWN vault.
+ * Read named secrets straight out of THIS persona's vault, including when the
+ * startup loader already mirrored that vault into process.env. Internal
+ * runtime config must not depend on the copy prepared for an agent child.
  *
- * Only needed for a persona whose vault is NOT the one `loadVaultIntoEnv`
- * injected at startup — for the loaded persona the values are already in
- * `process.env` and `personaEmbeddingKey` uses them. One daemon serves several
- * personas in-process, so without this a secondary persona's key exists on
- * disk and is unreachable, and (before #514) it silently embedded with the
- * DEFAULT persona's key instead. Skipping the loaded persona also keeps the
- * common single-persona path free of a per-`loadConfig` SQLite decrypt.
- *
- * Dynamically imported: `vault.ts` imports `loadConfig` from this module, so a
- * static edge here would close an import cycle. The provenance registry those
- * two share was split into `vaultEnvTracking.ts` precisely to avoid this for
- * the SYNC reads; the vault open genuinely needs `vault.ts`.
- *
- * Never throws — an unopenable or absent vault is "no key", never a failed
- * config load.
+ * Dynamically imported because vault.ts imports loadConfig from this module.
+ * Open-existing-only: a pure config read never provisions an identity or nsec.
+ * Never throws — an absent/unopenable vault is "no values", not a failed load.
  */
-async function readEmbeddingSecretsFromVault(
+async function readConfigSecretsFromVault(
   personaDirPath: string,
-): Promise<EmbeddingVaultSecrets> {
-  if (isVaultLoadedPersonaDir(personaDirPath)) return {};
+  names: readonly string[],
+): Promise<Record<string, string>> {
   try {
     const { vaultPath, openPersonaVault } = await import("./lib/vault.ts");
-    // Open-existing-only: `openPersonaVault` mints an identity.json (and an
-    // nsec) on demand, so asking about an unprovisioned persona must not
-    // create one. Same rule as readAllVaultValues (#262).
     if (!existsSync(vaultPath(personaDirPath))) return {};
     const vault = await openPersonaVault(personaDirPath);
     try {
-      const read = (name: string): string | undefined => {
-        const v = vault.get(name);
-        return v === undefined || v === "" ? undefined : v;
-      };
-      return {
-        gemini: read(EMBEDDING_KEY_ENV.gemini),
-        openaiCompatible: read(EMBEDDING_KEY_ENV.openaiCompatible),
-      };
+      const out: Record<string, string> = {};
+      for (const name of new Set(names)) {
+        const value = vault.get(name);
+        if (value !== undefined && value !== "") out[name] = value;
+      }
+      return out;
     } finally {
       vault.close();
     }
   } catch (e) {
-    log.warn("config: embedding vault read failed", {
+    log.warn("config: vault secret read failed", {
       error: (e as Error).message,
     });
     return {};
@@ -2623,12 +2621,27 @@ async function readEmbeddingSecretsFromVault(
 }
 
 /**
+ * Compatibility fallback for an explicit shell/systemd secret override. This
+ * is the ONLY config-layer environment read for a secret. A value injected
+ * from another persona's vault is never ambient and can never stand in.
+ */
+function ambientConfigSecret(
+  name: string,
+  personaDirPath: string,
+): string | undefined {
+  const value = process.env[name];
+  if (value === undefined || value === "") return undefined;
+  return !isVaultInjectedEnvKey(name) || isVaultLoadedPersonaDir(personaDirPath)
+    ? value
+    : undefined;
+}
+
+/**
  * Resolve one embedding API key for `personaDirPath`, vault first.
  *
  * Precedence, highest to lowest:
- *   1. THIS persona's vault — either read directly (a persona whose vault was
- *      never injected) or via the `process.env` value `loadVaultIntoEnv` put
- *      there from it.
+ *   1. THIS persona's vault, read directly whether or not the startup loader
+ *      mirrored it into `process.env`.
  *   2. A host-wide ambient env export (shell, systemd `Environment=`), which
  *      pre-vault hosts still depend on. Unchanged: env beats TOML everywhere
  *      else in this file and this key is no exception.
@@ -2649,15 +2662,8 @@ function personaEmbeddingKey(
   personaDirPath: string,
 ): string | undefined {
   if (fromVault !== undefined) return fromVault;
-  const fromEnv = process.env[envName];
-  const envUsable =
-    fromEnv !== undefined &&
-    fromEnv !== "" &&
-    // A vault-injected key belongs to exactly one persona. Honour it only for
-    // that persona; an ambient key was never claimed by one, so it is fine.
-    (!isVaultInjectedEnvKey(envName) ||
-      isVaultLoadedPersonaDir(personaDirPath));
-  const resolved = envUsable ? fromEnv : fromToml;
+  const fromEnv = ambientConfigSecret(envName, personaDirPath);
+  const resolved = fromEnv ?? fromToml;
   // The silent-shadow warning. A key in config.toml that loses to a vault or
   // an env export is the single most confusing state this resolver can be in:
   // the operator edits the file (that is what `phantombot embedding` and the
@@ -2785,40 +2791,6 @@ function hasDecisionModelEnv(): boolean {
   );
 }
 
-/**
- * Read this persona's Jev API keys straight out of ITS OWN vault — the same
- * multi-persona rule as readEmbeddingSecretsFromVault: a persona whose vault
- * was never injected still has its key on disk, and without this read the
- * Jev consumers would silently use the DEFAULT persona's credential. Never
- * throws — an unopenable or absent vault is "no key", never a failed load.
- */
-async function readDecisionModelSecretsFromVault(
-  personaDirPath: string,
-  names: readonly string[],
-): Promise<Record<string, string>> {
-  if (isVaultLoadedPersonaDir(personaDirPath)) return {};
-  try {
-    const { vaultPath, openPersonaVault } = await import("./lib/vault.ts");
-    if (!existsSync(vaultPath(personaDirPath))) return {};
-    const vault = await openPersonaVault(personaDirPath);
-    try {
-      const out: Record<string, string> = {};
-      for (const name of names) {
-        const v = vault.get(name);
-        if (v !== undefined && v !== "") out[name] = v;
-      }
-      return out;
-    } finally {
-      vault.close();
-    }
-  } catch (e) {
-    log.warn("config: jev vault read failed", {
-      error: (e as Error).message,
-    });
-    return {};
-  }
-}
-
 export interface BuildDecisionModelOptions {
   personaDirPath: string;
   vaultSecrets: Record<string, string>;
@@ -2931,15 +2903,8 @@ function buildDecisionModelConfig(
   // precedence personaEmbeddingKey applies, minus the TOML tier (a Jev key
   // has no business in the plaintext file at all).
   const fromVault = opts.vaultSecrets[keyEnv];
-  const fromEnv = process.env[keyEnv];
   const apiKey =
-    fromVault ??
-    (fromEnv !== undefined &&
-    fromEnv !== "" &&
-    (!isVaultInjectedEnvKey(keyEnv) ||
-      isVaultLoadedPersonaDir(opts.personaDirPath))
-      ? fromEnv
-      : undefined);
+    fromVault ?? ambientConfigSecret(keyEnv, opts.personaDirPath);
 
   // The judge threshold and both timeouts are SECURITY-RELEVANT bounds —
   // reject out-of-range values at parse time rather than letting them
@@ -3011,11 +2976,11 @@ function buildDecisionModelConfig(
  */
 function buildTelegramConfig(
   tomlTelegram: Record<string, unknown>,
-  envSuffix?: string,
+  envSuffix: string | undefined,
+  secret: (name: string) => string | undefined,
 ): Config["channels"]["telegram"] {
   const sfx = envSuffix ? `_${envSuffix}` : "";
-  const token =
-    process.env[`TELEGRAM_BOT_TOKEN${sfx}`] ?? asString(tomlTelegram.token);
+  const token = secret(`TELEGRAM_BOT_TOKEN${sfx}`) ?? asString(tomlTelegram.token);
   if (!token) return undefined;
 
   const pollTimeoutS = clampPollTimeout(
@@ -3089,6 +3054,7 @@ export function personaEnvSuffix(personaName: string): string {
  */
 function buildTelegramPersonasConfig(
   tomlTelegram: Record<string, unknown>,
+  secret: (name: string) => string | undefined,
 ): Record<string, TelegramAccount> | undefined {
   const personas = tomlTelegram.personas;
   if (!personas || typeof personas !== "object" || Array.isArray(personas)) {
@@ -3101,8 +3067,7 @@ function buildTelegramPersonasConfig(
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const entry = raw as Record<string, unknown>;
     const envSuffix = personaEnvSuffix(personaName);
-    const tokenFromEnv = process.env[`TELEGRAM_BOT_TOKEN_${envSuffix}`];
-    const token = tokenFromEnv ?? asString(entry.token);
+    const token = secret(`TELEGRAM_BOT_TOKEN_${envSuffix}`) ?? asString(entry.token);
     if (!token) {
       log.warn(
         `config: channels.telegram.personas.${personaName} has no token — skipping (set TELEGRAM_BOT_TOKEN_${envSuffix} or token = "...")`,

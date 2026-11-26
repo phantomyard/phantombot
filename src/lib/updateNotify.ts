@@ -350,6 +350,7 @@ export async function runUpdateFlow(
   const r = await findLatestRelease({
     target,
     channel,
+    config: input.config,
     fetchImpl: input.fetchImpl,
   });
   if (!r.ok) {
@@ -513,6 +514,7 @@ export async function checkAndNotifyOnce(
   const r = await findLatestRelease({
     target,
     channel: input.config.updateChannel ?? DEFAULT_UPDATE_CHANNEL,
+    config: input.config,
     fetchImpl: input.fetchImpl,
   });
   if (!r.ok) {
