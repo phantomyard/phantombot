@@ -71,7 +71,7 @@ export interface DecisionModelFlowDeps {
   existing: DecisionModelSettings | undefined;
   /** Credentials the path can reuse, pre-discovered by the caller for this persona. */
   reusableKeys: ReusableDecisionModelKey[];
-  /** Optional secret reader for resolving vault keys not present in process.env. */
+  /** Vault-first secret reader supplied by the caller for THIS persona. */
   getSecret?(keyEnv: string): Promise<string | undefined>;
   /** Optional model fetcher, defaulting to fetchDecisionModels. */
   fetchModels?(
@@ -178,6 +178,9 @@ export async function configureDecisionModel(
   let apiKey: string | undefined;
   let resolvedKey: string | undefined;
   let baseUrl: string;
+  const resolveSecret = async (name: string): Promise<string | undefined> =>
+    (await deps.getSecret?.(name))?.trim() ??
+    (existing?.keyEnv === name ? existing.apiKey?.trim() : undefined);
 
   if (provider === "custom") {
     // Keep the credential name exactly as configured, then re-ask the
@@ -186,10 +189,7 @@ export async function configureDecisionModel(
     // one here — the credential is NEVER sent to a transport's default,
     // which is the guessed endpoint the config guard refuses to load.
     keyEnv = existing!.keyEnv;
-    resolvedKey = existing!.apiKey ?? process.env[keyEnv]?.trim();
-    if (!resolvedKey && deps.getSecret) {
-      resolvedKey = (await deps.getSecret(keyEnv))?.trim();
-    }
+    resolvedKey = existing!.apiKey ?? (await resolveSecret(keyEnv));
     if (!resolvedKey)
       return {
         rejected:
@@ -255,12 +255,9 @@ export async function configureDecisionModel(
       resolvedKey = apiKey;
     } else {
       keyEnv = action.slice("reuse:".length);
-      resolvedKey = process.env[keyEnv]?.trim();
-      if (!resolvedKey && deps.getSecret) {
-        resolvedKey = (await deps.getSecret(keyEnv))?.trim();
-      }
+      resolvedKey = await resolveSecret(keyEnv);
       if (!resolvedKey) {
-        return { rejected: `${keyEnv} is not set in the environment` };
+        return { rejected: `${keyEnv} does not resolve in this persona's vault or the host environment` };
       }
     }
   } else {
@@ -284,7 +281,7 @@ export async function configureDecisionModel(
         (sameProvider(existing, "typesafe") && k.env === DECISION_MODEL_DEFAULT_KEY_ENV),
     );
     const existingKey = sameProvider(existing, "typesafe")
-      ? process.env[existing!.keyEnv]?.trim()
+      ? await resolveSecret(existing!.keyEnv)
       : undefined;
 
     if (tsReusable.length > 0) {
@@ -315,10 +312,7 @@ export async function configureDecisionModel(
           : DECISION_MODEL_DEFAULT_KEY_ENV;
       } else {
         keyEnv = action.slice("reuse:".length);
-        resolvedKey = process.env[keyEnv]?.trim();
-        if (!resolvedKey && deps.getSecret) {
-          resolvedKey = (await deps.getSecret(keyEnv))?.trim();
-        }
+        resolvedKey = await resolveSecret(keyEnv);
       }
     } else if (existingKey) {
       const action = await q.choose({

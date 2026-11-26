@@ -99,6 +99,7 @@ function deps(overrides: Partial<DecisionModelFlowDeps> = {}): DecisionModelFlow
       { env: EMBED_KEY_ENV, label: "the OpenRouter key already used for embeddings" },
     ],
     fetchModels: async () => ["typesafe/jev-1.13"],
+    getSecret: async (name) => process.env[name],
     validate: async () => ({ ok: true }),
     ...overrides,
   };
