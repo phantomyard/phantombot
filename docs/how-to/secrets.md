@@ -51,10 +51,10 @@ agent_env = ["GITHUB_CLASSIC_TOKEN"]   # [] = none
 
 Everything else then reaches commands only through `vault exec`. Phantombot's
 own features are unaffected: voice/audio, command tasks, Telegram, embeddings,
-the decision model and provider/platform configuration all read the active
-persona's vault directly, including when it is the startup persona. They do not
-depend on the environment mirror. A harness's own provider key is still set on
-its process explicitly.
+the decision model, release checks and provider/platform configuration all read
+the active persona's vault directly, including when it is the startup persona.
+They do not depend on the environment mirror. A harness's own provider key is
+still set on its process explicitly.
 
 For backward compatibility, an explicit shell or systemd secret override still
 works through the shared guarded resolver. A value injected from a different

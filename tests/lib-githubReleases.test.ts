@@ -4,6 +4,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   asUpdateChannel,
   detectSupportedArch,
@@ -11,22 +14,41 @@ import {
   findLatestRelease,
   releaseAssetName,
 } from "../src/lib/githubReleases.ts";
+import { loadVaultIntoEnv, openPersonaVault } from "../src/lib/vault.ts";
+import { _resetVaultTrackingForTesting } from "../src/lib/vaultEnvTracking.ts";
 
-const SAVED_ENV = {
-  PHANTOMBOT_UPDATE_REPO: process.env.PHANTOMBOT_UPDATE_REPO,
-  GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-};
+const ENV_NAMES = [
+  "PHANTOMBOT_UPDATE_REPO",
+  "GITHUB_TOKEN",
+  "PHANTOMBOT_CONFIG",
+  "PHANTOMBOT_PERSONAS_DIR",
+  "PHANTOMBOT_DEFAULT_PERSONA",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+] as const;
+const SAVED_ENV = Object.fromEntries(
+  ENV_NAMES.map((name) => [name, process.env[name]]),
+);
+let workdir: string;
 
-beforeEach(() => {
-  delete process.env.PHANTOMBOT_UPDATE_REPO;
-  delete process.env.GITHUB_TOKEN;
+beforeEach(async () => {
+  workdir = await mkdtemp(join(tmpdir(), "phantombot-releases-"));
+  for (const name of ENV_NAMES) delete process.env[name];
+  process.env.PHANTOMBOT_CONFIG = join(workdir, "config.toml");
+  process.env.PHANTOMBOT_PERSONAS_DIR = join(workdir, "personas");
+  process.env.PHANTOMBOT_DEFAULT_PERSONA = "phantom";
+  process.env.XDG_CONFIG_HOME = join(workdir, "xdg-config");
+  process.env.XDG_DATA_HOME = join(workdir, "xdg-data");
+  _resetVaultTrackingForTesting();
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const [k, v] of Object.entries(SAVED_ENV)) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
+  _resetVaultTrackingForTesting();
+  await rm(workdir, { recursive: true, force: true });
 });
 
 function fakeFetch(
@@ -302,6 +324,36 @@ describe("findLatestRelease", () => {
     if (r.ok) return;
     expect(r.error).toContain("401");
     expect(calls).toEqual([{ hasAuth: false }]);
+  });
+
+  test("uses the startup persona vault token with no environment copy", async () => {
+    const dir = join(process.env.PHANTOMBOT_PERSONAS_DIR!, "phantom");
+    await mkdir(dir, { recursive: true });
+    const vault = await openPersonaVault(dir);
+    try {
+      vault.set("GITHUB_TOKEN", "ghs_vault_only_token");
+    } finally {
+      vault.close();
+    }
+    await loadVaultIntoEnv(dir);
+    expect(process.env.GITHUB_TOKEN).toBe("ghs_vault_only_token");
+    delete process.env.GITHUB_TOKEN;
+
+    let authorization: string | undefined;
+    const fetchImpl = (async (
+      _url: string | URL | Request,
+      init?: { headers?: Record<string, string> },
+    ) => {
+      authorization = init?.headers?.authorization;
+      return new Response(JSON.stringify(SAMPLE_RELEASE), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const r = await findLatestRelease({ target: "linux-x64", fetchImpl });
+    expect(r.ok).toBe(true);
+    expect(process.env.GITHUB_TOKEN).toBeUndefined();
+    expect(authorization).toBe("Bearer ghs_vault_only_token");
   });
 
   test("with token, successful first call does not retry", async () => {

@@ -1453,7 +1453,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
     [...configSecretNames],
   );
   const telegramSecret = (name: string): string | undefined =>
-    ambientConfigSecret(name, personaDirPath) ?? vaultConfigSecrets[name];
+    vaultConfigSecrets[name] ?? ambientConfigSecret(name, personaDirPath);
   const vaultEmbeddingSecrets: EmbeddingVaultSecrets = {
     gemini: vaultConfigSecrets[EMBEDDING_KEY_ENV.gemini],
     openaiCompatible: vaultConfigSecrets[EMBEDDING_KEY_ENV.openaiCompatible],

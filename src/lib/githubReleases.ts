@@ -3,14 +3,17 @@
  * the latest released version + the right binary asset for the host arch.
  *
  * No GitHub auth needed because the repo is public; if the API ever rate-
- * limits us (60/h unauth), GITHUB_TOKEN in env is honored for higher caps.
- * If the token is rejected (401) or rate-limited (403) — e.g. a GitHub
+ * limits us (60/h unauth), the active persona's GITHUB_TOKEN is honored for
+ * higher caps (vault first, guarded ambient env fallback). If the token is
+ * rejected (401) or rate-limited (403) — e.g. a GitHub
  * App installation token scoped to a different org — we transparently
  * retry once without the auth header before failing.
  *
  * Repo coordinates are env-overridable (PHANTOMBOT_UPDATE_REPO=owner/name)
  * so a future repo move can be staged through env without a rebuild.
  */
+
+import type { Config } from "../config.ts";
 
 const DEFAULT_REPO = "phantomyard/phantombot";
 
@@ -129,6 +132,8 @@ export async function findLatestRelease(opts: {
   channel?: UpdateChannel;
   /** Override the upstream repo. Default: env var or DEFAULT_REPO. */
   repo?: string;
+  /** Active config for persona-scoped token resolution. Loaded when omitted. */
+  config?: Config;
   fetchImpl?: typeof fetch;
 }): Promise<FindLatestResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
@@ -142,11 +147,12 @@ export async function findLatestRelease(opts: {
       ? `https://api.github.com/repos/${repo}/releases?per_page=${PREVIEW_PAGE_SIZE}`
       : `https://api.github.com/repos/${repo}/releases/latest`;
 
-  const hadToken = !!process.env.GITHUB_TOKEN;
+  const token = await resolveGithubToken(opts.config);
+  const hadToken = token !== undefined;
 
   let res: Response;
   try {
-    res = await fetchImpl(url, { headers: buildHeaders(hadToken) });
+    res = await fetchImpl(url, { headers: buildHeaders(hadToken, token) });
   } catch (e) {
     return {
       ok: false,
@@ -324,18 +330,35 @@ export function detectSupportedTarget(
 }
 
 /**
- * Build the request headers for a GitHub API call. If `withAuth` is
- * true and GITHUB_TOKEN is in env, the `authorization` header is added;
- * otherwise the call is unauthenticated (subject to the 60/h IP cap).
+ * Resolve release auth like every other internal secret: the active persona's
+ * vault first, then an explicit shell/systemd value through the shared guard.
+ * Dynamic imports avoid the config -> releases -> config module cycle. A config
+ * failure degrades to the public unauthenticated API rather than blocking an
+ * update check.
  */
-function buildHeaders(withAuth: boolean): Record<string, string> {
+async function resolveGithubToken(
+  config?: Config,
+): Promise<string | undefined> {
+  try {
+    const resolved =
+      config ?? (await (await import("../config.ts")).loadConfig());
+    const { getPersonaSecret } = await import("./vaultSecrets.ts");
+    return await getPersonaSecret(resolved, "GITHUB_TOKEN");
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build request headers without ever consulting the shared process env. */
+function buildHeaders(
+  withAuth: boolean,
+  token?: string,
+): Record<string, string> {
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
     "x-github-api-version": "2022-11-28",
   };
-  if (withAuth && process.env.GITHUB_TOKEN) {
-    headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-  }
+  if (withAuth && token) headers.authorization = `Bearer ${token}`;
   return headers;
 }
 

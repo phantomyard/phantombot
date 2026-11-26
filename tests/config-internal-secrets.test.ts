@@ -81,6 +81,25 @@ async function injectThenScrub(dir: string): Promise<void> {
 }
 
 describe("config secrets with no startup env mirror", () => {
+  test("a rotated Telegram token wins over its stale injected copy", async () => {
+    const dir = await seedVault({
+      TELEGRAM_BOT_TOKEN: "telegram-before-rotation",
+    });
+    await loadVaultIntoEnv(dir);
+    expect(process.env.TELEGRAM_BOT_TOKEN).toBe("telegram-before-rotation");
+
+    const vault = await openPersonaVault(dir);
+    try {
+      vault.set("TELEGRAM_BOT_TOKEN", "telegram-after-rotation");
+    } finally {
+      vault.close();
+    }
+
+    const config = await loadConfig();
+    expect(process.env.TELEGRAM_BOT_TOKEN).toBe("telegram-before-rotation");
+    expect(config.channels.telegram?.token).toBe("telegram-after-rotation");
+  });
+
   test("Telegram, embeddings and the decision model still resolve", async () => {
     const dir = await seedVault({
       TELEGRAM_BOT_TOKEN: "telegram-default-from-vault",
