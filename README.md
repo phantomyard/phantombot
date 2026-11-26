@@ -124,6 +124,9 @@ phantombot acp install vscode    # also: zed, jetbrains, opencode
 Run `phantombot --help` or `phantombot <command> --help` for the current
 flags — it is always fresher than copied docs.
 
+Inside a turn, every harness reaches these as typed `pbot_*` tools — see
+[Connect MCP integrations](docs/how-to/mcp.md).
+
 ## Learn more
 
 - [Documentation](docs/README.md) — setup, daily use, operations, and concepts.

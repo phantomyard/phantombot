@@ -36,6 +36,10 @@
 #   ratelimit — exit 1 with provider rate-limit prose on stderr (the #559
 #              first-signal abort: the coder-swap ladder must NOT retry).
 
+#   pbot     — report PHANTOMBOT_PBOT_TOOLS, which memory route the
+#              --system-prompt file documents and every var named in
+#              FAKE_PI_ECHO_VARS, exit 0 (#820 spawn wiring).
+
 mode="${FAKE_PI_MODE:-normal}"
 
 # Record this invocation's argv (one line) when a test asks for it — used by
@@ -97,6 +101,25 @@ case "$mode" in
     exit 0
     ;;
 
+  pbot)
+    sp=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--system-prompt" ]; then sp="$a"; fi
+      prev="$a"
+    done
+    tool=no; cli=no
+    if [ -n "$sp" ] && [ -f "$sp" ]; then
+      grep -q "pbot_memory search" "$sp" && tool=yes
+      grep -q "phantombot memory search" "$sp" && cli=yes
+    fi
+    joined="flag=${PHANTOMBOT_PBOT_TOOLS-<unset>} tool=${tool} cli=${cli}"
+    for name in ${FAKE_PI_ECHO_VARS-}; do
+      joined+=" ${name}=${!name-<unset>}"
+    done
+    printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"${joined}\",\"partial\":{}},\"message\":{}}"
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
+    exit 0
+    ;;
   argv)
     joined="$*"
     printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"argv: ${joined}\",\"partial\":{}},\"message\":{}}"

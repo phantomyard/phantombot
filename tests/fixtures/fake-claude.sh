@@ -14,6 +14,9 @@
 #              inspect what flags the harness passed), then exit 0
 #   env      — emit select env vars as a text event (so the test can inspect
 #              the env the harness spawned us with), then exit 0
+#   envvars  — echo `NAME=value` for every var named in the whitespace-separated
+#              FAKE_CLAUDE_ECHO_VARS list (#820: which vault secrets the agent
+#              actually receives under `[vault] agent_env`).
 #   posttool_thinking — tool_use -> user tool_result -> spaced thinking
 #              heartbeats -> final text. Proves user-side tool_result clears
 #              the tool-running idle latch.
@@ -67,6 +70,17 @@ case "$mode" in
     # CLAUDE_CODE_* value can't smuggle a different one through filterAuthEnv).
     v="${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-<unset>}"
     printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"BGTASKS=${v}\"}]}}"
+    printf '%s\n' '{"type":"result"}'
+    exit 0
+    ;;
+  envvars)
+    joined=""
+    for name in ${FAKE_CLAUDE_ECHO_VARS-}; do
+      joined+="${name}=${!name-<unset>} "
+    done
+    joined="${joined//\\/\\\\}"
+    joined="${joined//\"/\\\"}"
+    printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"${joined}\"}]}}"
     printf '%s\n' '{"type":"result"}'
     exit 0
     ;;

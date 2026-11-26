@@ -37,6 +37,7 @@ import {
   isConfigOwnedEnvMirror,
   isRoutingEnvName,
   loadConfig,
+  loadConfigForPersona,
   personaDir as resolvePersonaDir,
   type Config,
   xdgConfigHome,
@@ -607,9 +608,27 @@ async function cachedConfig(): Promise<Config> {
   return config;
 }
 
+/**
+ * The config LAYERED for one persona, cached like `cachedConfig`. Per-persona
+ * settings (`[vault] agent_env`) must come from the persona being spawned, not
+ * the host default — a non-default persona's own config.toml decides what its
+ * agent sees.
+ */
+const _cachedPersonaConfigs = new Map<string, Config>();
+async function cachedPersonaConfig(host: Config, persona: string): Promise<Config> {
+  const key = `${xdgConfigHome()}\0${hostLocationEnv("PHANTOMBOT_CONFIG") ?? ""}\0${persona}`;
+  let config = _cachedPersonaConfigs.get(key);
+  if (!config) {
+    config = (await loadConfigForPersona(persona, host)).config;
+    _cachedPersonaConfigs.set(key, config);
+  }
+  return config;
+}
+
 /** For tests: drop the cached config so a fresh one is loaded next call. */
 export function _resetConfigCacheForTesting(): void {
   _cachedConfigs.clear();
+  _cachedPersonaConfigs.clear();
 }
 
 /**
@@ -740,4 +759,44 @@ export async function harnessSpawnEnv(
     }
   }
   return env;
+}
+
+/**
+ * The env a harness hands its AGENT child (#820, "scoped secrets"): `env`
+ * with every vault-injected secret removed except the names in the
+ * `[vault] agent_env` allow-list.
+ *
+ * Absent allow-list (the default) = unchanged: every vault secret still
+ * reaches the agent, exactly as before. An allow-list — e.g.
+ * `agent_env = ["GITHUB_CLASSIC_TOKEN"]` — shrinks what a bare `env` in a turn
+ * can print to those names; everything else reaches commands only through
+ * `pbot_vault exec` / `phantombot vault exec`. An empty list removes them
+ * all (rollout step 3). Phantombot's own reads are unaffected: the daemon's
+ * process.env keeps the vault, and a harness that needs a secret for the
+ * spawn itself (pi's provider key) sets it on the child explicitly AFTER this
+ * filter.
+ *
+ * Which names count as vault secrets: every name in the persona's vault plus
+ * every key the daemon injected from any vault (`vaultTrackedKeys`). Sticky
+ * boot env (systemd / shell) is never touched.
+ */
+export async function agentSpawnEnv<T extends NodeJS.ProcessEnv>(
+  env: T,
+  persona: string | undefined,
+): Promise<T> {
+  const host = await cachedConfig();
+  const name = persona || scopedPersona() || host.defaultPersona;
+  const config = await cachedPersonaConfig(host, name);
+  const allow = config.vaultAgentEnv;
+  if (allow === undefined) return env;
+  const names = new Set<string>(vaultTrackedKeys());
+  const result = await readAllVaultValues(resolvePersonaDir(config, name));
+  if (result) {
+    for (const k of result.values.keys()) names.add(k);
+    for (const k of result.badKeys) names.add(k);
+  }
+  const keep = new Set(allow);
+  const out = { ...env };
+  for (const k of names) if (!keep.has(k)) delete out[k];
+  return out;
 }

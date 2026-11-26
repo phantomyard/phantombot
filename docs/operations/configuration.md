@@ -34,7 +34,9 @@ phantombot decision-model
 
 Credentials are not ordinary configuration. Store them with `phantombot vault`.
 The legacy `phantombot env` command is only a compatibility alias for the
-encrypted vault.
+encrypted vault. `[vault] agent_env = ["NAME", …]` limits which vault secrets
+reach the agent's environment (unset = all of them); see
+[Store secrets safely](../how-to/secrets.md#limit-what-reaches-the-agents-environment).
 
 Run `phantombot doctor` after a configuration change. Some platform changes
 also reconcile or restart the installed service; the interactive UI states the

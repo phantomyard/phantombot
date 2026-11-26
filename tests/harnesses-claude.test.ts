@@ -758,13 +758,26 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
       .map((c) => c.text)
       .join("");
     // Foreground turns are now ALSO strict: claude uses only phantombot's own
-    // registry, ignoring ~/.claude.json + account-level claude.ai connectors
-    // (IBKR/Gmail/Calendar/Drive). With no servers registered for the test
-    // persona the projection is the empty map, so account connectors are
-    // isolated without spawning any child MCP server.
+    // proxy, ignoring ~/.claude.json + account-level claude.ai connectors
+    // (IBKR/Gmail/Calendar/Drive). Since #820 that proxy is projected even
+    // with no registered servers — it carries the typed pbot_* tools — and it
+    // is the ONLY server in the map.
     expect(texts).toContain("--strict-mcp-config");
     expect(texts).toContain("--mcp-config");
+    expect(texts).toContain('{"mcpServers":{"phantombot":{');
+    expect(texts).toContain('"proxy"');
+  });
+
+  test("a background turn (mcpMode none) keeps the empty server map (#820)", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(h.invoke({ ...newRequest(), mcpMode: "none" }));
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
     expect(texts).toContain('{"mcpServers":{}}');
+    expect(texts).not.toContain('"phantombot"');
   });
 
   test("pre-prompting trim flags ride along on every turn", async () => {

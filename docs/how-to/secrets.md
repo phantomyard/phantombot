@@ -23,3 +23,33 @@ unrecoverable.
 Phantombot injects the active persona's vault into the harness environment at
 spawn time. A newly saved credential is therefore available to the next turn
 without copying it into global `process.env` or restarting the service.
+
+## Give a secret to one command only
+
+`vault exec` runs one command with only the secrets you name added to its
+environment, and prints its output — never the values (any value that turns up
+in the output is shown as `«NAME»`):
+
+```bash
+phantombot vault exec --secrets GITHUB_CLASSIC_TOKEN 'gh pr view 820'
+```
+
+Every other vault secret is removed from that command's environment first. The
+agent's `pbot_vault` tool has the same action (`{action:"exec", secrets,
+command}`); the `get` action stays for when you explicitly ask for a value.
+
+## Limit what reaches the agent's environment
+
+By default every vault secret is in the agent's environment, so a bare `env`
+in a turn prints all of them. To shrink that, list the names the agent may
+still see in `config.toml`:
+
+```toml
+[vault]
+agent_env = ["GITHUB_CLASSIC_TOKEN"]   # [] = none
+```
+
+Everything else then reaches commands only through `vault exec`. Phantombot's
+own features (voice, tasks, providers) are unaffected: they read the vault
+themselves, and a harness's own provider key is set on its process explicitly.
+Leaving `agent_env` out keeps the old behaviour.

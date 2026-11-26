@@ -26,7 +26,7 @@ import {
   type ReasoningReplayConfig,
 } from "./reasoningReplay.ts";
 import { withPersonaEnv } from "../lib/envBootstrap.ts";
-import { harnessSpawnEnv } from "../lib/vault.ts";
+import { agentSpawnEnv, harnessSpawnEnv } from "../lib/vault.ts";
 import {
   type HarnessActivity,
   runHarnessProcess,
@@ -34,6 +34,8 @@ import {
 import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
 import { renderConversationPayload } from "./payload.ts";
+import { buildForegroundMcpConfig } from "../mcp/harnessConfig.ts";
+import { adaptRequestForPbotTools } from "../persona/pbotPrompt.ts";
 
 export interface CodexHarnessConfig {
   bin: string;
@@ -65,8 +67,20 @@ export class CodexHarness implements Harness {
     }
   }
 
-  async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
-    const args = this.buildArgs(req.toolsMode);
+  async *invoke(rawReq: HarnessRequest): AsyncGenerator<HarnessChunk> {
+    // #820: a normal foreground turn gets phantombot's proxy (typed pbot_*
+    // tools + the persona's registered servers) as codex's `phantombot` MCP
+    // server. Never on a judge (toolsMode "none"), a background turn (mcpMode
+    // "none") or a sandboxed turn — those keep today's surface.
+    const mcp = codexGetsPbotTools(rawReq)
+      ? codexProxyOverrides(await buildForegroundMcpConfig(rawReq.persona, {
+          conversation: rawReq.conversation,
+          turnId: rawReq.turnId,
+          trusted: rawReq.trusted,
+        }))
+      : [];
+    const req: HarnessRequest = adaptRequestForPbotTools(rawReq, mcp.length > 0);
+    const args = this.buildArgs(req.toolsMode, mcp);
     log.debug("codex.invoke spawning", {
       bin: this.config.bin,
       argCount: args.length,
@@ -79,7 +93,7 @@ export class CodexHarness implements Harness {
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
-      env: withPersonaEnv(spawnEnv, req.persona, req.conversation, req.turnId, req.scratchDir, req.trusted),
+      env: withPersonaEnv(await agentSpawnEnv(spawnEnv, req.persona), req.persona, req.conversation, req.turnId, req.scratchDir, req.trusted),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -111,7 +125,7 @@ export class CodexHarness implements Harness {
     });
   }
 
-  private buildArgs(toolsMode?: "none" | { allow: string[] }): string[] {
+  private buildArgs(toolsMode?: "none" | { allow: string[] }, mcp: string[] = []): string[] {
     const args = [
       "exec",
       "--json",
@@ -125,9 +139,43 @@ export class CodexHarness implements Harness {
     if (this.config.model) {
       args.push("-m", this.config.model);
     }
+    args.push(...mcp);
     args.push("-");
     return args;
   }
+}
+
+/** Whether this codex spawn carries the pbot_* tools (see invoke). */
+export function codexGetsPbotTools(req: HarnessRequest): boolean {
+  return req.toolsMode !== "none" && req.mcpMode !== "none" && req.securitySession === undefined;
+}
+
+/**
+ * Translate the `--mcp-config` JSON claude takes into codex `-c` overrides
+ * (`mcp_servers.phantombot.command/args/env`). Values are TOML: a JSON string
+ * is a valid TOML basic string and a JSON array of strings a valid TOML
+ * array; env becomes an inline table. Empty config (or a parse failure) = no
+ * overrides, so codex simply runs without phantombot's tools.
+ */
+export function codexProxyOverrides(mcpConfigJson: string): string[] {
+  let server: { command?: unknown; args?: unknown; env?: unknown } | undefined;
+  try {
+    server = (JSON.parse(mcpConfigJson) as { mcpServers?: Record<string, typeof server> }).mcpServers?.phantombot;
+  } catch {
+    return [];
+  }
+  if (!server || typeof server.command !== "string" || !Array.isArray(server.args)) return [];
+  const out = [
+    "-c", `mcp_servers.phantombot.command=${JSON.stringify(server.command)}`,
+    "-c", `mcp_servers.phantombot.args=${JSON.stringify(server.args.map(String))}`,
+  ];
+  if (server.env && typeof server.env === "object") {
+    const pairs = Object.entries(server.env as Record<string, unknown>)
+      .filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
+      .map(([k, v]) => `${k}=${JSON.stringify(String(v))}`);
+    out.push("-c", `mcp_servers.phantombot.env={${pairs.join(", ")}}`);
+  }
+  return out;
 }
 
 export function renderStdinPayload(req: HarnessRequest): string {

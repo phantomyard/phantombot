@@ -56,6 +56,7 @@ import {
 import { withPersonaEnv } from "./envBootstrap.ts";
 import { phantombotSecurityExtension } from "../security/extension.ts";
 import { type BodyGuardToolCallApi, phantombotBodyGuardExtension } from "./bodyPathGuard.ts";
+import { phantombotPbotExtension } from "../pbot/piExtension.ts";
 
 /** Hidden argv[2] that turns the phantombot binary into the pi CLI. */
 export const EMBEDDED_PI_SUBCOMMAND = "__pi";
@@ -144,6 +145,9 @@ export function embeddedPiExtensionFactories(): Array<(pi: never) => unknown> {
     // Always on, every turn (#718): refuses a `gh` call that would publish a
     // literal `@/path` body. See lib/bodyPathGuard.ts.
     ((pi: BodyGuardToolCallApi) => phantombotBodyGuardExtension(pi)) as never,
+    // #820: the typed pbot_* tools + registered MCP servers, in-process.
+    // Inert unless the harness set PHANTOMBOT_PBOT_TOOLS=1 for this spawn.
+    phantombotPbotExtension as never,
   ];
 }
 

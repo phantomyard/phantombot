@@ -12,9 +12,9 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { runInEngineScope } from "../src/lib/engineScope.ts";
 import {
   buildForegroundMcpConfig,
-  EMPTY_MCP_CONFIG,
   proxyInvocation,
 } from "../src/mcp/harnessConfig.ts";
 import { saveRegistry, upsertServer } from "../src/mcp/registry.ts";
@@ -35,9 +35,10 @@ afterEach(async () => {
 });
 
 describe("buildForegroundMcpConfig", () => {
-  test("no registered servers -> empty config (connectors still isolated, no child)", async () => {
-    const cfg = await buildForegroundMcpConfig("tester");
-    expect(cfg).toBe(EMPTY_MCP_CONFIG);
+  test("no registered servers -> STILL the proxy: it carries the pbot_* tools (#820)", async () => {
+    const cfg = JSON.parse(await buildForegroundMcpConfig("tester"));
+    expect(Object.keys(cfg.mcpServers)).toEqual(["phantombot"]);
+    expect(cfg.mcpServers.phantombot.args).toContain("proxy");
   });
 
   test("a registered server -> a single phantombot proxy stdio server", async () => {
@@ -49,15 +50,72 @@ describe("buildForegroundMcpConfig", () => {
     expect(cfg.mcpServers.phantombot.args).toContain("tester");
   });
 
-  test("a broken mcp.json never breaks the turn — falls back to empty config", async () => {
+  test("a broken mcp.json never breaks the turn — the proxy is still projected", async () => {
     const dir = join(workdir, "tester");
-    await writeFile(join(dir, "mcp.json"), "{ this is not json", "utf8").catch(async () => {
-      // dir may not exist yet
-      const { mkdir } = await import("node:fs/promises");
-      await mkdir(dir, { recursive: true });
-      await writeFile(join(dir, "mcp.json"), "{ this is not json", "utf8");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "mcp.json"), "{ this is not json", "utf8");
+    const cfg = JSON.parse(await buildForegroundMcpConfig("tester"));
+    expect(Object.keys(cfg.mcpServers)).toEqual(["phantombot"]);
+  });
+
+  test("the turn's conversation and tier reach the proxy child explicitly", async () => {
+    const cfg = JSON.parse(await buildForegroundMcpConfig("tester", { conversation: "telegram:1", trusted: true, turnId: "t1" }));
+    expect(cfg.mcpServers.phantombot.env).toMatchObject({
+      PHANTOMBOT_PERSONA: "tester",
+      PHANTOMBOT_CONVERSATION: "telegram:1",
+      PHANTOMBOT_TRUSTED: "1",
+      PHANTOMBOT_TURN_ID: "t1",
     });
-    expect(await buildForegroundMcpConfig("tester")).toBe(EMPTY_MCP_CONFIG);
+  });
+
+  test("an untrusted turn never states PHANTOMBOT_TRUSTED", async () => {
+    const cfg = JSON.parse(await buildForegroundMcpConfig("tester", { conversation: "email:x", trusted: false }));
+    expect(cfg.mcpServers.phantombot.env.PHANTOMBOT_TRUSTED).toBeUndefined();
+  });
+
+  test("no secret ever rides in the projected env", async () => {
+    process.env.SOME_SECRET_TOKEN = "s3cret-value";
+    const cfg = await buildForegroundMcpConfig("tester", { conversation: "c" });
+    expect(cfg).not.toContain("s3cret-value");
+  });
+});
+
+describe("proxy child location env (codex does not inherit the parent env)", () => {
+  test("outside an engine scope the parent's XDG roots and location overrides ride explicitly", async () => {
+    process.env.XDG_CONFIG_HOME = "/custom/cfg";
+    process.env.XDG_DATA_HOME = "/custom/data";
+    process.env.XDG_STATE_HOME = "/custom/state";
+    process.env.PHANTOMBOT_CONFIG = "/custom/cfg/phantombot/config.toml";
+    const cfg = JSON.parse(await buildForegroundMcpConfig("tester", { conversation: "c" }));
+    expect(cfg.mcpServers.phantombot.env).toMatchObject({
+      XDG_CONFIG_HOME: "/custom/cfg",
+      XDG_DATA_HOME: "/custom/data",
+      XDG_STATE_HOME: "/custom/state",
+      PHANTOMBOT_CONFIG: "/custom/cfg/phantombot/config.toml",
+      PHANTOMBOT_PERSONAS_DIR: workdir,
+      PHANTOMBOT_PERSONA: "tester",
+    });
+    expect(cfg.mcpServers.phantombot.env.PHANTOMBOT_ENGINE_SCOPE).toBeUndefined();
+  });
+
+  test("inside an engine scope only the scoped roots ride — never a host location override", async () => {
+    process.env.XDG_CONFIG_HOME = "/host/cfg";
+    process.env.PHANTOMBOT_CONFIG = "/host/cfg/phantombot/config.toml";
+    const raw = await runInEngineScope(
+      { configHome: "/app/cfg", dataHome: "/app/data", stateHome: "/app/state" },
+      () => buildForegroundMcpConfig("tester", { conversation: "c" }),
+    );
+    const env = JSON.parse(raw).mcpServers.phantombot.env;
+    expect(env).toMatchObject({
+      XDG_CONFIG_HOME: "/app/cfg",
+      XDG_DATA_HOME: "/app/data",
+      XDG_STATE_HOME: "/app/state",
+      PHANTOMBOT_ENGINE_SCOPE: "1",
+    });
+    expect(env.PHANTOMBOT_CONFIG).toBeUndefined();
+    expect(env.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
+    expect(raw).not.toContain("/host/");
   });
 });
 

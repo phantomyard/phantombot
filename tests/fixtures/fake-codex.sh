@@ -23,6 +23,10 @@
 #                 message. Used by the engine's credential-boundary regression
 #                 (which value a REAL adapter's child actually sees).
 
+#   pbot       -> report which memory route the stdin payload (system prompt
+#                 included) documents and whether the phantombot MCP overrides
+#                 are on argv (#820 spawn wiring).
+
 mode="${FAKE_CODEX_MODE:-normal}"
 
 # Drain stdin so harness stdin.end() resolves.
@@ -90,6 +94,15 @@ case "$mode" in
     joined="${joined//\\/\\\\}"
     joined="${joined//\"/\\\"}"
     printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"env: ${joined}\"}}"
+    printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+    exit 0
+    ;;
+  pbot)
+    tool=no; cli=no; mcp=no
+    case "$stdin_payload" in *"pbot_memory search"*) tool=yes ;; esac
+    case "$stdin_payload" in *"phantombot memory search"*) cli=yes ;; esac
+    case "$*" in *"mcp_servers.phantombot.command="*) mcp=yes ;; esac
+    printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"tool=${tool} cli=${cli} mcp=${mcp}\"}}"
     printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
     exit 0
     ;;
