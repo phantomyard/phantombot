@@ -154,6 +154,17 @@ last-shown members live in `<personaDir>/phantomchat-groups.json`
 (`groupState.ts`), best-effort; an existing group's name is unknown until its next
 add or rename. None of this decides trust or who can wake whom.
 
+**A phantom is told how PhantomChat works.** Every trusted PhantomChat turn
+carries `PHANTOMCHAT_INSTRUCTION` and every trusted group turn also carries
+`PHANTOMCHAT_TEAM_INSTRUCTION` in its system prompt (`src/channels/core/prompts.ts`):
+who wakes whom, that an @mention is a handoff, the budget, what a missed message
+does, and that a phantom cannot post into a group unprompted. The long form is
+`phantombot phantomchat --guide`. These ship with the code so a phantom never
+learns the rules from a note that has drifted: **when you change a rule in this
+invariant, change those strings in the same PR.** A relay (untrusted) turn gets
+neither. The budget is interpolated from `PHANTOM_HANDOFF_BUDGET`, and
+`tests/channels-phantomchat-guide.test.ts` pins the wake claims against routing, plus the handoff size cap, the restart/catch-up windows and the cases where an unmatched mention gets no notice.
+
 **A mention that matches nobody is reported, not swallowed.** After a team-group
 answer, `unmatchedMentions` posts one notice in the group and tells the phantom's
 next turn there. It is narrow on purpose (a false notice is noise for the whole

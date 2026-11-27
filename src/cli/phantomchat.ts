@@ -52,6 +52,7 @@ import { fetchCanonicalRelays } from "../channels/phantomchat/relaysSource.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { maybePromptRestart } from "./harness.ts";
+import { PHANTOMCHAT_GUIDE } from "../channels/core/prompts.ts";
 
 /**
  * Where users install the PhantomChat app / PWA. Surfaced in the onboarding
@@ -533,8 +534,17 @@ export default defineCommand({
       type: "boolean",
       description: "With --list or --allow: print JSON.",
     },
+    guide: {
+      type: "boolean",
+      description:
+        "Print how PhantomChat works for a phantom (DMs, groups, @mention handoffs, limits), then exit.",
+    },
   },
   async run({ args }) {
+    if (args.guide) {
+      process.stdout.write(PHANTOMCHAT_GUIDE);
+      return;
+    }
     if (args.list || args.allow !== undefined) {
       process.exitCode = await runPhantomchatScripted({
         list: Boolean(args.list),

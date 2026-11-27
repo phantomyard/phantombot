@@ -55,6 +55,8 @@ import type { LifecycleAccount } from "../../lib/lifecycleBroadcast.ts";
 import { ConversationBacklog } from "../core/backlog.ts";
 import {
   CHAT_REPLY_INSTRUCTION,
+  PHANTOMCHAT_INSTRUCTION,
+  PHANTOMCHAT_TEAM_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
 } from "../core/prompts.ts";
@@ -77,6 +79,7 @@ import {
   type GroupChatState,
   matchAtMentions,
   matchPersonaNames,
+  MAX_WHOLE_HANDOFF_BYTES,
   PHANTOM_HANDOFF_BUDGET,
 } from "../core/routing.ts";
 import {
@@ -148,10 +151,6 @@ export type SenderTier = "trusted" | "relay" | "open" | "drop";
 // a multi-hundred-MB blob would blow memory + disk for little benefit.
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
-/** Largest handoff sent as one message. The text is JSON-escaped twice and
- *  encrypted twice on its way out, and NIP-44 pads and caps at 64 KB, so stay far
- *  below that. A longer reply is split into bubbles like any other. */
-const MAX_WHOLE_HANDOFF_BYTES = 8_000;
 
 // Local sleep — spaces out consecutive bubbles so the PWA renders them as a
 // readable sequence rather than a single burst (mirrors core/engine.ts).
@@ -1487,6 +1486,10 @@ export async function runPhantomchatServer(
           willReplyWithVoice
             ? `${CHAT_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
             : CHAT_REPLY_INSTRUCTION,
+          // How PhantomChat works (invariant 90). Trusted only: a relay turn
+          // is not a team, and its rules would mislead it.
+          tier === "trusted" ? PHANTOMCHAT_INSTRUCTION : undefined,
+          tier === "trusted" && msg.groupId ? PHANTOMCHAT_TEAM_INSTRUCTION : undefined,
         ]
           .filter(Boolean)
           .join("\n\n"),
