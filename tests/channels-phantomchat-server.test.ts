@@ -3220,6 +3220,24 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     expect(groupBlock(harness.lastRequest!)).toBe("");
   });
 
+  test("phantomchat guide: a DM gets the PhantomChat section, a team group also gets the group rules", async () => {
+    const t = team();
+    const dm = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    await runOnce({ senderSk: t.andrewSk, botSk: t.lenaSk, allowedHex: [t.andrewHex], harness: dm, text: "hi", untilInvocations: 1 });
+    expect(dm.lastRequest!.systemPrompt).toContain("# PhantomChat\n");
+    expect(dm.lastRequest!.systemPrompt).not.toContain("# PhantomChat groups");
+
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }]);
+    const srv = makeGroupServer({ botSk: t.lenaSk, persona: "lena", allowedHex: [t.andrewHex], profiles: t.profiles, harness });
+    srv.feedGroup(t.andrewSk, t.others(t.andrewSk), "lena, status?", "PR");
+    await groupSleep(150);
+    await srv.stop();
+    const req = harness.lastRequest!;
+    expect(req.systemPrompt).toContain("# PhantomChat\n");
+    expect(req.systemPrompt).toContain("# PhantomChat groups");
+    expect(JSON.stringify([req.history, req.userMessage])).not.toContain("# PhantomChat");
+  });
+
   test.each(["human", "phantom"])("team group: an @name that matches nobody is reported (%s-woken)", async (who) => {
     const t = team();
     const script: HarnessChunk[] = [{ type: "done", finalText: "PR is up. Please review.\n\n@kaiwork" }];
@@ -3847,6 +3865,8 @@ describe("phantomchat relay tier", () => {
     expect(harness.lastRequest!.systemPrompt).not.toContain(
       "Security perimeter — TRUSTED turn",
     );
+    // A relay turn is not a team: no PhantomChat guide.
+    expect(harness.lastRequest!.systemPrompt).not.toContain("# PhantomChat");
   });
 
   // #534/#548: the reply-language rule is a channel-layer contract, and

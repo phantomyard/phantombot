@@ -55,6 +55,8 @@ import type { LifecycleAccount } from "../../lib/lifecycleBroadcast.ts";
 import { ConversationBacklog } from "../core/backlog.ts";
 import {
   CHAT_REPLY_INSTRUCTION,
+  PHANTOMCHAT_INSTRUCTION,
+  PHANTOMCHAT_TEAM_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
 } from "../core/prompts.ts";
@@ -1487,6 +1489,10 @@ export async function runPhantomchatServer(
           willReplyWithVoice
             ? `${CHAT_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
             : CHAT_REPLY_INSTRUCTION,
+          // How PhantomChat works (invariant 90). Trusted only: a relay turn
+          // is not a team, and its rules would mislead it.
+          tier === "trusted" ? PHANTOMCHAT_INSTRUCTION : undefined,
+          tier === "trusted" && msg.groupId ? PHANTOMCHAT_TEAM_INSTRUCTION : undefined,
         ]
           .filter(Boolean)
           .join("\n\n"),
