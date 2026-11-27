@@ -163,7 +163,7 @@ does, and that a phantom cannot post into a group unprompted. The long form is
 learns the rules from a note that has drifted: **when you change a rule in this
 invariant, change those strings in the same PR.** A relay (untrusted) turn gets
 neither. The budget is interpolated from `PHANTOM_HANDOFF_BUDGET`, and
-`tests/channels-phantomchat-guide.test.ts` pins the wake claims against routing.
+`tests/channels-phantomchat-guide.test.ts` pins the wake claims against routing, plus the handoff size cap, the restart/catch-up windows and the cases where an unmatched mention gets no notice.
 
 **A mention that matches nobody is reported, not swallowed.** After a team-group
 answer, `unmatchedMentions` posts one notice in the group and tells the phantom's

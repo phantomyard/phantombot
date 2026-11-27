@@ -75,6 +75,13 @@ export function matchAtMentions(text: string, names: string[]): string[] {
  */
 export const PHANTOM_HANDOFF_BUDGET = 60;
 
+/** Largest handoff sent as one message (PhantomChat server). The text is
+ *  JSON-escaped twice and encrypted twice on its way out, and NIP-44 pads and
+ *  caps at 64 KB, so stay far below that. A longer reply is split into bubbles
+ *  like any other, and only the bubble holding the @name wakes the teammate.
+ *  Lives here so the phantom guide (prompts.ts) can state it. */
+export const MAX_WHOLE_HANDOFF_BYTES = 8_000;
+
 /**
  * Decide whether THIS bot (persona `self`) should reply to a group message,
  * and what the chat's "last addressed" set becomes afterwards.

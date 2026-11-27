@@ -14,13 +14,51 @@ import {
   decideGroupReply,
   matchAtMentions,
   matchPersonaNames,
+  MAX_WHOLE_HANDOFF_BYTES,
   PHANTOM_HANDOFF_BUDGET,
 } from "../src/channels/core/routing.ts";
+import { unmatchedMentions } from "../src/channels/core/groupContext.ts";
+import { BACKFILL_POLL_WINDOW_SEC, GROUP_HISTORY_WINDOW_SEC } from "../src/channels/phantomchat/channel.ts";
 
 describe("phantomchat guide", () => {
   test("states the real handoff budget", () => {
     for (const text of [PHANTOMCHAT_TEAM_INSTRUCTION, PHANTOMCHAT_GUIDE]) {
       expect(text).toContain(`budget of ${PHANTOM_HANDOFF_BUDGET} per group`);
+    }
+  });
+
+  test("states the whole-handoff size cap", () => {
+    for (const text of [PHANTOMCHAT_TEAM_INSTRUCTION, PHANTOMCHAT_GUIDE]) {
+      expect(text).toContain(`${MAX_WHOLE_HANDOFF_BYTES} bytes`);
+    }
+  });
+
+  test("restart claims match the history and catch-up windows", () => {
+    // "~90 seconds" can still run a turn; history reaches 48 hours.
+    expect(BACKFILL_POLL_WINDOW_SEC).toBe(90);
+    expect(GROUP_HISTORY_WINDOW_SEC).toBe(48 * 3600);
+    for (const text of [PHANTOMCHAT_TEAM_INSTRUCTION, PHANTOMCHAT_GUIDE]) {
+      expect(text).toContain("~90 seconds");
+      expect(text).not.toContain("never runs a turn");
+    }
+    expect(PHANTOMCHAT_GUIDE).toContain("48 hours");
+  });
+
+  test("an unmatched mention is not always reported", () => {
+    const members = [
+      { name: "Kai", kind: "phantom" as const },
+      { name: "Andrew", kind: "human" as const },
+    ];
+    // Positive control: a direct call to nobody IS reported.
+    expect(unmatchedMentions("@Nobody please review", members as any)).toEqual(["Nobody"]);
+    // Quoted and mid-sentence calls get no notice, as the guide warns.
+    expect(unmatchedMentions("> @Nobody please review", members as any)).toEqual([]);
+    expect(unmatchedMentions("Please ask @Nobody to review this.", members as any)).toEqual([]);
+    // A nameless member silences every notice.
+    expect(unmatchedMentions("@Nobody please review", [...members, { name: "", kind: "phantom" }] as any)).toEqual([]);
+    for (const text of [PHANTOMCHAT_TEAM_INSTRUCTION, PHANTOMCHAT_GUIDE]) {
+      expect(text).not.toContain("you will be told");
+      expect(text).toMatch(/not\s+always/);
     }
   });
 

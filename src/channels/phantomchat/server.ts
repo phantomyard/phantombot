@@ -79,6 +79,7 @@ import {
   type GroupChatState,
   matchAtMentions,
   matchPersonaNames,
+  MAX_WHOLE_HANDOFF_BYTES,
   PHANTOM_HANDOFF_BUDGET,
 } from "../core/routing.ts";
 import {
@@ -150,10 +151,6 @@ export type SenderTier = "trusted" | "relay" | "open" | "drop";
 // a multi-hundred-MB blob would blow memory + disk for little benefit.
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
-/** Largest handoff sent as one message. The text is JSON-escaped twice and
- *  encrypted twice on its way out, and NIP-44 pads and caps at 64 KB, so stay far
- *  below that. A longer reply is split into bubbles like any other. */
-const MAX_WHOLE_HANDOFF_BYTES = 8_000;
 
 // Local sleep — spaces out consecutive bubbles so the PWA renders them as a
 // readable sequence rather than a single burst (mirrors core/engine.ts).

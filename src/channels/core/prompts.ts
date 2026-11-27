@@ -11,7 +11,7 @@
 import type { AudioSupport } from "../../lib/audio.ts";
 import { log } from "../../lib/logger.ts";
 import type { MemoryStore } from "../../memory/store.ts";
-import { PHANTOM_HANDOFF_BUDGET } from "./routing.ts";
+import { MAX_WHOLE_HANDOFF_BYTES, PHANTOM_HANDOFF_BUDGET } from "./routing.ts";
 
 /**
  * System-prompt suffix applied to EVERY chat turn (Telegram and
@@ -118,12 +118,16 @@ export const PHANTOMCHAT_TEAM_INSTRUCTION =
   ("Kai approved") wakes nobody.
 - An @mention is a handoff of actionable work, not a courtesy. Put it once, in
   your final answer, never in narration. No @ for thanks, sign-offs or "FYI".
+  Keep a handoff under ${MAX_WHOLE_HANDOFF_BYTES} bytes: a longer reply is split and the teammate
+  is woken by only the part holding the @name.
 - Phantom-to-phantom handoffs share a budget of ${PHANTOM_HANDOFF_BUDGET} per group; any human message
   refills it. When it runs out the phantoms pause until a human writes.
-- An @name that matches nobody wakes no one; you will be told.
+- An @name that matches nobody wakes no one. You may get a notice, but not
+  always (quotes, code and mid-sentence calls get none), so no notice does not
+  prove the handoff landed.
 - Messages you saw but were not addressed by reach you as "Recent group
-  messages" context. A message that arrived while you were offline is context
-  only: it never runs a turn, so a missed handoff must be re-sent.`;
+  messages" context. After a restart, older messages come back as context only;
+  ones from the last ~90 seconds can still run a turn.`;
 
 /** The long form, printed by `phantombot phantomchat --guide`. */
 export const PHANTOMCHAT_GUIDE = `PhantomChat for phantoms
@@ -162,7 +166,10 @@ Who wakes whom
 Handing off
   - An @mention is a handoff of actionable work. Put it once, in your final
     answer. Your final answer is sent as one message so the teammate gets all
-    of it; narration is sent separately and should not mention anyone.
+    of it, up to ${MAX_WHOLE_HANDOFF_BYTES} bytes (UTF-8). Longer replies are split into
+    several messages and the teammate is woken by only the one holding the
+    @name, with the rest as background, so keep handoffs below that. Narration
+    is sent separately and should not mention anyone.
   - No @ for acknowledgments, thanks, sign-offs or status you do not need
     answered.
   - When a phantom woke you and nothing is owed, reply with exactly SILENT
@@ -170,15 +177,21 @@ Handing off
   - Handoffs between phantoms share a budget of ${PHANTOM_HANDOFF_BUDGET} per group. Any human message
     refills it. When it is spent the woken phantom posts one pause notice and
     runs no turn until a human writes.
-  - An @name that matches no member wakes nobody. The group gets a notice
-    (which has no "@" and wakes nobody), and your next turn there is told.
+  - An @name that matches no member wakes nobody. Usually the group gets a
+    notice (which has no "@" and wakes nobody) and your next turn there is
+    told, but not always: a call inside quotes, code or a link, an ordinary
+    mid-sentence mention ("ask @Nobody to look"), or any group with a nameless
+    member gets no notice. The absence of a notice never proves a handoff
+    reached someone; check the member list.
 
 Context and gaps
   Group messages you saw but were not woken by are shown to your next turn
   there as "Recent group messages you saw but didn't reply to". After a
-  restart that buffer is refilled from history, but nothing missed while you
-  were offline runs a turn: a handoff sent while you were down must be sent
-  again.
+  restart that buffer is refilled from history (up to 48 hours) as context
+  only: older messages never run a turn. Messages from the last ~90 seconds
+  before the restart are left to the live catch-up poll and can still run a
+  turn. So before re-sending a handoff a teammate may have missed, check
+  whether it already answered, to avoid duplicate work.
 
 What you cannot do
   - Post into a group unprompted. You speak only by replying to a turn there.

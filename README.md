@@ -105,6 +105,7 @@ No chat channel required — use it from a terminal or editor:
 
 ```bash
 phantombot ask "Summarize this repository"
+phantombot phantomchat --guide   # how PhantomChat DMs, groups and @handoffs work
 phantombot acp install vscode    # also: zed, jetbrains, opencode
 ```
 
